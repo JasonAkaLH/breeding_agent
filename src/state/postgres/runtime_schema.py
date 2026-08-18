@@ -15,7 +15,7 @@ from src.storage.sqlite.base import SQLiteBase
 
 from .schema import POSTGRES_STATE_TABLES, build_schema_ddl
 
-POSTGRES_RUNTIME_SCHEMA_VERSION = "maf.postgresql_fresh_runtime_schema.v4"
+POSTGRES_RUNTIME_SCHEMA_VERSION = "maf.postgresql_fresh_runtime_schema.v5"
 POSTGRES_RUNTIME_TABLES = tuple(sorted(SQLiteBase.metadata.tables))
 POSTGRES_APPEND_ONLY_TABLES = (
     "mcp_cp7_ready_epoch_event",

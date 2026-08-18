@@ -95,6 +95,45 @@ fn sqlite_adapter_persists_complete_task_record_and_does_not_invent_legacy_rows(
 }
 
 #[test]
+fn sqlite_adapter_persists_planner_replan_claims_across_reopen() {
+    let db_path = temp_db_path("planner-replan-claim");
+    {
+        let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter");
+        adapter
+            .submit_task_record(authority_task("running"), "task-replan", None)
+            .expect("store task");
+        let first = adapter
+            .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:00:00Z")
+            .expect("claim first replan");
+        let retry = adapter
+            .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:01:00Z")
+            .expect("retry first replan");
+        let second = adapter
+            .claim_planner_replan("task-authority", &"b".repeat(64), "2026-08-18T10:02:00Z")
+            .expect("claim second replan");
+        assert_eq!(first, retry);
+        assert_eq!(first.planning_epoch, "r1");
+        assert_eq!(second.planning_epoch, "r2");
+        adapter
+            .mark_planner_replan_claim(
+                "task-authority",
+                &"a".repeat(64),
+                "applied",
+                "2026-08-18T10:03:00Z",
+            )
+            .expect("mark claim applied");
+    }
+    let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen sqlite adapter");
+    let claim = reopened
+        .get_planner_replan_claim("task-authority", &"a".repeat(64))
+        .expect("read claim")
+        .expect("claim exists");
+    assert_eq!(claim.status, "applied");
+    assert_eq!(claim.planning_revision, 1);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn sqlite_adapter_queries_authoritative_tasks_after_reopen_with_python_ordering() {
     let db_path = temp_db_path("task-query-authority");
     {

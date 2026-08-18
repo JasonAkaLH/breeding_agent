@@ -162,6 +162,38 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     self.assertFalse(
                         client.get_active_task_for_conversation(conversation_id="missing")["found"]
                     )
+                    first_claim = client.claim_planner_replan(
+                        task_id="task-authority",
+                        decision_digest="a" * 64,
+                        now="2026-08-18T10:00:00Z",
+                    )["claim"]
+                    retry_claim = client.claim_planner_replan(
+                        task_id="task-authority",
+                        decision_digest="a" * 64,
+                        now="2026-08-18T10:01:00Z",
+                    )["claim"]
+                    second_claim = client.claim_planner_replan(
+                        task_id="task-authority",
+                        decision_digest="b" * 64,
+                        now="2026-08-18T10:02:00Z",
+                    )["claim"]
+                    self.assertEqual(first_claim, retry_claim)
+                    self.assertEqual(first_claim["planning_epoch"], "r1")
+                    self.assertEqual(second_claim["planning_epoch"], "r2")
+                    applied_claim = client.mark_planner_replan_claim(
+                        task_id="task-authority",
+                        decision_digest="a" * 64,
+                        status="applied",
+                        now="2026-08-18T10:03:00Z",
+                    )["claim"]
+                    self.assertEqual(applied_claim["status"], "applied")
+                    self.assertEqual(
+                        client.get_planner_replan_claim(
+                            task_id="task-authority",
+                            decision_digest="a" * 64,
+                        )["claim"],
+                        applied_claim,
+                    )
                     conflicting = {**task_record, "status": "running"}
                     with self.assertRaisesRegex(RuntimeError, "runtime_store_idempotency_conflict"):
                         client.submit_task(

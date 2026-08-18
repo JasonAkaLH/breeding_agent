@@ -303,6 +303,78 @@ class RuntimeSidecarGrpcClient:
             )
         return response
 
+    def claim_planner_replan(
+        self,
+        *,
+        task_id: str,
+        decision_digest: str,
+        now: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = (
+            _field_string(1, task_id)
+            + _field_string(2, decision_digest)
+            + _field_string(3, now)
+        )
+        payload = self._unary("ClaimPlannerReplan", request, timeout_seconds=timeout_seconds)
+        response = _planner_replan_claim_response("planner_replan_claim", _decode_message(payload))
+        _consume_response("planner_replan_claim", response)
+        _ensure_planner_replan_claim_identity(
+            response["claim"],
+            task_id=task_id,
+            decision_digest=decision_digest,
+        )
+        return response
+
+    def get_planner_replan_claim(
+        self,
+        *,
+        task_id: str,
+        decision_digest: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = _field_string(1, task_id) + _field_string(2, decision_digest)
+        payload = self._unary("GetPlannerReplanClaim", request, timeout_seconds=timeout_seconds)
+        response = _planner_replan_claim_response("planner_replan_claim_get", _decode_message(payload))
+        _consume_response("planner_replan_claim_get", response)
+        if response["claim"] is not None:
+            _ensure_planner_replan_claim_identity(
+                response["claim"],
+                task_id=task_id,
+                decision_digest=decision_digest,
+            )
+        return response
+
+    def mark_planner_replan_claim(
+        self,
+        *,
+        task_id: str,
+        decision_digest: str,
+        status: str,
+        now: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = (
+            _field_string(1, task_id)
+            + _field_string(2, decision_digest)
+            + _field_string(3, status)
+            + _field_string(4, now)
+        )
+        payload = self._unary("MarkPlannerReplanClaim", request, timeout_seconds=timeout_seconds)
+        response = _planner_replan_claim_response("planner_replan_claim_mark", _decode_message(payload))
+        _consume_response("planner_replan_claim_mark", response)
+        _ensure_planner_replan_claim_identity(
+            response["claim"],
+            task_id=task_id,
+            decision_digest=decision_digest,
+        )
+        if response["claim"]["status"] != status:
+            _raise_task_identity_invalid("planner replan claim mark response status differs from request")
+        return response
+
     def transition_node(
         self,
         *,
@@ -963,6 +1035,50 @@ def _decode_task_record(payload: bytes) -> dict[str, Any]:
 def _optional_task_record(fields: dict[int, list[Any]], field_number: int) -> dict[str, Any] | None:
     payload = _first_message(fields, field_number)
     return _decode_task_record(payload) if payload else None
+
+
+def _decode_planner_replan_claim(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    return {
+        "task_id": _first_string(fields, 1),
+        "decision_digest": _first_string(fields, 2),
+        "planning_revision": _first_int(fields, 3),
+        "planning_epoch": _first_string(fields, 4),
+        "status": _first_string(fields, 5),
+        "created_at": _first_string(fields, 6),
+        "updated_at": _first_string(fields, 7),
+    }
+
+
+def _planner_replan_claim_response(
+    operation: str,
+    fields: dict[int, list[Any]],
+) -> dict[str, Any]:
+    payload = _first_message(fields, 1)
+    claim = _decode_planner_replan_claim(payload) if payload else None
+    found = _first_bool(fields, 2, default=False)
+    if found != (claim is not None):
+        raise RuntimeError(
+            "runtime_store_response_invalid: planner replan claim response is inconsistent"
+        )
+    return {
+        "operation": operation,
+        "claim": claim,
+        "found": found,
+        "error": _optional_typed_error(fields, 3),
+    }
+
+
+def _ensure_planner_replan_claim_identity(
+    claim: Mapping[str, Any] | None,
+    *,
+    task_id: str,
+    decision_digest: str,
+) -> None:
+    if claim is None:
+        _raise_task_identity_invalid("planner replan claim response omitted the claim")
+    if claim.get("task_id") != task_id or claim.get("decision_digest") != decision_digest:
+        _raise_task_identity_invalid("planner replan claim response identity differs from request")
 
 
 def _task_node_record(node: Mapping[str, Any]) -> bytes:

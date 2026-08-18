@@ -62,7 +62,7 @@ class MemoryAwareWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("查询龙粳33的基因型信息", prompts[0])
         self.assertIn("较早对话摘要", prompts[0])
         self.assertNotIn("must-not-prompt", prompts[0])
-        skill_node = plan.node_by_id("query")
+        skill_node = next(node for node in plan.nodes if node.capability_id == "skill.generic_data_lookup")
         self.assertEqual(skill_node.input_payload["user_message"], "查询龙粳33的基因型信息")
 
     async def test_planner_payload_cannot_override_resolved_question(self) -> None:
@@ -87,7 +87,8 @@ class MemoryAwareWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(plan.node_by_id("query").input_payload["user_message"], "查询龙粳33的基因型信息")
+        skill_node = next(node for node in plan.nodes if node.capability_id == "skill.generic_data_lookup")
+        self.assertEqual(skill_node.input_payload["user_message"], "查询龙粳33的基因型信息")
         self.assertNotIn("恶意替换", str(plan.nodes))
 
     def test_auto_workflow_uses_resolved_question_for_fallback_routing(self) -> None:

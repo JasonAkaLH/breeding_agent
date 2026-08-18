@@ -84,7 +84,7 @@ class UserMCPDispatchPlanningTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("must-not-survive", prompts[0])
         self.assertEqual([node.capability_id for node in plan.nodes], ["mcp.dispatch", "main_agent.respond"])
         self.assertEqual(plan.nodes[0].input_payload, {"server_id": "server-safe"})
-        self.assertEqual(plan.nodes[1].depends_on, ("route_mcp",))
+        self.assertEqual(plan.nodes[1].depends_on, (plan.nodes[0].node_id,))
         self.assertTrue(plan.metadata["planner_finalizer_added"])
 
     async def test_dispatch_is_hidden_and_rejected_without_profiles(self) -> None:
@@ -136,7 +136,7 @@ class UserMCPDispatchPlanningTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([node.capability_id for node in plan.nodes], ["mcp.dispatch", "main_agent.respond"])
-        self.assertEqual(plan.node_by_id("answer").depends_on, ("route_mcp",))
+        self.assertEqual(plan.nodes[1].depends_on, (plan.nodes[0].node_id,))
         self.assertFalse(plan.metadata["planner_finalizer_added"])
         self.assertTrue(plan.metadata["planner_finalizer_rewired"])
 

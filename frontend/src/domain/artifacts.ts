@@ -177,7 +177,6 @@ function isDataQueryDisplayArtifact(artifact: ArtifactResponse): boolean {
     metadata.domain_kind === 'data_query'
     || metadata.artifact_family === 'data_query'
     || artifact.artifact_id.includes('data_query')
-    || artifact.producer_node_id.includes('data_query')
     || isPreviewArtifact(artifact)
   );
 }
@@ -203,8 +202,7 @@ function artifactMetadata(artifact: ArtifactResponse): Record<string, unknown> {
 }
 
 function isMainAgentTextArtifact(artifact: ArtifactResponse): boolean {
-  return artifact.producer_node_id.includes('main_agent.respond')
-    || artifact.artifact_id.includes('main_agent_response')
+  return artifact.artifact_id.includes('main_agent_response')
     || artifact.artifact_id.includes('main_agent_text');
 }
 

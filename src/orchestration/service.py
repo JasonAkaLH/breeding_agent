@@ -21,6 +21,7 @@ from src.integrations.agent_skills.missing_input_interrupt import (
 from .backpressure import BackpressureGuard
 from .completion_policy import CompletionPolicy, CompletionStatus
 from .models import OrchestrationRequest, OrchestrationRunResult, WorkflowNodePlan, WorkflowPlan
+from .planner_node_identity import validate_canonical_model_node_identity
 from .registry import CapabilityRegistry, InstanceRegistry
 from .runtime_replanner import NoopRuntimeReplanner, RuntimeReplanContext, RuntimeReplanDecision, RuntimeReplanner
 from .scheduler import Scheduler
@@ -253,6 +254,7 @@ class OrchestrationService:
         saved = await self._storage.save_task(planning_task)
         resuming_nodes: list[tuple[TaskNode, WorkflowNodePlan]] = []
         for node in plan.nodes:
+            validate_canonical_model_node_identity(node, task_id=plan.task_id)
             if node.node_id not in existing_nodes:
                 await self._storage.save_task_node(
                     TaskNode(
@@ -333,6 +335,10 @@ class OrchestrationService:
         try:
             WorkflowPlanValidator(self._capability_registry, public_only=False).validate(revised_plan)
             for node in revised_plan.nodes:
+                validate_canonical_model_node_identity(
+                    node,
+                    task_id=revised_plan.task_id,
+                )
                 self._capability_registry.require(node.capability_id)
             current_plan_by_id = {node.node_id: node for node in current_plan.nodes}
             current_nodes_by_id = {
@@ -365,6 +371,7 @@ class OrchestrationService:
                     visibility=EventVisibility.FRONTEND,
                 )
             )
+            await self._mark_runtime_replan_claim(decision, status="rejected")
             return None
 
         previous_plan_node_ids = {node.node_id for node in current_plan.nodes}
@@ -387,6 +394,7 @@ class OrchestrationService:
                     visibility=EventVisibility.FRONTEND,
                 )
             )
+            await self._mark_runtime_replan_claim(decision, status="rejected")
             return None
 
         await self._record_event(
@@ -502,7 +510,26 @@ class OrchestrationService:
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         )
+        await self._mark_runtime_replan_claim(decision, status="applied")
         return revised_plan, next_dynamic_node_count
+
+    async def _mark_runtime_replan_claim(
+        self,
+        decision: RuntimeReplanDecision,
+        *,
+        status: str,
+    ) -> None:
+        decision_digest = decision.metadata.get("decision_digest")
+        if not isinstance(decision_digest, str) or not decision_digest:
+            return
+        if status == "rejected" and decision.metadata.get("claim_status") == "applied":
+            return
+        await self._storage.mark_planner_replan_claim(
+            decision.plan.task_id,
+            decision_digest,
+            status=status,
+            now=self._utcnow_naive(),
+        )
 
     @staticmethod
     def _json_safe_mapping(value: Any) -> dict[str, Any]:

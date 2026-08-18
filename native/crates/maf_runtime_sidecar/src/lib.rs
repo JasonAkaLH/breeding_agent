@@ -7,10 +7,10 @@
 use maf_event_log::EventLog;
 use maf_runtime_store::{
     ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_ARTIFACT_METADATA,
-    FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER, FEATURE_TASK_GRAPH,
-    FEATURE_TASK_READ, LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION,
-    RuntimeSidecarError, RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease,
-    runtime_sidecar_contract_artifact,
+    FEATURE_EVENT_LOG, FEATURE_PLANNER_REPLAN_CLAIM, FEATURE_RUNTIME_STORE,
+    FEATURE_TASK_DISPATCHER, FEATURE_TASK_GRAPH, FEATURE_TASK_READ, LeaseRegistry,
+    PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError, RuntimeSidecarErrorCode,
+    SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
 };
 use maf_task_dispatcher::{
     TaskDispatcher, TaskSubmitRequest as DispatcherTaskSubmitRequest, TaskSubmitResult,
@@ -197,6 +197,24 @@ pub struct ListTasksForConversationResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetActiveTaskForConversationResponse {
     pub task: Option<TaskRecord>,
+    pub found: bool,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerReplanClaimRecord {
+    pub task_id: String,
+    pub decision_digest: String,
+    pub planning_revision: u64,
+    pub planning_epoch: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerReplanClaimResponse {
+    pub claim: Option<PlannerReplanClaimRecord>,
     pub found: bool,
     pub error: Option<TypedErrorEnvelope>,
 }
@@ -700,6 +718,7 @@ pub struct RuntimeSidecarKernel {
     task_submit_idempotency: BTreeMap<String, TaskSubmitResult>,
     task_record_idempotency: BTreeMap<String, TaskRecord>,
     tasks: BTreeMap<String, TaskRecord>,
+    planner_replan_claims: BTreeMap<(String, String), PlannerReplanClaimRecord>,
     dispatched_task_ids: BTreeSet<String>,
     node_transition_idempotency: BTreeMap<String, NodeTransitionReceipt>,
     task_edge_idempotency: BTreeMap<String, TaskEdgeRecord>,
@@ -734,6 +753,7 @@ impl RuntimeSidecarKernel {
             task_submit_idempotency: BTreeMap::new(),
             task_record_idempotency: BTreeMap::new(),
             tasks: BTreeMap::new(),
+            planner_replan_claims: BTreeMap::new(),
             dispatched_task_ids: BTreeSet::new(),
             node_transition_idempotency: BTreeMap::new(),
             task_edge_idempotency: BTreeMap::new(),
@@ -954,6 +974,82 @@ impl RuntimeSidecarKernel {
         )
         .into_iter()
         .next()
+    }
+
+    pub fn claim_planner_replan(
+        &mut self,
+        task_id: &str,
+        decision_digest: &str,
+        now: &str,
+    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        validate_planner_replan_identity(task_id, decision_digest, now)?;
+        let key = (task_id.to_owned(), decision_digest.to_owned());
+        if let Some(existing) = self.planner_replan_claims.get(&key) {
+            return Ok(existing.clone());
+        }
+        if !self.tasks.contains_key(task_id) {
+            return Err(write_failed("planner replan claim task was not found"));
+        }
+        let planning_revision = self
+            .planner_replan_claims
+            .values()
+            .filter(|claim| claim.task_id == task_id)
+            .map(|claim| claim.planning_revision)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let claim = PlannerReplanClaimRecord {
+            task_id: task_id.to_owned(),
+            decision_digest: decision_digest.to_owned(),
+            planning_revision,
+            planning_epoch: format!("r{planning_revision}"),
+            status: "claimed".to_owned(),
+            created_at: now.to_owned(),
+            updated_at: now.to_owned(),
+        };
+        self.planner_replan_claims.insert(key, claim.clone());
+        Ok(claim)
+    }
+
+    #[must_use]
+    pub fn get_planner_replan_claim(
+        &self,
+        task_id: &str,
+        decision_digest: &str,
+    ) -> Option<PlannerReplanClaimRecord> {
+        self.planner_replan_claims
+            .get(&(task_id.to_owned(), decision_digest.to_owned()))
+            .cloned()
+    }
+
+    pub fn mark_planner_replan_claim(
+        &mut self,
+        task_id: &str,
+        decision_digest: &str,
+        status: &str,
+        now: &str,
+    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        validate_planner_replan_identity(task_id, decision_digest, now)?;
+        if !matches!(status, "applied" | "rejected") {
+            return Err(write_failed("planner replan claim status is invalid"));
+        }
+        let claim = self
+            .planner_replan_claims
+            .get_mut(&(task_id.to_owned(), decision_digest.to_owned()))
+            .ok_or_else(|| write_failed("planner replan claim was not found"))?;
+        if claim.status == status {
+            return Ok(claim.clone());
+        }
+        if claim.status != "claimed" {
+            return Err(write_failed(
+                "terminal planner replan claim cannot be changed",
+            ));
+        }
+        claim.status = status.to_owned();
+        claim.updated_at = now.to_owned();
+        Ok(claim.clone())
     }
 
     pub fn transition_node(
@@ -1453,6 +1549,69 @@ impl RuntimeSidecarService {
             found: task.is_some(),
             task,
             error: None,
+        }
+    }
+
+    pub fn claim_planner_replan(
+        &mut self,
+        task_id: &str,
+        decision_digest: &str,
+        now: &str,
+    ) -> PlannerReplanClaimResponse {
+        match self
+            .kernel
+            .claim_planner_replan(task_id, decision_digest, now)
+        {
+            Ok(claim) => PlannerReplanClaimResponse {
+                claim: Some(claim),
+                found: true,
+                error: None,
+            },
+            Err(error) => PlannerReplanClaimResponse {
+                claim: None,
+                found: false,
+                error: Some(error.into()),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn get_planner_replan_claim(
+        &self,
+        task_id: &str,
+        decision_digest: &str,
+    ) -> PlannerReplanClaimResponse {
+        let claim = self
+            .kernel
+            .get_planner_replan_claim(task_id, decision_digest);
+        PlannerReplanClaimResponse {
+            found: claim.is_some(),
+            claim,
+            error: None,
+        }
+    }
+
+    pub fn mark_planner_replan_claim(
+        &mut self,
+        task_id: &str,
+        decision_digest: &str,
+        status: &str,
+        now: &str,
+    ) -> PlannerReplanClaimResponse {
+        match self
+            .kernel
+            .mark_planner_replan_claim(task_id, decision_digest, status, now)
+        {
+            Ok(claim) => PlannerReplanClaimResponse {
+                claim: Some(claim),
+                found: true,
+                error: None,
+            },
+            Err(error) => PlannerReplanClaimResponse {
+                claim: None,
+                found: false,
+                error: Some(error.into()),
+            },
         }
     }
 
@@ -1982,6 +2141,119 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         Ok(tonic::Response::new(
             runtime_pb::GetActiveTaskForConversationResponse {
                 task: response.task.map(task_record_to_pb),
+                found: response.found,
+                error: response.error.map(typed_error_to_pb),
+            },
+        ))
+    }
+
+    async fn claim_planner_replan(
+        &self,
+        request: tonic::Request<runtime_pb::ClaimPlannerReplanRequest>,
+    ) -> Result<tonic::Response<runtime_pb::PlannerReplanClaimResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match self.run_sqlite_write(|| {
+                adapter.claim_planner_replan(
+                    &request.task_id,
+                    &request.decision_digest,
+                    &request.now,
+                )
+            })? {
+                Ok(claim) => PlannerReplanClaimResponse {
+                    claim: Some(claim),
+                    found: true,
+                    error: None,
+                },
+                Err(error) => PlannerReplanClaimResponse {
+                    claim: None,
+                    found: false,
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            self.lock()?.claim_planner_replan(
+                &request.task_id,
+                &request.decision_digest,
+                &request.now,
+            )
+        };
+        Ok(tonic::Response::new(
+            runtime_pb::PlannerReplanClaimResponse {
+                claim: response.claim.map(planner_replan_claim_to_pb),
+                found: response.found,
+                error: response.error.map(typed_error_to_pb),
+            },
+        ))
+    }
+
+    async fn get_planner_replan_claim(
+        &self,
+        request: tonic::Request<runtime_pb::GetPlannerReplanClaimRequest>,
+    ) -> Result<tonic::Response<runtime_pb::PlannerReplanClaimResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.get_planner_replan_claim(&request.task_id, &request.decision_digest) {
+                Ok(claim) => PlannerReplanClaimResponse {
+                    found: claim.is_some(),
+                    claim,
+                    error: None,
+                },
+                Err(error) => PlannerReplanClaimResponse {
+                    claim: None,
+                    found: false,
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            self.lock()?
+                .get_planner_replan_claim(&request.task_id, &request.decision_digest)
+        };
+        Ok(tonic::Response::new(
+            runtime_pb::PlannerReplanClaimResponse {
+                claim: response.claim.map(planner_replan_claim_to_pb),
+                found: response.found,
+                error: response.error.map(typed_error_to_pb),
+            },
+        ))
+    }
+
+    async fn mark_planner_replan_claim(
+        &self,
+        request: tonic::Request<runtime_pb::MarkPlannerReplanClaimRequest>,
+    ) -> Result<tonic::Response<runtime_pb::PlannerReplanClaimResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match self.run_sqlite_write(|| {
+                adapter.mark_planner_replan_claim(
+                    &request.task_id,
+                    &request.decision_digest,
+                    &request.status,
+                    &request.now,
+                )
+            })? {
+                Ok(claim) => PlannerReplanClaimResponse {
+                    claim: Some(claim),
+                    found: true,
+                    error: None,
+                },
+                Err(error) => PlannerReplanClaimResponse {
+                    claim: None,
+                    found: false,
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            self.lock()?.mark_planner_replan_claim(
+                &request.task_id,
+                &request.decision_digest,
+                &request.status,
+                &request.now,
+            )
+        };
+        Ok(tonic::Response::new(
+            runtime_pb::PlannerReplanClaimResponse {
+                claim: response.claim.map(planner_replan_claim_to_pb),
                 found: response.found,
                 error: response.error.map(typed_error_to_pb),
             },
@@ -2714,6 +2986,7 @@ pub fn supported_features() -> Vec<String> {
         FEATURE_TASK_GRAPH.to_owned(),
         FEATURE_ARTIFACT_METADATA.to_owned(),
         FEATURE_TASK_READ.to_owned(),
+        FEATURE_PLANNER_REPLAN_CLAIM.to_owned(),
     ]
 }
 
@@ -2874,6 +3147,20 @@ fn task_record_to_pb(task: TaskRecord) -> runtime_pb::TaskRecord {
         created_at: task.created_at,
         updated_at: task.updated_at,
         assignment: task.assignment.map(task_assignment_to_pb),
+    }
+}
+
+fn planner_replan_claim_to_pb(
+    claim: PlannerReplanClaimRecord,
+) -> runtime_pb::PlannerReplanClaimRecord {
+    runtime_pb::PlannerReplanClaimRecord {
+        task_id: claim.task_id,
+        decision_digest: claim.decision_digest,
+        planning_revision: claim.planning_revision,
+        planning_epoch: claim.planning_epoch,
+        status: claim.status,
+        created_at: claim.created_at,
+        updated_at: claim.updated_at,
     }
 }
 
@@ -3076,6 +3363,24 @@ pub(crate) fn validate_task_node_record(node: &TaskNodeRecord) -> Result<(), Run
         if serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(payload).is_err() {
             return Err(write_failed("TaskNodeRecord policy JSON must be an object"));
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_planner_replan_identity(
+    task_id: &str,
+    decision_digest: &str,
+    now: &str,
+) -> Result<(), RuntimeSidecarError> {
+    if task_id.trim().is_empty() || now.trim().is_empty() {
+        return Err(write_failed("planner replan claim identity is incomplete"));
+    }
+    if decision_digest.len() != 64
+        || !decision_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(write_failed("planner replan decision digest is invalid"));
     }
     Ok(())
 }

@@ -805,9 +805,15 @@ class MainAgentLLMAPITest(APITestCase):
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         nodes_by_capability = {node.capability_id: node for node in nodes}
         edges = await self.runtime.storage.list_task_edges(task_id)
-        self.assertIn(
-            (nodes_by_capability["skill.generic_data_lookup"].node_id, nodes_by_capability["main_agent.respond"].node_id),
-            {(edge.from_node_id, edge.to_node_id) for edge in edges},
+        skill_node_id = nodes_by_capability["skill.generic_data_lookup"].node_id
+        main_agent_targets = {
+            edge.to_node_id for edge in edges if edge.from_node_id == skill_node_id
+        }
+        self.assertTrue(
+            any(
+                node.capability_id == "main_agent.respond" and node.node_id in main_agent_targets
+                for node in nodes
+            )
         )
         self.assertIn("查询龙粳33", prompts[-1])
         self.assertIn("上游能力结果上下文", prompts[-1])

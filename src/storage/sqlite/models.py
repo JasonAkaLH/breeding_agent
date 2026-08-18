@@ -1529,6 +1529,39 @@ class TaskRow(SQLiteBase):
     mcp_rollout_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class PlannerReplanClaimRow(SQLiteBase):
+    __tablename__ = "planner_replan_claim"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "planning_revision",
+            name="uq_planner_replan_claim_task_revision",
+        ),
+        CheckConstraint(
+            "planning_revision >= 1",
+            name="planner_replan_claim_positive_revision",
+        ),
+        CheckConstraint(
+            "status IN ('claimed', 'applied', 'rejected')",
+            name="planner_replan_claim_status",
+        ),
+        Index(
+            "idx_planner_replan_claim_task_status",
+            "task_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    task_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    decision_digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    planning_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    planning_epoch: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
 class TaskNodeRow(SQLiteBase):
     __tablename__ = "task_node"
     __table_args__ = (

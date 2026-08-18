@@ -78,6 +78,28 @@ class PostgresRuntimeSchemaManifestTest(unittest.TestCase):
         self.assertIn("idx_task_input_attachment_conversation_task", index_ddl)
         self.assertIn("idx_task_input_attachment_upload", index_ddl)
 
+    def test_planner_replan_claim_is_bootstrapped_with_closed_constraints(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        self.assertIn("planner_replan_claim", manifest.runtime_table_names)
+        self.assertEqual(
+            manifest.table_columns["planner_replan_claim"],
+            {
+                "task_id": "text",
+                "decision_digest": "text",
+                "planning_revision": "bigint",
+                "planning_epoch": "text",
+                "status": "text",
+                "created_at": "timestamp with time zone",
+                "updated_at": "timestamp with time zone",
+            },
+        )
+        constraints = manifest.check_constraints["planner_replan_claim"]
+        self.assertIn("planning_revision >= 1", constraints["ck_planner_replan_claim_planner_replan_claim_positive_revision"])
+        self.assertIn("'claimed'", constraints["ck_planner_replan_claim_planner_replan_claim_status"])
+        ddl = build_runtime_table_schema_ddl()
+        self.assertIn("CREATE TABLE IF NOT EXISTS planner_replan_claim", ddl)
+        self.assertIn("uq_planner_replan_claim_task_revision", ddl)
+
     def test_manifest_checksum_changes_when_table_spec_changes(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
         mutated = manifest.with_runtime_table_names((*manifest.runtime_table_names, "extra_table"))

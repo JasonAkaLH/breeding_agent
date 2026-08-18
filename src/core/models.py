@@ -1028,6 +1028,17 @@ class FileUploadMessageProjection:
 
 
 @dataclass(slots=True, frozen=True)
+class PlannerReplanClaim:
+    task_id: str
+    decision_digest: str
+    planning_revision: int
+    planning_epoch: str
+    status: str = "claimed"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class Task:
     task_id: str
     conversation_id: str

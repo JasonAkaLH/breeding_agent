@@ -13,6 +13,9 @@ service RuntimeSidecar {
   rpc GetTask(GetTaskRequest) returns (GetTaskResponse);
   rpc ListTasksForConversation(ListTasksForConversationRequest) returns (ListTasksForConversationResponse);
   rpc GetActiveTaskForConversation(GetActiveTaskForConversationRequest) returns (GetActiveTaskForConversationResponse);
+  rpc ClaimPlannerReplan(ClaimPlannerReplanRequest) returns (PlannerReplanClaimResponse);
+  rpc GetPlannerReplanClaim(GetPlannerReplanClaimRequest) returns (PlannerReplanClaimResponse);
+  rpc MarkPlannerReplanClaim(MarkPlannerReplanClaimRequest) returns (PlannerReplanClaimResponse);
   rpc GetTaskNode(GetTaskNodeRequest) returns (GetTaskNodeResponse);
   rpc ListTaskNodesForTask(ListTaskNodesForTaskRequest) returns (ListTaskNodesForTaskResponse);
   rpc TransitionNode(TransitionNodeRequest) returns (TransitionNodeResponse);
@@ -148,6 +151,40 @@ message GetActiveTaskForConversationRequest {
 
 message GetActiveTaskForConversationResponse {
   TaskRecord task = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message PlannerReplanClaimRecord {
+  string task_id = 1;
+  string decision_digest = 2;
+  uint64 planning_revision = 3;
+  string planning_epoch = 4;
+  string status = 5;
+  string created_at = 6;
+  string updated_at = 7;
+}
+
+message ClaimPlannerReplanRequest {
+  string task_id = 1;
+  string decision_digest = 2;
+  string now = 3;
+}
+
+message GetPlannerReplanClaimRequest {
+  string task_id = 1;
+  string decision_digest = 2;
+}
+
+message MarkPlannerReplanClaimRequest {
+  string task_id = 1;
+  string decision_digest = 2;
+  string status = 3;
+  string now = 4;
+}
+
+message PlannerReplanClaimResponse {
+  PlannerReplanClaimRecord claim = 1;
   bool found = 2;
   maf.common.v1.TypedError error = 3;
 }

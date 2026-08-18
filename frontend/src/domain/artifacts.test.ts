@@ -132,6 +132,23 @@ describe('parseAssistantTextArtifact', () => {
       }),
     ])).toBe('主代理最终回答');
   });
+
+  it('uses artifact identity rather than opaque producer node id for main-agent preference', () => {
+    expect(parseAssistantTextArtifact([
+      artifact({
+        artifact_id: 'weather_text:1',
+        producer_node_id: 'opaque:main_agent.respond:misleading',
+        artifact_type: 'text',
+        storage_ref: '天气能力文本',
+      }),
+      artifact({
+        artifact_id: 'main_agent_text:1',
+        producer_node_id: 'task-1:plan:v1:p0:answer:0123456789abcdef0123',
+        artifact_type: 'text',
+        storage_ref: '主代理最终回答',
+      }),
+    ])).toBe('主代理最终回答');
+  });
 });
 
 describe('parseCapabilityArtifactDisplays', () => {
@@ -227,6 +244,20 @@ describe('parseCapabilityArtifactDisplays', () => {
         artifact_type: 'summary',
         storage_ref: JSON.stringify({ summary: '天气结果' }),
         summary: '天气结果',
+      }),
+    ]);
+
+    expect(displays).toEqual([]);
+  });
+
+  it('does not infer data-query semantics from an opaque producer node id', () => {
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({
+        artifact_id: 'generic-summary:1',
+        producer_node_id: 'task-1:plan:v1:p0:data_query:0123456789abcdef0123',
+        artifact_type: 'summary',
+        storage_ref: JSON.stringify({ summary: '普通能力结果' }),
+        summary: '普通能力结果',
       }),
     ]);
 

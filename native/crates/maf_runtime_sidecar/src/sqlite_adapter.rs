@@ -1,8 +1,9 @@
 use crate::{
     ArtifactRecord, BundleRevisionResult, CancellationToken, EventCursor, NodeTransitionResult,
-    TaskEdgeRecord, TaskNodeRecord, TaskRecord, TaskRouteAssignment, idempotency_conflict,
-    migration_blocked, require_idempotency_key, validate_task_node_record,
-    validate_task_node_update, validate_task_record, validate_task_update,
+    PlannerReplanClaimRecord, TaskEdgeRecord, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
+    idempotency_conflict, migration_blocked, require_idempotency_key,
+    validate_planner_replan_identity, validate_task_node_record, validate_task_node_update,
+    validate_task_record, validate_task_update,
 };
 use maf_runtime_store::{RuntimeSidecarError, RuntimeSidecarErrorCode, TaskLease};
 use maf_task_dispatcher::TaskSubmitResult;
@@ -190,6 +191,99 @@ impl RuntimeSidecarSqliteAdapter {
             )?
             .into_iter()
             .next())
+    }
+
+    pub fn claim_planner_replan(
+        &self,
+        task_id: &str,
+        decision_digest: &str,
+        now: &str,
+    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
+        validate_planner_replan_identity(task_id, decision_digest, now)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(|error| {
+            sqlite_error("begin planner replan claim transaction failed", error)
+        })?;
+        if let Some(existing) =
+            planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
+        {
+            transaction.commit().map_err(|error| {
+                sqlite_error("commit idempotent planner replan claim failed", error)
+            })?;
+            return Ok(existing);
+        }
+        if task_record_by_id(&transaction, task_id)?.is_none() {
+            return Err(write_failed("planner replan claim task was not found"));
+        }
+        let planning_revision_i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(planning_revision), 0) + 1 FROM planner_replan_claims WHERE task_id = ?1",
+                rusqlite::params![task_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| sqlite_error("select planner replan revision failed", error))?;
+        let planning_revision = u64::try_from(planning_revision_i64)
+            .map_err(|_| write_failed("planner replan revision is invalid"))?;
+        let planning_epoch = format!("r{planning_revision}");
+        transaction
+            .execute(
+                "INSERT INTO planner_replan_claims (task_id, decision_digest, planning_revision, planning_epoch, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'claimed', ?5, ?5)",
+                rusqlite::params![task_id, decision_digest, planning_revision_i64, planning_epoch, now],
+            )
+            .map_err(|error| sqlite_error("insert planner replan claim failed", error))?;
+        let claim = planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
+            .ok_or_else(|| write_failed("inserted planner replan claim was not found"))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit planner replan claim failed", error))?;
+        Ok(claim)
+    }
+
+    pub fn get_planner_replan_claim(
+        &self,
+        task_id: &str,
+        decision_digest: &str,
+    ) -> Result<Option<PlannerReplanClaimRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        planner_replan_claim_by_identity(&connection, task_id, decision_digest)
+    }
+
+    pub fn mark_planner_replan_claim(
+        &self,
+        task_id: &str,
+        decision_digest: &str,
+        status: &str,
+        now: &str,
+    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
+        validate_planner_replan_identity(task_id, decision_digest, now)?;
+        if !matches!(status, "applied" | "rejected") {
+            return Err(write_failed("planner replan claim status is invalid"));
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| sqlite_error("begin planner replan mark transaction failed", error))?;
+        let existing = planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
+            .ok_or_else(|| write_failed("planner replan claim was not found"))?;
+        if existing.status != status {
+            if existing.status != "claimed" {
+                return Err(write_failed(
+                    "terminal planner replan claim cannot be changed",
+                ));
+            }
+            transaction
+                .execute(
+                    "UPDATE planner_replan_claims SET status = ?3, updated_at = ?4 WHERE task_id = ?1 AND decision_digest = ?2",
+                    rusqlite::params![task_id, decision_digest, status, now],
+                )
+                .map_err(|error| sqlite_error("update planner replan claim failed", error))?;
+        }
+        let claim = planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
+            .ok_or_else(|| write_failed("updated planner replan claim was not found"))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit planner replan mark failed", error))?;
+        Ok(claim)
     }
 
     pub fn transition_node(
@@ -1054,6 +1148,17 @@ impl RuntimeSidecarSqliteAdapter {
                     task_id TEXT NOT NULL,
                     node_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS planner_replan_claims (
+                    task_id TEXT NOT NULL,
+                    decision_digest TEXT NOT NULL,
+                    planning_revision INTEGER NOT NULL,
+                    planning_epoch TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('claimed', 'applied', 'rejected')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (task_id, decision_digest),
+                    UNIQUE (task_id, planning_revision)
+                );
                 CREATE TABLE IF NOT EXISTS node_transition_idempotency (
                     idempotency_key TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
@@ -1456,6 +1561,54 @@ fn task_node_by_id(
         .optional()
         .map_err(|error| sqlite_error("select TaskNodeRecord failed", error))?;
     node_json.as_deref().map(decode_task_node_json).transpose()
+}
+
+fn planner_replan_claim_by_identity(
+    connection: &Connection,
+    task_id: &str,
+    decision_digest: &str,
+) -> Result<Option<PlannerReplanClaimRecord>, RuntimeSidecarError> {
+    let row = connection
+        .query_row(
+            "SELECT task_id, decision_digest, planning_revision, planning_epoch, status, created_at, updated_at FROM planner_replan_claims WHERE task_id = ?1 AND decision_digest = ?2",
+            rusqlite::params![task_id, decision_digest],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| sqlite_error("select planner replan claim failed", error))?;
+    row.map(
+        |(
+            task_id,
+            decision_digest,
+            planning_revision,
+            planning_epoch,
+            status,
+            created_at,
+            updated_at,
+        )| {
+            Ok(PlannerReplanClaimRecord {
+                task_id,
+                decision_digest,
+                planning_revision: u64::try_from(planning_revision)
+                    .map_err(|_| write_failed("planner replan revision is invalid"))?,
+                planning_epoch,
+                status,
+                created_at,
+                updated_at,
+            })
+        },
+    )
+    .transpose()
 }
 
 fn decode_task_node_json(payload: &str) -> Result<TaskNodeRecord, RuntimeSidecarError> {

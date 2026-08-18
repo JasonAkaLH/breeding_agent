@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- Planner Node Identity v1 已完成仓库实现：LLM 初始 Planner 在 enrich 后把 task-local key 与依赖统一转换为 `{task_id}:plan:v1:p0:{safe_key}:{digest}`；Main Agent Runtime Replanner 改用 closed existing/new reference contract，并通过 durable decision claim 分配可恢复 `rN` epoch。SQLite/PostgreSQL schema、Task 行锁并发边界、Rust RuntimeSidecar kernel/SQLite/gRPC、Python enforce/shadow facade 与 contract hash 已同步；model-origin persistence guard 不影响 system/legacy 节点。前端 artifact 分类不再解析 opaque `producer_node_id`。新增相同 `n1 + answer_user` 顺序/并发、初始/replan 同 key、幂等 retry、collision/非法 key、claim terminal/reopen、真实 Sidecar gRPC 与 opaque 前端回归。License Requirement：复用 Python/Rust/React 现有依赖，无新增依赖或许可变更。
+
 - 新增 Planner Node Identity v1 设计：确认模型只生成规划内局部 key，Runtime 以 task、planning epoch 和 key 生成全局确定性 node ID；初始规划使用 `p0`，LLM Runtime Replanner 通过 SQLite/PostgreSQL/Rust Sidecar 等价的 durable claim 分配可恢复 epoch，并使用 closed existing/new reference contract。设计同时锁定 system/legacy 节点兼容、前端不再解析 `producer_node_id`、additive migration、回滚边界，以及 `n1 + answer_user` 顺序/并发/replan/重启验收。License Requirement：仅设计、索引和变更记录，无新增依赖/许可变更。
 
 - `$` 用户级 MCP Server Soft Binding 已在 `main` 完成仓库实现：前端从当前用户 `enabled + available` Server派生安全 `$显示名称` 菜单，只提交closed `server_id` binding，并支持互斥badge、附件-only提交、设置变更刷新和历史恢复；后端新增422/409/503合同、持久化前owner/status零副作用preflight、根Message private authority与public badge、固定dispatch+finalizer、跨Interrupt/recovery mode恢复、Selector prompt/validator/Coordinator三层禁换Server、当前消息附件最小投影和closed audit/history allowlist。新增fake MCP E2E与user-scoped discover-only smoke脚本；真实OCR smoke仍等待受控环境提供owner/server引用后执行，`prod`未修改、构建或部署。License Requirement：复用既有Python/Pydantic/FastAPI/React/Ant Design/MCP依赖，无新增依赖或许可变更。

@@ -6,15 +6,16 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260813_task_authority_cas";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260818_planner_replan_claim";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260813_expected_status_cas";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260818_planner_replan_claim";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
 pub const FEATURE_TASK_GRAPH: &str = "task_graph";
 pub const FEATURE_ARTIFACT_METADATA: &str = "artifact_metadata";
 pub const FEATURE_TASK_READ: &str = "task_read";
+pub const FEATURE_PLANNER_REPLAN_CLAIM: &str = "planner_replan_claim";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
 pub const MAX_IN_FLIGHT_CPU_MULTIPLIER: u64 = 4;
@@ -369,10 +370,22 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
     .into_iter()
     .map(write_operation)
     .chain(
+        ["planner_replan_claim", "planner_replan_claim_mark"]
+            .into_iter()
+            .map(|name| OperationPolicy {
+                name: name.to_owned(),
+                kind: "write".to_owned(),
+                enforce_failure: "fail_closed".to_owned(),
+                python_legacy_write_fallback: false,
+                idempotency_required: true,
+            }),
+    )
+    .chain(
         [
             "task_get",
             "task_list_for_conversation",
             "task_get_active_for_conversation",
+            "planner_replan_claim_get",
             "task_node_get",
             "task_node_list",
             "task_edge_list",
@@ -692,6 +705,7 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             FEATURE_TASK_GRAPH.to_owned(),
             FEATURE_ARTIFACT_METADATA.to_owned(),
             FEATURE_TASK_READ.to_owned(),
+            FEATURE_PLANNER_REPLAN_CLAIM.to_owned(),
         ],
         modes: vec!["off".to_owned(), "shadow".to_owned(), "enforce".to_owned()],
         mode_env: BTreeMap::from([

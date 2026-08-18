@@ -97,6 +97,7 @@ class _RecordingRuntimeSidecarClient:
         self.edges: dict[str, list[dict[str, object]]] = {}
         self.artifacts: dict[str, dict[str, object]] = {}
         self.nodes: dict[str, dict[str, object]] = {}
+        self.planner_replan_claims: dict[tuple[str, str], dict[str, object]] = {}
 
     async def submit_task(
         self,
@@ -201,6 +202,79 @@ class _RecordingRuntimeSidecarClient:
             "task": task,
             "error": None,
         }
+
+    async def claim_planner_replan(
+        self,
+        *,
+        task_id: str,
+        decision_digest: str,
+        now: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "planner_replan_claim",
+                {"task_id": task_id, "decision_digest": decision_digest, "now": now},
+            )
+        )
+        key = (task_id, decision_digest)
+        claim = self.planner_replan_claims.get(key)
+        if claim is None:
+            revision = 1 + sum(1 for stored in self.planner_replan_claims.values() if stored["task_id"] == task_id)
+            claim = {
+                "task_id": task_id,
+                "decision_digest": decision_digest,
+                "planning_revision": revision,
+                "planning_epoch": f"r{revision}",
+                "status": "claimed",
+                "created_at": now,
+                "updated_at": now,
+            }
+            self.planner_replan_claims[key] = claim
+        return {"operation": "planner_replan_claim", "claim": claim, "found": True, "error": None}
+
+    async def get_planner_replan_claim(
+        self,
+        *,
+        task_id: str,
+        decision_digest: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "planner_replan_claim_get",
+                {"task_id": task_id, "decision_digest": decision_digest},
+            )
+        )
+        claim = self.planner_replan_claims.get((task_id, decision_digest))
+        return {
+            "operation": "planner_replan_claim_get",
+            "claim": claim,
+            "found": claim is not None,
+            "error": None,
+        }
+
+    async def mark_planner_replan_claim(
+        self,
+        *,
+        task_id: str,
+        decision_digest: str,
+        status: str,
+        now: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "planner_replan_claim_mark",
+                {
+                    "task_id": task_id,
+                    "decision_digest": decision_digest,
+                    "status": status,
+                    "now": now,
+                },
+            )
+        )
+        claim = self.planner_replan_claims[(task_id, decision_digest)]
+        claim = {**claim, "status": status, "updated_at": now}
+        self.planner_replan_claims[(task_id, decision_digest)] = claim
+        return {"operation": "planner_replan_claim_mark", "claim": claim, "found": True, "error": None}
 
     async def transition_node(
         self,
@@ -618,11 +692,11 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertFalse(conflict["retriable"])
         self.assertEqual(
             contract["schema_hash"],
-            "maf_runtime_v1_schema_20260813_task_authority_cas",
+            "maf_runtime_v1_schema_20260818_planner_replan_claim",
         )
         self.assertEqual(
             contract["artifact_policy"]["expected_proto_hash"],
-            "maf_runtime_proto_v1_20260813_expected_status_cas",
+            "maf_runtime_proto_v1_20260818_planner_replan_claim",
         )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:
@@ -898,6 +972,75 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(sidecar.calls[3][1]["node"]["capability_id"], "main_agent.respond")
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task(task.task_id)))
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
+
+    def test_runtime_store_enforce_routes_planner_replan_claims_to_sidecar(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-sidecar-replan",
+            conversation_id="conv-sidecar-replan",
+            root_message_id="msg-sidecar-replan",
+            status=TaskStatus.RUNNING,
+        )
+        first_digest = "a" * 64
+        second_digest = "b" * 64
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            first = asyncio.run(
+                storage.claim_planner_replan(
+                    task.task_id,
+                    first_digest,
+                    now=datetime(2026, 8, 18, 10, 0, 0),
+                )
+            )
+            retry = asyncio.run(
+                storage.claim_planner_replan(
+                    task.task_id,
+                    first_digest,
+                    now=datetime(2026, 8, 18, 10, 1, 0),
+                )
+            )
+            second = asyncio.run(
+                storage.claim_planner_replan(
+                    task.task_id,
+                    second_digest,
+                    now=datetime(2026, 8, 18, 10, 2, 0),
+                )
+            )
+            applied = asyncio.run(
+                storage.mark_planner_replan_claim(
+                    task.task_id,
+                    first_digest,
+                    status="applied",
+                    now=datetime(2026, 8, 18, 10, 3, 0),
+                )
+            )
+            loaded = asyncio.run(storage.get_planner_replan_claim(task.task_id, first_digest))
+
+        self.assertEqual(first, retry)
+        self.assertEqual(first.planning_epoch, "r1")
+        self.assertEqual(second.planning_epoch, "r2")
+        self.assertEqual(applied.status, "applied")
+        self.assertEqual(loaded, applied)
+        self.assertEqual(
+            [call[0] for call in sidecar.calls[-5:]],
+            [
+                "planner_replan_claim",
+                "planner_replan_claim",
+                "planner_replan_claim",
+                "planner_replan_claim_mark",
+                "planner_replan_claim_get",
+            ],
+        )
+        self.assertIsNone(
+            asyncio.run(
+                SQLiteStorage(self.session_factory).get_planner_replan_claim(
+                    task.task_id,
+                    first_digest,
+                )
+            )
+        )
 
     def test_remote_terminal_outbox_transitions_authoritative_sidecar_node_in_enforce(self) -> None:
         now = datetime(2026, 8, 13, 12, 0, 0)

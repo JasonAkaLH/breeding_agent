@@ -58,6 +58,7 @@ from .models import (
     MCPTerminalResultReceipt,
     Message,
     PendingSkillContext,
+    PlannerReplanClaim,
     SlotCollection,
     SlotEvent,
     Task,
@@ -1155,6 +1156,29 @@ class StoragePort(Protocol):
     ) -> Task | None: ...
 
     async def get_task(self, task_id: str) -> Task | None: ...
+
+    async def claim_planner_replan(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        now: datetime,
+    ) -> PlannerReplanClaim: ...
+
+    async def get_planner_replan_claim(
+        self,
+        task_id: str,
+        decision_digest: str,
+    ) -> PlannerReplanClaim | None: ...
+
+    async def mark_planner_replan_claim(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        status: str,
+        now: datetime,
+    ) -> PlannerReplanClaim: ...
 
     async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None: ...
 

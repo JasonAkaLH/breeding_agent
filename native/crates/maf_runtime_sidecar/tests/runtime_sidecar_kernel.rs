@@ -87,6 +87,54 @@ fn task_record_is_authoritative_idempotent_and_assignment_is_write_once() {
 }
 
 #[test]
+fn planner_replan_claim_is_task_scoped_monotonic_and_idempotent() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    kernel
+        .submit_task_record(task_record("running"), "task-replan", None)
+        .expect("store task before claiming a replan epoch");
+    let first = kernel
+        .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:00:00Z")
+        .expect("claim first replan");
+    let retry = kernel
+        .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:01:00Z")
+        .expect("retry same replan claim");
+    let second = kernel
+        .claim_planner_replan("task-authority", &"b".repeat(64), "2026-08-18T10:02:00Z")
+        .expect("claim second replan");
+
+    assert_eq!(first, retry);
+    assert_eq!(first.planning_revision, 1);
+    assert_eq!(first.planning_epoch, "r1");
+    assert_eq!(second.planning_revision, 2);
+    assert_eq!(second.planning_epoch, "r2");
+
+    let applied = kernel
+        .mark_planner_replan_claim(
+            "task-authority",
+            &"a".repeat(64),
+            "applied",
+            "2026-08-18T10:03:00Z",
+        )
+        .expect("mark first claim applied");
+    assert_eq!(applied.status, "applied");
+    assert_eq!(
+        kernel
+            .get_planner_replan_claim("task-authority", &"a".repeat(64))
+            .expect("claim remains readable"),
+        applied
+    );
+    let terminal_error = kernel
+        .mark_planner_replan_claim(
+            "task-authority",
+            &"a".repeat(64),
+            "rejected",
+            "2026-08-18T10:04:00Z",
+        )
+        .expect_err("terminal claim cannot change outcome");
+    assert_eq!(terminal_error.code, "runtime_store_write_failed");
+}
+
+#[test]
 fn legacy_null_assignment_requires_an_explicit_migration() {
     let mut kernel = RuntimeSidecarKernel::new();
     let mut legacy = task_record("completed");

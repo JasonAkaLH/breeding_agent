@@ -72,6 +72,54 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             payload_policies=payload_policies,
         )
 
+    async def test_model_node_ids_are_canonicalized_per_task_after_finalizer_enrichment(self) -> None:
+        self.registry.register(
+            CapabilityDescriptor(
+                capability_id="field.inspect",
+                name="Field Inspect",
+                description="Inspect a field without producing the final answer.",
+                public=True,
+            )
+        )
+
+        async def planner(_prompt: str) -> str:
+            return json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "node_id": "n1",
+                            "capability_id": "field.inspect",
+                        }
+                    ]
+                }
+            )
+
+        first = await self.make_provider(planner).build_plan(
+            OrchestrationRequest(
+                task_id="task-first",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="查询龙粳33",
+            )
+        )
+        second = await self.make_provider(planner).build_plan(
+            OrchestrationRequest(
+                task_id="task-second",
+                conversation_id="conv-2",
+                root_message_id="msg-2",
+                user_message="查询龙粳33",
+            )
+        )
+
+        first_public = tuple(node for node in first.nodes if node.metadata.get("identity_origin") == "model")
+        second_public = tuple(node for node in second.nodes if node.metadata.get("identity_origin") == "model")
+        self.assertEqual(len(first_public), 2)
+        self.assertEqual(len(second_public), 2)
+        self.assertTrue(all(node.node_id.startswith("task-first:plan:v1:p0:") for node in first_public))
+        self.assertTrue(all(node.node_id.startswith("task-second:plan:v1:p0:") for node in second_public))
+        self.assertEqual(first_public[1].depends_on, (first_public[0].node_id,))
+        self.assertTrue(set(node.node_id for node in first_public).isdisjoint(node.node_id for node in second_public))
+
     async def test_planner_explicit_capability_missing_metadata_becomes_disclosed_fallback(self) -> None:
         async def planner(_prompt: str) -> str:
             return json.dumps(
@@ -254,7 +302,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.metadata["planner_source"], "llm")
         capability_ids = [node.capability_id for node in plan.nodes]
         self.assertEqual(capability_ids, ["skill.generic_data_lookup", "main_agent.respond"])
-        self.assertIn("task-1:query_data:skill_execute", plan.nodes[-1].depends_on)
+        self.assertEqual(plan.nodes[-1].depends_on, (plan.nodes[0].node_id,))
+        self.assertIn(":plan:v1:p0:query_data:", plan.nodes[0].node_id)
         self.assertEqual(plan.nodes[-1].input_payload["user_message"], "查询龙粳33的详细审定信息")
         self.assertIn("skill.generic_data_lookup", prompts[0])
         self.assertIn("main_agent.respond", prompts[0])
@@ -291,7 +340,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(plan.nodes[-1].capability_id, "main_agent.respond")
-        self.assertIn("task-finalizer:query_data:skill_execute", plan.nodes[-1].depends_on)
+        self.assertEqual(plan.nodes[-1].depends_on, (plan.nodes[0].node_id,))
+        self.assertIn(":plan:v1:p0:query_data:", plan.nodes[0].node_id)
         self.assertFalse(plan.metadata["planner_finalizer_added"])
 
     async def test_planner_payload_cannot_override_user_input(self) -> None:
@@ -357,7 +407,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        skill_node = plan.node_by_id("task-sql-hints:query_genotype_info:skill_execute")
+        skill_node = next(node for node in plan.nodes if node.capability_id == "skill.generic_data_lookup")
+        self.assertIn(":plan:v1:p0:query_genotype_info:", skill_node.node_id)
         self.assertEqual(skill_node.input_payload["user_message"], "龙粳33的审定信息和基因型信息都查一下")
         self.assertNotIn("route_hint", skill_node.input_payload)
         self.assertEqual(skill_node.input_payload["subtask_label"], "基因型信息")
@@ -561,7 +612,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(plan.nodes[-1].capability_id, "main_agent.respond")
-        self.assertIn("task-rewire:query_data:skill_execute", plan.nodes[-1].depends_on)
+        self.assertEqual(plan.nodes[-1].depends_on, (plan.nodes[0].node_id,))
+        self.assertIn(":plan:v1:p0:query_data:", plan.nodes[0].node_id)
         self.assertFalse(plan.metadata["planner_finalizer_rewired"])
         self.assertFalse(plan.metadata["planner_finalizer_added"])
 

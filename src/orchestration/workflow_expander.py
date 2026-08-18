@@ -37,7 +37,13 @@ class WorkflowExpander:
         self._macro_providers = dict(macro_providers)
         self._macro_provider_resolver = macro_provider_resolver
 
-    def expand(self, plan: WorkflowPlan, *, request: OrchestrationRequest) -> WorkflowPlan:
+    def expand(
+        self,
+        plan: WorkflowPlan,
+        *,
+        request: OrchestrationRequest,
+        preserved_node_ids: frozenset[str] = frozenset(),
+    ) -> WorkflowPlan:
         ordered_nodes = self._topological_nodes(plan)
         nodes_by_original_id = {node.node_id: node for node in ordered_nodes}
         dropped_public_skill_dependencies: dict[str, tuple[str, ...]] = {}
@@ -77,6 +83,16 @@ class WorkflowExpander:
             high_level_answer_source_count = sum(
                 1 for dependency in preserved_dependency_ids if dependency in expanded_answer_ids_by_original
             )
+            if node.node_id in preserved_node_ids:
+                expanded_nodes.append(node)
+                expanded_tail_ids_by_original[node.node_id] = (node.node_id,)
+                if node.capability_id == "main_agent.respond":
+                    expanded_main_agent_node_ids.add(node.node_id)
+                    last_main_agent_node_id = node.node_id
+                if response_role_from_metadata(node.metadata) == RESPONSE_ROLE_FINAL:
+                    expanded_answer_ids_by_original[node.node_id] = (node.node_id,)
+                continue
+
             provider = self._resolve_macro_provider(node.capability_id)
             if provider is None:
                 if node.capability_id == "main_agent.respond" and not high_level_dependencies and last_main_agent_node_id:

@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from src.capabilities.main_agent.runtime_replanner import MainAgentRuntimeReplanner
 from src.capabilities.main_agent.workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS, MAIN_AGENT_PLANNER_PAYLOAD_POLICIES
 from src.core.enums import NodeStatus
-from src.core.models import TaskNode
+from src.core.models import PlannerReplanClaim, TaskNode
 from src.integrations.agent_skills import SkillManifest
 from src.orchestration.completion_policy import CompletionStatus
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
@@ -19,7 +20,39 @@ from src.orchestration.runtime_replanner import RuntimeReplanContext
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 
 
+class _PlannerReplanClaimStore:
+    def __init__(self) -> None:
+        self.claims: dict[tuple[str, str], PlannerReplanClaim] = {}
+
+    async def claim_planner_replan(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        now: datetime,
+    ) -> PlannerReplanClaim:
+        key = (task_id, decision_digest)
+        existing = self.claims.get(key)
+        if existing is not None:
+            return existing
+        revision = 1 + sum(1 for claim in self.claims.values() if claim.task_id == task_id)
+        claim = PlannerReplanClaim(
+            task_id=task_id,
+            decision_digest=decision_digest,
+            planning_revision=revision,
+            planning_epoch=f"r{revision}",
+            created_at=now,
+            updated_at=now,
+        )
+        self.claims[key] = claim
+        return claim
+
+
 class MainAgentRuntimeReplannerTest(unittest.TestCase):
+    @staticmethod
+    def _claim_store() -> _PlannerReplanClaimStore:
+        return _PlannerReplanClaimStore()
+
     def _generic_data_lookup_manifest(self) -> SkillManifest:
         return SkillManifest(
             name="generic-data-lookup",
@@ -78,8 +111,17 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                     "action": "replan",
                     "reason": "split query after empty result",
                     "nodes": [
-                        {"node_id": "query_again", "capability_id": "skill.generic_data_lookup"},
-                        {"node_id": "answer_user", "capability_id": "main_agent.respond", "depends_on": ["query_again"]},
+                        {"existing_node_id": "query_data"},
+                        {
+                            "node_key": "query_again",
+                            "capability_id": "skill.generic_data_lookup",
+                            "depends_on": [{"existing_node_id": "query_data"}],
+                        },
+                        {
+                            "node_key": "answer_user",
+                            "capability_id": "main_agent.respond",
+                            "depends_on": [{"node_key": "query_again"}],
+                        },
                     ],
                 },
                 ensure_ascii=False,
@@ -100,15 +142,15 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                 max_dynamic_nodes=24,
             ),
             nodes={
-                "filter": TaskNode(
-                    node_id="filter",
+                "query_data": TaskNode(
+                    node_id="query_data",
                     task_id="task-1",
                     capability_id="skill.generic_data_lookup",
                     status=NodeStatus.COMPLETED,
                 )
             },
             node_outputs={
-                "filter": {
+                "query_data": {
                     "row_count": 0,
                     "satisfaction": {"satisfied": False, "reason_code": "empty_result", "replan_recommended": True},
                 }
@@ -119,6 +161,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
             capability_registry=self._registry(),
             macro_providers=self._macro_providers(),
             text_generator=text_generator,
+            replan_claim_store=self._claim_store(),
         )
 
         decision = asyncio.run(replanner.build_replan(context))
@@ -129,9 +172,139 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         self.assertEqual(decision.metadata["replan_source"], "main_agent_llm_runtime")
         self.assertEqual(calls[0]["stage"], "orchestration_replan")
         capabilities = [node.capability_id for node in decision.plan.nodes]
-        self.assertEqual(capabilities, ["skill.generic_data_lookup", "main_agent.respond"])
+        self.assertEqual(capabilities, ["skill.generic_data_lookup", "skill.generic_data_lookup", "main_agent.respond"])
+        self.assertEqual(decision.plan.nodes[0].node_id, "query_data")
+        self.assertTrue(any(":plan:v1:r1:query_again:" in node.node_id for node in decision.plan.nodes))
         self.assertEqual(decision.plan.nodes[-1].capability_id, "main_agent.respond")
         self.assertEqual(decision.plan.metadata["runtime_replan_source"], "main_agent_llm_runtime")
+        self.assertEqual(decision.metadata["planning_epoch"], "r1")
+        self.assertRegex(decision.metadata["decision_digest"], r"^[0-9a-f]{64}$")
+        self.assertIn("existing_node_id", calls[0]["prompt"])
+        self.assertIn("node_key", calls[0]["prompt"])
+
+    def test_runtime_replanner_rejects_legacy_or_mutating_existing_node_shapes_before_claim(self) -> None:
+        outputs = iter(
+            (
+                {
+                    "action": "replan",
+                    "nodes": [{"node_id": "legacy", "capability_id": "main_agent.respond"}],
+                },
+                {
+                    "action": "replan",
+                    "nodes": [
+                        {
+                            "existing_node_id": "answer",
+                            "capability_id": "skill.generic_data_lookup",
+                        }
+                    ],
+                },
+            )
+        )
+
+        async def text_generator(_prompt: str, **_: object) -> str:
+            return json.dumps(next(outputs))
+
+        context = RuntimeReplanContext(
+            request=OrchestrationRequest("task-closed", "conv-1", "msg-1", "继续查询"),
+            plan=WorkflowPlan(
+                task_id="task-closed",
+                nodes=(WorkflowNodePlan("answer", "main_agent.respond"),),
+                max_replans=1,
+                max_dynamic_nodes=4,
+            ),
+            nodes={
+                "answer": TaskNode(
+                    "answer",
+                    "task-closed",
+                    "main_agent.respond",
+                    status=NodeStatus.COMPLETED,
+                )
+            },
+            node_outputs={
+                "answer": {
+                    "satisfaction": {
+                        "satisfied": False,
+                        "replan_recommended": True,
+                    }
+                }
+            },
+            completion_status=CompletionStatus.RUNNING,
+        )
+        claim_store = self._claim_store()
+        replanner = MainAgentRuntimeReplanner(
+            capability_registry=self._registry(),
+            macro_providers=self._macro_providers(),
+            text_generator=text_generator,
+            replan_claim_store=claim_store,
+        )
+
+        self.assertIsNone(asyncio.run(replanner.build_replan(context)))
+        self.assertIsNone(asyncio.run(replanner.build_replan(context)))
+        self.assertEqual(claim_store.claims, {})
+
+    def test_same_runtime_replan_decision_reuses_durable_epoch(self) -> None:
+        async def text_generator(_prompt: str, **_: object) -> str:
+            return json.dumps(
+                {
+                    "action": "replan",
+                    "nodes": [
+                        {"existing_node_id": "answer"},
+                        {
+                            "node_key": "retry",
+                            "capability_id": "main_agent.respond",
+                            "depends_on": [{"existing_node_id": "answer"}],
+                        },
+                    ],
+                }
+            )
+
+        context = RuntimeReplanContext(
+            request=OrchestrationRequest("task-idempotent", "conv-1", "msg-1", "继续"),
+            plan=WorkflowPlan(
+                task_id="task-idempotent",
+                nodes=(WorkflowNodePlan("answer", "main_agent.respond"),),
+                max_replans=2,
+                max_dynamic_nodes=4,
+            ),
+            nodes={
+                "answer": TaskNode(
+                    "answer",
+                    "task-idempotent",
+                    "main_agent.respond",
+                    status=NodeStatus.COMPLETED,
+                )
+            },
+            node_outputs={
+                "answer": {
+                    "satisfaction": {
+                        "satisfied": False,
+                        "replan_recommended": True,
+                    }
+                }
+            },
+            completion_status=CompletionStatus.RUNNING,
+        )
+        claim_store = self._claim_store()
+        replanner = MainAgentRuntimeReplanner(
+            capability_registry=self._registry(),
+            macro_providers=self._macro_providers(),
+            text_generator=text_generator,
+            replan_claim_store=claim_store,
+        )
+
+        first = asyncio.run(replanner.build_replan(context))
+        second = asyncio.run(replanner.build_replan(context))
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertEqual(first.metadata["planning_epoch"], "r1")
+        self.assertEqual(first.metadata["decision_digest"], second.metadata["decision_digest"])
+        self.assertEqual(
+            [node.node_id for node in first.plan.nodes],
+            [node.node_id for node in second.plan.nodes],
+        )
+        self.assertEqual(len(claim_store.claims), 1)
 
     def test_runtime_replanner_profile_records_budget_metadata(self) -> None:
         calls: list[dict] = []
@@ -181,6 +354,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
             capability_registry=self._registry(),
             macro_providers=self._macro_providers(),
             text_generator=text_generator,
+            replan_claim_store=self._claim_store(),
         )
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
@@ -201,7 +375,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                 {
                     "action": "replan",
                     "reason": "use rcbd skill",
-                    "nodes": [{"node_id": "design", "capability_id": "skill.mini_breedstat_rcbd"}],
+                    "nodes": [{"node_key": "design", "capability_id": "skill.mini_breedstat_rcbd"}],
                 },
                 ensure_ascii=False,
             )
@@ -258,6 +432,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                 ),
             },
             text_generator=text_generator,
+            replan_claim_store=self._claim_store(),
         )
 
         decision = asyncio.run(replanner.build_replan(context))
@@ -287,6 +462,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
             capability_registry=self._registry(),
             macro_providers=self._macro_providers(),
             text_generator=text_generator,
+            replan_claim_store=self._claim_store(),
         )
 
         decision = asyncio.run(replanner.build_replan(context))
@@ -328,6 +504,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
             capability_registry=self._registry(),
             macro_providers=self._macro_providers(),
             text_generator=text_generator,
+            replan_claim_store=self._claim_store(),
         )
 
         self.assertIsNone(asyncio.run(replanner.build_replan(context)))
@@ -373,6 +550,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
             capability_registry=self._registry(),
             macro_providers=self._macro_providers(),
             text_generator=text_generator,
+            replan_claim_store=self._claim_store(),
         )
 
         decision = asyncio.run(replanner.build_replan(context))

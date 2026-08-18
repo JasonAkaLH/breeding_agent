@@ -11416,6 +11416,8 @@ def build_api_runtime(
             macro_provider_resolver=resolve_macro_provider,
             text_generator=resolved_planner_text_generator,
             payload_policies=planner_payload_policies,
+            replan_claim_store=storage,
+            now_fn=ApiRuntime._utcnow_naive,
         )
     ]
     resolved_runtime_replanner = runtime_replanner or CompositeRuntimeReplanner(default_replanners)

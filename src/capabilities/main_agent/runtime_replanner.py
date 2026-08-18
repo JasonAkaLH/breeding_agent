@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import inspect
 import json
+import hashlib
 from collections.abc import Callable, Mapping
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Protocol
 
 from src.core.enums import NodeStatus
+from src.core.models import PlannerReplanClaim
 from src.orchestration.completion_policy import CompletionStatus
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
-from src.orchestration.planner_contract import PlannerOutputError, TextGenerator, parse_planner_output
+from src.orchestration.planner_contract import TextGenerator
+from src.orchestration.planner_node_identity import PlannerNodeIdentityError, PlannerNodeIdentityMap
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy, PlannerPayloadPolicy
 from src.orchestration.prompt_envelope import PromptSegment
 from src.orchestration.prompt_profiles import (
@@ -65,6 +69,25 @@ _MAX_STRING_LENGTH = 240
 _RUNTIME_REPLAN_TEMPLATE_ID = "runtime_replan"
 
 
+class PlannerReplanClaimStore(Protocol):
+    async def claim_planner_replan(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        now: datetime,
+    ) -> PlannerReplanClaim: ...
+
+    async def mark_planner_replan_claim(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        status: str,
+        now: datetime,
+    ) -> PlannerReplanClaim: ...
+
+
 class MainAgentRuntimeReplanner:
     """Main-agent LLM advisor for Observe -> Replan decisions.
 
@@ -82,6 +105,8 @@ class MainAgentRuntimeReplanner:
         macro_provider_resolver: Callable[[str], Any | None] | None = None,
         text_generator: TextGenerator | None = None,
         payload_policies: Mapping[str, CapabilityPayloadPolicy] | None = None,
+        replan_claim_store: PlannerReplanClaimStore,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._capability_registry = capability_registry
         self._macro_providers = dict(macro_providers)
@@ -90,9 +115,10 @@ class MainAgentRuntimeReplanner:
             self._macro_providers,
             macro_provider_resolver=macro_provider_resolver,
         )
-        self._public_validator = WorkflowPlanValidator(capability_registry, public_only=True)
         self._internal_validator = WorkflowPlanValidator(capability_registry, public_only=False)
         self._payload_policy_overrides = dict(payload_policies or {})
+        self._replan_claim_store = replan_claim_store
+        self._now_fn = now_fn or self._utcnow_naive
 
     async def build_replan(self, context: RuntimeReplanContext) -> RuntimeReplanDecision | None:
         if self._text_generator is None:
@@ -113,20 +139,60 @@ class MainAgentRuntimeReplanner:
         )
         if inspect.isawaitable(raw_output):
             raw_output = await raw_output
+        claim: PlannerReplanClaim | None = None
         try:
             decision_payload = self._parse_decision(str(raw_output or ""))
             if decision_payload.get("action") != "replan":
                 return None
             reason = str(decision_payload.get("reason") or "main_agent_runtime_replan")
-            public_plan = parse_planner_output(
-                json.dumps({"nodes": decision_payload.get("nodes")}, ensure_ascii=False),
-                task_id=context.plan.task_id,
+            public_plan, existing_node_ids = self._build_closed_public_plan(
+                decision_payload,
+                context=context,
             )
-            public_plan = self._enrich_public_plan(public_plan, request=context.request)
-            self._public_validator.validate(public_plan)
-            expanded = self._expander.expand(public_plan, request=context.request)
+            public_plan = self._enrich_public_plan(
+                public_plan,
+                request=context.request,
+                existing_node_ids=existing_node_ids,
+            )
+            self._validate_new_public_nodes(public_plan, existing_node_ids=existing_node_ids)
+            decision_digest = self._decision_digest(decision_payload)
+            claim = await self._replan_claim_store.claim_planner_replan(
+                context.plan.task_id,
+                decision_digest,
+                now=self._now_fn(),
+            )
+            if claim.status == "rejected":
+                return None
+            public_plan = PlannerNodeIdentityMap(
+                task_id=context.plan.task_id,
+                planning_epoch=claim.planning_epoch,
+            ).canonicalize_runtime_replan(
+                public_plan,
+                existing_node_ids=existing_node_ids,
+            )
+            expanded = self._expander.expand(
+                public_plan,
+                request=context.request,
+                preserved_node_ids=existing_node_ids,
+            )
             self._internal_validator.validate(expanded)
-        except (PlannerOutputError, WorkflowPlanValidationError, WorkflowExpansionError, ValueError, TypeError):
+        except (
+            PlannerNodeIdentityError,
+            WorkflowPlanValidationError,
+            WorkflowExpansionError,
+            ValueError,
+            TypeError,
+        ):
+            if claim is not None and claim.status == "claimed":
+                try:
+                    await self._replan_claim_store.mark_planner_replan_claim(
+                        claim.task_id,
+                        claim.decision_digest,
+                        status="rejected",
+                        now=self._now_fn(),
+                    )
+                except Exception:
+                    pass
             return None
 
         return RuntimeReplanDecision(
@@ -142,7 +208,13 @@ class MainAgentRuntimeReplanner:
                 max_dynamic_nodes=max(context.plan.max_dynamic_nodes, expanded.max_dynamic_nodes),
             ),
             reason=reason,
-            metadata={"replan_source": "main_agent_llm_runtime"},
+            metadata={
+                "replan_source": "main_agent_llm_runtime",
+                "decision_digest": claim.decision_digest,
+                "planning_epoch": claim.planning_epoch,
+                "planning_revision": claim.planning_revision,
+                "claim_status": claim.status,
+            },
         )
 
     def _call_text_generator(
@@ -188,13 +260,23 @@ class MainAgentRuntimeReplanner:
             raise ValueError("runtime replan must include nodes")
         return payload
 
-    def _enrich_public_plan(self, plan: WorkflowPlan, *, request: OrchestrationRequest) -> WorkflowPlan:
+    def _enrich_public_plan(
+        self,
+        plan: WorkflowPlan,
+        *,
+        request: OrchestrationRequest,
+        existing_node_ids: frozenset[str],
+    ) -> WorkflowPlan:
         payload_policy = PlannerPayloadPolicy(self._resolve_payload_policies())
-        nodes = tuple(payload_policy.apply(node, request=request) for node in plan.nodes)
+        nodes = tuple(
+            node if node.node_id in existing_node_ids else payload_policy.apply(node, request=request)
+            for node in plan.nodes
+        )
         nodes, finalizer_added, finalizer_rewired = self._ensure_final_main_agent(
             nodes,
             request=request,
             payload_policy=payload_policy,
+            existing_node_ids=existing_node_ids,
         )
         return WorkflowPlan(
             task_id=plan.task_id,
@@ -221,6 +303,7 @@ class MainAgentRuntimeReplanner:
         *,
         request: OrchestrationRequest,
         payload_policy: PlannerPayloadPolicy,
+        existing_node_ids: frozenset[str],
     ) -> tuple[tuple[WorkflowNodePlan, ...], bool, bool]:
         if not nodes:
             return nodes, False, False
@@ -236,6 +319,16 @@ class MainAgentRuntimeReplanner:
             missing_dependencies = tuple(node_id for node_id in non_answering_tail_ids if node_id not in target.depends_on)
             if not missing_dependencies:
                 return nodes, False, False
+            if target.node_id in existing_node_ids:
+                final_node = payload_policy.apply(
+                    WorkflowNodePlan(
+                        node_id=cls._unique_node_id("answer_user", node_ids),
+                        capability_id="main_agent.respond",
+                        depends_on=non_answering_tail_ids,
+                    ),
+                    request=request,
+                )
+                return (*nodes, final_node), True, False
             rewired = WorkflowNodePlan(
                 node_id=target.node_id,
                 capability_id=target.capability_id,
@@ -259,6 +352,119 @@ class MainAgentRuntimeReplanner:
             request=request,
         )
         return (*nodes, final_node), True, False
+
+    def _build_closed_public_plan(
+        self,
+        decision_payload: Mapping[str, Any],
+        *,
+        context: RuntimeReplanContext,
+    ) -> tuple[WorkflowPlan, frozenset[str]]:
+        raw_nodes = decision_payload.get("nodes")
+        if not isinstance(raw_nodes, list) or not raw_nodes:
+            raise ValueError("runtime replan must include a non-empty nodes array")
+        current_plan_by_id = {node.node_id: node for node in context.plan.nodes}
+        allowed_existing_ids = frozenset(
+            node_id
+            for node_id, node in context.nodes.items()
+            if node_id in current_plan_by_id and node.status != NodeStatus.ORPHANED
+        )
+        existing_node_ids: set[str] = set()
+        nodes: list[WorkflowNodePlan] = []
+        new_node_keys: set[str] = set()
+
+        for raw_node in raw_nodes:
+            if not isinstance(raw_node, dict):
+                raise ValueError("runtime replan node must be an object")
+            if "existing_node_id" in raw_node:
+                if set(raw_node) != {"existing_node_id"}:
+                    raise ValueError("existing runtime replan node must contain only existing_node_id")
+                existing_node_id = str(raw_node.get("existing_node_id") or "").strip()
+                if existing_node_id not in allowed_existing_ids:
+                    raise ValueError("runtime replan existing_node_id is not in the current allowlist")
+                if existing_node_id in existing_node_ids:
+                    raise ValueError("runtime replan contains a duplicate existing_node_id")
+                existing_node_ids.add(existing_node_id)
+                nodes.append(current_plan_by_id[existing_node_id])
+                continue
+
+            allowed_keys = {"node_key", "capability_id", "depends_on", "input_payload"}
+            if set(raw_node) - allowed_keys:
+                raise ValueError("new runtime replan node contains unknown fields")
+            if "node_key" not in raw_node or "capability_id" not in raw_node:
+                raise ValueError("new runtime replan node requires node_key and capability_id")
+            node_key = str(raw_node.get("node_key") or "").strip()
+            capability_id = str(raw_node.get("capability_id") or "").strip()
+            if not node_key or not capability_id:
+                raise ValueError("runtime replan node_key and capability_id must not be empty")
+            if node_key in new_node_keys or node_key in allowed_existing_ids:
+                raise ValueError("runtime replan node_key must be unique and distinct from existing IDs")
+            new_node_keys.add(node_key)
+            raw_dependencies = raw_node.get("depends_on", [])
+            if not isinstance(raw_dependencies, list):
+                raise ValueError("runtime replan depends_on must be an array of closed references")
+            dependencies: list[str] = []
+            for raw_dependency in raw_dependencies:
+                if not isinstance(raw_dependency, dict):
+                    raise ValueError("runtime replan dependency must be an object reference")
+                if set(raw_dependency) == {"existing_node_id"}:
+                    dependency = str(raw_dependency.get("existing_node_id") or "").strip()
+                    if dependency not in allowed_existing_ids:
+                        raise ValueError("runtime replan dependency existing_node_id is not allowed")
+                elif set(raw_dependency) == {"node_key"}:
+                    dependency = str(raw_dependency.get("node_key") or "").strip()
+                    if not dependency:
+                        raise ValueError("runtime replan dependency node_key must not be empty")
+                else:
+                    raise ValueError("runtime replan dependency must contain exactly one reference kind")
+                dependencies.append(dependency)
+            input_payload = raw_node.get("input_payload", {})
+            if not isinstance(input_payload, dict):
+                raise ValueError("runtime replan input_payload must be an object")
+            nodes.append(
+                WorkflowNodePlan(
+                    node_id=node_key,
+                    capability_id=capability_id,
+                    depends_on=tuple(dependencies),
+                    input_payload=input_payload,
+                )
+            )
+
+        all_node_ids = existing_node_ids | new_node_keys
+        if any(dependency not in all_node_ids for node in nodes for dependency in node.depends_on):
+            raise ValueError("runtime replan contains a dangling dependency reference")
+        return WorkflowPlan(task_id=context.plan.task_id, nodes=tuple(nodes)), frozenset(existing_node_ids)
+
+    def _validate_new_public_nodes(
+        self,
+        plan: WorkflowPlan,
+        *,
+        existing_node_ids: frozenset[str],
+    ) -> None:
+        for node in plan.nodes:
+            if node.node_id in existing_node_ids:
+                continue
+            descriptor = self._capability_registry.require(node.capability_id)
+            if not descriptor.public:
+                raise WorkflowPlanValidationError(
+                    f"Runtime replan may only add public capabilities: {node.capability_id}"
+                )
+
+    @staticmethod
+    def _decision_digest(decision_payload: Mapping[str, Any]) -> str:
+        canonical = json.dumps(
+            {
+                "nodes": decision_payload.get("nodes"),
+                "version": "runtime_replan_v1",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _utcnow_naive() -> datetime:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
     @staticmethod
     def _is_answer_producing(capability_id: str) -> bool:
@@ -320,19 +526,24 @@ class MainAgentRuntimeReplanner:
             "action": "none | replan",
             "reason": "short reason when replanning",
             "nodes": [
+                {"existing_node_id": "exact current node_id; no other fields"},
                 {
-                    "node_id": "public node id",
+                    "node_key": "task-local key for one new node",
                     "capability_id": "public capability id only",
-                    "depends_on": ["other public node ids"],
+                    "depends_on": [
+                        {"existing_node_id": "exact current node_id"},
+                        {"node_key": "another new node key"},
+                    ],
                     "input_payload": {},
-                }
+                },
             ],
         }
         return (
             "你是育种助手（SeedPilot）的运行时重编排决策器。\n"
             "你必须在 capability public contract 内工作，只能输出 public capability 高层 DAG；禁止输出任何 Skill 内部阶段、handler 或实现细节。\n"
             "如果当前结果已经足以回答用户，返回 {\"action\": \"none\"}。\n"
-            "如果系统内可补足，返回 {\"action\": \"replan\", \"reason\": ..., \"nodes\": [...]}，nodes 是完整修订后的 public DAG。\n"
+            "如果系统内可补足，返回 {\"action\": \"replan\", \"reason\": ..., \"nodes\": [...]}，nodes 是完整修订后的 DAG。"
+            "保留当前节点时只能输出单字段 existing_node_id；新增节点只能输出 node_key 和 public capability，依赖必须使用 closed reference object。\n"
             "不要无限重排；必须尊重预算。只返回 JSON，不要输出 Markdown 或解释。\n\n"
             f"用户问题：{context.request.user_message}\n\n"
             f"重排预算：replan_count={context.replan_count}, max_replans={context.plan.max_replans}, "
@@ -369,12 +580,16 @@ class MainAgentRuntimeReplanner:
             "action": "none | replan",
             "reason": "short reason when replanning",
             "nodes": [
+                {"existing_node_id": "exact current node_id; no other fields"},
                 {
-                    "node_id": "public node id",
+                    "node_key": "task-local key for one new node",
                     "capability_id": "public capability id only",
-                    "depends_on": ["other public node ids"],
+                    "depends_on": [
+                        {"existing_node_id": "exact current node_id"},
+                        {"node_key": "another new node key"},
+                    ],
                     "input_payload": {},
-                }
+                },
             ],
         }
         metadata = context.request.metadata if isinstance(context.request.metadata, Mapping) else {}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from dataclasses import replace
+from datetime import datetime
 
 from src.core.contracts import CapabilityExecutionRequest, CapabilityExecutionResult
 from src.core.enums import NodeCriticality, NodeStatus, TaskStatus
@@ -191,6 +192,76 @@ class RuntimeReplanningTest(OrchestrationSQLiteTestCase):
             [node["node_id"] for node in replanned_snapshots[0]["nodes"]],
             ["repair"],
         )
+
+    def test_runtime_replan_application_marks_durable_claim_applied(self) -> None:
+        service = self._service(
+            executor=FakeExecutor({"cap.probe": success_result(), "cap.repair": success_result()}),
+            runtime_replanner=_AsyncNoneReplanner(),
+        )
+        task = Task(
+            task_id="task-claim-applied",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.RUNNING,
+        )
+        current_node = TaskNode(
+            node_id="probe",
+            task_id=task.task_id,
+            capability_id="cap.probe",
+            status=NodeStatus.COMPLETED,
+        )
+        asyncio.run(self.storage.save_task(task))
+        asyncio.run(self.storage.save_task_node(current_node))
+        digest = "a" * 64
+        claim = asyncio.run(
+            self.storage.claim_planner_replan(
+                task.task_id,
+                digest,
+                now=datetime(2026, 8, 18, 10, 0, 0),
+            )
+        )
+        current_plan = WorkflowPlan(
+            task_id=task.task_id,
+            nodes=(WorkflowNodePlan("probe", "cap.probe"),),
+            max_replans=1,
+            max_dynamic_nodes=1,
+        )
+        revised_plan = WorkflowPlan(
+            task_id=task.task_id,
+            nodes=(
+                WorkflowNodePlan("probe", "cap.probe"),
+                WorkflowNodePlan("repair", "cap.repair", depends_on=("probe",)),
+            ),
+            max_replans=1,
+            max_dynamic_nodes=1,
+        )
+        decision = RuntimeReplanDecision(
+            plan=revised_plan,
+            reason="repair",
+            metadata={
+                "decision_digest": digest,
+                "planning_epoch": claim.planning_epoch,
+                "planning_revision": claim.planning_revision,
+                "claim_status": claim.status,
+            },
+        )
+
+        applied = asyncio.run(
+            service._apply_runtime_replan(
+                request=OrchestrationRequest(task.task_id, "conv-1", "msg-1", "repair"),
+                current_plan=current_plan,
+                decision=decision,
+                current_nodes={"probe": current_node},
+                replan_count=0,
+                dynamic_node_count=0,
+            )
+        )
+
+        self.assertIsNotNone(applied)
+        stored_claim = asyncio.run(self.storage.get_planner_replan_claim(task.task_id, digest))
+        self.assertIsNotNone(stored_claim)
+        assert stored_claim is not None
+        self.assertEqual(stored_claim.status, "applied")
 
     def test_completed_but_unsatisfied_result_can_append_more_nodes_before_task_completion(self) -> None:
         def probe_handler(request: CapabilityExecutionRequest) -> CapabilityExecutionResult:

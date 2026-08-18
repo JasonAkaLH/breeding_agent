@@ -6,13 +6,149 @@ from dataclasses import replace
 from datetime import datetime
 
 from src.core.enums import ArtifactType, DependencyType, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
-from src.core.models import Artifact, Task, TaskEdge, TaskInputAttachment, TaskNode
+from src.core.models import Artifact, PlannerReplanClaim, Task, TaskEdge, TaskInputAttachment, TaskNode
 from src.lifecycle.rust_contract import status_list
 from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
+    def test_planner_replan_claim_is_durable_idempotent_and_monotonic(self) -> None:
+        task = Task(
+            task_id="task-replan-claim",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.RUNNING,
+            created_at=datetime(2026, 8, 18, 10, 0, 0),
+            updated_at=datetime(2026, 8, 18, 10, 0, 0),
+        )
+        first_digest = "1" * 64
+        second_digest = "2" * 64
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            repo.save_task(task)
+            first = repo.claim_planner_replan(
+                task.task_id,
+                first_digest,
+                now=datetime(2026, 8, 18, 10, 1, 0),
+            )
+            first_retry = repo.claim_planner_replan(
+                task.task_id,
+                first_digest,
+                now=datetime(2026, 8, 18, 10, 2, 0),
+            )
+            second = repo.claim_planner_replan(
+                task.task_id,
+                second_digest,
+                now=datetime(2026, 8, 18, 10, 3, 0),
+            )
+            applied = repo.mark_planner_replan_claim(
+                task.task_id,
+                first_digest,
+                status="applied",
+                now=datetime(2026, 8, 18, 10, 4, 0),
+            )
+            session.commit()
+
+        self.assertEqual(first, first_retry)
+        self.assertEqual(first.planning_revision, 1)
+        self.assertEqual(first.planning_epoch, "r1")
+        self.assertEqual(second.planning_revision, 2)
+        self.assertEqual(second.planning_epoch, "r2")
+        self.assertEqual(applied.status, "applied")
+
+        with self.session_factory() as session:
+            loaded = SQLiteStateRepository(session).get_planner_replan_claim(task.task_id, first_digest)
+        self.assertEqual(loaded, applied)
+        self.assertIsInstance(loaded, PlannerReplanClaim)
+
+    def test_planner_replan_claim_rejects_invalid_or_unknown_identity(self) -> None:
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            with self.assertRaisesRegex(ValueError, "decision_digest"):
+                repo.claim_planner_replan(
+                    "missing-task",
+                    "bad",
+                    now=datetime(2026, 8, 18, 10, 0, 0),
+                )
+            with self.assertRaisesRegex(ValueError, "task not found"):
+                repo.claim_planner_replan(
+                    "missing-task",
+                    "a" * 64,
+                    now=datetime(2026, 8, 18, 10, 0, 0),
+                )
+
+    def test_planner_replan_claim_status_is_closed_and_terminal(self) -> None:
+        task = Task(
+            task_id="task-replan-status",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.RUNNING,
+        )
+        digest = "b" * 64
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            repo.save_task(task)
+            repo.claim_planner_replan(task.task_id, digest, now=datetime(2026, 8, 18, 10, 0, 0))
+            repo.mark_planner_replan_claim(
+                task.task_id,
+                digest,
+                status="rejected",
+                now=datetime(2026, 8, 18, 10, 1, 0),
+            )
+            with self.assertRaisesRegex(ValueError, "terminal"):
+                repo.mark_planner_replan_claim(
+                    task.task_id,
+                    digest,
+                    status="applied",
+                    now=datetime(2026, 8, 18, 10, 2, 0),
+                )
+            with self.assertRaisesRegex(ValueError, "status"):
+                repo.mark_planner_replan_claim(
+                    task.task_id,
+                    digest,
+                    status="unknown",
+                    now=datetime(2026, 8, 18, 10, 2, 0),
+                )
+
+    def test_async_planner_replan_claim_serializes_concurrent_revisions(self) -> None:
+        task = Task(
+            task_id="task-replan-concurrent",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.RUNNING,
+        )
+        with self.session_factory() as session:
+            SQLiteStateRepository(session).save_task(task)
+            session.commit()
+        storage = SQLiteStorage(self.session_factory)
+
+        async def claim_both() -> tuple[PlannerReplanClaim, PlannerReplanClaim]:
+            first, second = await asyncio.gather(
+                storage.claim_planner_replan(
+                    task.task_id,
+                    "c" * 64,
+                    now=datetime(2026, 8, 18, 10, 0, 0),
+                ),
+                storage.claim_planner_replan(
+                    task.task_id,
+                    "d" * 64,
+                    now=datetime(2026, 8, 18, 10, 0, 0),
+                ),
+            )
+            return first, second
+
+        claims = asyncio.run(claim_both())
+
+        self.assertEqual({claim.planning_revision for claim in claims}, {1, 2})
+        self.assertEqual({claim.planning_epoch for claim in claims}, {"r1", "r2"})
+
+    def test_planner_replan_claim_locks_task_row_for_postgres_multi_instance_serialization(self) -> None:
+        source = inspect.getsource(SQLiteStateRepository.claim_planner_replan)
+        self.assertIn("TaskRow.task_id == task_id", source)
+        self.assertIn("with_for_update", source)
+
     def test_active_task_lookup_uses_rust_lifecycle_contract_statuses(self) -> None:
         source = inspect.getsource(SQLiteStateRepository.get_active_task_for_conversation)
         self.assertIn("active_task_statuses", source)

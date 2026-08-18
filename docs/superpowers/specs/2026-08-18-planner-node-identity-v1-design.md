@@ -2,7 +2,7 @@
 
 日期：2026-08-18
 
-状态：设计与实施计划已批准；待书面 spec 复核后实施
+状态：设计、实施计划与书面 spec 已批准；仓库实现和自动质量门禁已完成，开发镜像 smoke 待执行
 
 适用范围：`main` 分支中由 LLM 初始 Planner 和 Main Agent Runtime Replanner 生成的工作流节点身份、依赖引用、持久化、恢复、API/SSE 关联和前端 artifact 分类。
 
@@ -292,3 +292,12 @@ SQLite、PostgreSQL 和启用的 Rust Runtime Sidecar 权威路径必须提供�
 - **风险：ID 变长。** 当前相关字段为 Text；实施仍需检查日志、UI 和第三方导出是否存在隐藏长度限制。
 - **假设：普通旧代码把 node ID 当作字符串。** 实施时必须通过兼容测试验证，不能只依赖静态观察。
 - **假设：无需展示 planner key。** planner key 仅用于受控审计；若未来需要公开展示，应新增显式 DTO 字段，而不是解析 canonical ID。
+
+## 16. 实施结果
+
+- 初始 LLM Planner 在 finalizer enrich 后、public validator 前执行 `p0` canonicalization。
+- Main Agent Runtime Replanner 使用 closed `existing_node_id` / `node_key` contract；durable claim 为相同 decision digest 复用 epoch，并为不同决定分配 `r1`、`r2` 等递增 revision。
+- SQLite、PostgreSQL runtime schema、Rust RuntimeSidecar kernel/SQLite/gRPC 和 Python facade 已实现 claim/get/terminal-mark 等价合同。
+- persistence guard 只校验 `identity_origin=model` 的新节点；system 与 legacy 节点保持原合同。
+- 前端 artifact projection 不再解析 `producer_node_id`。
+- 自动验证覆盖相同 `n1 + answer_user` 的顺序/并发任务、初始/replan 同 key、claim 重试与 Rust SQLite reopen；相关后端分层测试、前端全套/typecheck/build、Rust fmt/clippy/workspace test/cargo-deny 已通过。

@@ -95,6 +95,7 @@ from src.core.models import (
     MCPSealedState,
     Message,
     PendingSkillContext,
+    PlannerReplanClaim,
     SlotCollection,
     SlotEvent,
     Task,
@@ -185,6 +186,7 @@ from .models import (
     MCPTerminalResultReceiptRow,
     MessageRow,
     PendingSkillContextRow,
+    PlannerReplanClaimRow,
     SlotCollectionRow,
     SlotEventRow,
     TaskInputAttachmentRow,
@@ -206,6 +208,7 @@ MCP_ROLLOUT_ATTESTATION_KEY_ID_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
 )
 MCP_ROLLOUT_ATTESTATION_SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
+PLANNER_REPLAN_DECISION_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 MCP_ROLLOUT_STAGES = frozenset(
     {
         "off",
@@ -1333,6 +1336,18 @@ def _row_to_task(row: TaskRow) -> Task:
     )
 
 
+def _row_to_planner_replan_claim(row: PlannerReplanClaimRow) -> PlannerReplanClaim:
+    return PlannerReplanClaim(
+        task_id=row.task_id,
+        decision_digest=row.decision_digest,
+        planning_revision=row.planning_revision,
+        planning_epoch=row.planning_epoch,
+        status=row.status,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 def _row_to_task_node(row: TaskNodeRow) -> TaskNode:
     return TaskNode(
         node_id=row.node_id,
@@ -2258,6 +2273,7 @@ class SQLiteStateRepository:
             "mcp_audit_event": 0,
             "task_edge": 0,
             "task_node": 0,
+            "planner_replan_claim": 0,
             "message": 0,
             "task": 0,
             "conversation": 0,
@@ -2310,6 +2326,12 @@ class SQLiteStateRepository:
             _delete("mcp_audit_event", delete(MCPAuditEventRow).where(MCPAuditEventRow.task_id.in_(task_ids)))
             _delete("task_edge", delete(TaskEdgeRow).where(TaskEdgeRow.task_id.in_(task_ids)))
             _delete("task_node", delete(TaskNodeRow).where(TaskNodeRow.task_id.in_(task_ids)))
+            _delete(
+                "planner_replan_claim",
+                delete(PlannerReplanClaimRow).where(
+                    PlannerReplanClaimRow.task_id.in_(task_ids)
+                ),
+            )
         _delete(
             "conversation_file_resource",
             delete(ConversationFileResourceRow).where(ConversationFileResourceRow.conversation_id == conversation_id),
@@ -2927,6 +2949,83 @@ class SQLiteStateRepository:
     def get_task(self, task_id: str) -> Task | None:
         row = self._session.get(TaskRow, task_id)
         return None if row is None else _row_to_task(row)
+
+    def claim_planner_replan(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        now: datetime,
+    ) -> PlannerReplanClaim:
+        if PLANNER_REPLAN_DECISION_DIGEST_RE.fullmatch(decision_digest) is None:
+            raise ValueError("planner_replan_decision_digest_invalid: decision_digest must be 64 lowercase hex characters")
+        task_exists = self._session.scalar(
+            select(TaskRow.task_id)
+            .where(TaskRow.task_id == task_id)
+            .with_for_update()
+        )
+        if task_exists is None:
+            raise ValueError("planner_replan_task_not_found: task not found")
+        existing = self._session.get(
+            PlannerReplanClaimRow,
+            {"task_id": task_id, "decision_digest": decision_digest},
+        )
+        if existing is not None:
+            return _row_to_planner_replan_claim(existing)
+        current_revision = self._session.scalar(
+            select(func.max(PlannerReplanClaimRow.planning_revision)).where(
+                PlannerReplanClaimRow.task_id == task_id
+            )
+        )
+        planning_revision = int(current_revision or 0) + 1
+        row = PlannerReplanClaimRow(
+            task_id=task_id,
+            decision_digest=decision_digest,
+            planning_revision=planning_revision,
+            planning_epoch=f"r{planning_revision}",
+            status="claimed",
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_planner_replan_claim(row)
+
+    def get_planner_replan_claim(
+        self,
+        task_id: str,
+        decision_digest: str,
+    ) -> PlannerReplanClaim | None:
+        row = self._session.get(
+            PlannerReplanClaimRow,
+            {"task_id": task_id, "decision_digest": decision_digest},
+        )
+        return None if row is None else _row_to_planner_replan_claim(row)
+
+    def mark_planner_replan_claim(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        status: str,
+        now: datetime,
+    ) -> PlannerReplanClaim:
+        if status not in {"applied", "rejected"}:
+            raise ValueError("planner_replan_claim_status_invalid: status must be applied or rejected")
+        row = self._session.get(
+            PlannerReplanClaimRow,
+            {"task_id": task_id, "decision_digest": decision_digest},
+        )
+        if row is None:
+            raise ValueError("planner_replan_claim_not_found")
+        if row.status == status:
+            return _row_to_planner_replan_claim(row)
+        if row.status != "claimed":
+            raise ValueError("planner_replan_claim_terminal: terminal claim status cannot be changed")
+        row.status = status
+        row.updated_at = now
+        self._session.flush()
+        return _row_to_planner_replan_claim(row)
 
     def compare_and_set_task(
         self, task: Task, *, expected_from_status: TaskStatus
@@ -11687,6 +11786,161 @@ class SQLiteStorage(StoragePort):
         )
         return loaded
 
+    async def claim_planner_replan(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        now: datetime,
+    ) -> PlannerReplanClaim:
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="planner_replan_claim",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        now_text = now.isoformat()
+        if sidecar_client is not None:
+            envelope = _consume_runtime_sidecar_response(
+                "planner_replan_claim",
+                await _resolve_runtime_sidecar_call(
+                    sidecar_client.claim_planner_replan(
+                        task_id=task_id,
+                        decision_digest=decision_digest,
+                        now=now_text,
+                    )
+                ),
+            )
+            return _validated_planner_replan_claim_from_sidecar_record(envelope.get("claim"))
+        claim = await self._run(
+            lambda state, collab: state.claim_planner_replan(
+                task_id,
+                decision_digest,
+                now=now,
+            )
+        )
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="planner_replan_claim",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={"task_id": task_id, "decision_digest": decision_digest},
+            legacy_output={"claim": _planner_replan_claim_to_sidecar_record(claim)},
+            rust_call=lambda: self._runtime_sidecar_client.claim_planner_replan(
+                task_id=task_id,
+                decision_digest=decision_digest,
+                now=now_text,
+            ),
+            rust_output=lambda envelope: {"claim": envelope.get("claim")},
+            mode=self._task_authority_mode(),
+        )
+        return claim
+
+    async def get_planner_replan_claim(
+        self,
+        task_id: str,
+        decision_digest: str,
+    ) -> PlannerReplanClaim | None:
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="planner_replan_claim_get",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            envelope = _consume_runtime_sidecar_response(
+                "planner_replan_claim_get",
+                await _resolve_runtime_sidecar_call(
+                    sidecar_client.get_planner_replan_claim(
+                        task_id=task_id,
+                        decision_digest=decision_digest,
+                    )
+                ),
+            )
+            record = envelope.get("claim")
+            return None if record is None else _validated_planner_replan_claim_from_sidecar_record(record)
+        claim = await self._run(
+            lambda state, collab: state.get_planner_replan_claim(
+                task_id,
+                decision_digest,
+            )
+        )
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="planner_replan_claim_get",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={"task_id": task_id, "decision_digest": decision_digest},
+            legacy_output={
+                "claim": None if claim is None else _planner_replan_claim_to_sidecar_record(claim)
+            },
+            rust_call=lambda: self._runtime_sidecar_client.get_planner_replan_claim(
+                task_id=task_id,
+                decision_digest=decision_digest,
+            ),
+            rust_output=lambda envelope: {"claim": envelope.get("claim")},
+            mode=self._task_authority_mode(),
+        )
+        return claim
+
+    async def mark_planner_replan_claim(
+        self,
+        task_id: str,
+        decision_digest: str,
+        *,
+        status: str,
+        now: datetime,
+    ) -> PlannerReplanClaim:
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="planner_replan_claim_mark",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        now_text = now.isoformat()
+        if sidecar_client is not None:
+            envelope = _consume_runtime_sidecar_response(
+                "planner_replan_claim_mark",
+                await _resolve_runtime_sidecar_call(
+                    sidecar_client.mark_planner_replan_claim(
+                        task_id=task_id,
+                        decision_digest=decision_digest,
+                        status=status,
+                        now=now_text,
+                    )
+                ),
+            )
+            return _validated_planner_replan_claim_from_sidecar_record(envelope.get("claim"))
+        claim = await self._run(
+            lambda state, collab: state.mark_planner_replan_claim(
+                task_id,
+                decision_digest,
+                status=status,
+                now=now,
+            )
+        )
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="planner_replan_claim_mark",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={
+                "task_id": task_id,
+                "decision_digest": decision_digest,
+                "status": status,
+            },
+            legacy_output={"claim": _planner_replan_claim_to_sidecar_record(claim)},
+            rust_call=lambda: self._runtime_sidecar_client.mark_planner_replan_claim(
+                task_id=task_id,
+                decision_digest=decision_digest,
+                status=status,
+                now=now_text,
+            ),
+            rust_output=lambda envelope: {"claim": envelope.get("claim")},
+            mode=self._task_authority_mode(),
+        )
+        return claim
+
     async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None:
         sidecar_client = self._runtime_sidecar_client_for(
             component="runtime_store",
@@ -12365,6 +12619,7 @@ class SQLiteStorage(StoragePort):
                 "task_get_active_for_conversation",
                 "task_node_get",
                 "task_node_list",
+                "planner_replan_claim_get",
             }:
                 error_code = runtime_error_policy(unavailable_error_code)["code"]
                 raise RuntimeError(
@@ -12484,6 +12739,56 @@ def _task_get_shadow_payload(task: Task | None) -> dict[str, Any]:
         "found": task is not None,
         "task": _task_to_sidecar_record(task) if task is not None else None,
     }
+
+
+def _planner_replan_claim_to_sidecar_record(
+    claim: PlannerReplanClaim,
+) -> dict[str, Any]:
+    return {
+        "task_id": claim.task_id,
+        "decision_digest": claim.decision_digest,
+        "planning_revision": claim.planning_revision,
+        "planning_epoch": claim.planning_epoch,
+        "status": claim.status,
+        "created_at": _optional_datetime_text(claim.created_at) or "",
+        "updated_at": _optional_datetime_text(claim.updated_at) or "",
+    }
+
+
+def _validated_planner_replan_claim_from_sidecar_record(
+    record: Any,
+) -> PlannerReplanClaim:
+    if not isinstance(record, Mapping):
+        _raise_task_snapshot_response_invalid(
+            "sidecar PlannerReplanClaim snapshot is not a mapping"
+        )
+    try:
+        task_id = str(record["task_id"])
+        decision_digest = str(record["decision_digest"])
+        planning_revision = int(record["planning_revision"])
+        planning_epoch = str(record["planning_epoch"])
+        status = str(record["status"])
+        created_at = datetime.fromisoformat(str(record["created_at"]).replace("Z", "+00:00"))
+        updated_at = datetime.fromisoformat(str(record["updated_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError) as exc:
+        _raise_task_snapshot_response_invalid(
+            f"invalid PlannerReplanClaim snapshot: {type(exc).__name__}"
+        )
+    if not task_id or PLANNER_REPLAN_DECISION_DIGEST_RE.fullmatch(decision_digest) is None:
+        _raise_task_snapshot_response_invalid("PlannerReplanClaim identity is invalid")
+    if planning_revision < 1 or planning_epoch != f"r{planning_revision}":
+        _raise_task_snapshot_response_invalid("PlannerReplanClaim epoch is invalid")
+    if status not in {"claimed", "applied", "rejected"}:
+        _raise_task_snapshot_response_invalid("PlannerReplanClaim status is invalid")
+    return PlannerReplanClaim(
+        task_id=task_id,
+        decision_digest=decision_digest,
+        planning_revision=planning_revision,
+        planning_epoch=planning_epoch,
+        status=status,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
 
 
 def _task_node_to_sidecar_record(node: TaskNode) -> dict[str, Any]:

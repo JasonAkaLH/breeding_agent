@@ -17,6 +17,7 @@ from .planner_contract import (
     parse_planner_output,
 )
 from .planner_payload_policy import CapabilityPayloadPolicy, PlannerPayloadPolicy
+from .planner_node_identity import INITIAL_PLANNING_EPOCH, PlannerNodeIdentityError, PlannerNodeIdentityMap
 from .registry import CapabilityRegistry
 from .workflow_expander import WorkflowExpander, WorkflowExpansionError
 from .workflow_plan_validator import WorkflowPlanValidationError, WorkflowPlanValidator
@@ -109,6 +110,10 @@ class LLMWorkflowProvider:
                 public_plan = parse_planner_output(raw_output, task_id=request.task_id)
                 self._validate_request_visible_capabilities(public_plan, request=request)
                 public_plan = self._enrich_public_plan(public_plan, request=request, payload_policies=payload_policies)
+                public_plan = PlannerNodeIdentityMap(
+                    task_id=request.task_id,
+                    planning_epoch=INITIAL_PLANNING_EPOCH,
+                ).canonicalize(public_plan)
                 self._public_validator.validate(public_plan)
                 expanded = self._expander.expand(public_plan, request=request)
                 self._internal_validator.validate(expanded)
@@ -127,7 +132,12 @@ class LLMWorkflowProvider:
                     max_replans=expanded.max_replans,
                     max_dynamic_nodes=expanded.max_dynamic_nodes,
                 )
-            except (PlannerOutputError, WorkflowPlanValidationError, WorkflowExpansionError) as exc:
+            except (
+                PlannerNodeIdentityError,
+                PlannerOutputError,
+                WorkflowPlanValidationError,
+                WorkflowExpansionError,
+            ) as exc:
                 if attempts <= self._max_repair_attempts:
                     repair_resolution = build_planner_repair_profile_resolution(
                         original_prompt,

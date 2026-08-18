@@ -150,6 +150,20 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
         if task is not None:
             _validate_task_record(task)
         return
+    if operation_name in {
+        "planner_replan_claim",
+        "planner_replan_claim_get",
+        "planner_replan_claim_mark",
+    }:
+        found = response.get("found")
+        claim = response.get("claim")
+        if not isinstance(found, bool) or found != (claim is not None):
+            _raise_response_invalid()
+        if operation_name != "planner_replan_claim_get" and not found:
+            _raise_response_invalid()
+        if claim is not None:
+            _validate_planner_replan_claim_record(claim)
+        return
     if operation_name == "node_state_transition":
         if not _non_empty_string(response.get("node_id")) or not _non_empty_string(response.get("status")):
             _raise_response_invalid()
@@ -225,6 +239,27 @@ def _validate_event_cursor(cursor: Any) -> None:
         and isinstance(cursor.get("sequence"), int)
         and cursor["sequence"] > 0
         and isinstance(cursor.get("created_at_ms"), int)
+    ):
+        _raise_response_invalid()
+
+
+def _validate_planner_replan_claim_record(claim: Any) -> None:
+    if not isinstance(claim, Mapping):
+        _raise_response_invalid()
+    decision_digest = claim.get("decision_digest")
+    planning_revision = claim.get("planning_revision")
+    if not (
+        _non_empty_string(claim.get("task_id"))
+        and isinstance(decision_digest, str)
+        and len(decision_digest) == 64
+        and all(character in "0123456789abcdef" for character in decision_digest)
+        and isinstance(planning_revision, int)
+        and not isinstance(planning_revision, bool)
+        and planning_revision >= 1
+        and claim.get("planning_epoch") == f"r{planning_revision}"
+        and claim.get("status") in {"claimed", "applied", "rejected"}
+        and _non_empty_string(claim.get("created_at"))
+        and _non_empty_string(claim.get("updated_at"))
     ):
         _raise_response_invalid()
 
