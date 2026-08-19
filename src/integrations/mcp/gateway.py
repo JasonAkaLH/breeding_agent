@@ -941,6 +941,9 @@ class MCPGateway:
         input_responses: Mapping[str, Any] | None = None,
         sealed_request_state_ref: str | None = None,
         continuation_plan: Mapping[str, Any] | None = None,
+        pending_action_id: str | None = None,
+        arguments_payload_ref: str | None = None,
+        arguments_sha256: str | None = None,
         authorization_verified: bool = False,
     ) -> MCPCallOutcome:
         await self._require_safety_admission()
@@ -972,6 +975,9 @@ class MCPGateway:
                 input_responses=input_responses,
                 sealed_request_state_ref=sealed_request_state_ref,
                 continuation_plan=continuation_plan,
+                pending_action_id=pending_action_id,
+                arguments_payload_ref=arguments_payload_ref,
+                arguments_sha256=arguments_sha256,
             ),
             name=f"user-mcp-call:{call_ref}",
         )
@@ -1008,6 +1014,9 @@ class MCPGateway:
         input_responses: Mapping[str, Any] | None,
         sealed_request_state_ref: str | None,
         continuation_plan: Mapping[str, Any] | None,
+        pending_action_id: str | None,
+        arguments_payload_ref: str | None,
+        arguments_sha256: str | None,
     ) -> MCPCallOutcome:
         await call_state.start_allowed.wait()
         async with self._task_call_guard.admit(
@@ -1064,6 +1073,9 @@ class MCPGateway:
                         node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
                         call_ref=call_state.call_ref,
                         continuation_plan=continuation_plan,
+                        pending_action_id=pending_action_id,
+                        arguments_payload_ref=arguments_payload_ref,
+                        arguments_sha256=arguments_sha256,
                     ),
                     input_responses=input_responses,
                     sealed_request_state_ref=sealed_request_state_ref,

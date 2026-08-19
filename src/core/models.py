@@ -304,6 +304,19 @@ class MCPApprovalDecisionResult(StrEnum):
     CONFLICT = "conflict"
 
 
+class MCPInputSuspendResult(StrEnum):
+    SUSPENDED = "suspended"
+    ALREADY_SUSPENDED = "already_suspended"
+    CONFLICT = "conflict"
+
+
+class MCPMRTRAnswerResult(StrEnum):
+    ACCEPTED = "accepted"
+    ALREADY_ACCEPTED = "already_accepted"
+    INVALIDATED = "invalidated"
+    CONFLICT = "conflict"
+
+
 class MCPLegacyRetirementConvergenceResult(StrEnum):
     NOT_APPLICABLE = "not_applicable"
     CONVERGED = "converged"
@@ -788,6 +801,21 @@ class MCPSealedState:
     encryption_version: int
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MCPMRTRRequestStateEvidence:
+    sealed_state_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    request_state: str
+    tool_name: str
+    arguments_sha256: str
+    input_requests: Mapping[str, Mapping[str, Any]]
+    pending_action_id: str
+    arguments_payload_ref: str
 
 
 @dataclass(slots=True, frozen=True)

@@ -254,7 +254,8 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             bootstrap_sqlite_database(engine)
             session_factory = create_sqlite_session_factory(engine)
             first_storage = SQLiteStorage(session_factory)
-            recovery = MCPRecoveryService(first_storage, recovery_cipher(b"r" * 32))
+            cipher = recovery_cipher(b"r" * 32)
+            recovery = MCPRecoveryService(first_storage, cipher)
             first_transport = FakeRequestScopedTransport(
                 [
                     response("server_discover_result.json"),
@@ -272,15 +273,19 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             await first.initialize()
             await first.list_tools()
 
+            recovery_context = MCPRecoveryCallContext(
+                owner_user_id="alice",
+                task_id="task-1",
+                node_id="node-1",
+                call_ref="call-1",
+                pending_action_id="action-1",
+                arguments_payload_ref="mcp-action-payload-v1-" + "a" * 64,
+                arguments_sha256="sha256:" + "b" * 64,
+            )
             pending = await first.call_tool(
                 "lookup",
                 {"tenant": "alpha"},
-                recovery_context=MCPRecoveryCallContext(
-                    owner_user_id="alice",
-                    task_id="task-1",
-                    node_id="node-1",
-                    call_ref="call-1",
-                ),
+                recovery_context=recovery_context,
             )
             await first.close()
 
@@ -291,6 +296,29 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(saved)
             self.assertNotIn(b"opaque-server-state", saved.ciphertext)
             self.assertNotIn("opaque-server-state", repr(saved))
+            sealed_payload = cipher.unseal_task_private_payload(
+                EncryptedCredential(
+                    nonce=saved.nonce,
+                    ciphertext=saved.ciphertext,
+                    encryption_version=saved.encryption_version,
+                ),
+                owner_user_id="alice",
+                task_id="task-1",
+                node_id="node-1",
+                call_ref="call-1",
+                state_kind=saved.state_kind,
+                server_id="crm",
+                protocol_version="2026-07-28",
+            )
+            self.assertNotIn("arguments", sealed_payload)
+            self.assertEqual(sealed_payload["pending_action_id"], "action-1")
+            self.assertEqual(
+                sealed_payload["arguments_payload_ref"],
+                "mcp-action-payload-v1-" + "a" * 64,
+            )
+            self.assertEqual(
+                sealed_payload["input_requests"], pending.input_requests
+            )
 
             second_storage = SQLiteStorage(session_factory)
             second_transport = FakeRequestScopedTransport(
@@ -330,12 +358,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
                 {"tenant": "alpha"},
                 input_responses={"confirm": {"action": "accept"}},
                 sealed_request_state_ref=pending.sealed_request_state_ref,
-                recovery_context=MCPRecoveryCallContext(
-                    owner_user_id="alice",
-                    task_id="task-1",
-                    node_id="node-1",
-                    call_ref="call-1",
-                ),
+                recovery_context=recovery_context,
             )
 
             self.assertIsInstance(completed, MCPCompletedOutcome)
@@ -807,6 +830,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
                 request_state="界" * (MAX_REQUEST_STATE_BYTES // 3 + 1),
                 tool_name="lookup",
                 arguments={"tenant": "alpha"},
+                input_requests={},
             )
         with self.assertRaisesRegex(
             CredentialSecurityError, "mcp_remote_task_id_too_large"

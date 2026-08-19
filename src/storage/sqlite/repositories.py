@@ -69,6 +69,8 @@ from src.core.models import (
     MCPExecutionTerminalProjectionStatus,
     MCPExecutionTerminalReason,
     MCPInitialIntentCreateResult,
+    MCPInputSuspendResult,
+    MCPMRTRAnswerResult,
     MCPLegacyRetirementConvergenceResult,
     MCPLegacyRetirementEvidence,
     MCPNoServerConvergenceResult,
@@ -157,6 +159,7 @@ from src.storage.runtime_sidecar_shadow import (
 )
 from src.storage.mcp_dispatch_aggregate import (
     DurableResultSnapshotReader,
+    MRTRRequestStateEvidenceReader,
     PendingActionPayloadReader,
     TerminalCandidateSnapshotReader,
 )
@@ -1898,6 +1901,8 @@ class SQLiteStateRepository:
         terminal_candidate_snapshot_reader: TerminalCandidateSnapshotReader
         | None = None,
         durable_result_snapshot_reader: DurableResultSnapshotReader | None = None,
+        mrtr_request_state_evidence_reader: MRTRRequestStateEvidenceReader
+        | None = None,
     ) -> None:
         self._session = session
         self._task_authority_mode = task_authority_mode
@@ -1906,6 +1911,7 @@ class SQLiteStateRepository:
         self._pending_action_payload_reader = pending_action_payload_reader
         self._terminal_candidate_snapshot_reader = terminal_candidate_snapshot_reader
         self._durable_result_snapshot_reader = durable_result_snapshot_reader
+        self._mrtr_request_state_evidence_reader = mrtr_request_state_evidence_reader
 
     def _lock_mcp_owner_guard(
         self, owner_user_id: str, occurred_at: datetime
@@ -5599,6 +5605,382 @@ class SQLiteStateRepository:
         self._session.flush()
         return MCPApprovalDecisionResult.ACCEPTED
 
+    def suspend_mcp_for_input(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        sealed_state_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        interrupt: Interrupt,
+        occurred_at: datetime,
+    ) -> MCPInputSuspendResult:
+        call_candidate = self._session.get(MCPCallRecordRow, call_id)
+        if call_candidate is None:
+            return MCPInputSuspendResult.CONFLICT
+        self._lock_mcp_owner_guard(call_candidate.owner_user_id, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == call_candidate.owner_user_id,
+                UserMCPServerRow.server_id == call_candidate.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        action = (
+            self._session.scalar(
+                select(MCPPendingToolActionRow)
+                .where(
+                    MCPPendingToolActionRow.action_id
+                    == call_candidate.pending_action_id
+                )
+                .with_for_update()
+            )
+            if call_candidate.pending_action_id is not None
+            else None
+        )
+        branch = self._session.scalar(
+            select(MCPBranchRecordRow)
+            .where(MCPBranchRecordRow.branch_id == call_candidate.branch_id)
+            .with_for_update()
+        )
+        call = self._session.scalar(
+            select(MCPCallRecordRow)
+            .where(MCPCallRecordRow.call_ref == call_id)
+            .with_for_update()
+        )
+        sealed = self._session.scalar(
+            select(MCPSealedStateRow)
+            .where(MCPSealedStateRow.sealed_state_ref == sealed_state_ref)
+            .with_for_update()
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == call_candidate.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == call_candidate.node_id)
+            .with_for_update()
+        )
+        existing_interrupt = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.interrupt_id == interrupt.interrupt_id)
+            .with_for_update()
+        )
+        open_inputs = self._session.scalars(
+            select(InterruptRow)
+            .where(
+                InterruptRow.task_id == call_candidate.task_id,
+                InterruptRow.node_id == call_candidate.node_id,
+                InterruptRow.reason_code == "mcp_input_required",
+                InterruptRow.status == "open",
+            )
+            .order_by(InterruptRow.interrupt_id)
+            .with_for_update()
+        ).all()
+        if (
+            existing_interrupt is not None
+            and call is not None
+            and outbox is not None
+            and call.status == "input_required"
+            and outbox.status == "waiting_input"
+            and len(open_inputs) == 1
+            and open_inputs[0].interrupt_id == interrupt.interrupt_id
+        ):
+            return MCPInputSuspendResult.ALREADY_SUSPENDED
+        if (
+            self._mrtr_request_state_evidence_reader is None
+            or sealed is None
+            or call is None
+            or call.protocol_version is None
+        ):
+            raise RuntimeError("mcp_mrtr_evidence_reader_unavailable")
+        evidence = self._mrtr_request_state_evidence_reader.read(
+            _row_to_mcp_sealed_state(sealed),
+            server_id=call.server_id,
+            protocol_version=call.protocol_version,
+        )
+        expected_required_fields = {
+            "mcp_input_responses": {"type": "object"},
+            "sealed_request_state_ref": sealed_state_ref,
+            "server_id": call.server_id,
+            "tool_name": call.tool_name,
+        }
+        if (
+            server is None
+            or intent is None
+            or outbox is None
+            or action is None
+            or branch is None
+            or task is None
+            or node is None
+            or existing_interrupt is not None
+            or open_inputs
+            or int(intent.revision) != expected_intent_revision
+            or int(outbox.revision) != expected_outbox_revision
+            or intent.status != "dispatched"
+            or outbox.status != "active"
+            or outbox.claim_owner != claim_owner
+            or outbox.claim_token != claim_token
+            or outbox.lease_expires_at is None
+            or outbox.lease_expires_at <= occurred_at
+            or call.status != "active"
+            or not call.may_have_dispatched
+            or call.terminal_at is not None
+            or action.status != "consumed"
+            or action.action_id != evidence.pending_action_id
+            or action.arguments_payload_ref != evidence.arguments_payload_ref
+            or action.arguments_sha256 != evidence.arguments_sha256
+            or call.pending_action_id != action.action_id
+            or call.tool_name != evidence.tool_name
+            or evidence.owner_user_id != call.owner_user_id
+            or evidence.task_id != call.task_id
+            or evidence.node_id != call.node_id
+            or evidence.call_ref != call.call_ref
+            or not _mcp_server_is_available(server)
+            or int(server.config_version) != int(call.server_config_version or 0)
+            or int(server.security_version) != int(call.server_security_version)
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status not in {str(NodeStatus.RUNNING), str(NodeStatus.READY_TO_RESUME)}
+            or branch.active_call_ref != call.call_ref
+            or interrupt.conversation_id != task.conversation_id
+            or interrupt.task_id != task.task_id
+            or interrupt.node_id != node.node_id
+            or interrupt.source_agent != "mcp.dispatch"
+            or interrupt.source_message_id != task.root_message_id
+            or interrupt.reason_code != "mcp_input_required"
+            or str(interrupt.status) != "open"
+            or interrupt.required_fields != expected_required_fields
+        ):
+            return MCPInputSuspendResult.CONFLICT
+        self._session.add(InterruptRow(**_mcp_approval_interrupt_values(interrupt)))
+        call.status = "input_required"
+        call.result_ref = sealed_state_ref
+        call.updated_at = occurred_at
+        call.terminal_at = occurred_at
+        branch.active_call_ref = None
+        branch.status = "input_required"
+        branch.result_ref = sealed_state_ref
+        branch.updated_at = occurred_at
+        outbox.status = "waiting_input"
+        outbox.claim_owner = None
+        outbox.claim_token = None
+        outbox.lease_expires_at = None
+        outbox.resume_reason = "initial"
+        outbox.resume_receipt_id = None
+        outbox.resume_answer_id = None
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        node.status = str(NodeStatus.WAITING_FOR_INPUT)
+        self._session.flush()
+        return MCPInputSuspendResult.SUSPENDED
+
+    def accept_mcp_mrtr_answer(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        occurred_at: datetime,
+    ) -> MCPMRTRAnswerResult:
+        interrupt_candidate = self._session.get(InterruptRow, interrupt_id)
+        if interrupt_candidate is None or interrupt_candidate.reason_code != "mcp_input_required":
+            return MCPMRTRAnswerResult.CONFLICT
+        sealed_ref_candidate = str(
+            (interrupt_candidate.required_fields or {}).get(
+                "sealed_request_state_ref"
+            )
+            or ""
+        )
+        sealed_candidate = self._session.get(MCPSealedStateRow, sealed_ref_candidate)
+        call_candidate = (
+            self._session.get(MCPCallRecordRow, sealed_candidate.call_ref)
+            if sealed_candidate is not None
+            else None
+        )
+        if call_candidate is None:
+            return MCPMRTRAnswerResult.CONFLICT
+        self._lock_mcp_owner_guard(call_candidate.owner_user_id, occurred_at)
+        interrupt = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.interrupt_id == interrupt_id)
+            .with_for_update()
+        )
+        sealed_state_ref = str(
+            (interrupt.required_fields or {}).get("sealed_request_state_ref") or ""
+        )
+        sealed = self._session.scalar(
+            select(MCPSealedStateRow)
+            .where(MCPSealedStateRow.sealed_state_ref == sealed_state_ref)
+            .with_for_update()
+        )
+        call = (
+            self._session.scalar(
+                select(MCPCallRecordRow)
+                .where(MCPCallRecordRow.call_ref == sealed.call_ref)
+                .with_for_update()
+            )
+            if sealed is not None
+            else None
+        )
+        server = (
+            self._session.scalar(
+                select(UserMCPServerRow)
+                .where(
+                    UserMCPServerRow.owner_user_id == call.owner_user_id,
+                    UserMCPServerRow.server_id == call.server_id,
+                )
+                .with_for_update()
+            )
+            if call is not None
+            else None
+        )
+        intent_id = mcp_no_server_intent_id(
+            interrupt.task_id, node_id=interrupt.node_id
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(
+                MCPDispatchResumeOutboxRow.outbox_id
+                == mcp_dispatch_resume_outbox_id(intent_id)
+            )
+            .with_for_update()
+        )
+        branch = (
+            self._session.scalar(
+                select(MCPBranchRecordRow)
+                .where(MCPBranchRecordRow.branch_id == call.branch_id)
+                .with_for_update()
+            )
+            if call is not None
+            else None
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == interrupt.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == interrupt.node_id)
+            .with_for_update()
+        )
+        answers = self._session.scalars(
+            select(InterruptAnswerRow)
+            .where(InterruptAnswerRow.interrupt_id == interrupt_id)
+            .order_by(InterruptAnswerRow.interrupt_answer_id)
+            .with_for_update()
+        ).all()
+        accepted = [item for item in answers if item.accepted]
+        if accepted:
+            if (
+                len(accepted) == 1
+                and accepted[0].interrupt_answer_id == answer.interrupt_answer_id
+                and accepted[0].answer_payload == answer.answer_payload
+                and interrupt.status == "answered"
+            ):
+                return MCPMRTRAnswerResult.ALREADY_ACCEPTED
+            return MCPMRTRAnswerResult.CONFLICT
+        if (
+            self._mrtr_request_state_evidence_reader is None
+            or sealed is None
+            or call is None
+            or call.protocol_version is None
+        ):
+            raise RuntimeError("mcp_mrtr_evidence_reader_unavailable")
+        evidence = self._mrtr_request_state_evidence_reader.read(
+            _row_to_mcp_sealed_state(sealed),
+            server_id=call.server_id,
+            protocol_version=call.protocol_version,
+        )
+        responses = answer.answer_payload.get("mcp_input_responses")
+        if (
+            intent is None
+            or outbox is None
+            or branch is None
+            or task is None
+            or node is None
+            or interrupt.status != "open"
+            or call.status != "input_required"
+            or outbox.status != "waiting_input"
+            or outbox.claim_owner is not None
+            or outbox.claim_token is not None
+            or outbox.lease_expires_at is not None
+            or intent.status != "dispatched"
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status != str(NodeStatus.WAITING_FOR_INPUT)
+            or answer.interrupt_id != interrupt_id
+            or not answer.accepted
+            or not isinstance(responses, dict)
+            or answer.answer_payload
+            != {"mcp_input_responses": dict(responses)}
+            or set(responses) != set(evidence.input_requests)
+        ):
+            return MCPMRTRAnswerResult.CONFLICT
+        if (
+            not _mcp_server_is_available(server)
+            or server is None
+            or int(server.config_version) != int(call.server_config_version or 0)
+            or int(server.security_version) != int(call.server_security_version)
+        ):
+            interrupt.status = "cancelled"
+            interrupt.cancelled_at = occurred_at
+            finalized = self._finalize_mcp_dispatch_rows(
+                intent_id=intent_id,
+                outbox_id=outbox.outbox_id,
+                node_id=node.node_id,
+                outcome="failed",
+                safe_error_code="mcp_mrtr_server_drift",
+                expected_outbox_revision=int(outbox.revision),
+                claim_owner=None,
+                claim_token=None,
+                occurred_at=occurred_at,
+                allow_without_claim=True,
+            )
+            if finalized is MCPDispatchFinalizeResult.CONFLICT:
+                raise RuntimeError("mcp_mrtr_drift_finalize_conflict")
+            return MCPMRTRAnswerResult.INVALIDATED
+        self._session.add(
+            InterruptAnswerRow(
+                interrupt_answer_id=answer.interrupt_answer_id,
+                interrupt_id=interrupt_id,
+                answer_payload={"mcp_input_responses": dict(responses)},
+                source_message_id=answer.source_message_id,
+                accepted=True,
+                created_at=answer.created_at or occurred_at,
+                accepted_at=occurred_at,
+            )
+        )
+        interrupt.status = "answered"
+        interrupt.answered_at = occurred_at
+        outbox.status = "pending"
+        outbox.resume_reason = "mrtr_answer"
+        outbox.resume_receipt_id = None
+        outbox.resume_answer_id = answer.interrupt_answer_id
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        branch.status = "ready"
+        branch.updated_at = occurred_at
+        node.status = str(NodeStatus.READY_TO_RESUME)
+        self._session.flush()
+        return MCPMRTRAnswerResult.ACCEPTED
+
     def reclaim_mcp_dispatch_resume_outbox(
         self, outbox_id: str, expected_revision: int, now: datetime
     ) -> MCPDispatchResumeOutbox | None:
@@ -5957,6 +6339,191 @@ class SQLiteStateRepository:
             action.revision = int(action.revision) + 1
             action.updated_at = occurred_at
             action.consumed_at = occurred_at
+        self._session.flush()
+        return True
+
+    def admit_mrtr_continuation(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        original_call_id: str,
+        sealed_state_ref: str,
+        answer_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool:
+        original_candidate = self._session.get(MCPCallRecordRow, original_call_id)
+        if original_candidate is None or original_candidate.pending_action_id is None:
+            return False
+        self._lock_mcp_owner_guard(original_candidate.owner_user_id, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == original_candidate.owner_user_id,
+                UserMCPServerRow.server_id == original_candidate.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        action = self._session.scalar(
+            select(MCPPendingToolActionRow)
+            .where(
+                MCPPendingToolActionRow.action_id
+                == original_candidate.pending_action_id
+            )
+            .with_for_update()
+        )
+        branch = self._session.scalar(
+            select(MCPBranchRecordRow)
+            .where(MCPBranchRecordRow.branch_id == original_candidate.branch_id)
+            .with_for_update()
+        )
+        original = self._session.scalar(
+            select(MCPCallRecordRow)
+            .where(MCPCallRecordRow.call_ref == original_call_id)
+            .with_for_update()
+        )
+        sealed = self._session.scalar(
+            select(MCPSealedStateRow)
+            .where(MCPSealedStateRow.sealed_state_ref == sealed_state_ref)
+            .with_for_update()
+        )
+        answer = self._session.scalar(
+            select(InterruptAnswerRow)
+            .where(InterruptAnswerRow.interrupt_answer_id == answer_id)
+            .with_for_update()
+        )
+        interrupt = (
+            self._session.scalar(
+                select(InterruptRow)
+                .where(InterruptRow.interrupt_id == answer.interrupt_id)
+                .with_for_update()
+            )
+            if answer is not None
+            else None
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == original_candidate.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == original_candidate.node_id)
+            .with_for_update()
+        )
+        if (
+            self._mrtr_request_state_evidence_reader is None
+            or self._pending_action_payload_reader is None
+            or sealed is None
+            or original is None
+            or original.protocol_version is None
+        ):
+            raise RuntimeError("mcp_mrtr_continuation_authority_unavailable")
+        evidence = self._mrtr_request_state_evidence_reader.read(
+            _row_to_mcp_sealed_state(sealed),
+            server_id=original.server_id,
+            protocol_version=original.protocol_version,
+        )
+        revalidated_payload = self._pending_action_payload_reader.revalidate(
+            payload_snapshot
+        )
+        responses = (
+            None
+            if answer is None
+            else (answer.answer_payload or {}).get("mcp_input_responses")
+        )
+        if (
+            server is None
+            or intent is None
+            or outbox is None
+            or action is None
+            or branch is None
+            or answer is None
+            or interrupt is None
+            or task is None
+            or node is None
+            or intent.status != "dispatched"
+            or outbox.status != "claimed"
+            or int(intent.revision) != expected_intent_revision
+            or int(outbox.revision) != expected_outbox_revision
+            or outbox.claim_owner != claim_owner
+            or outbox.claim_token != claim_token
+            or outbox.lease_expires_at is None
+            or outbox.lease_expires_at <= occurred_at
+            or str(outbox.resume_reason) != "mrtr_answer"
+            or outbox.resume_answer_id != answer_id
+            or original.status != "input_required"
+            or not original.may_have_dispatched
+            or action.status != "consumed"
+            or original.pending_action_id != action.action_id
+            or evidence.pending_action_id != action.action_id
+            or evidence.arguments_payload_ref != action.arguments_payload_ref
+            or evidence.arguments_sha256 != action.arguments_sha256
+            or evidence.call_ref != original.call_ref
+            or evidence.tool_name != original.tool_name
+            or revalidated_payload != payload_snapshot
+            or not _pending_snapshot_matches_action(payload_snapshot, action)
+            or answer.interrupt_id != interrupt.interrupt_id
+            or not bool(answer.accepted)
+            or interrupt.status != "answered"
+            or interrupt.reason_code != "mcp_input_required"
+            or str(
+                (interrupt.required_fields or {}).get("sealed_request_state_ref")
+                or ""
+            )
+            != sealed_state_ref
+            or not isinstance(responses, dict)
+            or set(responses) != set(evidence.input_requests)
+            or not _mcp_server_is_available(server)
+            or int(server.config_version) != int(original.server_config_version or 0)
+            or int(server.security_version) != int(original.server_security_version)
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status != str(NodeStatus.READY_TO_RESUME)
+            or branch.active_call_ref is not None
+            or record.pending_action_id is not None
+            or record.continuation_of_call_ref != original_call_id
+            or record.branch_id != original.branch_id
+            or record.owner_user_id != original.owner_user_id
+            or record.task_id != original.task_id
+            or record.node_id != original.node_id
+            or record.server_id != original.server_id
+            or record.tool_name != original.tool_name
+            or record.arguments_sha256 != original.arguments_sha256
+            or record.server_config_version != original.server_config_version
+            or record.server_security_version != original.server_security_version
+            or record.input_schema_sha256 != original.input_schema_sha256
+        ):
+            return False
+        admitted = self.admit_mcp_tool_call(
+            intent_id,
+            outbox_id,
+            expected_intent_revision,
+            expected_outbox_revision,
+            record,
+            occurred_at,
+            allow_claimed_later=True,
+            cp7_candidate_id=cp7_candidate_id,
+            cp7_epoch_id=cp7_epoch_id,
+        )
+        if not admitted:
+            return False
         self._session.flush()
         return True
 
@@ -11214,6 +11781,8 @@ class SQLiteStorage(StoragePort):
         mcp_terminal_candidate_snapshot_reader: TerminalCandidateSnapshotReader
         | None = None,
         mcp_durable_result_snapshot_reader: DurableResultSnapshotReader | None = None,
+        mcp_mrtr_request_state_evidence_reader: MRTRRequestStateEvidenceReader
+        | None = None,
     ) -> None:
         if mcp_task_authority_mode not in {None, "off", "shadow", "enforce"}:
             raise ValueError(
@@ -11246,6 +11815,9 @@ class SQLiteStorage(StoragePort):
             mcp_terminal_candidate_snapshot_reader
         )
         self._mcp_durable_result_snapshot_reader = mcp_durable_result_snapshot_reader
+        self._mcp_mrtr_request_state_evidence_reader = (
+            mcp_mrtr_request_state_evidence_reader
+        )
 
     async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]:
         return await self._run(lambda state, collab: state.list_user_mcp_servers(owner_user_id))
@@ -11711,6 +12283,46 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def suspend_mcp_for_input(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        sealed_state_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        interrupt: Interrupt,
+        occurred_at: datetime,
+    ) -> MCPInputSuspendResult:
+        return await self._run(
+            lambda state, collab: state.suspend_mcp_for_input(
+                intent_id,
+                outbox_id,
+                call_id,
+                sealed_state_ref,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                interrupt,
+                occurred_at,
+            )
+        )
+
+    async def accept_mcp_mrtr_answer(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        occurred_at: datetime,
+    ) -> MCPMRTRAnswerResult:
+        return await self._run(
+            lambda state, collab: state.accept_mcp_mrtr_answer(
+                interrupt_id, answer, occurred_at
+            )
+        )
+
     async def reclaim_mcp_dispatch_resume_outbox(
         self, outbox_id: str, expected_revision: int, now: datetime
     ) -> MCPDispatchResumeOutbox | None:
@@ -11786,6 +12398,43 @@ class SQLiteStorage(StoragePort):
                 record,
                 occurred_at,
                 action_candidate=action_candidate,
+                cp7_candidate_id=cp7_candidate_id,
+                cp7_epoch_id=cp7_epoch_id,
+            )
+        )
+
+    async def admit_mrtr_continuation(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        original_call_id: str,
+        sealed_state_ref: str,
+        answer_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.admit_mrtr_continuation(
+                intent_id,
+                outbox_id,
+                original_call_id,
+                sealed_state_ref,
+                answer_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                payload_snapshot,
+                record,
+                occurred_at,
                 cp7_candidate_id=cp7_candidate_id,
                 cp7_epoch_id=cp7_epoch_id,
             )
@@ -13169,6 +13818,9 @@ class SQLiteStorage(StoragePort):
                     ),
                     durable_result_snapshot_reader=(
                         self._mcp_durable_result_snapshot_reader
+                    ),
+                    mrtr_request_state_evidence_reader=(
+                        self._mcp_mrtr_request_state_evidence_reader
                     ),
                 )
                 collab_repo = SQLiteCollaborationRepository(session)

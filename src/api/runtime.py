@@ -135,6 +135,7 @@ from src.integrations.mcp.credentials import (
     MCPAuditReferenceSigner,
     MCPCredentialCipher,
     MCPRecoveryCipher,
+    MCPRequestStateEvidenceAuthority,
     MCPRecoveryService,
     MasterKeySentinelCipher,
 )
@@ -4336,6 +4337,22 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
         mcp_approval_action = None
         mcp_approval_decision: str | None = None
+        mcp_mrtr_answer = False
+        if interrupt.reason_code == "mcp_input_required":
+            mrtr_intent = await self.storage.get_mcp_no_server_intent(
+                mcp_no_server_intent_id(task.task_id, node_id=interrupt.node_id)
+            )
+            mrtr_outbox = (
+                None
+                if mrtr_intent is None
+                else await self.storage.get_mcp_dispatch_resume_outbox(
+                    mcp_dispatch_resume_outbox_id(mrtr_intent.intent_id)
+                )
+            )
+            mcp_mrtr_answer = (
+                mrtr_outbox is not None
+                and str(mrtr_outbox.status) == "waiting_input"
+            )
         if interrupt.reason_code == "mcp_tool_approval_required":
             mcp_approval_decision = str(
                 answer_payload.get("mcp_tool_approval") or ""
@@ -4457,10 +4474,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             interrupt_id=interrupt_id,
             answer_payload=dict(answer_payload),
             source_message_id=source_message_id or self._make_id("msg"),
-            accepted=mcp_approval_action is not None,
+            accepted=mcp_approval_action is not None or mcp_mrtr_answer,
             created_at=self._utcnow_naive(),
             accepted_at=(
-                self._utcnow_naive() if mcp_approval_action is not None else None
+                self._utcnow_naive()
+                if mcp_approval_action is not None or mcp_mrtr_answer
+                else None
             ),
         )
         pending_file_selection_upload_ids = self._normalize_upload_ids(
@@ -4551,6 +4570,43 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         },
                     )
                 )
+        elif mcp_mrtr_answer:
+            mcp_mrtr_result = str(
+                await self.storage.accept_mcp_mrtr_answer(
+                    interrupt_id,
+                    answer,
+                    self._utcnow_naive(),
+                )
+            )
+            if mcp_mrtr_result in {"conflict", "invalidated"}:
+                raise ValueError("MCP input request is no longer pending")
+            saved_interrupt = await self.storage.get_interrupt(interrupt_id)
+            if saved_interrupt is None:
+                raise RuntimeError("mcp_mrtr_interrupt_missing_after_accept")
+            if mcp_mrtr_result == "already_accepted":
+                return {
+                    "interrupt_id": saved_interrupt.interrupt_id,
+                    "status": str(saved_interrupt.status),
+                    "node_id": saved_interrupt.node_id,
+                    "answer_payload": dict(answer_payload),
+                    "source_message_id": answer.source_message_id,
+                }
+            resumed_node = await self.storage.get_task_node(interrupt.node_id)
+            if resumed_node is None:
+                raise RuntimeError("mcp_mrtr_node_missing_after_accept")
+            await self._record_event(
+                self._make_event(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    node_id=interrupt.node_id,
+                    event_type="node.ready_to_resume",
+                    payload={
+                        "interrupt_id": interrupt_id,
+                        "status": str(resumed_node.status),
+                        "capability_id": resumed_node.capability_id,
+                    },
+                )
+            )
         else:
             saved_interrupt = await self.interrupt_service.record_answer(answer)
 
@@ -10575,6 +10631,9 @@ def build_api_runtime(
     mcp_recovery_cipher = MCPRecoveryCipher(
         master_key_deriver.derive(MasterKeyDomain.MCP_RECOVERY)
     )
+    mcp_request_state_evidence_authority = MCPRequestStateEvidenceAuthority(
+        mcp_recovery_cipher
+    )
     auth_token_hasher = AuthTokenHasher(
         master_key_deriver.derive(MasterKeyDomain.AUTH_TOKEN)
     )
@@ -10797,6 +10856,9 @@ def build_api_runtime(
             mcp_durable_result_snapshot_reader=(
                 mcp_durable_result_snapshot_authority
             ),
+            mcp_mrtr_request_state_evidence_reader=(
+                mcp_request_state_evidence_authority
+            ),
             **mcp_rollout_storage_kwargs,
         )
         if isinstance(engine, Engine):
@@ -10823,6 +10885,9 @@ def build_api_runtime(
             ),
             mcp_durable_result_snapshot_reader=(
                 mcp_durable_result_snapshot_authority
+            ),
+            mcp_mrtr_request_state_evidence_reader=(
+                mcp_request_state_evidence_authority
             ),
         )
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))

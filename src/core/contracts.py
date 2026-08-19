@@ -35,6 +35,8 @@ from .models import (
     MCPDispatchFinalizeResult,
     MCPExecutionTerminalProjection,
     MCPInitialIntentCreateResult,
+    MCPInputSuspendResult,
+    MCPMRTRAnswerResult,
     MCPLegacyRetirementEvidence,
     MCPLegacyRetirementConvergenceResult,
     MCPLegacyMigrationBatchResult,
@@ -450,6 +452,27 @@ class StoragePort(Protocol):
         occurred_at: datetime,
     ) -> MCPApprovalDecisionResult: ...
 
+    async def suspend_mcp_for_input(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        sealed_state_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        interrupt: Interrupt,
+        occurred_at: datetime,
+    ) -> MCPInputSuspendResult: ...
+
+    async def accept_mcp_mrtr_answer(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        occurred_at: datetime,
+    ) -> MCPMRTRAnswerResult: ...
+
     async def admit_approved_mcp_action(
         self,
         intent_id: str,
@@ -465,6 +488,25 @@ class StoragePort(Protocol):
         occurred_at: datetime,
         *,
         action_candidate: MCPPendingToolAction | None = None,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool: ...
+
+    async def admit_mrtr_continuation(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        original_call_id: str,
+        sealed_state_ref: str,
+        answer_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
         cp7_candidate_id: str | None = None,
         cp7_epoch_id: str | None = None,
     ) -> bool: ...

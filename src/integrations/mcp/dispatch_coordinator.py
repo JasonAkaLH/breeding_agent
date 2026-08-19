@@ -172,6 +172,8 @@ class _ApprovalResolution:
 class _MRTRContinuation:
     sealed_request_state_ref: str
     input_responses: Mapping[str, Any]
+    original_call_ref: str = ""
+    answer_id: str = ""
 
 
 @dataclass(slots=True)
@@ -368,16 +370,18 @@ class UserMCPDispatchCoordinator:
                 owner_user_id, request.task_id, branch_id=branch_id
             )
             authority.admitted = any(call.may_have_dispatched for call in existing_calls)
-        try:
-            mrtr_continuation = await self._resolve_mrtr_continuation(request)
-        except _CallReservationError as exc:
-            return await self._finalize_no_call_outcome(
-                authority,
-                request,
-                self._error(exc.code, "MCP input continuation was rejected safely."),
-                outcome="failed",
-                safe_error_code=exc.code,
-            )
+        mrtr_continuation: _MRTRContinuation | None = None
+        if authority is None:
+            try:
+                mrtr_continuation = await self._resolve_mrtr_continuation(request)
+            except _CallReservationError as exc:
+                return await self._finalize_no_call_outcome(
+                    authority,
+                    request,
+                    self._error(exc.code, "MCP input continuation was rejected safely."),
+                    outcome="failed",
+                    safe_error_code=exc.code,
+                )
 
         for selector_step in range(1, self._max_selector_steps + 1):
             scope = (
@@ -571,6 +575,99 @@ class UserMCPDispatchCoordinator:
                         )
                         approved_payload = await approved_payload_manager.__aenter__()
                         approved_payload_entered = True
+                        action = MCPSelectorAction(
+                            action=MCPSelectorActionType.CALL_TOOL,
+                            tool_name=pending_action.tool_name,
+                            arguments=approved_payload.arguments,
+                        )
+                    elif (
+                        outbox is not None
+                        and str(outbox.resume_reason) == "mrtr_answer"
+                    ):
+                        answer = (
+                            None
+                            if outbox.resume_answer_id is None
+                            else await self._storage.get_interrupt_answer(
+                                outbox.resume_answer_id
+                            )
+                        )
+                        interrupt = (
+                            None
+                            if answer is None
+                            else await self._storage.get_interrupt(answer.interrupt_id)
+                        )
+                        sealed_ref = (
+                            ""
+                            if interrupt is None
+                            else str(
+                                interrupt.required_fields.get(
+                                    "sealed_request_state_ref"
+                                )
+                                or ""
+                            )
+                        )
+                        sealed = (
+                            None
+                            if not sealed_ref
+                            else await self._storage.get_mcp_sealed_state(
+                                owner_user_id,
+                                request.task_id,
+                                sealed_ref,
+                            )
+                        )
+                        original_call = (
+                            None
+                            if sealed is None
+                            else await self._storage.get_mcp_call_record(
+                                owner_user_id,
+                                request.task_id,
+                                sealed.call_ref,
+                            )
+                        )
+                        pending_action = (
+                            None
+                            if original_call is None
+                            or original_call.pending_action_id is None
+                            else await self._storage.get_mcp_pending_tool_action(
+                                original_call.pending_action_id
+                            )
+                        )
+                        responses = (
+                            None
+                            if answer is None
+                            else answer.answer_payload.get("mcp_input_responses")
+                        )
+                        if (
+                            answer is None
+                            or interrupt is None
+                            or sealed is None
+                            or original_call is None
+                            or pending_action is None
+                            or not isinstance(responses, Mapping)
+                            or self._pending_action_payload_store is None
+                            or answer.interrupt_answer_id != outbox.resume_answer_id
+                            or not answer.accepted
+                        ):
+                            raise MCPSelectorContextAuthorityError(
+                                "mcp_mrtr_resume_authority_conflict"
+                            )
+                        approved_payload_manager = (
+                            self._pending_action_payload_store.open_validated(
+                                _pending_action_identity(pending_action),
+                                pending_action.arguments_payload_ref,
+                                on_gate_wait=lambda: self._renew_dispatch_claim(
+                                    authority
+                                ),
+                            )
+                        )
+                        approved_payload = await approved_payload_manager.__aenter__()
+                        approved_payload_entered = True
+                        mrtr_continuation = _MRTRContinuation(
+                            sealed_request_state_ref=sealed_ref,
+                            input_responses=dict(responses),
+                            original_call_ref=original_call.call_ref,
+                            answer_id=answer.interrupt_answer_id,
+                        )
                         action = MCPSelectorAction(
                             action=MCPSelectorActionType.CALL_TOOL,
                             tool_name=pending_action.tool_name,
@@ -1084,7 +1181,70 @@ class UserMCPDispatchCoordinator:
                         server=current_server,
                         tool_name=tool_name,
                         sealed_request_state_ref=outcome.sealed_request_state_ref,
+                        persist=authority is None,
                     )
+                    if authority is not None:
+                        intent = await self._storage.get_mcp_no_server_intent(
+                            authority.intent_id
+                        )
+                        outbox = await self._storage.get_mcp_dispatch_resume_outbox(
+                            authority.outbox_id
+                        )
+                        if intent is None or outbox is None:
+                            raise _CallReservationError(
+                                "mcp_dispatch_authority_missing"
+                            )
+                        try:
+                            suspended = await self._storage.suspend_mcp_for_input(
+                                authority.intent_id,
+                                authority.outbox_id,
+                                call_ref,
+                                outcome.sealed_request_state_ref or "",
+                                intent.revision,
+                                outbox.revision,
+                                authority.claim_owner,
+                                authority.claim_token,
+                                mrtr_interrupt,
+                                self._now(),
+                            )
+                        except BaseException as exc:
+                            await self._storage.converge_mcp_unknown_no_replay(
+                                request.task_id, self._now()
+                            )
+                            raise _CallReservationError(
+                                "mcp_input_suspend_failed"
+                            ) from exc
+                        if str(suspended) not in {
+                            "suspended",
+                            "already_suspended",
+                        }:
+                            await self._storage.converge_mcp_unknown_no_replay(
+                                request.task_id, self._now()
+                            )
+                            raise _CallReservationError(
+                                "mcp_input_suspend_conflict"
+                            )
+                        refreshed = (
+                            await self._storage.get_mcp_branch_record(
+                                owner_user_id, request.task_id, branch_id
+                            )
+                            or branch
+                        )
+                        return MCPDispatchOutcome(
+                            output_payload={
+                                "mcp_status": "input_required",
+                                "mcp_branch_id": refreshed.branch_id,
+                                "safe_summary": "The MCP tool requires additional user input.",
+                                "result_ref": outcome.sealed_request_state_ref,
+                                "external_content_notice": EXTERNAL_CONTENT_NOTICE,
+                                "safe_call_ref": safe_call_ref,
+                                "input_request_count": len(outcome.requests),
+                                "sealed_request_state_ref": outcome.sealed_request_state_ref,
+                                "interrupt_id": mrtr_interrupt.interrupt_id,
+                            },
+                            events=tuple(events),
+                            interrupt=mrtr_interrupt,
+                        )
                     return await self._finish_branch(
                         request,
                         branch,
@@ -1729,6 +1889,7 @@ class UserMCPDispatchCoordinator:
         server: UserMCPServer,
         tool_name: str,
         sealed_request_state_ref: str | None,
+        persist: bool = True,
     ) -> Interrupt:
         if not sealed_request_state_ref:
             raise _CallReservationError("mcp_input_required_state_missing")
@@ -1749,6 +1910,8 @@ class UserMCPDispatchCoordinator:
             },
             created_at=self._now(),
         )
+        if not persist:
+            return interrupt
         return await self._storage.save_interrupt(interrupt)
 
     async def _call_tool(
@@ -1825,7 +1988,14 @@ class UserMCPDispatchCoordinator:
                 updated_at=now,
                 may_have_dispatched=True,
                 pending_action_id=(
-                    pending_action.action_id if pending_action is not None else None
+                    pending_action.action_id
+                    if pending_action is not None and mrtr_continuation is None
+                    else None
+                ),
+                continuation_of_call_ref=(
+                    mrtr_continuation.original_call_ref
+                    if mrtr_continuation is not None
+                    else None
                 ),
             )
             if authority is None:
@@ -1841,22 +2011,40 @@ class UserMCPDispatchCoordinator:
                 )
                 if intent is None or outbox is None:
                     raise _CallReservationError("mcp_dispatch_authority_missing")
-                reserved = await self._storage.admit_approved_mcp_action(
-                    authority.intent_id,
-                    authority.outbox_id,
-                    pending_action.action_id,
-                    intent.revision,
-                    outbox.revision,
-                    pending_action.revision,
-                    authority.claim_owner,
-                    authority.claim_token,
-                    pending_action_payload,
-                    record,
-                    now,
-                    action_candidate=pending_action,
-                    cp7_candidate_id=self._cp7_candidate_id,
-                    cp7_epoch_id=self._cp7_epoch_id,
-                )
+                if mrtr_continuation is None:
+                    reserved = await self._storage.admit_approved_mcp_action(
+                        authority.intent_id,
+                        authority.outbox_id,
+                        pending_action.action_id,
+                        intent.revision,
+                        outbox.revision,
+                        pending_action.revision,
+                        authority.claim_owner,
+                        authority.claim_token,
+                        pending_action_payload,
+                        record,
+                        now,
+                        action_candidate=pending_action,
+                        cp7_candidate_id=self._cp7_candidate_id,
+                        cp7_epoch_id=self._cp7_epoch_id,
+                    )
+                else:
+                    reserved = await self._storage.admit_mrtr_continuation(
+                        authority.intent_id,
+                        authority.outbox_id,
+                        mrtr_continuation.original_call_ref,
+                        mrtr_continuation.sealed_request_state_ref,
+                        mrtr_continuation.answer_id,
+                        intent.revision,
+                        outbox.revision,
+                        authority.claim_owner,
+                        authority.claim_token,
+                        pending_action_payload,
+                        record,
+                        now,
+                        cp7_candidate_id=self._cp7_candidate_id,
+                        cp7_epoch_id=self._cp7_epoch_id,
+                    )
             if not reserved:
                 active_calls = await self._storage.list_mcp_call_records(
                     current.owner_user_id,
@@ -1948,6 +2136,19 @@ class UserMCPDispatchCoordinator:
                         request.metadata.get("mcp_remote_task_continuation_plan"),
                         Mapping,
                     )
+                    else None
+                ),
+                pending_action_id=(
+                    pending_action.action_id if pending_action is not None else None
+                ),
+                arguments_payload_ref=(
+                    pending_action.arguments_payload_ref
+                    if pending_action is not None
+                    else None
+                ),
+                arguments_sha256=(
+                    pending_action.arguments_sha256
+                    if pending_action is not None
                     else None
                 ),
                 authorization_verified=True,
@@ -2280,7 +2481,7 @@ class UserMCPDispatchCoordinator:
             result_receipt_id = mcp_terminal_receipt_id(
                 call_ref, result_payload_sha256
             )
-        else:
+        elif authority is None or outcome.kind is not MCPCallOutcomeKind.INPUT_REQUIRED:
             finished = await self._storage.finish_mcp_call(
                 branch.owner_user_id,
                 branch.task_id,

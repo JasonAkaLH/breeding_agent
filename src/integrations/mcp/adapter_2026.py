@@ -582,6 +582,7 @@ class MCP2026Adapter:
                         request_state=request_state,
                         tool_name=tool_name,
                         arguments=arguments,
+                        input_requests=input_requests,
                     )
                 except CredentialSecurityError as exc:
                     raise MCPProtocolError("MCP request state could not be sealed.") from exc

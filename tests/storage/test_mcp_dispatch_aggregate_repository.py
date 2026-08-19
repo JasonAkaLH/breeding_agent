@@ -16,6 +16,8 @@ from src.core.models import (
     MCPBranchRecord,
     MCPCallRecord,
     MCPDurableResultSnapshot,
+    MCPMRTRRequestStateEvidence,
+    MCPSealedState,
     MCPPendingActionPayloadSnapshot,
     MCPPendingToolAction,
     MCPPendingToolActionStatus,
@@ -75,6 +77,22 @@ class ExactSnapshotReader:
         return self.replacement or snapshot
 
 
+class ExactMRTRReader:
+    def __init__(self) -> None:
+        self.evidence: MCPMRTRRequestStateEvidence | None = None
+
+    def read(self, record, *, server_id: str, protocol_version: str):
+        if self.evidence is None:
+            raise RuntimeError("test MRTR evidence missing")
+        if (
+            record.sealed_state_ref != self.evidence.sealed_state_ref
+            or server_id != "server-1"
+            or protocol_version != "2026-07-28"
+        ):
+            raise RuntimeError("test MRTR evidence mismatch")
+        return self.evidence
+
+
 class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -88,11 +106,13 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.reader = ExactPayloadReader()
         self.candidate_reader = ExactSnapshotReader()
         self.result_reader = ExactSnapshotReader()
+        self.mrtr_reader = ExactMRTRReader()
         self.storage = SQLiteStorage(
             self.sessions,
             mcp_pending_action_payload_reader=self.reader,
             mcp_terminal_candidate_snapshot_reader=self.candidate_reader,
             mcp_durable_result_snapshot_reader=self.result_reader,
+            mcp_mrtr_request_state_evidence_reader=self.mrtr_reader,
         )
         self.task = Task(
             task_id="task-1",
@@ -407,7 +427,6 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             str((await self.storage.get_task_node(self.node.node_id)).status),
             "ready_to_resume",
         )
-
     async def test_suspend_revalidates_real_held_payload_descriptor(self) -> None:
         with self.sessions() as session:
             session.delete(session.get(MCPPendingToolActionRow, "action-1"))
@@ -816,6 +835,155 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(saved.status), "consumed")
         self.assertEqual(saved.revision, 1)
         self.assertEqual(saved.approved_at, NOW)
+
+    async def test_mrtr_suspend_and_answer_commit_call_interrupt_and_cursor_atomically(
+        self,
+    ) -> None:
+        await self._admit()
+        sealed_ref = "mcp-request-state:test"
+        await self.storage.save_mcp_sealed_state(
+            MCPSealedState(
+                sealed_state_ref=sealed_ref,
+                owner_user_id="alice",
+                task_id=self.task.task_id,
+                node_id=self.node.node_id,
+                call_ref="call-1",
+                state_kind="request_state",
+                ciphertext=b"ciphertext",
+                nonce=b"n" * 12,
+                encryption_version=1,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        self.mrtr_reader.evidence = MCPMRTRRequestStateEvidence(
+            sealed_state_ref=sealed_ref,
+            owner_user_id="alice",
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            call_ref="call-1",
+            request_state="opaque",
+            tool_name="lookup",
+            arguments_sha256="sha256:arguments",
+            input_requests={"confirm": {"type": "boolean"}},
+            pending_action_id="action-1",
+            arguments_payload_ref="mcp-action-payload-1",
+        )
+        interrupt = Interrupt(
+            interrupt_id="mcp-input-call-1",
+            conversation_id=self.task.conversation_id,
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            source_agent="mcp.dispatch",
+            source_message_id=self.task.root_message_id,
+            question="Input required",
+            reason_code="mcp_input_required",
+            required_fields={
+                "mcp_input_responses": {"type": "object"},
+                "sealed_request_state_ref": sealed_ref,
+                "server_id": self.server.server_id,
+                "tool_name": "lookup",
+            },
+            created_at=NOW,
+        )
+        intent = await self.storage.get_mcp_no_server_intent(self.intent_id)
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+
+        suspended = await self.storage.suspend_mcp_for_input(
+            self.intent_id,
+            self.outbox_id,
+            "call-1",
+            sealed_ref,
+            intent.revision,
+            outbox.revision,
+            "worker",
+            "token",
+            interrupt,
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(str(suspended), "suspended")
+        self.assertEqual(
+            (await self.storage.get_mcp_call_record("alice", self.task.task_id, "call-1")).status,
+            "input_required",
+        )
+        self.assertEqual(
+            str((await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)).status),
+            "waiting_input",
+        )
+        self.assertEqual(
+            str((await self.storage.get_task_node(self.node.node_id)).status),
+            "waiting_for_input",
+        )
+        answer = InterruptAnswer(
+            interrupt_answer_id="answer-mrtr-1",
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload={"mcp_input_responses": {"confirm": True}},
+            source_message_id="message-answer-mrtr-1",
+            accepted=True,
+            created_at=NOW + timedelta(seconds=2),
+            accepted_at=NOW + timedelta(seconds=2),
+        )
+
+        accepted = await self.storage.accept_mcp_mrtr_answer(
+            interrupt.interrupt_id,
+            answer,
+            NOW + timedelta(seconds=2),
+        )
+
+        self.assertEqual(str(accepted), "accepted")
+        resumed = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        self.assertEqual(str(resumed.status), "pending")
+        self.assertEqual(str(resumed.resume_reason), "mrtr_answer")
+        self.assertIsNone(resumed.resume_receipt_id)
+        self.assertEqual(resumed.resume_answer_id, answer.interrupt_answer_id)
+        self.assertEqual(
+            str((await self.storage.get_task_node(self.node.node_id)).status),
+            "ready_to_resume",
+        )
+        claimed = await self.storage.claim_mcp_dispatch(
+            self.outbox_id,
+            "worker",
+            "token-2",
+            resumed.revision,
+            NOW + timedelta(seconds=3),
+            NOW + timedelta(seconds=33),
+        )
+        intent = await self.storage.get_mcp_no_server_intent(self.intent_id)
+        continuation = replace(
+            self._call("call-2", call_sequence=2),
+            pending_action_id=None,
+            continuation_of_call_ref="call-1",
+            created_at=NOW + timedelta(seconds=3),
+            updated_at=NOW + timedelta(seconds=3),
+        )
+
+        admitted = await self.storage.admit_mrtr_continuation(
+            self.intent_id,
+            self.outbox_id,
+            "call-1",
+            sealed_ref,
+            answer.interrupt_answer_id,
+            intent.revision,
+            claimed.revision,
+            "worker",
+            "token-2",
+            self.snapshot,
+            continuation,
+            NOW + timedelta(seconds=3),
+        )
+
+        self.assertTrue(admitted)
+        saved_continuation = await self.storage.get_mcp_call_record(
+            "alice", self.task.task_id, "call-2"
+        )
+        self.assertEqual(saved_continuation.status, "active")
+        self.assertEqual(saved_continuation.continuation_of_call_ref, "call-1")
+        self.assertIsNone(saved_continuation.pending_action_id)
+        self.assertEqual(
+            str((await self.storage.get_mcp_pending_tool_action("action-1")).status),
+            "consumed",
+        )
 
     async def test_expired_active_claim_with_unreceipted_call_cannot_recover_pending(
         self,

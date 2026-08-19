@@ -15,8 +15,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from src.core.models import (
     MAFMasterKeyValidation,
     MCPRemoteTaskBinding,
+    MCPMRTRRequestStateEvidence,
     MCPSealedState,
 )
+from src.integrations.mcp.cp7_artifacts import canonical_sha256
 from src.integrations.master_key import (
     MasterKeyDomain,
     MasterKeyError,
@@ -39,6 +41,7 @@ _ALLOWED_AUTH_FIELDS = {
     "static_headers": frozenset({"values"}),
 }
 _TASK_PRIVATE_REQUEST_STATE_KIND = "request_state"
+_MRTR_REQUEST_STATE_EVIDENCE_SCHEMA_V2 = "maf.user_mcp.mrtr_request_state.v2"
 _TASK_PRIVATE_REMOTE_TASK_KIND = "remote_task_id"
 _INITIAL_TERMINAL_REMOTE_TASK_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "unknown"}
@@ -81,6 +84,9 @@ class MCPRecoveryCallContext:
     node_id: str
     call_ref: str
     continuation_plan: Mapping[str, Any] | None = None
+    pending_action_id: str | None = None
+    arguments_payload_ref: str | None = None
+    arguments_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,6 +467,7 @@ class MCPRecoveryService:
         request_state: str,
         tool_name: str,
         arguments: Mapping[str, Any],
+        input_requests: Mapping[str, Mapping[str, Any]],
     ) -> None:
         _validate_private_string_size(
             request_state,
@@ -476,9 +483,18 @@ class MCPRecoveryService:
             server_id=server_id,
             protocol_version=protocol_version,
             payload={
+                "schema": _MRTR_REQUEST_STATE_EVIDENCE_SCHEMA_V2,
                 "request_state": request_state,
                 "tool_name": tool_name,
-                "arguments": dict(arguments),
+                "arguments_sha256": (
+                    context.arguments_sha256 or canonical_sha256(dict(arguments))
+                ),
+                "input_requests": {
+                    str(key): dict(value)
+                    for key, value in input_requests.items()
+                },
+                "pending_action_id": context.pending_action_id,
+                "arguments_payload_ref": context.arguments_payload_ref,
             },
         )
         now = self._now()
@@ -508,9 +524,17 @@ class MCPRecoveryService:
         except Exception as exc:
             raise CredentialSecurityError("mcp_recovery_persistence_failed") from exc
         if payload != {
+            "schema": _MRTR_REQUEST_STATE_EVIDENCE_SCHEMA_V2,
             "request_state": request_state,
             "tool_name": tool_name,
-            "arguments": dict(arguments),
+            "arguments_sha256": (
+                context.arguments_sha256 or canonical_sha256(dict(arguments))
+            ),
+            "input_requests": {
+                str(key): dict(value) for key, value in input_requests.items()
+            },
+            "pending_action_id": context.pending_action_id,
+            "arguments_payload_ref": context.arguments_payload_ref,
         }:
             raise CredentialSecurityError("mcp_recovery_persistence_failed")
 
@@ -544,7 +568,35 @@ class MCPRecoveryService:
             server_id=server_id,
             protocol_version=protocol_version,
         )
-        if payload.get("tool_name") != tool_name or payload.get("arguments") != dict(arguments):
+        v2 = payload.get("schema") == _MRTR_REQUEST_STATE_EVIDENCE_SCHEMA_V2
+        if v2 and (
+            set(payload)
+            != {
+                "schema",
+                "request_state",
+                "tool_name",
+                "arguments_sha256",
+                "input_requests",
+                "pending_action_id",
+                "arguments_payload_ref",
+            }
+            or payload.get("tool_name") != tool_name
+            or payload.get("arguments_sha256")
+            != (
+                expected_context.arguments_sha256
+                or canonical_sha256(dict(arguments))
+            )
+            or payload.get("pending_action_id") != expected_context.pending_action_id
+            or payload.get("arguments_payload_ref")
+            != expected_context.arguments_payload_ref
+            or not isinstance(payload.get("input_requests"), dict)
+        ):
+            raise CredentialSecurityError("mcp_recovery_request_mismatch")
+        if not v2 and (
+            set(payload) != {"request_state", "tool_name", "arguments"}
+            or payload.get("tool_name") != tool_name
+            or payload.get("arguments") != dict(arguments)
+        ):
             raise CredentialSecurityError("mcp_recovery_request_mismatch")
         request_state = payload.get("request_state")
         if not isinstance(request_state, str):
@@ -555,6 +607,7 @@ class MCPRecoveryService:
             error_code="mcp_task_private_decryption_failed",
         )
         return request_state
+
 
     async def save_remote_task(
         self,
@@ -695,6 +748,99 @@ class MCPRecoveryService:
             error_code="mcp_task_private_decryption_failed",
         )
         return remote_task_id
+
+
+class MCPRequestStateEvidenceAuthority:
+    def __init__(self, cipher: MCPRecoveryCipher) -> None:
+        if not isinstance(cipher, MCPRecoveryCipher):
+            raise TypeError("MCP recovery cipher is required")
+        self._cipher = cipher
+
+    def read(
+        self,
+        record: MCPSealedState,
+        *,
+        server_id: str,
+        protocol_version: str,
+    ) -> MCPMRTRRequestStateEvidence:
+        if record.state_kind != _TASK_PRIVATE_REQUEST_STATE_KIND:
+            raise CredentialSecurityError("mcp_mrtr_evidence_kind_invalid")
+        payload = self._cipher.unseal_task_private_payload(
+            EncryptedCredential(
+                nonce=record.nonce,
+                ciphertext=record.ciphertext,
+                encryption_version=record.encryption_version,
+            ),
+            owner_user_id=record.owner_user_id,
+            task_id=record.task_id,
+            node_id=record.node_id,
+            call_ref=record.call_ref,
+            state_kind=record.state_kind,
+            server_id=server_id,
+            protocol_version=protocol_version,
+        )
+        if set(payload) != {
+            "schema",
+            "request_state",
+            "tool_name",
+            "arguments_sha256",
+            "input_requests",
+            "pending_action_id",
+            "arguments_payload_ref",
+        } or payload.get("schema") != _MRTR_REQUEST_STATE_EVIDENCE_SCHEMA_V2:
+            raise CredentialSecurityError("mcp_mrtr_evidence_schema_invalid")
+        request_state = payload.get("request_state")
+        tool_name = payload.get("tool_name")
+        arguments_sha256 = payload.get("arguments_sha256")
+        input_requests = payload.get("input_requests")
+        pending_action_id = payload.get("pending_action_id")
+        arguments_payload_ref = payload.get("arguments_payload_ref")
+        if (
+            not isinstance(request_state, str)
+            or len(request_state.encode("utf-8")) > MAX_REQUEST_STATE_BYTES
+            or not isinstance(tool_name, str)
+            or not tool_name
+            or not isinstance(arguments_sha256, str)
+            or (
+                not (
+                    len(arguments_sha256) == 64
+                    and all(character in "0123456789abcdef" for character in arguments_sha256)
+                )
+                and not (
+                    len(arguments_sha256) == 71
+                    and arguments_sha256.startswith("sha256:")
+                    and all(
+                        character in "0123456789abcdef"
+                        for character in arguments_sha256[7:]
+                    )
+                )
+            )
+            or not isinstance(input_requests, dict)
+            or any(
+                not isinstance(key, str) or not isinstance(value, dict)
+                for key, value in input_requests.items()
+            )
+            or not isinstance(pending_action_id, str)
+            or not pending_action_id
+            or not isinstance(arguments_payload_ref, str)
+            or not arguments_payload_ref
+        ):
+            raise CredentialSecurityError("mcp_mrtr_evidence_payload_invalid")
+        return MCPMRTRRequestStateEvidence(
+            sealed_state_ref=record.sealed_state_ref,
+            owner_user_id=record.owner_user_id,
+            task_id=record.task_id,
+            node_id=record.node_id,
+            call_ref=record.call_ref,
+            request_state=request_state,
+            tool_name=tool_name,
+            arguments_sha256=arguments_sha256,
+            input_requests={
+                str(key): dict(value) for key, value in input_requests.items()
+            },
+            pending_action_id=pending_action_id,
+            arguments_payload_ref=arguments_payload_ref,
+        )
 
 
 def _record_matches_context(

@@ -22,6 +22,8 @@ from src.core.models import (
     MCPDispatchFinalizeResult,
     MCPDurableResultSnapshot,
     MCPInitialIntentCreateResult,
+    MCPInputSuspendResult,
+    MCPMRTRAnswerResult,
     MCPTerminalCandidateSnapshot,
     MCPTerminalResultCommitResult,
     MCPValidatedTerminalResultCandidate,
@@ -64,6 +66,7 @@ from src.storage.sqlite.models import (
     MCPDurableResultLifecycleRow,
     MCPExecutionTerminalProjectionRow,
     MCPNoServerIntentRow,
+    MCPSealedStateRow,
     MCPPendingToolActionRow,
     MCPTerminalResultReceiptRow,
     MCPTerminalCandidateLifecycleRow,
@@ -319,6 +322,9 @@ class PostgreSQLStorage(SQLiteStorage):
                     ),
                     durable_result_snapshot_reader=(
                         self._mcp_durable_result_snapshot_reader
+                    ),
+                    mrtr_request_state_evidence_reader=(
+                        self._mcp_mrtr_request_state_evidence_reader
                     ),
                 )
             )
@@ -771,6 +777,122 @@ class PostgreSQLStorage(SQLiteStorage):
             ),
         )
 
+    async def suspend_mcp_for_input(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        sealed_state_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        interrupt: Interrupt,
+        occurred_at: datetime,
+    ) -> MCPInputSuspendResult:
+        with self._session_factory() as session:
+            call = session.get(MCPCallRecordRow, call_id)
+            if call is None:
+                return MCPInputSuspendResult.CONFLICT
+            values = (
+                call.owner_user_id,
+                call.server_id,
+                call.pending_action_id,
+                call.branch_id,
+                call.task_id,
+                call.node_id,
+            )
+        owner_user_id, server_id, action_id, branch_id, task_id, node_id = values
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            intent_id=intent_id,
+            outbox_id=outbox_id,
+            pending_action_id=action_id,
+            branch_id=branch_id,
+            call_id=call_id,
+            task_id=task_id,
+            node_id=node_id,
+            interrupt_id=interrupt.interrupt_id,
+            operation=lambda state: state.suspend_mcp_for_input(
+                intent_id,
+                outbox_id,
+                call_id,
+                sealed_state_ref,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                interrupt,
+                occurred_at,
+            ),
+        )
+
+    async def accept_mcp_mrtr_answer(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        occurred_at: datetime,
+    ) -> MCPMRTRAnswerResult:
+        with self._session_factory() as session:
+            interrupt = session.get(InterruptRow, interrupt_id)
+            sealed_ref = (
+                ""
+                if interrupt is None
+                else str(
+                    (interrupt.required_fields or {}).get(
+                        "sealed_request_state_ref"
+                    )
+                    or ""
+                )
+            )
+            sealed = session.get(MCPSealedStateRow, sealed_ref)
+            call = (
+                None
+                if sealed is None
+                else session.get(MCPCallRecordRow, sealed.call_ref)
+            )
+            if interrupt is None or call is None:
+                return MCPMRTRAnswerResult.CONFLICT
+            values = (
+                call.owner_user_id,
+                call.server_id,
+                mcp_no_server_intent_id(call.task_id, node_id=call.node_id),
+                call.pending_action_id,
+                call.branch_id,
+                call.call_ref,
+                call.task_id,
+                call.node_id,
+            )
+        (
+            owner_user_id,
+            server_id,
+            intent_id,
+            action_id,
+            branch_id,
+            call_id,
+            task_id,
+            node_id,
+        ) = values
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            intent_id=intent_id,
+            outbox_id=mcp_dispatch_resume_outbox_id(intent_id),
+            pending_action_id=action_id,
+            branch_id=branch_id,
+            call_id=call_id,
+            task_id=task_id,
+            node_id=node_id,
+            interrupt_id=interrupt_id,
+            answer_id=answer.interrupt_answer_id,
+            operation=lambda state: state.accept_mcp_mrtr_answer(
+                interrupt_id, answer, occurred_at
+            ),
+        )
+
     async def admit_mcp_tool_call(
         self,
         intent_id: str,
@@ -846,6 +968,59 @@ class PostgreSQLStorage(SQLiteStorage):
                 record,
                 occurred_at,
                 action_candidate=action_candidate,
+                cp7_candidate_id=cp7_candidate_id,
+                cp7_epoch_id=cp7_epoch_id,
+            ),
+        )
+
+    async def admit_mrtr_continuation(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        original_call_id: str,
+        sealed_state_ref: str,
+        answer_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool:
+        with self._session_factory() as session:
+            original = session.get(MCPCallRecordRow, original_call_id)
+            if original is None:
+                return False
+            action_id = original.pending_action_id
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=record.owner_user_id,
+            server_id=record.server_id,
+            intent_id=intent_id,
+            outbox_id=outbox_id,
+            pending_action_id=action_id,
+            branch_id=record.branch_id,
+            call_id=original_call_id,
+            task_id=record.task_id,
+            node_id=record.node_id,
+            answer_id=answer_id,
+            operation=lambda state: state.admit_mrtr_continuation(
+                intent_id,
+                outbox_id,
+                original_call_id,
+                sealed_state_ref,
+                answer_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                payload_snapshot,
+                record,
+                occurred_at,
                 cp7_candidate_id=cp7_candidate_id,
                 cp7_epoch_id=cp7_epoch_id,
             ),

@@ -4,6 +4,8 @@ from typing import Protocol, runtime_checkable
 
 from src.core.models import (
     MCPDurableResultSnapshot,
+    MCPMRTRRequestStateEvidence,
+    MCPSealedState,
     MCPPendingActionPayloadSnapshot,
     MCPTerminalCandidateSnapshot,
 )
@@ -30,9 +32,21 @@ class DurableResultSnapshotReader(Protocol):
     ) -> MCPDurableResultSnapshot: ...
 
 
+@runtime_checkable
+class MRTRRequestStateEvidenceReader(Protocol):
+    def read(
+        self,
+        record: MCPSealedState,
+        *,
+        server_id: str,
+        protocol_version: str,
+    ) -> MCPMRTRRequestStateEvidence: ...
+
+
 __all__ = [
     "MCPPendingActionPayloadSnapshot",
     "PendingActionPayloadReader",
     "TerminalCandidateSnapshotReader",
     "DurableResultSnapshotReader",
+    "MRTRRequestStateEvidenceReader",
 ]

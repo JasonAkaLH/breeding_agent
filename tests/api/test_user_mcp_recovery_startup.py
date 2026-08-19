@@ -803,6 +803,258 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.shutdown()
 
+    async def test_mrtr_answer_resumes_original_action_without_selector_or_reapproval(
+        self,
+    ) -> None:
+        class Selector:
+            def __init__(self) -> None:
+                self.call_count = 0
+
+            async def select(self, _context):
+                self.call_count += 1
+                if self.call_count == 1:
+                    return MCPSelectorAction(
+                        MCPSelectorActionType.CALL_TOOL,
+                        tool_name="lookup",
+                        arguments={"query": "durable-original"},
+                    )
+                return MCPSelectorAction(MCPSelectorActionType.FINISH)
+
+        class MRTRGateway:
+            def __init__(self, storage, result_store) -> None:
+                self.recovery = MCPRecoveryService(
+                    storage, recovery_cipher(b"a" * 32)
+                )
+                self.result_store = result_store
+                self.call_count = 0
+                self.catalog = ToolCatalogSnapshot(
+                    server_id="server-mrtr-resume",
+                    effective_protocol_version="2026-07-28",
+                    tools=(
+                        MCPToolDescriptor(
+                            name="lookup",
+                            description="lookup",
+                            input_schema={
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                            },
+                            input_schema_sha256="schema-mrtr-resume",
+                        ),
+                    ),
+                )
+
+            async def open_scope(self, principal, platform_task_id, server_id, **_kwargs):
+                return MCPTaskServerScope(
+                    "scope-mrtr-resume",
+                    principal.username,
+                    platform_task_id,
+                    server_id,
+                    1,
+                    1,
+                )
+
+            async def list_tools(self, _scope):
+                return self.catalog
+
+            async def call_tool(
+                self, scope, tool_name, arguments, callbacks, **kwargs
+            ):
+                self.call_count += 1
+                call_ref = f"call-mrtr-resume-{self.call_count}"
+                await callbacks.on_created(call_ref)
+                await callbacks.on_registered(call_ref)
+                if self.call_count == 1:
+                    await self.recovery.save_request_state(
+                        MCPRecoveryCallContext(
+                            owner_user_id=scope.owner_user_id,
+                            task_id=scope.platform_task_id,
+                            node_id="node-mrtr-resume",
+                            call_ref=call_ref,
+                            pending_action_id=kwargs["pending_action_id"],
+                            arguments_payload_ref=kwargs["arguments_payload_ref"],
+                            arguments_sha256=kwargs["arguments_sha256"],
+                        ),
+                        server_id=scope.server_id,
+                        protocol_version="2026-07-28",
+                        sealed_state_ref="mcp-request-state:mrtr-resume",
+                        request_state="opaque-request-state",
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        input_requests={"confirm": {"type": "boolean"}},
+                    )
+                    return MCPCallOutcome.input_required(
+                        ({"type": "boolean"},),
+                        "mcp-request-state:mrtr-resume",
+                    )
+                if (
+                    kwargs.get("sealed_request_state_ref")
+                    != "mcp-request-state:mrtr-resume"
+                    or kwargs.get("input_responses") != {"confirm": True}
+                    or dict(arguments) != {"query": "durable-original"}
+                ):
+                    raise AssertionError("MRTR continuation authority drifted")
+                sink = self.result_store.create_sink(
+                    scope.platform_task_id,
+                    scope_id=scope.scope_id,
+                    durable=True,
+                    owner_user_id=scope.owner_user_id,
+                    node_id="node-mrtr-resume",
+                    call_ref=call_ref,
+                )
+                await sink.write(b'{"continued":true}')
+                result = await sink.finalize()
+                return MCPCallOutcome.completed(
+                    result.ref,
+                    byte_size=result.size_bytes,
+                    result_content_sha256="sha256:" + result.sha256,
+                    result_store_kind="durable_content_addressed",
+                )
+
+            async def verify_durable_result(self, *_args, **_kwargs):
+                return None
+
+            async def close_scope(self, _scope, _reason):
+                return None
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            now = runtime._utcnow_naive()
+            task = Task(
+                task_id="task-mrtr-resume",
+                conversation_id="conversation-mrtr-resume",
+                root_message_id="message-mrtr-resume",
+                status=TaskStatus.RUNNING,
+                mcp_execution_mode="user_scoped",
+                mcp_shadow_enabled=False,
+                mcp_rollout_config_version="cp7",
+                mcp_route_reason_code="enforce_selected",
+                mcp_rollout_mode="enforce",
+            )
+            node = TaskNode(
+                node_id="node-mrtr-resume",
+                task_id=task.task_id,
+                capability_id="mcp.dispatch",
+                status=NodeStatus.RUNNING,
+            )
+            server = UserMCPServer(
+                server_id="server-mrtr-resume",
+                owner_user_id="alice",
+                display_name="MRTR server",
+                routing_description="MRTR",
+                endpoint_url="https://example.test/mcp",
+                transport=UserMCPTransport.STREAMABLE_HTTP,
+                health_status=UserMCPHealthStatus.AVAILABLE,
+                created_at=now,
+                updated_at=now,
+            )
+            await runtime.storage.save_conversation(
+                Conversation(task.conversation_id, "alice")
+            )
+            await runtime.storage.save_message(
+                Message(
+                    task.root_message_id,
+                    task.conversation_id,
+                    MessageRole.USER,
+                    "run MRTR",
+                    task_id=task.task_id,
+                )
+            )
+            await runtime.storage.save_task(task)
+            await runtime.storage.save_task_node(node)
+            await runtime.storage.create_user_mcp_server(server)
+            selector = Selector()
+            gateway = MRTRGateway(runtime.storage, runtime.user_mcp_result_store)
+            coordinator = UserMCPDispatchCoordinator(
+                storage=runtime.storage,
+                gateway=gateway,
+                selector=selector,
+                audit_reference_signer=runtime._mcp_audit_reference_signer,
+                pending_action_payload_store=runtime._mcp_pending_action_payload_store,
+                terminal_candidate_snapshot_authority=(
+                    runtime._mcp_terminal_candidate_snapshot_authority
+                ),
+                durable_result_snapshot_authority=(
+                    runtime._mcp_durable_result_snapshot_authority
+                ),
+                terminal_result_root=runtime._mcp_terminal_result_root,
+                now_fn=lambda: now,
+                terminal_now_fn=lambda: now.replace(tzinfo=timezone.utc),
+            )
+            request = CapabilityExecutionRequest(
+                capability_id="mcp.dispatch",
+                conversation_id=task.conversation_id,
+                task_id=task.task_id,
+                node_id=node.node_id,
+                input_payload={"server_id": server.server_id},
+                metadata={"user_message": "run MRTR"},
+            )
+            approval = await coordinator.dispatch(request, server_id=server.server_id)
+            await runtime.storage.accept_mcp_tool_approval(
+                approval.interrupt.interrupt_id,
+                InterruptAnswer(
+                    interrupt_answer_id="answer-mrtr-approval",
+                    interrupt_id=approval.interrupt.interrupt_id,
+                    answer_payload={"mcp_tool_approval": "allow_once"},
+                    source_message_id="answer-message-mrtr-approval",
+                    accepted=True,
+                    created_at=now,
+                    accepted_at=now,
+                ),
+                "allow_once",
+                now,
+            )
+
+            input_required = await coordinator.dispatch(
+                request, server_id=server.server_id
+            )
+
+            self.assertEqual(input_required.output_payload["mcp_status"], "input_required")
+            self.assertEqual(selector.call_count, 1)
+            self.assertEqual(gateway.call_count, 1)
+            accepted = await runtime.storage.accept_mcp_mrtr_answer(
+                input_required.interrupt.interrupt_id,
+                InterruptAnswer(
+                    interrupt_answer_id="answer-mrtr-input",
+                    interrupt_id=input_required.interrupt.interrupt_id,
+                    answer_payload={"mcp_input_responses": {"confirm": True}},
+                    source_message_id="answer-message-mrtr-input",
+                    accepted=True,
+                    created_at=now,
+                    accepted_at=now,
+                ),
+                now,
+            )
+            self.assertEqual(str(accepted), "accepted")
+
+            completed = await coordinator.dispatch(request, server_id=server.server_id)
+
+            self.assertIsNone(completed.error)
+            self.assertEqual(selector.call_count, 2)
+            self.assertEqual(gateway.call_count, 2)
+            calls = await runtime.storage.list_mcp_call_records(
+                "alice", task.task_id
+            )
+            self.assertEqual([call.status for call in calls], ["input_required", "completed"])
+            self.assertEqual(calls[1].continuation_of_call_ref, calls[0].call_ref)
+            self.assertIsNone(calls[1].pending_action_id)
+            self.assertIsNone(
+                await runtime.storage.get_mcp_sealed_state(
+                    "alice", task.task_id, "mcp-request-state:mrtr-resume"
+                )
+            )
+            await runtime.shutdown()
+
     async def test_v2_open_interrupt_waits_then_recovers_automatic_metadata(
         self,
     ) -> None:
