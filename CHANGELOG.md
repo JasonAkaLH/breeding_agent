@@ -22,7 +22,7 @@
 
 ## [Unreleased]
 
-- 新增MCP auto/explicit selected-route等价性开发计划：实现仅允许新增`src/orchestration/mcp_route_handoff.py`并修改`src/orchestration/service.py`唯一交接点，以可信固定ID或当前Server allowlist做authority，canonical投影后统一进入既有`explicit_command`执行合同；Phase 0～4覆盖纯函数红绿测试、Node/Task拒绝收敛、v2/approval/legacy/remote continuation、多MCP和prompt-injection边界、完整回归及用户PNG真实auto OCR smoke。明确禁止修改API Runtime、恢复Provider、Coordinator、Gateway、Storage、v2 envelope、OCR workflow和多MCP DAG。本轮仅新增计划与索引，尚未修改业务代码。License Requirement：无新增依赖或许可变更。
+- MCP auto/explicit selected-route等价性开发计划经`document-perfectization`三轮审阅与授权修订后以100/100通过95分信心门：实现仅允许新增`src/orchestration/mcp_route_handoff.py`并修改`src/orchestration/service.py`唯一交接点，以可信固定ID或当前Server allowlist做authority，canonical投影后统一进入既有`explicit_command`执行合同。计划固定`continuation ownership -> route authority -> scheduler -> Executor`顺序，闭合pinned字段存在性、非法payload兼容、CAS取消/竞争及空dependency防护；Phase 0～4覆盖纯函数红绿测试、Node/Task拒绝收敛、v2/approval/legacy/remote continuation、多MCP和prompt-injection边界、完整回归及用户PNG真实auto OCR smoke。明确禁止修改API Runtime、恢复Provider、Coordinator、Gateway、Storage、v2 envelope、OCR workflow和多MCP DAG。本轮仅修改计划、设计复杂度/并发说明及索引，尚未修改业务代码。License Requirement：无新增依赖或许可变更。
 
 - 新增MCP auto与显式绑定路由等价性设计：两者只允许在Server选择来源上不同；Orchestration向Executor交接的唯一route handoff以system-managed固定Server ID或当前`available_mcp_servers`白名单验证authority，主动移除重复Server ID、显示命令和来源字段，再统一输出既有`mcp_binding_mode=explicit_command` selected-server执行合同。来源继续由既有root binding context、public badge和选择点evidence记录，恢复/执行阶段不重推断且不新增audit I/O；该交接点覆盖初次执行、approval、startup恢复和remote continuation，不修改API Runtime、恢复Provider、Coordinator、附件物化、OCR workflow、Gateway、Storage、v2信封或多MCP DAG。最新auto OCR的20次232-byte错误Call作为验收复现，streamed `_mcpResultRef`隐藏`isError`继续作为独立缺陷。License Requirement：仅设计、索引与变更记录，无新增依赖或许可变更。
 

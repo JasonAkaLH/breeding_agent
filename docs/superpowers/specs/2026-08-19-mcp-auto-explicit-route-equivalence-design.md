@@ -6,7 +6,7 @@
 - 分支：`main`
 - 状态：设计已确认，尚未实施
 - 范围：只在Orchestration的selected-route交接边界归一化MCP路由metadata；API、恢复模块与执行链零修改
-- `document-perfectization`：2轮审阅与2轮批准修订；100/100，Pass
+- `document-perfectization`：2轮设计审阅修订及实施计划一致性复审；100/100，Pass
 
 ## 背景与故障证据
 
@@ -108,6 +108,7 @@ normalize_selected_mcp_route(
     capability_id,
     input_payload,
     node_metadata,
+    pinned_server_id_present,
     pinned_server_id,
     available_server_ids
 ) -> {
@@ -118,8 +119,9 @@ normalize_selected_mcp_route(
 
 输入authority只能来自已有可信运行时状态：
 
-- `pinned_server_id`取system-managed request metadata中的`mcp_dispatch_server_id`；用户提交的
-  同名metadata已被现有API denylist移除；
+- `pinned_server_id_present`按system-managed request metadata中是否存在
+  `mcp_dispatch_server_id`计算，`pinned_server_id`保留其raw值；用户提交的同名metadata已被现有
+  API denylist移除；
 - `available_server_ids`只取`OrchestrationRequest.available_mcp_servers`，不得从提示词、Planner
   metadata或附件内容构造；
 - Node payload仍必须精确为一个非空`server_id`，不得包含Endpoint、credential、Tool或Schema。
@@ -165,11 +167,21 @@ set normalized.mcp_binding_mode = "explicit_command"
 Runtime Replanner、approval恢复、startup恢复和remote continuation产生的全部待执行
 `mcp.dispatch` Node，不在Provider或API Runtime分别打补丁。
 
+现有`_assert_mcp_continuation_execution_owned(request)`必须保持第一道门禁；固定顺序为：
+
+```text
+continuation ownership → route authority → scheduler → Executor
+```
+
+无有效continuation lease的worker不得执行route CAS或修改Node状态。
+
 - authority通过：使用canonical Node metadata继续既有READY→RUNNING→Executor流程；
 - `mcp_selected_route_not_authorized`：以当前Node状态做CAS并直接收敛为FAILED，记录不含Server ID、
   用户文字或payload的`node.failed` code，跳过scheduler/Executor/network，再由现有completion
   policy收敛Task；
-- CAS因取消或并发状态变化失败：服从当前Task/Node authority，不覆盖新状态且不执行网络调用；
+- CAS因取消状态变化失败：返回latest cancellation authority并由现有Task取消路径收敛；其他CAS
+  丢失一律抛确定性route rejection conflict，当前worker不得把空output当作其他worker的完成结果、
+  不得继续下游或执行网络调用；
 - malformed payload：不由适配器收敛，继续使用现有Executor错误路径，保持错误码兼容。
 
 该处理只复用既有Node状态和completion policy，不新增生命周期状态、不修改普通Node失败语义。
@@ -186,7 +198,8 @@ Runtime Replanner、approval恢复、startup恢复和remote continuation产生�
 
 ### 6. 非功能约束
 
-- 适配器必须为O(1)纯函数，不执行Storage、网络、Event/Audit或时间相关I/O；
+- 适配器必须为纯函数，不执行Storage、网络、Event/Audit或时间相关I/O；相对于附件、消息、Tool
+  参数和结果大小为O(1)，实际CPU成本只允许来自有界Node metadata浅拷贝和当前Server ID集合投影；
 - 不记录Server ID、文件名、用户文字、附件、Tool、参数、result或credential；
 - 不增加正常MCP调用次数、Selector step、approval round或resume envelope大小；
 - 非MCP Node必须保持逐字段不变；malformed MCP payload必须保留既有错误码；
@@ -329,7 +342,7 @@ intent + v2 envelope锁定server_id
 
 允许的业务源码修改只有：
 
-- 新增`src/orchestration/mcp_route_handoff.py`：O(1)纯route adapter与闭合result contract；
+- 新增`src/orchestration/mcp_route_handoff.py`：无I/O的有界纯route adapter与闭合result contract；
 - 修改`src/orchestration/service.py`：唯一调用点及authority拒绝的Node失败收敛；
 - 增加对应`tests/orchestration/`测试。
 
