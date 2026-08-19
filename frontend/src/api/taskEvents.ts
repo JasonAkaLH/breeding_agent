@@ -108,6 +108,7 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
       'mcp.input_required',
       'mcp.input_submitted',
       'mcp.remote_task_status_changed',
+      'mcp.result_artifact_projection',
       'artifact.download_denied',
       'artifact.download_gone',
       'artifact.downloaded',

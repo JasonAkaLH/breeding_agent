@@ -105,6 +105,9 @@ async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
         created_at=task.created_at,
         updated_at=task.updated_at,
         mcp_terminal_projection=await runtime.mcp_terminal_projection_for_task(task),
+        mcp_result_artifact_projections=(
+            await runtime.mcp_result_artifact_projections_for_task(task.task_id)
+        ),
     )
 
 

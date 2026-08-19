@@ -4,8 +4,8 @@ import json
 from datetime import datetime
 from functools import wraps
 
-from src.core.enums import ArtifactType, MessageRole, TaskStatus
-from src.core.models import Artifact, Conversation, Interrupt, Message, Task
+from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
+from src.core.models import Artifact, Conversation, EventRecord, Interrupt, Message, Task
 from src.storage.artifact_files import build_file_storage_ref
 from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, file_upload_message_id
 from tests.api.support import APITestCase
@@ -89,6 +89,61 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
         self.assertEqual(artifact["artifact_id"], f"{conversation_id}:filtered_query_result:1")
         self.assertEqual(artifact["artifact_type"], "json")
         self.assertEqual(json.loads(artifact["storage_ref"])["columns"], ["品种名称"])
+
+    async def test_conversation_messages_include_closed_mcp_result_artifact_projection(
+        self,
+    ) -> None:
+        conversation_id = "conv-history-mcp-result-projection"
+        await self._save_conversation_with_messages(conversation_id)
+        task_id = f"{conversation_id}:task-1"
+        await self.runtime.storage.append_event(
+            EventRecord(
+                event_id="mcp-result-artifact-projection:v1:artifact-1:deferred:projection_failed",
+                conversation_id=conversation_id,
+                task_id=task_id,
+                node_id=f"{conversation_id}:node-1",
+                event_type="mcp.result_artifact_projection",
+                payload={
+                    "schema": "maf.user_mcp.result_artifact_projection.v1",
+                    "safe_call_ref": "a" * 64,
+                    "status": "deferred",
+                    "reason_code": "projection_failed",
+                    "artifact_count": 0,
+                },
+                visibility=EventVisibility.FRONTEND,
+                created_at=datetime(2026, 6, 3, 1, 0, 4),
+            )
+        )
+
+        response = await self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        messages = response.json()["messages"]
+        user_message = next(message for message in messages if message["role"] == "user")
+        assistant_message = next(
+            message for message in messages if message["role"] == "assistant"
+        )
+        self.assertEqual(user_message["mcp_result_artifact_projections"], [])
+        self.assertEqual(
+            assistant_message["mcp_result_artifact_projections"],
+            [
+                {
+                    "schema": "maf.user_mcp.result_artifact_projection.v1",
+                    "safe_call_ref": "a" * 64,
+                    "status": "deferred",
+                    "reason_code": "projection_failed",
+                    "artifact_count": 0,
+                }
+            ],
+        )
+        task_response = await self.client.get(f"/api/v1/tasks/{task_id}")
+        self.assertEqual(task_response.status_code, 200)
+        self.assertEqual(
+            task_response.json()["mcp_result_artifact_projections"],
+            assistant_message["mcp_result_artifact_projections"],
+        )
 
     async def test_conversation_messages_include_query_result_preview_when_no_filtered_result(self) -> None:
         conversation_id = "conv-history-sqlquery-preview"

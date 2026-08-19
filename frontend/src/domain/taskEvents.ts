@@ -1,4 +1,4 @@
-import type { TaskEventEnvelope } from '../api/types';
+import type { MCPResultArtifactProjection, TaskEventEnvelope } from '../api/types';
 
 export type TaskPhase =
   | 'idle'
@@ -137,6 +137,7 @@ export interface MCPTaskState {
   executionUnknown: MCPExecutionUnknownState | null;
   executionResolution: MCPExecutionResolutionState | null;
   lateResult: MCPLateResultState | null;
+  resultArtifactProjections: MCPResultArtifactProjection[];
 }
 
 export interface TaskEventState {
@@ -191,6 +192,7 @@ export function createInitialTaskEventState(): TaskEventState {
       executionUnknown: null,
       executionResolution: null,
       lateResult: null,
+      resultArtifactProjections: [],
     },
     seenEventIds: [],
     eventFingerprints: {},
@@ -572,6 +574,23 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
       return applyMCPInputEvent(withEvent, event);
     case 'mcp.remote_task_status_changed':
       return applyMCPRemoteTaskEvent(withEvent, event);
+    case 'mcp.result_artifact_projection': {
+      const projections = foldMCPResultArtifactProjections([
+        ...withEvent.mcp.resultArtifactProjections,
+        event.payload,
+      ]);
+      if (projections === null) {
+        return {
+          ...withEvent,
+          mcp: { ...withEvent.mcp, resultArtifactProjections: [] },
+          eventSyncError: 'MCP 完整结果文件状态存在冲突，请重新同步任务历史。',
+        };
+      }
+      return {
+        ...withEvent,
+        mcp: { ...withEvent.mcp, resultArtifactProjections: projections },
+      };
+    }
     case 'mcp.runtime_unavailable':
       return {
         ...withEvent,
@@ -668,6 +687,7 @@ const KNOWN_TASK_EVENT_TYPES = new Set([
   'mcp.tool_approval_decided', 'mcp.tool_call_started', 'mcp.tool_call_still_running',
   'mcp.tool_call_completed', 'mcp.tool_call_failed', 'mcp.tool_call_cancelled',
   'mcp.input_required', 'mcp.input_submitted', 'mcp.remote_task_status_changed',
+  'mcp.result_artifact_projection',
   'task.completed', 'task.cancellation_requested', 'task.cancelled', 'node.cancelled',
   'node.blocked_by_cancellation', 'node.orphaned', 'node.failed', 'task.failed',
   'skill.progress',
@@ -680,6 +700,12 @@ function isKnownTaskEventType(eventType: string): boolean {
 export function isClosedCP7Event(event: TaskEventEnvelope): boolean {
   const payload = event.payload;
   if (!isRecord(payload)) return false;
+  if (event.event_type === 'mcp.result_artifact_projection') {
+    const projection = parseMCPResultArtifactProjection(payload);
+    return projection !== null
+      && event.event_id.startsWith('mcp-result-artifact-projection:v1:')
+      && event.event_id.endsWith(`:${projection.status}:${projection.reason_code}`);
+  }
   if (event.event_type === 'mcp.runtime_unavailable') {
     return hasExactKeys(payload, ['status', 'reason_code'])
       && payload.status === 'unavailable'
@@ -778,6 +804,63 @@ export function isClosedCP7Event(event: TaskEventEnvelope): boolean {
       && event.event_id === expectedCorrectionEventId(payload.call_id);
   }
   return true;
+}
+
+export function foldMCPResultArtifactProjections(
+  values: readonly unknown[],
+): MCPResultArtifactProjection[] | null {
+  if (values.length > 120) return null;
+  const grouped = new Map<string, Map<MCPResultArtifactProjection['status'], MCPResultArtifactProjection>>();
+  for (const value of values) {
+    const projection = parseMCPResultArtifactProjection(value);
+    if (!projection) return null;
+    let byStatus = grouped.get(projection.safe_call_ref);
+    if (!byStatus) {
+      if (grouped.size >= 20) return null;
+      byStatus = new Map();
+      grouped.set(projection.safe_call_ref, byStatus);
+    }
+    const current = byStatus.get(projection.status);
+    if (!current || projectionReasonPriority(projection) > projectionReasonPriority(current)) {
+      byStatus.set(projection.status, projection);
+    }
+  }
+  const folded: MCPResultArtifactProjection[] = [];
+  for (const safeCallRef of [...grouped.keys()].sort()) {
+    const byStatus = grouped.get(safeCallRef)!;
+    if (byStatus.has('ready') && byStatus.has('permanent_failure')) return null;
+    const selected = byStatus.get('ready') ?? byStatus.get('permanent_failure') ?? byStatus.get('deferred');
+    if (selected) folded.push(selected);
+  }
+  return folded;
+}
+
+function parseMCPResultArtifactProjection(value: unknown): MCPResultArtifactProjection | null {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'schema', 'safe_call_ref', 'status', 'reason_code', 'artifact_count',
+  ])) return null;
+  if (
+    value.schema !== 'maf.user_mcp.result_artifact_projection.v1'
+    || typeof value.safe_call_ref !== 'string'
+    || !/^[0-9a-f]{64}$/.test(value.safe_call_ref)
+    || !['ready', 'deferred', 'permanent_failure'].includes(String(value.status))
+    || !['promoted', 'already_promoted', 'capacity_unavailable', 'projection_failed', 'source_expired'].includes(String(value.reason_code))
+    || (value.artifact_count !== 0 && value.artifact_count !== 1)
+  ) return null;
+  const projection = value as unknown as MCPResultArtifactProjection;
+  const validReason = projection.status === 'ready'
+    ? ['promoted', 'already_promoted'].includes(projection.reason_code)
+    : projection.status === 'deferred'
+      ? ['capacity_unavailable', 'projection_failed'].includes(projection.reason_code)
+      : ['projection_failed', 'source_expired'].includes(projection.reason_code);
+  if (!validReason || (projection.status === 'ready') !== (projection.artifact_count === 1)) return null;
+  return projection;
+}
+
+function projectionReasonPriority(projection: MCPResultArtifactProjection): number {
+  if (projection.status === 'ready') return projection.reason_code === 'promoted' ? 1 : 0;
+  if (projection.status === 'deferred') return projection.reason_code === 'projection_failed' ? 1 : 0;
+  return projection.reason_code === 'source_expired' ? 1 : 0;
 }
 
 function isCP7ContractEvent(event: TaskEventEnvelope): boolean {

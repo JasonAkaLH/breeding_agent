@@ -255,6 +255,38 @@ class DeleteUploadRequest(StrictRequestModel):
     upload_id: str
 
 
+class MCPResultArtifactProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_: Literal["maf.user_mcp.result_artifact_projection.v1"] = Field(
+        alias="schema",
+        serialization_alias="schema",
+    )
+    safe_call_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["ready", "deferred", "permanent_failure"]
+    reason_code: Literal[
+        "promoted",
+        "already_promoted",
+        "capacity_unavailable",
+        "projection_failed",
+        "source_expired",
+    ]
+    artifact_count: Literal[0, 1]
+
+    @model_validator(mode="after")
+    def validate_projection_state(self):
+        allowed = {
+            "ready": {"promoted", "already_promoted"},
+            "deferred": {"capacity_unavailable", "projection_failed"},
+            "permanent_failure": {"projection_failed", "source_expired"},
+        }
+        if self.reason_code not in allowed[self.status]:
+            raise ValueError("mcp_result_artifact_projection_reason_invalid")
+        if (self.status == "ready") != (self.artifact_count == 1):
+            raise ValueError("mcp_result_artifact_projection_count_invalid")
+        return self
+
+
 class TaskSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -271,6 +303,9 @@ class TaskSummaryResponse(BaseModel):
     created_at: datetime | None
     updated_at: datetime | None
     mcp_terminal_projection: dict[str, Any] | None = None
+    mcp_result_artifact_projections: list[
+        MCPResultArtifactProjectionResponse
+    ] = Field(default_factory=list, max_length=20)
 
 
 class TaskListResponse(BaseModel):
@@ -343,6 +378,9 @@ class MessageResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     updated_at: datetime | None = None
     artifacts: list[ArtifactResponse] = Field(default_factory=list)
+    mcp_result_artifact_projections: list[
+        MCPResultArtifactProjectionResponse
+    ] = Field(default_factory=list, max_length=20)
 
 
 class ConversationMessagesResponse(BaseModel):

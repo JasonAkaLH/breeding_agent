@@ -31,6 +31,7 @@ MCP_ROLLOUT_AUDIT_EVENT_TYPES = frozenset(
 )
 _SAFE_PAYLOAD_FIELDS = frozenset(
     {
+        "artifact_count",
         "decision",
         "error_code",
         "heartbeat_at",
@@ -42,11 +43,13 @@ _SAFE_PAYLOAD_FIELDS = frozenset(
         "next_poll_at",
         "queue_position",
         "reason",
+        "reason_code",
         "safe_call_ref",
         "safe_server_ref",
         "safe_remote_task_ref",
         "safe_task_ref",
         "server_display_name",
+        "schema",
         "status",
         "binding_mode",
         "selector_action",

@@ -136,6 +136,17 @@ export interface DeleteUploadResponse {
   deleted: boolean;
 }
 
+export type MCPResultArtifactProjectionStatus = 'ready' | 'deferred' | 'permanent_failure';
+export type MCPResultArtifactProjectionReason = 'promoted' | 'already_promoted' | 'capacity_unavailable' | 'projection_failed' | 'source_expired';
+
+export interface MCPResultArtifactProjection {
+  schema: 'maf.user_mcp.result_artifact_projection.v1';
+  safe_call_ref: string;
+  status: MCPResultArtifactProjectionStatus;
+  reason_code: MCPResultArtifactProjectionReason;
+  artifact_count: 0 | 1;
+}
+
 export interface TaskSummaryResponse {
   task_id: string;
   conversation_id: string;
@@ -150,6 +161,7 @@ export interface TaskSummaryResponse {
   created_at: string | null;
   updated_at: string | null;
   mcp_terminal_projection?: Record<string, unknown> | null;
+  mcp_result_artifact_projections?: MCPResultArtifactProjection[];
 }
 
 export interface TaskListResponse {
@@ -188,6 +200,7 @@ export interface MessageResponse {
   metadata?: Record<string, unknown>;
   updated_at?: string | null;
   artifacts?: ArtifactResponse[];
+  mcp_result_artifact_projections?: MCPResultArtifactProjection[];
 }
 
 export interface ConversationMessagesResponse {

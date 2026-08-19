@@ -5,7 +5,7 @@ import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { pickComposerPlaceholder } from './domain/composerPlaceholders';
 import { deriveMCPServerCommands, isMCPServerInput, mcpServerMenuCandidates, mcpServerSubmitIntent, parseDirectMCPServerCommand, type MCPServerCommand } from './domain/mcpServerCommands';
@@ -20,6 +20,7 @@ import {
   markTaskCompleted,
   markTaskFailed,
   markWaitingInputRequired,
+  foldMCPResultArtifactProjections,
   parseCapabilityFallbackNotice,
   prepareTaskEventResync,
   taskProgressDisplayText,
@@ -31,7 +32,7 @@ import {
 import { DataQueryResultCard } from './components/DataQueryResultCard';
 import { MarkdownText } from './components/MarkdownText';
 import { MCPApprovalDialog } from './components/MCPApprovalDialog';
-import { MCPRuntimeStatus } from './components/MCPRuntimeStatus';
+import { MCPResultArtifactNotice, MCPRuntimeStatus } from './components/MCPRuntimeStatus';
 import { MCPSettingsPanel } from './components/MCPSettingsPanel';
 import SlashCommandMenu from './components/SlashCommandMenu';
 import './styles.css';
@@ -72,12 +73,13 @@ interface ConversationMessage {
   fallbackNotice?: CapabilityFallbackNotice;
   skillStatuses?: SkillStatusLine[];
   artifactDisplays?: CapabilityArtifactDisplay[];
+  mcpResultArtifactProjections?: MCPResultArtifactProjection[];
   finalContentLoaded?: boolean;
   replyCompleted?: boolean;
   interruptPrompt?: PendingInterrupt;
 }
 
-type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'taskId' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'fallbackNotice' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
+type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'taskId' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'fallbackNotice' | 'skillStatuses' | 'artifactDisplays' | 'mcpResultArtifactProjections' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
 type FileArtifactResult = Extract<CapabilityArtifactDisplay, { kind: 'file' }>['result'];
 
 interface PendingInterrupt {
@@ -203,6 +205,7 @@ const TERMINAL_PROJECTION_EVENT_TYPES = new Set([
   'mcp.execution_status_unknown',
   'mcp.execution_status_resolution',
   'mcp.late_terminal_result_recovered',
+  'mcp.result_artifact_projection',
 ]);
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 function validReasoningConfig(option: ModelEditionOption | null | undefined): option is ModelEditionOption {
@@ -825,7 +828,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function reconcileTerminalTaskStatus(
-    task: Pick<TaskSummaryResponse, 'task_id' | 'status' | 'mcp_terminal_projection'>,
+    task: Pick<TaskSummaryResponse, 'task_id' | 'status' | 'mcp_terminal_projection' | 'mcp_result_artifact_projections'>,
     expectedTaskId: string,
     assistantId: string,
     generation: number,
@@ -833,6 +836,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   ): Promise<boolean> {
     if (task.task_id !== expectedTaskId) return false;
     if (!isCurrentRestoreGeneration(generation, targetConversationId)) return true;
+    mergeTaskResultArtifactProjections(task.mcp_result_artifact_projections);
     if (!isTerminalTaskStatus(task.status)) return false;
     if (task.status === 'failed' && task.mcp_terminal_projection) {
       taskPhaseRef.current = 'failed';
@@ -919,6 +923,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const restoringState = hasTerminalProjection
       ? { ...createRestoringTaskState(), phase: 'failed' as const, statusText: '任务执行结果无法确认', currentActivityText: null }
       : createRestoringTaskState();
+    const restoredProjections = foldMCPResultArtifactProjections(
+      task.mcp_result_artifact_projections ?? [],
+    ) ?? [];
+    restoringState.mcp = {
+      ...restoringState.mcp,
+      resultArtifactProjections: restoredProjections,
+    };
     const restoredAssistantId = `restored-assistant-${taskId}`;
     const restoredAssistantMessage: ConversationMessage = {
       id: restoredAssistantId,
@@ -2049,6 +2060,37 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }, EVENT_STREAM_RECONNECT_DELAY_MS);
   }
 
+  function mergeTaskResultArtifactProjections(
+    projections: MCPResultArtifactProjection[] | undefined,
+  ) {
+    const fromSummary = foldMCPResultArtifactProjections(projections ?? []);
+    if (fromSummary === null) return;
+    const current = taskStateRef.current;
+    const merged = foldMCPResultArtifactProjections([
+      ...current.mcp.resultArtifactProjections,
+      ...fromSummary,
+    ]);
+    const next: TaskEventState = merged === null
+      ? {
+        ...current,
+        mcp: { ...current.mcp, resultArtifactProjections: [] },
+        eventSyncError: 'MCP 完整结果文件状态存在冲突，请重新同步任务历史。',
+      }
+      : {
+        ...current,
+        mcp: { ...current.mcp, resultArtifactProjections: merged },
+      };
+    taskStateRef.current = next;
+    setTaskState(next);
+  }
+
+  function copyTaskResultArtifactProjectionsToAssistant(assistantId: string) {
+    const projections = taskStateRef.current.mcp.resultArtifactProjections;
+    updateAssistantMessage(assistantId, {
+      mcpResultArtifactProjections: projections.length > 0 ? projections : undefined,
+    });
+  }
+
   async function loadArtifacts(taskId: string, assistantId: string) {
     try {
       const response = await api.getTaskArtifacts(taskId);
@@ -2064,6 +2106,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         });
       }
       updateAssistantMessage(assistantId, { activityText: undefined });
+      copyTaskResultArtifactProjectionsToAssistant(assistantId);
       taskPhaseRef.current = 'completed';
       setTaskState((state) => markTaskCompleted(state));
       updateCurrentTaskId(null);
@@ -2085,6 +2128,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       void refreshConversationHistory();
     } catch {
+      copyTaskResultArtifactProjectionsToAssistant(assistantId);
       localTaskRuntimeActiveRef.current = false;
       taskPhaseRef.current = 'completed';
       setTaskState((state) => markTaskCompleted(state, '任务已完成，但结果加载失败'));
@@ -3285,6 +3329,9 @@ function MessageBubble({
   const shouldShowAssistantActions = message.role === 'assistant'
     && (Boolean(message.finalContentLoaded) || Boolean(message.replyCompleted))
     && Boolean(message.content.trim());
+  const hasResultArtifactNotice = message.mcpResultArtifactProjections?.some(
+    (item) => item.status !== 'ready',
+  ) ?? false;
   return (
     <div className={className}>
       <div className="message-meta">{message.role === 'user' ? '你' : 'SeedPilot'}</div>
@@ -3297,6 +3344,7 @@ function MessageBubble({
           <ReasoningBox content={message.reasoningContent ?? ''} complete={message.reasoningComplete} />
         ) : null}
         {message.fallbackNotice ? <CapabilityFallbackNoticeView notice={message.fallbackNotice} /> : null}
+        <MCPResultArtifactNotice projections={message.mcpResultArtifactProjections ?? []} />
         {message.interruptPrompt ? (
           <InterruptQuestionText interrupt={message.interruptPrompt} />
         ) : shouldShowContent || message.artifactDisplays?.length ? (
@@ -3310,7 +3358,7 @@ function MessageBubble({
               />
             ))}
           </>
-        ) : message.activityText ? (
+        ) : hasResultArtifactNotice ? null : message.activityText ? (
           <ActivityNotice text={message.activityText} status={message.activityStatus} />
         ) : (
           <ActivityNotice text="正在等待回答..." />
@@ -3534,6 +3582,9 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
   const mcpServerBadge = message.role === 'user'
     ? parseMCPServerBadge(message.metadata)
     : null;
+  const mcpResultArtifactProjections = message.role === 'assistant'
+    ? foldMCPResultArtifactProjections(message.mcp_result_artifact_projections ?? []) ?? []
+    : [];
   return {
     id: message.message_id,
     kind: 'chat',
@@ -3546,6 +3597,9 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
     fallbackNotice: fallbackNotice ?? undefined,
     mcpServerBadge: mcpServerBadge ?? undefined,
     artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
+    mcpResultArtifactProjections: mcpResultArtifactProjections.length > 0
+      ? mcpResultArtifactProjections
+      : undefined,
   };
 }
 
@@ -3576,13 +3630,31 @@ export function mergeHistoryWithLiveFallbackNotices(
   const liveFallbacks = currentMessages
     .filter((message) => message.role === 'assistant' && message.fallbackNotice && message.taskId)
     .map((message) => ({ taskId: message.taskId as string, notice: message.fallbackNotice as CapabilityFallbackNotice }));
-  if (liveFallbacks.length === 0) return loadedMessages;
   const noticeByTaskId = new Map(liveFallbacks.map((item) => [item.taskId, item.notice]));
-  return loadedMessages.map((message) => (
-    message.role === 'assistant' && message.taskId && !message.fallbackNotice && noticeByTaskId.has(message.taskId)
-      ? { ...message, fallbackNotice: noticeByTaskId.get(message.taskId) }
-      : message
-  ));
+  const liveResultArtifactProjections = currentMessages
+    .filter((message) => message.role === 'assistant' && message.mcpResultArtifactProjections?.length && message.taskId)
+    .map((message) => ({
+      taskId: message.taskId as string,
+      projections: message.mcpResultArtifactProjections as MCPResultArtifactProjection[],
+    }));
+  if (liveFallbacks.length === 0 && liveResultArtifactProjections.length === 0) return loadedMessages;
+  const projectionsByTaskId = new Map(
+    liveResultArtifactProjections.map((item) => [item.taskId, item.projections]),
+  );
+  return loadedMessages.map((message) => {
+    if (message.role !== 'assistant' || !message.taskId) return message;
+    const mergedProjections = foldMCPResultArtifactProjections([
+      ...(projectionsByTaskId.get(message.taskId) ?? []),
+      ...(message.mcpResultArtifactProjections ?? []),
+    ]);
+    return {
+      ...message,
+      fallbackNotice: message.fallbackNotice ?? noticeByTaskId.get(message.taskId),
+      mcpResultArtifactProjections: mergedProjections?.length
+        ? mergedProjections
+        : undefined,
+    };
+  });
 }
 
 function safeFileUploadHistoryMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {

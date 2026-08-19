@@ -54,6 +54,7 @@ from src.integrations.mcp.adapter_2025_tasks import (
     MCP2025TaskResult,
     MCP2025TaskState,
 )
+from src.integrations.mcp.adapter_2026 import MCPTaskState as MCP2026TaskState
 from src.integrations.mcp.credentials import (
     MCPRecoveryCallContext,
     MCPRecoveryService,
@@ -685,6 +686,9 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             await runtime.storage.create_user_mcp_server(server)
             selector = TwoStepSelector()
             gateway = DurableCompletedGateway(runtime.user_mcp_result_store)
+            projector = AsyncMock(
+                side_effect=[RuntimeError("simulated projection failure"), None]
+            )
             coordinator = UserMCPDispatchCoordinator(
                 storage=runtime.storage,
                 gateway=gateway,
@@ -699,6 +703,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 durable_result_snapshot_authority=(
                     runtime._mcp_durable_result_snapshot_authority
                 ),
+                result_artifact_projector=projector,
                 terminal_result_root=runtime._mcp_terminal_result_root,
                 now_fn=lambda: now,
                 terminal_now_fn=lambda: now.replace(tzinfo=timezone.utc),
@@ -778,6 +783,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 "alice", task.task_id
             )
             self.assertEqual([call.status for call in calls], ["completed", "completed"])
+            self.assertEqual(
+                [call.args[0] for call in projector.await_args_list],
+                [call.result_ref for call in calls],
+            )
             self.assertEqual(
                 [
                     str(
@@ -1114,7 +1123,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     safe_remote_task_ref="mcp-task:remote-adopt",
                     remote_task_id="remote-private-id",
                     status="working",
-                    poll_interval_ms=1000,
+                    poll_interval_ms=0,
                 )
                 return MCPCallOutcome.task_created(
                     "mcp-task:remote-adopt", status="working"
@@ -1240,6 +1249,46 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 str((await runtime.storage.get_task_node(node.node_id)).status),
                 "waiting_for_dependency",
             )
+
+            test_case = self
+
+            class CompletedRemoteClient:
+                async def tasks_get(self, safe_ref, *, recovery_context):
+                    test_case.assertEqual(safe_ref, "mcp-task:remote-adopt")
+                    test_case.assertEqual(
+                        recovery_context.call_ref, "call-remote-adopt"
+                    )
+                    return MCP2026TaskState(
+                        safe_remote_task_ref=safe_ref,
+                        status="completed",
+                        terminal=True,
+                        result={"content": [{"type": "text", "text": "done"}]},
+                    )
+
+                async def aclose(self):
+                    return None
+
+            runtime.mcp_remote_task_recovery_worker._client_factory = (
+                lambda _binding: CompletedRemoteClient()
+            )
+            runtime.mcp_remote_task_recovery_worker._continuation_sink = None
+
+            self.assertEqual(
+                await runtime.mcp_remote_task_recovery_worker.run_once(), 1
+            )
+            artifacts = await runtime.storage.list_artifacts_for_task(task.task_id)
+            self.assertEqual(len(artifacts), 1)
+            artifact_metadata = json.loads(artifacts[0].storage_ref)
+            self.assertEqual(artifact_metadata["source_kind"], "mcp_result")
+            self.assertEqual(artifact_metadata["mime_type"], "application/json")
+            projection_events = await runtime.storage.list_events_for_task_filtered(
+                task.task_id,
+                event_types={"mcp.result_artifact_projection"},
+                limit=2,
+            )
+            self.assertEqual(len(projection_events), 1)
+            self.assertEqual(projection_events[0].payload["status"], "ready")
+            self.assertNotIn("remote-private-id", str(projection_events[0].payload))
             await runtime.shutdown()
 
     async def test_v2_open_interrupt_waits_then_recovers_automatic_metadata(

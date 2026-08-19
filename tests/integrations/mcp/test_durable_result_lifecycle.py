@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.core.models import (
     Artifact,
@@ -150,6 +151,58 @@ class _PromotionStorage(_LifecycleStorage):
             updated_at=occurred_at,
         )
         return self.row
+
+
+class _ProjectionLifecycleStorage(_LifecycleStorage):
+    async def list_projectable_mcp_durable_result_lifecycles(
+        self,
+        *,
+        after_updated_at=None,
+        after_result_ref=None,
+        limit=1000,
+    ):
+        del after_updated_at, after_result_ref, limit
+        if (
+            self.row.status is MCPDurableResultLifecycleStatus.RETAINED
+            and self.row.reason
+            is MCPDurableResultLifecycleReason.DISPATCH_RESOLVED
+        ):
+            return [self.row]
+        return []
+
+    async def claim_mcp_dispatch_result_deletion(
+        self, result_ref, expected_revision, now
+    ):
+        if (
+            self.row.result_ref != result_ref
+            or self.row.revision != expected_revision
+            or self.row.status is not MCPDurableResultLifecycleStatus.RETAINED
+            or self.row.reason
+            is not MCPDurableResultLifecycleReason.DISPATCH_RESOLVED
+            or self.row.eligible_at is None
+            or self.row.eligible_at > now
+        ):
+            return None
+        self.row = replace(
+            self.row,
+            status=MCPDurableResultLifecycleStatus.DELETING,
+            revision=self.row.revision + 1,
+            updated_at=now,
+        )
+        return self.row
+
+    async def claim_mcp_durable_result_deletions(self, now, *, limit):
+        del now, limit
+        return []
+
+
+class _PermanentProjector:
+    def __init__(self):
+        self.calls = []
+
+    async def project_completed_result(self, result_ref, *, source):
+        self.calls.append((result_ref, source))
+        return SimpleNamespace(status="permanent_failure")
 
 class DurableResultLifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def _result(self, root: Path):
@@ -319,6 +372,35 @@ class DurableResultLifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 await manager.promote_to_artifact(result_ref=result.ref),
                 artifact,
+            )
+
+    async def test_reconciler_exactly_deletes_expired_dispatch_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _store, authority, result, row = await self._result(root)
+            storage = _ProjectionLifecycleStorage(
+                replace(row, eligible_at=NOW)
+            )
+            projector = _PermanentProjector()
+            manager = MCPDurableResultLifecycleManager(
+                storage,
+                authority,
+                now_fn=lambda: NOW,
+            )
+            manager.configure_result_projector(projector)
+
+            summary = await manager.reconcile_artifacts_and_gc_once()
+
+            self.assertEqual(
+                projector.calls,
+                [(result.ref, "reconciler")],
+            )
+            self.assertEqual(summary.permanent_failure, 1)
+            self.assertEqual(summary.exact_deleted, 1)
+            self.assertEqual(summary.bulk_deleted, 0)
+            self.assertEqual(
+                storage.row.status,
+                MCPDurableResultLifecycleStatus.DELETED,
             )
 
     async def test_startup_repairs_manifest_first_partial_delete(self) -> None:

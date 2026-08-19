@@ -44,6 +44,44 @@ class _SafetyDetector:
 
 
 class MCPAuditServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_result_artifact_projection_audit_keeps_only_closed_fields(
+        self,
+    ) -> None:
+        storage = _Storage()
+        service = MCPAuditService(storage=storage, now_fn=lambda: NOW)
+
+        await service.observe_event(
+            EventRecord(
+                event_id="projection-event",
+                conversation_id="conv-a",
+                task_id="task-a",
+                node_id="node-a",
+                event_type="mcp.result_artifact_projection",
+                payload={
+                    "schema": "maf.user_mcp.result_artifact_projection.v1",
+                    "safe_call_ref": "a" * 64,
+                    "status": "ready",
+                    "reason_code": "promoted",
+                    "artifact_count": 1,
+                    "result_ref": "must-not-persist",
+                    "raw_result": "must-not-persist",
+                },
+                visibility=EventVisibility.FRONTEND,
+                created_at=NOW,
+            )
+        )
+
+        self.assertEqual(
+            storage.events[0].safe_payload,
+            {
+                "schema": "maf.user_mcp.result_artifact_projection.v1",
+                "safe_call_ref": "a" * 64,
+                "status": "ready",
+                "reason_code": "promoted",
+                "artifact_count": 1,
+            },
+        )
+
     async def test_aggregate_transition_requires_exact_closed_payload(self) -> None:
         storage = _Storage()
         service = MCPAuditService(storage=storage, now_fn=lambda: NOW)

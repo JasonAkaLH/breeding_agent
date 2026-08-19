@@ -6,6 +6,7 @@ import hashlib
 import unittest
 from dataclasses import replace
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 from src.capabilities.mcp_dispatch.models import (
     MCPBindingMode,
@@ -1410,6 +1411,7 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_validated_remote_error_after_dispatch_is_failed(self) -> None:
         storage = _FakeStorage()
+        projector = AsyncMock()
         storage.grants.append(
             UserMCPToolGrant(
                 "grant-a", "alice", "server-a", "lookup", 1, "schema-v1", NOW
@@ -1419,6 +1421,7 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             storage=storage,
             gateway=_FakeGateway(MCPRemoteError("tool rejected", remote_code=-32001)),
             selector=_SequenceSelector(_call()),
+            result_artifact_projector=projector,
         )
 
         outcome = await coordinator.dispatch(_request(), server_id="server-a")
@@ -1427,6 +1430,7 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         call = next(iter(storage.calls.values()))
         self.assertEqual(call.status, "failed")
         self.assertEqual(call.safe_error_code, "mcp_call_failed")
+        projector.assert_not_awaited()
 
     async def test_dispatch_claim_renewer_renews_before_first_wait(self) -> None:
         coordinator = UserMCPDispatchCoordinator(

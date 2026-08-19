@@ -62,10 +62,66 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(runtime.start(), timeout=2)
             await asyncio.wait_for(started.wait(), timeout=1)
             self.assertFalse(runtime._mcp_post_ready_recovery_task.done())
+            self.assertIsNotNone(runtime._mcp_result_artifact_reconciler_task)
+            self.assertFalse(runtime._mcp_result_artifact_reconciler_task.done())
 
             release.set()
             await asyncio.wait_for(runtime._mcp_post_ready_recovery_task, timeout=1)
             await runtime.shutdown()
+            self.assertIsNone(runtime._mcp_result_artifact_reconciler_task)
+
+    async def test_result_artifact_reconciler_runs_serial_cycles_every_sixty_seconds(
+        self,
+    ) -> None:
+        runtime = object.__new__(ApiRuntime)
+        manager = AsyncMock()
+        second_cycle_started = asyncio.Event()
+        hold_second_cycle = asyncio.Event()
+        cycle_count = 0
+
+        async def reconcile(*, limit: int):
+            nonlocal cycle_count
+            self.assertEqual(limit, 1000)
+            cycle_count += 1
+            if cycle_count == 2:
+                second_cycle_started.set()
+                await hold_second_cycle.wait()
+
+        delays: list[int] = []
+
+        async def sleep(delay: int) -> None:
+            delays.append(delay)
+
+        manager.reconcile_artifacts_and_gc_once.side_effect = reconcile
+        runtime._mcp_durable_result_lifecycle_manager = manager
+        runtime._mcp_result_artifact_projector = object()
+        runtime._mcp_result_artifact_reconciler_sleep = sleep
+        runtime._audit_sink = None
+
+        task = asyncio.create_task(
+            runtime._run_mcp_result_artifact_reconciler_forever()
+        )
+        await asyncio.wait_for(second_cycle_started.wait(), timeout=1)
+
+        self.assertEqual(cycle_count, 2)
+        self.assertEqual(delays, [60])
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_pre_ready_terminal_recovery_only_reconciles_untracked_results(
+        self,
+    ) -> None:
+        runtime = object.__new__(ApiRuntime)
+        manager = AsyncMock()
+        manager.reconcile_untracked.return_value = (0, 0)
+        runtime._mcp_startup_terminal_candidates = ()
+        runtime._mcp_durable_result_lifecycle_manager = manager
+
+        await runtime._reconcile_mcp_terminal_candidates()
+
+        manager.reconcile_untracked.assert_awaited_once_with(limit=1000)
+        manager.run_once.assert_not_awaited()
+        manager.reconcile_artifacts_and_gc_once.assert_not_awaited()
 
     async def test_candidate_capacity_warning_triggers_immediate_archive_scan(
         self,

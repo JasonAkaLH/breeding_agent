@@ -5,6 +5,7 @@ import base64
 import hashlib
 import inspect
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -164,6 +165,12 @@ from src.integrations.mcp.cp7_terminal_lifecycle import (
 )
 from src.integrations.mcp.durable_result_lifecycle import (
     MCPDurableResultLifecycleManager,
+)
+from src.integrations.mcp.result_artifact_projection import (
+    MCP_RESULT_ARTIFACT_PROJECTION_EVENT,
+    MCPResultArtifactProjectionObservation,
+    MCPResultArtifactProjector,
+    fold_mcp_result_artifact_projection_payloads,
 )
 from src.integrations.mcp.pending_action_payloads import (
     MAX_PENDING_ACTION_ARGUMENT_BYTES,
@@ -358,6 +365,9 @@ from .mcp_binding import (
 from .sse import InMemoryEventBroker, is_frontend_event
 from .table_upload_normalizer import normalize_selected_spreadsheet_sheet, normalize_table_upload
 from .upload_store import InMemoryUploadStore, UploadedFileRecord, UploadValidationError, _decode_plain_text_upload
+
+
+logger = logging.getLogger(__name__)
 
 
 UNFINISHED_TASK_STATUSES = {
@@ -659,6 +669,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         mcp_durable_result_lifecycle_manager: (
             MCPDurableResultLifecycleManager | None
         ) = None,
+        mcp_result_artifact_projector: MCPResultArtifactProjector | None = None,
         user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
         user_mcp_presence_service: MCPTaskPresenceService | None = None,
         user_mcp_audit_service: MCPAuditService | None = None,
@@ -721,6 +732,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._mcp_durable_result_lifecycle_manager = (
             mcp_durable_result_lifecycle_manager
         )
+        self._mcp_result_artifact_projector = mcp_result_artifact_projector
         self.user_mcp_result_janitor = user_mcp_result_janitor
         self.user_mcp_presence_service = user_mcp_presence_service
         self.user_mcp_audit_service = user_mcp_audit_service
@@ -795,6 +807,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._mcp_continuation_consumer_task: asyncio.Task[None] | None = None
         self._mcp_post_ready_recovery_task: asyncio.Task[None] | None = None
         self._mcp_post_ready_recovery_error: BaseException | None = None
+        self._mcp_result_artifact_reconciler_task: asyncio.Task[None] | None = None
+        self._mcp_result_artifact_reconciler_error: BaseException | None = None
+        self._mcp_result_artifact_reconciler_sleep = asyncio.sleep
         self._mcp_continuation_consumer_id = f"api-continuation:{uuid4().hex}"
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
@@ -2532,6 +2547,53 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             "unknown_terminal_at": projection.unknown_terminal_at,
             "resolved_at": projection.resolved_at,
         }
+
+    async def mcp_result_artifact_projections_for_task(
+        self, task_id: str
+    ) -> list[dict[str, object]]:
+        try:
+            events = await self.storage.list_events_for_task_filtered(
+                task_id,
+                event_types={MCP_RESULT_ARTIFACT_PROJECTION_EVENT},
+                visibility=EventVisibility.FRONTEND,
+                limit=121,
+            )
+        except Exception:
+            await self._record_mcp_result_artifact_history_failure(
+                "event_read_failed"
+            )
+            return []
+        if len(events) >= 121:
+            await self._record_mcp_result_artifact_history_failure(
+                "event_limit_exceeded"
+            )
+            return []
+        try:
+            folded = fold_mcp_result_artifact_projection_payloads(
+                event.payload for event in events
+            )
+        except (TypeError, ValueError):
+            await self._record_mcp_result_artifact_history_failure(
+                "event_contract_invalid"
+            )
+            return []
+        return [item.as_payload() for item in folded]
+
+    async def _record_mcp_result_artifact_history_failure(
+        self, reason_code: str
+    ) -> None:
+        if self._audit_sink is None:
+            return
+        try:
+            await self._audit_sink.record(
+                "mcp.result_artifact_projection_history_failed",
+                {
+                    "status": "failed",
+                    "reason_code": reason_code,
+                },
+            )
+        except Exception:
+            logger.error("mcp_result_artifact_projection_observation_failed")
 
     async def _resume_llm_metadata(
         self,
@@ -8648,6 +8710,22 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             self._mcp_post_ready_recovery_task.add_done_callback(
                 self._handle_mcp_post_ready_recovery_exit
             )
+        if (
+            self._mcp_result_artifact_projector is not None
+            and self._mcp_durable_result_lifecycle_manager is not None
+            and (
+                self._mcp_result_artifact_reconciler_task is None
+                or self._mcp_result_artifact_reconciler_task.done()
+            )
+        ):
+            self._mcp_result_artifact_reconciler_error = None
+            self._mcp_result_artifact_reconciler_task = asyncio.create_task(
+                self._run_mcp_result_artifact_reconciler_forever(),
+                name="mcp-result-artifact-reconciler",
+            )
+            self._mcp_result_artifact_reconciler_task.add_done_callback(
+                self._handle_mcp_result_artifact_reconciler_exit
+            )
 
     async def _repair_mcp_terminal_candidate_lifecycle(self) -> None:
         candidate_manager = self._mcp_terminal_candidate_lifecycle_manager
@@ -8762,7 +8840,33 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
         result_manager = self._mcp_durable_result_lifecycle_manager
         if result_manager is not None:
-            await result_manager.run_once(limit=1000)
+            await result_manager.reconcile_untracked(limit=1000)
+
+    async def _run_mcp_result_artifact_reconciler_forever(self) -> None:
+        manager = self._mcp_durable_result_lifecycle_manager
+        if manager is None or self._mcp_result_artifact_projector is None:
+            return
+        while True:
+            try:
+                await manager.reconcile_artifacts_and_gc_once(limit=1000)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error("mcp_result_artifact_reconciler_cycle_failed")
+                if self._audit_sink is not None:
+                    try:
+                        await self._audit_sink.record(
+                            "mcp.result_artifact_reconciler_cycle_failed",
+                            {
+                                "status": "deferred",
+                                "reason_code": "projection_failed",
+                            },
+                        )
+                    except Exception:
+                        logger.error(
+                            "mcp_result_artifact_projection_observation_failed"
+                        )
+            await self._mcp_result_artifact_reconciler_sleep(60)
 
     async def _reconcile_cp7_mcp_authority(self) -> None:
         """Compatibility entry point for focused recovery tests and operators."""
@@ -9359,6 +9463,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         except asyncio.CancelledError:
             return
 
+    def _handle_mcp_result_artifact_reconciler_exit(
+        self, task: asyncio.Task[None]
+    ) -> None:
+        if task.cancelled():
+            return
+        try:
+            self._mcp_result_artifact_reconciler_error = task.exception()
+        except asyncio.CancelledError:
+            return
+
     async def _admit_mcp_rollout_instance(self) -> None:
         admission = self._mcp_rollout_instance_admission
         if admission is None:
@@ -9889,6 +10003,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
     async def shutdown(self) -> None:
         await self._quiesce_cp7_for_shutdown()
+        if self._mcp_result_artifact_reconciler_task is not None:
+            if not self._mcp_result_artifact_reconciler_task.done():
+                self._mcp_result_artifact_reconciler_task.cancel()
+            await asyncio.gather(
+                self._mcp_result_artifact_reconciler_task,
+                return_exceptions=True,
+            )
+            self._mcp_result_artifact_reconciler_task = None
         if self._mcp_post_ready_recovery_task is not None:
             if not self._mcp_post_ready_recovery_task.done():
                 self._mcp_post_ready_recovery_task.cancel()
@@ -11264,6 +11386,7 @@ def build_api_runtime(
     mcp_durable_result_lifecycle_manager: (
         MCPDurableResultLifecycleManager | None
     ) = None
+    mcp_result_artifact_projector: MCPResultArtifactProjector | None = None
     mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None
     result_root: Path | None = None
     if user_mcp_enabled:
@@ -11703,6 +11826,42 @@ def build_api_runtime(
         await storage.append_event(event)
         await event_broker.publish(event)
 
+    if user_mcp_enabled:
+        assert user_mcp_capacity_values is not None
+        assert mcp_durable_result_lifecycle_manager is not None
+
+        async def observe_mcp_result_artifact_projection(
+            observation: MCPResultArtifactProjectionObservation,
+        ) -> None:
+            try:
+                await audit_sink.record(
+                    "mcp.result_artifact_projection_observed",
+                    {
+                        "status": observation.status.value,
+                        "reason_code": observation.reason_code.value,
+                        "source": observation.source,
+                        "projection_latency_ms": observation.elapsed_ms,
+                    },
+                )
+            except Exception:
+                logger.error(
+                    "mcp_result_artifact_projection_observation_failed"
+                )
+
+        mcp_result_artifact_projector = MCPResultArtifactProjector(
+            storage=storage,
+            lifecycle_manager=mcp_durable_result_lifecycle_manager,
+            artifact_file_store=artifact_file_store,
+            audit_reference_signer=mcp_audit_reference_signer,
+            artifact_disk_low_watermark_bytes=user_mcp_capacity_values[1],
+            event_sink=record_live_event,
+            observer=observe_mcp_result_artifact_projection,
+            now_fn=ApiRuntime._utcnow_naive,
+        )
+        mcp_durable_result_lifecycle_manager.configure_result_projector(
+            mcp_result_artifact_projector
+        )
+
     async def publish_transient_event(event: EventRecord) -> None:
         event = _ensure_event_created_at(event)
         await event_broker.publish_transient(event)
@@ -12134,6 +12293,20 @@ def build_api_runtime(
                     )
             if str(committed) == "conflict":
                 raise RuntimeError("mcp_remote_task_terminal_commit_conflict")
+            if (
+                result_ref is not None
+                and candidate.terminal_state is MCPTerminalState.COMPLETED
+                and mcp_result_artifact_projector is not None
+            ):
+                try:
+                    await mcp_result_artifact_projector.project_completed_result(
+                        result_ref,
+                        source="immediate",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
             return mcp_terminal_receipt_id(
                 binding.call_ref, candidate.result_payload_sha256
             )
@@ -12359,6 +12532,16 @@ def build_api_runtime(
             ),
             server_router=mcp_server_router,
             live_event_recorder=record_live_event,
+            result_artifact_projector=(
+                None
+                if mcp_result_artifact_projector is None
+                else lambda result_ref: (
+                    mcp_result_artifact_projector.project_completed_result(
+                        result_ref,
+                        source="immediate",
+                    )
+                )
+            ),
             now_fn=ApiRuntime._utcnow_naive,
             metric_recorder=mcp_rollout_metric_recorder,
             metric_context=mcp_dispatch_metric_context,
@@ -12552,6 +12735,7 @@ def build_api_runtime(
         mcp_durable_result_lifecycle_manager=(
             mcp_durable_result_lifecycle_manager
         ),
+        mcp_result_artifact_projector=mcp_result_artifact_projector,
         user_mcp_result_janitor=user_mcp_result_janitor,
         user_mcp_presence_service=user_mcp_presence_service,
         user_mcp_audit_service=user_mcp_audit_service,

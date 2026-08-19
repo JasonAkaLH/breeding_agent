@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request, status
 
 from src.core.enums import ConversationStatus, MessageRole
@@ -121,6 +123,10 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
     messages = await runtime.storage.list_messages_for_conversation(conversation_id)
     public_messages = [message for message in messages if _is_public_history_message(message)]
     artifacts_by_task_id = await _history_display_artifacts_by_task_id(runtime, conversation_id, public_messages)
+    projections_by_task_id = await _history_mcp_result_artifact_projections_by_task_id(
+        runtime,
+        public_messages,
+    )
     return ConversationMessagesResponse(
         conversation_id=conversation_id,
         messages=[
@@ -144,10 +150,46 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
                     )
                     else []
                 ),
+                mcp_result_artifact_projections=(
+                    projections_by_task_id.get(message.task_id, [])
+                    if (
+                        str(message.role) == str(MessageRole.ASSISTANT)
+                        and message.task_id is not None
+                        and message.stream_status == "complete"
+                    )
+                    else []
+                ),
             )
             for message in public_messages
         ],
     )
+
+
+async def _history_mcp_result_artifact_projections_by_task_id(
+    runtime: ApiRuntime,
+    messages: list[Message],
+) -> dict[str, list[dict[str, object]]]:
+    task_ids = sorted(
+        {
+            str(message.task_id)
+            for message in messages
+            if str(message.role) == str(MessageRole.ASSISTANT)
+            and message.task_id is not None
+            and message.stream_status == "complete"
+        }
+    )
+    if not task_ids:
+        return {}
+    gate = asyncio.Semaphore(8)
+
+    async def load(task_id: str):
+        async with gate:
+            return (
+                task_id,
+                await runtime.mcp_result_artifact_projections_for_task(task_id),
+            )
+
+    return dict(await asyncio.gather(*(load(task_id) for task_id in task_ids)))
 
 
 def _is_public_history_message(message: Message) -> bool:

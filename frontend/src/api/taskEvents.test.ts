@@ -73,6 +73,27 @@ describe('taskEvents', () => {
       ...unknown,
       payload: { ...unknown.payload, no_replay: false },
     }))).toBeNull();
+
+    const projection = {
+      event_id: 'mcp-result-artifact-projection:v1:artifact-1:deferred:capacity_unavailable',
+      conversation_id: 'conv-1',
+      event_type: 'mcp.result_artifact_projection',
+      task_id: 'task-1',
+      node_id: 'node-1',
+      created_at: '2026-04-27T00:00:00Z',
+      payload: {
+        schema: 'maf.user_mcp.result_artifact_projection.v1',
+        safe_call_ref: 'a'.repeat(64),
+        status: 'deferred',
+        reason_code: 'capacity_unavailable',
+        artifact_count: 0,
+      },
+    };
+    expect(parseTaskEventData(JSON.stringify(projection))).toMatchObject({ event_id: projection.event_id });
+    expect(parseTaskEventData(JSON.stringify({
+      ...projection,
+      payload: { ...projection.payload, result_ref: 'must-not-pass' },
+    }))).toBeNull();
   });
 
   it('builds task event URLs without query tokens', () => {

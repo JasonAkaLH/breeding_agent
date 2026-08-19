@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, replayTaskEvents, taskProgressDisplayText } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, foldMCPResultArtifactProjections, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, replayTaskEvents, taskProgressDisplayText } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -91,6 +91,57 @@ function terminalProjectionEvents(): TaskEventEnvelope[] {
 }
 
 describe('applyTaskEvent', () => {
+  it('folds MCP result artifact projection events with terminal state precedence', () => {
+    const safeCallRef = 'a'.repeat(64);
+    let state = applyTaskEvent(createInitialTaskEventState(), event(
+      'mcp.result_artifact_projection',
+      {
+        schema: 'maf.user_mcp.result_artifact_projection.v1',
+        safe_call_ref: safeCallRef,
+        status: 'deferred',
+        reason_code: 'capacity_unavailable',
+        artifact_count: 0,
+      },
+      'mcp-result-artifact-projection:v1:artifact-1:deferred:capacity_unavailable',
+      'node-1',
+    ));
+    state = applyTaskEvent(state, event(
+      'mcp.result_artifact_projection',
+      {
+        schema: 'maf.user_mcp.result_artifact_projection.v1',
+        safe_call_ref: safeCallRef,
+        status: 'ready',
+        reason_code: 'promoted',
+        artifact_count: 1,
+      },
+      'mcp-result-artifact-projection:v1:artifact-1:ready:promoted',
+      'node-1',
+    ));
+
+    expect(state.mcp.resultArtifactProjections).toEqual([
+      expect.objectContaining({ safe_call_ref: safeCallRef, status: 'ready', reason_code: 'promoted' }),
+    ]);
+    expect(state.eventSyncError).toBeNull();
+  });
+
+  it('fails closed when one MCP call has both ready and permanent projection authority', () => {
+    const safeCallRef = 'b'.repeat(64);
+    const ready = {
+      schema: 'maf.user_mcp.result_artifact_projection.v1',
+      safe_call_ref: safeCallRef,
+      status: 'ready',
+      reason_code: 'promoted',
+      artifact_count: 1,
+    } as const;
+    const permanent = {
+      ...ready,
+      status: 'permanent_failure',
+      reason_code: 'source_expired',
+      artifact_count: 0,
+    } as const;
+
+    expect(foldMCPResultArtifactProjections([ready, permanent])).toBeNull();
+  });
   it('creates a restoring task state for refresh recovery', () => {
     const state = createRestoringTaskState();
 

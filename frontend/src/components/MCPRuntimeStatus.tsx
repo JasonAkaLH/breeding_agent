@@ -13,6 +13,7 @@ interface Props {
 
 export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, syncError = null, onContinue, onCancel, onResync }: Props) {
   const noReplay = Boolean(mcp.executionUnknown?.noReplay || mcp.lateResult?.noReplay);
+  const hasResultArtifactNotice = mcp.resultArtifactProjections.some((item) => item.status !== 'ready');
   const visible = Boolean(
     mcp.serverDisplayName
     || mcp.discovery
@@ -24,6 +25,7 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, syncError = 
     || mcp.availability
     || mcp.executionUnknown
     || mcp.lateResult
+    || hasResultArtifactNotice
     || syncError,
   );
   if (!visible) return null;
@@ -42,6 +44,7 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, syncError = 
           action={<Button size="small" disabled={!onResync} onClick={() => onResync?.(taskId)}>重新同步</Button>}
         />
       ) : null}
+      <MCPResultArtifactNotice projections={mcp.resultArtifactProjections} />
       {mcp.discovery ? (
         <Typography.Paragraph>
           工具发现：<Tag color={mcp.discovery.status === 'failed' ? 'red' : mcp.discovery.status === 'completed' ? 'green' : 'blue'}>
@@ -105,6 +108,34 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, syncError = 
         )}
       />
     </Card>
+  );
+}
+
+export function MCPResultArtifactNotice({
+  projections,
+}: {
+  projections: MCPTaskState['resultArtifactProjections'];
+}) {
+  const hasPermanentFailure = projections.some((item) => item.status === 'permanent_failure');
+  const hasDeferred = projections.some((item) => item.status === 'deferred');
+  if (!hasPermanentFailure && !hasDeferred) return null;
+  return (
+    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+      {hasPermanentFailure ? (
+        <Alert
+          type="error"
+          showIcon
+          message="工具调用已完成，但完整结果文件未能保留"
+        />
+      ) : null}
+      {hasDeferred ? (
+        <Alert
+          type="info"
+          showIcon
+          message="工具调用已完成，完整结果文件正在生成，可稍后刷新"
+        />
+      ) : null}
+    </Space>
   );
 }
 

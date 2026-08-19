@@ -297,6 +297,41 @@ describe('App', () => {
     expect(merged[1].fallbackNotice).toEqual(notice);
   });
 
+  it('canonically merges live and history MCP result artifact projections by call', () => {
+    const deferred = {
+      schema: 'maf.user_mcp.result_artifact_projection.v1' as const,
+      safe_call_ref: 'a'.repeat(64),
+      status: 'deferred' as const,
+      reason_code: 'projection_failed' as const,
+      artifact_count: 0 as const,
+    };
+    const ready = {
+      ...deferred,
+      status: 'ready' as const,
+      reason_code: 'promoted' as const,
+      artifact_count: 1 as const,
+    };
+    const permanent = {
+      ...deferred,
+      safe_call_ref: 'b'.repeat(64),
+      status: 'permanent_failure' as const,
+      reason_code: 'source_expired' as const,
+    };
+
+    const merged = mergeHistoryWithLiveFallbackNotices(
+      [{
+        id: 'history', kind: 'chat', role: 'assistant', content: 'done', mode: 'chat',
+        taskId: 'task-target', mcpResultArtifactProjections: [ready],
+      }],
+      [{
+        id: 'live', kind: 'chat', role: 'assistant', content: 'live', mode: 'chat',
+        taskId: 'task-target', mcpResultArtifactProjections: [deferred, permanent],
+      }],
+    );
+
+    expect(merged[0].mcpResultArtifactProjections).toEqual([ready, permanent]);
+  });
+
   afterEach(() => {
     localStorage.clear();
     vi.useRealTimers();
@@ -2709,6 +2744,74 @@ describe('App', () => {
     expect(screen.getByText('数据查询已完成，共返回 1 行结果。')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '展开原始表格' }));
     expect(await screen.findByText('隆平381')).toBeInTheDocument();
+  });
+
+  it('restores MCP raw-result artifact failure notices from assistant history', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history-mcp-artifact');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-history-mcp-artifact', username: 'alice', status: 'active', current_task_id: null, title: 'MCP 历史结果', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-mcp-artifact',
+        messages: [
+          {
+            message_id: 'msg-assistant-mcp',
+            conversation_id: 'conv-history-mcp-artifact',
+            role: 'assistant',
+            content: '工具调用已完成。',
+            task_id: 'task-history-mcp',
+            stream_status: 'complete',
+            created_at: null,
+            mcp_result_artifact_projections: [{
+              schema: 'maf.user_mcp.result_artifact_projection.v1',
+              safe_call_ref: 'a'.repeat(64),
+              status: 'permanent_failure',
+              reason_code: 'source_expired',
+              artifact_count: 0,
+            }],
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(await screen.findByText('工具调用已完成，但完整结果文件未能保留')).toBeInTheDocument();
+    expect(screen.queryByText('source_expired')).not.toBeInTheDocument();
+  });
+
+  it('moves a live MCP raw-result artifact notice into the completed assistant message', async () => {
+    const api = makeApi({
+      getTaskArtifacts: vi.fn(async () => ({ task_id: 'task-1', artifacts: [] })),
+    });
+    const projectionEvent = event(
+      'mcp.result_artifact_projection',
+      {
+        schema: 'maf.user_mcp.result_artifact_projection.v1',
+        safe_call_ref: 'a'.repeat(64),
+        status: 'deferred',
+        reason_code: 'projection_failed',
+        artifact_count: 0,
+      },
+      'mcp-result-artifact-projection:v1:artifact-live:deferred:projection_failed',
+      'node-mcp',
+    );
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
+      projectionEvent,
+      event('task.completed'),
+    ])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '运行 MCP 工具' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByText('工具调用已完成，完整结果文件正在生成，可稍后刷新')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'MCP 运行状态' })).not.toBeInTheDocument();
+    });
+    expect(screen.getAllByText('工具调用已完成，完整结果文件正在生成，可稍后刷新')).toHaveLength(1);
   });
 
   it('keeps restored task artifact cards after reloading conversation messages on completion', async () => {

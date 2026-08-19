@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from src.core.contracts import StoragePort
 from src.core.enums import ArtifactType
@@ -24,6 +27,18 @@ class MCPDurableResultLifecycleError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class MCPDurableResultReconcileSummary:
+    repaired: int = 0
+    backfilled: int = 0
+    untracked_deferred: int = 0
+    ready: int = 0
+    deferred: int = 0
+    permanent_failure: int = 0
+    exact_deleted: int = 0
+    bulk_deleted: int = 0
+
+
 class MCPDurableResultLifecycleManager:
     def __init__(
         self,
@@ -41,6 +56,14 @@ class MCPDurableResultLifecycleManager:
             lambda: datetime.now(timezone.utc).replace(tzinfo=None)
         )
         self._fault_hook = fault_hook
+        self._result_projector: Any | None = None
+
+    def configure_result_projector(self, projector: Any) -> None:
+        if projector is None or not callable(
+            getattr(projector, "project_completed_result", None)
+        ):
+            raise ValueError("mcp_result_artifact_projector_invalid")
+        self._result_projector = projector
 
     async def repair_incomplete(self, *, limit: int = 1000) -> int:
         rows = await self._storage.list_incomplete_mcp_durable_result_lifecycles(
@@ -61,6 +84,86 @@ class MCPDurableResultLifecycleManager:
         for row in deleting:
             await self._delete(row)
         return repaired, len(deleting)
+
+    async def reconcile_artifacts_and_gc_once(
+        self, *, limit: int = 1000
+    ) -> MCPDurableResultReconcileSummary:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_durable_result_lifecycle_limit_invalid")
+        projector = self._result_projector
+        if projector is None:
+            raise MCPDurableResultLifecycleError(
+                "mcp_result_artifact_projector_unavailable"
+            )
+        repaired = 0
+        while True:
+            count = await self.repair_incomplete(limit=limit)
+            repaired += count
+            if count < limit:
+                break
+        backfilled, untracked_deferred = await self.reconcile_untracked(
+            limit=limit
+        )
+        ready = 0
+        deferred = 0
+        permanent_failure = 0
+        exact_deleted = 0
+        after_updated_at = None
+        after_result_ref = None
+        while True:
+            rows = (
+                await self._storage.list_projectable_mcp_durable_result_lifecycles(
+                    after_updated_at=after_updated_at,
+                    after_result_ref=after_result_ref,
+                    limit=limit,
+                )
+            )
+            for row in rows:
+                result = await projector.project_completed_result(
+                    row.result_ref,
+                    source="reconciler",
+                )
+                status = str(result.status)
+                if status == "ready":
+                    ready += 1
+                elif status == "permanent_failure":
+                    permanent_failure += 1
+                    claimed = await self._storage.claim_mcp_dispatch_result_deletion(
+                        row.result_ref,
+                        row.revision,
+                        self._now(),
+                    )
+                    if claimed is not None:
+                        await self._delete(claimed)
+                        exact_deleted += 1
+                else:
+                    deferred += 1
+            if rows:
+                await asyncio.sleep(0)
+            if not rows or len(rows) < limit:
+                break
+            after_updated_at = rows[-1].updated_at
+            after_result_ref = rows[-1].result_ref
+        bulk_deleted = 0
+        while True:
+            deleting = await self._storage.claim_mcp_durable_result_deletions(
+                self._now(), limit=limit
+            )
+            for row in deleting:
+                await self._delete(row)
+            bulk_deleted += len(deleting)
+            if len(deleting) < limit:
+                break
+        return MCPDurableResultReconcileSummary(
+            repaired=repaired,
+            backfilled=backfilled,
+            untracked_deferred=untracked_deferred,
+            ready=ready,
+            deferred=deferred,
+            permanent_failure=permanent_failure,
+            exact_deleted=exact_deleted,
+            bulk_deleted=bulk_deleted,
+        )
 
     async def reconcile_untracked(
         self, *, limit: int = 1000
@@ -296,4 +399,5 @@ class MCPDurableResultLifecycleManager:
 __all__ = [
     "MCPDurableResultLifecycleError",
     "MCPDurableResultLifecycleManager",
+    "MCPDurableResultReconcileSummary",
 ]

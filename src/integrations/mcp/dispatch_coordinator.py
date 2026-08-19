@@ -200,6 +200,7 @@ class _DispatchAuthority:
 
 NowFn = Callable[[], datetime]
 LiveEventRecorder = Callable[[EventRecord], Awaitable[None]]
+MCPResultArtifactProjector = Callable[[str], Awaitable[object]]
 
 
 class UserMCPDispatchCoordinator:
@@ -227,6 +228,7 @@ class UserMCPDispatchCoordinator:
         now_fn: NowFn | None = None,
         terminal_now_fn: NowFn | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
+        result_artifact_projector: MCPResultArtifactProjector | None = None,
         metric_recorder: MCPRolloutMetricRecorderPort | None = None,
         metric_context: MCPDispatchMetricContext | None = None,
         max_tool_calls: int = 20,
@@ -263,6 +265,7 @@ class UserMCPDispatchCoordinator:
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
         self._terminal_now = terminal_now_fn or terminal_now_utc_second
         self._live_event_recorder = live_event_recorder
+        self._result_artifact_projector = result_artifact_projector
         self._metric_recorder = metric_recorder
         self._metric_context = metric_context
         self._max_tool_calls = max_tool_calls
@@ -2644,6 +2647,13 @@ class UserMCPDispatchCoordinator:
             result_receipt_id = mcp_terminal_receipt_id(
                 call_ref, result_payload_sha256
             )
+            if self._result_artifact_projector is not None:
+                try:
+                    await self._result_artifact_projector(outcome.result_ref)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
         elif authority is None or outcome.kind is not MCPCallOutcomeKind.INPUT_REQUIRED:
             finished = await self._storage.finish_mcp_call(
                 branch.owner_user_id,
