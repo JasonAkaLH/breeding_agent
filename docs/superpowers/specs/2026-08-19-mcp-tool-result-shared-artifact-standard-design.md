@@ -7,7 +7,7 @@
 - 状态：设计已确认并通过document-perfectization复审，尚未实施
 - 用户决策：MCP产物标准直接复用Skill最终进入的公共Artifact标准；成功Call展示完整原始返回，失败或取消Call只展示脱敏错误码
 - 范围：用户级`mcp.dispatch`成功Tool Call的durable result投影、补偿与公共Artifact展示
-- 信心门：98/100，无Blocking或Major问题
+- 信心门：99/100，无Blocking或Major问题
 
 ## 用户、干系人与受影响系统
 
@@ -17,7 +17,7 @@
 | Main Agent | 仍只消费最多20,000字符的execution-only有界projection，不读取Artifact完整内容 |
 | MCP Coordinator / recovery worker | terminal commit之后调用同一个投影入口；投影失败不得改变业务终态或重放网络调用 |
 | Storage / durable lifecycle | 保证authoritative result、Artifact copy与源文件GC之间的身份校验、幂等和竞态安全 |
-| API / frontend | 复用公共Artifact API、下载鉴权和文件卡片；仅扩展既有MCP状态提醒和事件reducer |
+| API / frontend | 复用公共Artifact API、下载鉴权和文件卡片；扩展闭合事件reducer、Task/Message历史投影和既有Alert提醒 |
 | 运维与发布 | 先补投仍可验证的历史结果，再做全新OCR smoke；不扩大Ready阻塞面，不授权`prod`部署 |
 
 ## 问题证据
@@ -55,7 +55,7 @@ authoritative durable result的完整字节。它不是HTTP headers、SSE frame�
 
 | ID | 目标 | 可验证成功指标 |
 |---|---|---|
-| G-01 | 成功Call产出完整原始返回 | 每个具有authoritative durable result的completed业务Call恰有1个可下载file Artifact，字节数与SHA匹配receipt |
+| G-01 | 成功Call产出完整原始返回 | 正常容量与完整authority下，每个completed业务Call恰有1个匹配receipt的可下载file Artifact；无法在原24小时内安全投影的Call必须闭合为permanent failure，并至少产生安全用户事件或低基数本地观测，禁止系统静默缺失 |
 | G-02 | 复用公共Artifact标准 | MCP与Skill使用相同ArtifactResponse、Task Artifact API、下载路由和前端文件卡片 |
 | G-03 | 覆盖全部提交路径 | 普通调用、approval恢复、remote Task和startup/post-ready recovery调用同一projector合同 |
 | G-04 | 失败隔离与no-replay | 投影失败不回滚Call/receipt/Task、不触发MCP网络调用，24小时有效期内可幂等补投 |
@@ -76,11 +76,11 @@ authoritative durable result的完整字节。它不是HTTP headers、SSE frame�
 
 | ID | 需求 |
 |---|---|
-| FR-01 | 每个具有authoritative durable result的completed `mcp_call_record`业务Call创建一个独立`ArtifactType.FILE` |
+| FR-01 | 每个具有authoritative durable result的completed业务Call最终必须且只能闭合为：一个独立`ArtifactType.FILE`，或到期后的安全permanent failure；正常容量/完整authority路径只允许前者，permanent用户事件存储失败时至少必须有本地安全观测 |
 | FR-02 | Artifact ID、文件名、Task、Node、Tool、size和SHA只能从已提交authority派生，调用方不得传入可伪造展示元数据 |
 | FR-03 | 普通、approval、remote与reconciler使用同一个`MCPResultArtifactProjector.project_completed_result(result_ref)`入口 |
 | FR-04 | projector在terminal commit之后、branch continuation或Task terminal事件之前尽力执行；失败不得改变已提交业务终态 |
-| FR-05 | pre-ready阶段不得删除尚未尝试投影的`retained`结果；独立post-ready周期reconciler按固定顺序补投可验证结果、最后执行durable GC |
+| FR-05 | pre-ready阶段不得删除尚未尝试投影的`retained / dispatch_resolved`结果；post-ready对每个到期业务结果只有在本轮投影返回permanent后才可按result_ref+revision精确claim删除，bulk GC不得选择该类结果 |
 | FR-06 | projection事件只能携带闭合状态和原因码；不得携带raw result、result ref、Server/Call authority或远端错误体 |
 | FR-07 | API和前端复用公共file Artifact链；即时或恢复加载时都能显示已有Artifact |
 | FR-08 | failed、cancelled、unknown、无Call或无matching receipt的结果不得创建原始返回Artifact |
@@ -146,7 +146,8 @@ projector以窄async callable注入Coordinator和remote terminal committer；调
 
 ### 普通与approval路径
 
-`src/integrations/mcp/dispatch_coordinator.py`中的两处ordinary terminal commit成功后调用同一projector：
+`src/integrations/mcp/dispatch_coordinator.py`中completed分支的terminal commit成功后调用projector；同文件另一处
+`commit_mcp_call_terminal()`属于failed分支，必须明确不调用projector：
 
 ```text
 Tool返回
@@ -192,16 +193,21 @@ durable `mcp_call_record`业务Call。OCR job workflow内部的poll/ack属于同
 每轮reconciler按以下固定顺序运行，因位于post-ready后台而不阻塞Ready：
 
 1. 完成已有`deleting`等中断态修复，避免旧GC半完成状态悬挂；
-2. 分页执行`reconcile_untracked()`，先为可验证但尚无SQL lifecycle的durable文件补齐记录；
-3. 以`(eligible_at, result_ref)`keyset分页枚举`retained / dispatch_resolved`候选，每批最多1,000条；
-4. 对具有completed Call、matching receipt和可验证snapshot的候选调用同一个projector；每页后
-   `await asyncio.sleep(0)`让出event loop，直到本轮keyset扫描结束；
-5. 只有完整扫描结束后，才调用现有durable deletion claim处理已到期`retained`和可立即删除的
-   `artifact_owned`源；删除同样每批最多1,000条直至不足一批；
-6. 等待下一次60秒周期。shutdown必须cancel并await该任务。
+2. 调用一次现有`reconcile_untracked(limit=1000)`；该方法内部已经按result ref分页到文件枚举结束，先为
+   可验证但尚无SQL lifecycle的durable文件补齐记录，不得在外层按返回总数重复全量调用；
+3. 复用现有`status + updated_at + result_ref`索引，以`(updated_at, result_ref)`keyset分页枚举
+   `retained / dispatch_resolved`候选，每批最多1,000条；
+4. 对每个候选调用同一个projector；未到`eligible_at`的任何失败统一返回deferred并保留，成功转为
+   `artifact_owned`；已到期且仍失败时返回permanent，随后以该行刚读取的`result_ref + revision`执行单行CAS
+   claim/delete。未经本轮projector返回permanent的`dispatch_resolved`行不得删除；
+5. 每页后`await asyncio.sleep(0)`让出event loop，直到本轮keyset扫描结束；
+6. 扫描结束后bulk deletion只允许选择`artifact_owned`及`retained / orphan`，不得选择
+   `retained / dispatch_resolved`；删除每批最多1,000条直至不足一批；
+7. 等待下一次60秒周期。shutdown必须cancel并await该任务。
 
-固定顺序确保部署后的历史结果先获得一次投影机会，不会被原pre-ready `run_once()`抢先GC。扫描期间新写入的
-结果由普通即时projector处理；未落入当前keyset快照的结果最迟下一轮补偿。
+固定顺序与单行deletion authority确保部署后的每个历史业务结果在删除前至少获得一次可证明的投影尝试，
+不会被原pre-ready `run_once()`、另一实例或并发补齐的旧lifecycle抢先GC。扫描期间新写入的结果由普通即时
+projector处理；未落入当前keyset页的结果最迟下一轮补偿，且bulk GC无权删除它。
 
 并发和竞态处理：
 
@@ -211,6 +217,8 @@ durable `mcp_call_record`业务Call。OCR job workflow内部的poll/ack属于同
 - 确定性Artifact ID、no-clobber保存与lifecycle CAS共同保证普通路径、remote worker和reconciler并发时只产生一个Artifact；
 - 如果另一执行者已经完成promotion或源GC，当前执行者返回`ready/already_promoted`或
   `permanent_failure/source_expired`，不得重新请求远端；
+- `retained / dispatch_resolved`删除必须由当前候选的精确revision CAS触发；CAS丢失时重读状态，
+  `artifact_owned/deleted`视为其他worker已收敛，其他状态留待下一轮，不得降级为bulk delete；
 - 历史结果已删除文件、orphan、identity不足或receipt冲突时一律不猜测恢复。
 
 历史补投和所有重试的MCP网络调用增量必须为0。
@@ -235,8 +243,9 @@ retained / dispatch_resolved
 - 开始复制前复用既有MCP临时磁盘low-watermark配置值，但必须对Artifact目标目录所在文件系统检查，要求
   可用空间至少为`result_size + low_watermark`；result源与Artifact目录配置在不同文件系统时不得检查错盘；
 - 空间不足时返回`deferred/capacity_unavailable`，保持`retained`并在原24小时期限内由周期janitor重试；
-- 到达原`eligible_at`仍无法投影时，记录`permanent_failure/source_expired`后允许既有GC删除源，
-  不无限延长保留、不绕过容量门禁；
+- 未到原`eligible_at`时，容量、I/O、身份或文件冲突等非成功结果都只能记录deferred并安全重试；到期后仍
+  失败才记录`permanent_failure/(projection_failed|source_expired)`，并只允许当前行的精确CAS删除源；
+  不无限延长保留、不绕过容量门禁，也不允许generic bulk GC删除该类结果；
 - MCP Artifact不参与Skill同会话supersede；所有成功Call按Task/Call独立保留；
 - conversation强删除、Artifact下载鉴权和公共文件清理继续复用现有Artifact合同。
 
@@ -264,13 +273,22 @@ Tool业务终态优先于Artifact投影：
 
 合法组合只有：`ready/(promoted|already_promoted)/1`、
 `deferred/(capacity_unavailable|projection_failed)/0`、
-`permanent_failure/(projection_failed|source_expired)/0`。事件ID由确定性Artifact ID与status派生；相同状态重试
-写同一事件，状态变化写新事件。Projector内部使用已有signer生成`safe_call_ref`，Coordinator/remote调用方
-看不到raw Call authority。Reducer以`safe_call_ref`维护最多20个Call状态，并对每个Call按
-`deferred < ready|permanent_failure`单调收敛；一个Call的ready不得清除另一个Call的告警，迟到的deferred
-不得覆盖同Call终态。事件持久化失败不得回滚Artifact或业务终态：deferred结果仍为`retained`，下一轮会用
+`permanent_failure/(projection_failed|source_expired)/0`。事件ID由确定性Artifact ID、status与reason_code派生；
+相同status/reason重试写同一事件，reason或status变化写新事件。Projector内部使用已有signer生成
+`safe_call_ref`，Coordinator/remote调用方
+看不到raw Call authority。Reducer以`safe_call_ref`维护最多20个Call状态，并使用唯一canonical fold：
+`absent → deferred → ready | permanent_failure`；同status的多个合法reason按闭合优先级归并：ready优先
+`promoted`，deferred优先`projection_failed`，permanent优先`source_expired`。同Call同时出现ready和permanent
+才视为authority conflict并fail closed，不按created_at或event ID猜测先后。一个Call的ready不得清除另一
+Call的告警，迟到的deferred不得覆盖同Call终态。事件持久化失败
+不得回滚Artifact或业务终态：deferred结果仍为`retained`，下一轮会用
 同一确定性ID重试；ready结果以Artifact API为权威，不因提示事件失败删除Artifact；permanent failure提示为
 best-effort，事件存储故障不得借此突破原24小时源保留上限，必须另记低基数本地观测。
+
+确定性事件必须连`created_at`也可重建：ready使用Artifact `created_at`，deferred使用authoritative Call
+`terminal_at`（缺失时使用lifecycle `created_at`），仍为retained的到期permanent使用`eligible_at`，已经
+deleted且无Artifact的`source_expired`使用`deleted_at`。禁止重试时使用当前clock改写同event ID的时间；
+SQLite merge与Sidecar idempotency都必须收到逐字段相同的EventRecord。
 
 Task/Node关联继续使用事件envelope；payload不得包含`result_ref`、Artifact storage信息、Call/Server ID、
 Tool返回、远端错误体或自由文本异常。MCP audit allowlist只增加`schema`、`reason_code`和`artifact_count`，
@@ -278,8 +296,16 @@ Tool返回、远端错误体或自由文本异常。MCP audit allowlist只增加
 
 为覆盖已完成Task刷新后的状态，既有`TaskSummaryResponse`增加可选
 `mcp_result_artifact_projections`，最多20项；每项复用上述5个闭合字段。后端从Task事件中按
-`safe_call_ref`选取最新合法状态并按safe ref稳定排序，不新增表或MCP专属endpoint。字段缺失表示旧Task或
-无投影事件，前端保持兼容；任何额外键、非法组合或超过20项均fail closed为不展示状态，而不是显示自由文本。
+`safe_call_ref`执行与前端相同的canonical fold并按safe ref稳定排序，不以时间戳决定authority；一个Call最多
+6个合法status/reason事件，因此filtered reader固定读取至多121条，第121条即判超限，不新增表或MCP专属
+endpoint。字段缺失表示旧Task或无投影事件，前端保持兼容；任何额外键、非法组合、状态fork、超过20个Call
+或超过120个事件均fail closed为不展示状态并记录闭合观测，而不是显示自由文本。
+
+普通历史对话并不保证completed Task仍是`current_task_id`，因此`ConversationMessagesResponse.messages[]`中的
+assistant `MessageResponse`也必须增加相同可选投影。`list_conversation_messages`在现有owner鉴权后按assistant
+message的Task集合有界派生canonical fold，不写入Message metadata或新增Storage schema；旧字段缺失继续兼容。
+Task Summary负责当前Task恢复，MessageResponse负责任意completed历史消息，二者必须复用同一后端helper和
+测试向量。
 
 前端只扩展现有`TaskEventState.mcp` reducer和`MCPRuntimeStatus`的Ant Design Alert：
 
@@ -288,8 +314,10 @@ Tool返回、远端错误体或自由文本异常。MCP audit allowlist只增加
 - `permanent_failure`：显示“工具调用已完成，但完整结果文件未能保留”，不展示内部原因；
 - 多Call时只要任一Call为deferred或permanent就保留对应聚合提醒，ready Call不遮蔽失败Call；
 - projector正常在Task terminal事件前完成，现有Task完成加载即可显示卡片；
-- 如果补投发生在Task SSE关闭后，下一次会话/history恢复先读取Task Summary闭合投影，再调用Task Artifact API；
-  已成功补投的Artifact届时出现，仍失败的Call继续显示提醒；不为此保持无限SSE或新增轮询器。
+- `loadArtifacts()`清空`currentTaskId`前必须把当前聚合状态复制到对应assistant message；MessageBubble复用
+  Ant Design Alert持续显示deferred/permanent，运行中的`MCPRuntimeStatus`不与message notice重复渲染；
+- 如果补投发生在Task SSE关闭后，当前Task恢复读取Task Summary，普通历史消息读取MessageResponse，然后沿用
+  公共Artifact加载；已成功补投的Artifact届时出现，仍失败的Call继续显示提醒；不保持无限SSE或新增轮询器。
 
 ## API与前端Artifact交付
 
@@ -325,12 +353,12 @@ Main Agent仍只接收现有最多20,000字符的有界execution projection。Ar
 |---|---|---|
 | FR-01, FR-02, NFR-01, NFR-02 | completed result生成确定性ID/文件名/MIME/size/SHA/summary；身份或receipt冲突fail closed | manager/projector单元测试 |
 | FR-01, FR-09 | 三个成功Call得到三个独立Artifact；promotion后durable源删除而Artifact仍可下载 | lifecycle集成测试 |
-| FR-03, FR-04 | ordinary两处commit、approval恢复、remote terminal均调用同一fake projector；失败不回滚、不重放 | Coordinator/runtime集成测试 |
-| FR-05, FR-10, NFR-03, NFR-09 | pre-ready不claim retained删除；untracked→keyset补投→GC固定顺序；两批以上回填；60秒周期与shutdown；网络调用计数保持0 | startup/post-ready集成测试 |
+| FR-03, FR-04 | ordinary completed commit、approval恢复、remote terminal调用同一fake projector；ordinary failed commit明确不调用；投影失败不回滚、不重放 | Coordinator/runtime集成测试 |
+| FR-05, FR-10, NFR-03, NFR-09 | pre-ready不claim业务结果；untracked单次内部分页；`updated_at/result_ref`两批以上回填；到期失败只精确CAS删除；bulk GC拒绝dispatch_resolved；60秒周期与shutdown；网络调用计数保持0 | startup/post-ready集成测试 |
 | FR-05, FR-09, NFR-08 | snapshot hold期间GC不删除；文件写成功/CAS前崩溃和并发promotion可恢复为单Artifact | 故障注入与并发测试 |
 | FR-06, G-06, NFR-04 | event/audit/prompt/Node output/v2 envelope泄漏扫描不出现raw result、内部ref或远端错误体 | 安全回归测试 |
 | FR-07, NFR-05 | Task Artifact API返回N个file Artifact，`storage_ref`为空，下载可用，跨用户404 | API集成测试 |
-| FR-07 | ready不提前完成Task；terminal后一次加载；Task Summary/history恢复文件卡片与最多20项闭合状态；多Call隔离；乱序deferred不覆盖终态 | API/frontend parser/reducer/App测试 |
+| FR-07 | ready不提前完成Task；Task Summary覆盖当前恢复、MessageResponse覆盖任意历史assistant；terminal前复制notice；MessageBubble持续Alert；多Call/fold/fork闭合 | API/frontend parser/reducer/App测试 |
 | FR-08, NFR-06 | failed/cancelled/unknown/no-call不生成Artifact且只显示脱敏错误码 | 后端与前端回归测试 |
 | NFR-07, NFR-10 | 64 MiB输入常量内存分块复制；低空间返回deferred，到期后GC且有永久告警 | 容量/性能测试 |
 | 兼容性 | Skill现有输出、覆盖、ZIP、下载和前端卡片测试保持不变 | Skill/API/frontend回归 |
@@ -352,14 +380,15 @@ Main Agent仍只接收现有最多20,000字符的有界execution projection。Ar
 
 | 模块 | 预期最小改动 |
 |---|---|
-| `src/integrations/mcp/durable_result_lifecycle.py` | 增加canonical projector返回合同、容量状态、历史候选投影和“投影后GC”的单轮编排 |
-| `src/integrations/mcp/dispatch_coordinator.py` | 两处ordinary terminal commit后调用注入的窄projector callable |
+| `src/integrations/mcp/result_artifact_projection.py` | 新增canonical projector、闭合事件builder/parser、状态fold、目标盘容量检查与安全观测合同 |
+| `src/integrations/mcp/durable_result_lifecycle.py` | 保留低层promotion并增加历史候选投影、到期业务结果单行CAS删除和安全bulk GC编排 |
+| `src/integrations/mcp/dispatch_coordinator.py` | ordinary completed terminal commit后调用窄projector；failed terminal commit增加零调用回归 |
 | `src/api/runtime.py` | 装配projector；remote terminal接入；移除pre-ready源GC；管理60秒post-ready reconciler及shutdown |
-| `src/core/contracts.py`、`src/storage/sqlite/`与`src/storage/postgres/` | 增加只读keyset候选查询；复用现有snapshot hold、CAS和deletion claim |
+| `src/core/contracts.py`、`src/storage/sqlite/`与`src/storage/postgres/` | 增加复用现有`updated_at`索引的只读keyset查询及精确单行deletion claim；bulk claim排除dispatch_resolved |
 | `src/integrations/mcp/audit.py` | 允许projection事件的3个新增闭合字段，继续拒绝secret-like和额外业务内容 |
-| `src/api/dto.py`与`src/api/routes/tasks.py` | Task Summary增加最多20项的闭合projection列表并从Task事件安全派生 |
+| `src/api/dto.py`、`src/api/routes/tasks.py`与`src/api/routes/conversations.py` | Task Summary和assistant MessageResponse增加相同闭合projection列表，复用有界安全fold helper |
 | `frontend/src/api/taskEvents.ts` | 把projection事件加入命名SSE监听列表 |
-| `frontend/src/api/types.ts`与`frontend/src/App.tsx` | 解析Task Summary闭合状态，在history恢复时先恢复提醒再沿用Artifact加载 |
+| `frontend/src/api/types.ts`与`frontend/src/App.tsx` | 解析Task/Message projection，terminal前持久到前端assistant message并由MessageBubble Alert显示 |
 | `frontend/src/domain/taskEvents.ts` | 解析并归并闭合projection状态 |
 | `frontend/src/components/MCPRuntimeStatus.tsx` | 使用现有Alert展示deferred/permanent状态 |
 | `tests/`与`frontend/src/**/*.test.*` | 按追踪矩阵增加回归、故障注入、安全泄漏和前端恢复覆盖 |
@@ -371,7 +400,7 @@ Main Agent仍只接收现有最多20,000字符的有界execution projection。Ar
 
 | 类型 | 内容 | 影响 | 缓解或验证 |
 |---|---|---|---|
-| 已证实风险 | 当前pre-ready `run_once()`会claim已到期`retained`源，若先发布GC再发布projector可能丢失可回填结果 | 历史原文不可恢复 | 同一变更中移除pre-ready源GC；post-ready严格先完整补投扫描再GC；顺序故障注入 |
+| 已证实风险 | 当前pre-ready和generic bulk deletion都会claim已到期`retained / dispatch_resolved`；并发补齐lifecycle时仅靠“先扫描后GC”仍可能删除未尝试结果 | 历史原文不可恢复 | pre-ready禁删；业务结果到期只允许projector返回permanent后的result_ref+revision单行CAS；bulk GC永久排除dispatch_resolved |
 | 已证实风险 | `artifact_owned`会被现有janitor选择并删除durable源 | 错误实现会误以为源永久存在 | Artifact逐字节验证与CAS成功后才进入该状态；验收“源deleted、Artifact可下载” |
 | 已证实风险 | 当前`loadArtifacts()`会完成Task并关闭SSE | ready事件若提前调用会截断后续Call/事件 | ready只更新状态；仍由`task.completed`或history路径加载Artifact |
 | 已证实风险 | Artifact目录可配置为与result源不同文件系统 | 检查源盘空间不能保证目标复制成功 | 对`LocalArtifactFileStore.root_dir`所在文件系统执行`result_size + low_watermark`检查 |
@@ -392,11 +421,13 @@ Main Agent仍只接收现有最多20,000字符的有界execution projection。Ar
 
 ## 回滚
 
-1. 停止新的projector触发和post-ready补投，保留公共Artifact读取链。
-2. 已生成Artifact继续有效；对应durable lifecycle可能已经推进到`deleted`，不得尝试降级或重建源文件。
-3. 尚未投影的`retained`结果继续沿用原24小时GC语义。
-4. 保留闭合projection事件reader以兼容回滚前历史事件；writer停止后前端按缺省状态运行。
-5. 不回滚Call、receipt、Task、Node、intent、outbox或no-replay证据。
+1. 先停止新MCP业务提交并等待活动Call收敛，不能先停止安全reconciler。
+2. 保留projector/reconciler和bulk排除保护，直到`retained / dispatch_resolved = 0`且`deleting = 0`；
+   每个遗留结果继续按Artifact或到期精确CAS删除规则收敛。
+3. 身份/digest损坏导致无法安全promotion或删除时，回滚必须Blocked并交给operator；不得恢复旧generic bulk绕过。
+4. drain证据通过后才停止projector/reconciler并回滚新writer/UI；已生成Artifact继续有效，已删除源不得重建。
+5. 保留公共Artifact reader与闭合projection事件reader；不回滚Call、receipt、Task、Node、intent、outbox或
+   no-replay证据。
 
 ## document-perfectization复审记录
 
@@ -433,10 +464,59 @@ Main Agent仍只接收现有最多20,000字符的有界execution projection。Ar
 | 非功能需求 | 10/10 | 无 |
 | 验收标准与可测试性 | 15/15 | 无 |
 | 边界情况与失败模式 | 10/10 | 无 |
-| 依赖与实施可行性 | 9/10 | Minor：low-watermark目前由temporary-result容量配置持有，而Artifact目标盘可独立配置；影响仅是实现时的配置注入接口，已明确必须检查目标文件系统，实施计划需锁定参数传递 |
+| 依赖与实施可行性 | 10/10 | 无；实施计划已锁定从现有容量配置注入low-watermark并检查Artifact目标文件系统 |
 | 测试、发布、迁移与回滚 | 10/10 | 无 |
 | 风险、假设、追踪与一致性 | 9/10 | Minor：真实历史候选量和多Call分布没有完整生产统计；只影响回填耗时估算，已用1,000条keyset、逐页yield、60秒周期与发布前计数约束 |
-| **总分** | **98/100** | **2个有界Minor** |
+| **总分** | **99/100** | **1个有界Minor** |
 
-- Blocking：0；Major：0；Minor：2。
+- Blocking：0；Major：0；Minor：1。
 - 结论：**Pass with recorded assumptions**，通过95分信心门。
+
+### 第4轮：实施计划一致性复审
+
+- 发现并修正1个Major：多实例或并发`reconcile_untracked`可在keyset扫描游标之后新增已到期行，原“完整扫描后
+  bulk GC”仍可能删除未获投影机会的`dispatch_resolved`结果。
+- 删除authority改为逐行闭合：未到期失败只能deferred；到期permanent后才以当前revision精确CAS删除；
+  generic bulk GC永久排除业务结果，只清理artifact-owned和orphan。
+- keyset改为复用现有`status + updated_at + result_ref`索引；Task Summary与前端统一canonical状态fold，
+  不再依赖时间戳选择“最新”事件。
+- 实施计划同时锁定low-watermark的现有配置来源、目标盘free-bytes注入与测试hook，消除原依赖接口Minor。
+- 修订后完整评分为99/100；Blocking 0，Major 0，剩余1个有界Minor是实施前尚无真实历史量统计，结论保持
+  **Pass with recorded assumptions**。
+
+### 第5轮：完成语义一致性复审
+
+- 发现并修正1个Major：绝对“每个completed Call必有Artifact”与已批准的到期permanent failure边界冲突。
+- G-01和FR-01统一为闭合二选一：正常容量/完整authority只允许唯一Artifact；只有达到原期限仍无法安全投影
+  才允许permanent failure，任何缺失不得静默。
+- 重评分仍为99/100；Blocking 0，Major 0，唯一Minor仍为真实历史量需实施前预检，最终结论不变。
+
+### 第6轮：事件幂等一致性复审
+
+- 发现并修正1个Major：同status不同reason原本会复用同一event ID并写入冲突payload。
+- event ID改为绑定Artifact ID、status和reason；同status原因以固定优先级fold，ready/permanent并存才判fork；
+  history读取以121条硬限检测超过20 Call/120合法事件的异常。
+- 重评分仍为99/100；Blocking 0，Major 0，唯一Minor与最终结论不变。
+
+### 第7轮：EventRecord精确幂等复审
+
+- 发现并修正1个Major：确定性event ID若搭配重试时的当前时间，SQLite merge会改写历史，Sidecar也可能拒绝
+  同idempotency key的不同payload。
+- created_at改为稳定authority派生，要求同ID重试逐字段相同；重评分仍为99/100，最终结论不变。
+
+### 第8轮：deleted时间authority复审
+
+- 发现并修正1个Major：deleted lifecycle会清空eligible_at，source_expired不能用它重建事件时间。
+- retained到期permanent使用eligible_at，deleted source_expired使用deleted_at；重评分仍为99/100，最终结论不变。
+
+### 第9轮：Coordinator接入点事实复审
+
+- 发现并修正1个Major：两处terminal commit并非两个completed入口，其中一处是failed commit。
+- ordinary只在唯一completed commit后调用projector；failed commit锁定零调用，approval仍复用completed分支；
+  重评分仍为99/100，最终结论不变。
+
+### 第10轮：历史消息可见性复审
+
+- 发现并修正1个Major：Task完成后currentTaskId清空会卸载MCPRuntimeStatus，且普通历史消息不一定读取Task Summary。
+- assistant MessageResponse增加相同闭合投影，terminal前同步到前端message，MessageBubble持续显示Alert；
+  重评分仍为99/100，最终结论不变。
