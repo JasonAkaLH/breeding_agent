@@ -23,7 +23,7 @@ from .adapter_2026 import (
     MCPInputRequiredOutcome,
     MCPTaskCreatedOutcome,
 )
-from .client import MCPClientError, MCPProtocolError
+from .client import MCPClientError, MCPProtocolError, MCPRemoteError
 from .credentials import MCPRecoveryCallContext
 from .endpoint_policy import (
     EndpointPolicyError,
@@ -41,6 +41,8 @@ from .gateway_models import (
     ToolCatalogSnapshot,
 )
 from .invalidation import MCPInvalidationAction, MCPServerInvalidated
+from .attachment_materialization import MCPJobWorkflowKind
+from .job_workflows import run_ocr_async_job_workflow
 from .rollout_evidence import (
     MCPCallKind,
     MCPMetricAdapter,
@@ -945,6 +947,7 @@ class MCPGateway:
         arguments_payload_ref: str | None = None,
         arguments_sha256: str | None = None,
         authorization_verified: bool = False,
+        workflow_kind: MCPJobWorkflowKind | None = None,
     ) -> MCPCallOutcome:
         await self._require_safety_admission()
         state = self._require_scope(scope)
@@ -978,6 +981,7 @@ class MCPGateway:
                 pending_action_id=pending_action_id,
                 arguments_payload_ref=arguments_payload_ref,
                 arguments_sha256=arguments_sha256,
+                workflow_kind=workflow_kind,
             ),
             name=f"user-mcp-call:{call_ref}",
         )
@@ -1017,6 +1021,7 @@ class MCPGateway:
         pending_action_id: str | None,
         arguments_payload_ref: str | None,
         arguments_sha256: str | None,
+        workflow_kind: MCPJobWorkflowKind | None,
     ) -> MCPCallOutcome:
         await call_state.start_allowed.wait()
         async with self._task_call_guard.admit(
@@ -1080,9 +1085,28 @@ class MCPGateway:
                     input_responses=input_responses,
                     sealed_request_state_ref=sealed_request_state_ref,
                 )
-            invocation = asyncio.create_task(
-                state.adapter.call_tool(tool_name, arguments, **call_kwargs)
-            )
+            if workflow_kind is None:
+                invocation = asyncio.create_task(
+                    state.adapter.call_tool(tool_name, arguments, **call_kwargs)
+                )
+            elif workflow_kind is MCPJobWorkflowKind.OCR_ASYNC_JOB_V1:
+                if tool_name != "start_parse_job":
+                    await sink.abort()
+                    raise MCPGatewayError("mcp_job_workflow_tool_invalid")
+                invocation = asyncio.create_task(
+                    run_ocr_async_job_workflow(
+                        state.adapter,
+                        arguments,
+                        request_registered_callback=registered,
+                        sleep=self._sleep,
+                        result_persisted_callback=(
+                            lambda result: self._normalize_outcome(result, sink)
+                        ),
+                    )
+                )
+            else:
+                await sink.abort()
+                raise MCPGatewayError("mcp_job_workflow_unsupported")
             heartbeat = asyncio.create_task(
                 self._heartbeat(call_state, invocation, callbacks)
             )
@@ -1096,7 +1120,11 @@ class MCPGateway:
                 await asyncio.gather(heartbeat, return_exceptions=True)
         if not state.accepting_calls:
             raise MCPGatewayError("mcp_scope_closed")
-        outcome = await self._normalize_outcome(raw, sink)
+        outcome = (
+            raw
+            if isinstance(raw, MCPCallOutcome)
+            else await self._normalize_outcome(raw, sink)
+        )
         if not state.accepting_calls:
             raise MCPGatewayError("mcp_scope_closed")
         return outcome
@@ -1115,6 +1143,15 @@ class MCPGateway:
         result = raw.result if isinstance(raw, MCPCompletedOutcome) else raw
         if not isinstance(result, Mapping):
             result = {"value": result}
+        if result.get("isError") is True:
+            await sink.abort()
+            structured = result.get("structuredContent")
+            error = structured.get("error") if isinstance(structured, Mapping) else None
+            remote_code = error.get("code") if isinstance(error, Mapping) else None
+            raise MCPRemoteError(
+                "MCP tool returned isError=true.",
+                remote_code=remote_code,
+            )
         embedded = result.get("_mcpResultRef")
         if isinstance(embedded, Mapping):
             size = embedded.get("sizeBytes")

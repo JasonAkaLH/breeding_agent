@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -29,6 +31,7 @@ from src.integrations.mcp.dispatch_coordinator import (
     EXTERNAL_CONTENT_NOTICE,
     MCPDispatchMetricContext,
     UserMCPDispatchCoordinator as _UserMCPDispatchCoordinator,
+    _DispatchAuthority,
     _mcp_attachment_summaries,
     build_mcp_call_fingerprint,
 )
@@ -225,6 +228,7 @@ class _FakeStorage:
         self.interrupts = []
         self.answers: dict[str, list[InterruptAnswer]] = {}
         self.lifecycle: list[str] = []
+        self.attachments: list[TaskInputAttachment] = []
 
     async def delete_mcp_sealed_state(self, owner_user_id, task_id, sealed_state_ref):
         del owner_user_id, task_id, sealed_state_ref
@@ -245,7 +249,7 @@ class _FakeStorage:
 
     async def list_task_input_attachments_for_task(self, task_id):
         del task_id
-        return []
+        return list(self.attachments)
 
     async def save_mcp_branch_record(self, record):
         self.branches[record.branch_id] = record
@@ -772,6 +776,98 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             if event.event_type == "mcp.dispatch_finished"
         )
         self.assertTrue(finished.payload["tool_call_dispatched"])
+
+    async def test_explicit_ocr_attachment_is_materialized_and_finishes_once(self) -> None:
+        storage = _FakeStorage()
+        content = b"\x89PNG\r\n\x1a\nnewspaper"
+        storage.attachments.append(
+            TaskInputAttachment(
+                attachment_id="attachment-1",
+                task_id="task-a",
+                conversation_id="conv-a",
+                source_kind="message_upload",
+                source_upload_id="upload-1",
+                source_message_id="message-a",
+                filename="newspaper.png",
+                content_type="image/png",
+                file_type="image",
+                size_bytes=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+                source_payload={
+                    "encoding": "base64",
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                },
+            )
+        )
+        gateway = _FakeGateway(MCPCallOutcome.completed("result-safe"))
+        gateway.catalog = ToolCatalogSnapshot(
+            server_id="server-a",
+            effective_protocol_version="2025-11-25",
+            tools=tuple(
+                MCPToolDescriptor(
+                    name=name,
+                    description=name,
+                    input_schema=(
+                        {
+                            "type": "object",
+                            "properties": {"source": {"type": "object"}},
+                            "required": ["source"],
+                        }
+                        if name == "start_parse_job"
+                        else {"type": "object"}
+                    ),
+                    input_schema_sha256=f"schema-{name}",
+                )
+                for name in (
+                    "get_ocr_capabilities",
+                    "start_parse_job",
+                    "get_parse_job",
+                    "ack_parse_job",
+                    "cancel_parse_job",
+                )
+            ),
+        )
+        storage.grants.append(
+            UserMCPToolGrant(
+                "grant-ocr",
+                "alice",
+                "server-a",
+                "start_parse_job",
+                1,
+                "schema-start_parse_job",
+                NOW,
+            )
+        )
+        selector = _SequenceSelector(
+            MCPSelectorAction(
+                MCPSelectorActionType.CALL_TOOL,
+                tool_name="start_parse_job",
+                arguments={"source": {"file_path": "newspaper.png"}},
+            )
+        )
+        coordinator = UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=gateway,
+            selector=selector,
+        )
+
+        outcome = await coordinator.dispatch(
+            _request(metadata={"mcp_binding_mode": "explicit_command"}),
+            server_id="server-a",
+        )
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(len(gateway.calls), 1)
+        tool_name, arguments, kwargs = gateway.calls[0]
+        self.assertEqual(tool_name, "start_parse_job")
+        self.assertEqual(arguments["source"]["type"], "base64")
+        self.assertEqual(
+            base64.b64decode(arguments["source"]["data"], validate=True),
+            content,
+        )
+        self.assertEqual(kwargs["workflow_kind"].value, "ocr_async_job_v1")
+        self.assertEqual(len(selector.contexts), 1)
+        self.assertEqual(outcome.output_payload["mcp_status"], "completed")
 
     async def test_resumes_accepted_always_allow_and_persists_exact_grant_and_call_barriers(self) -> None:
         storage = _FakeStorage()
@@ -1319,12 +1415,33 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             selector=_SequenceSelector(_call()),
         )
 
-        with self.assertRaises(MCPRemoteError):
-            await coordinator.dispatch(_request(), server_id="server-a")
+        outcome = await coordinator.dispatch(_request(), server_id="server-a")
 
+        self.assertEqual(outcome.error.code, "mcp_tool_error")
         call = next(iter(storage.calls.values()))
         self.assertEqual(call.status, "failed")
         self.assertEqual(call.safe_error_code, "mcp_call_failed")
+
+    async def test_dispatch_claim_renewer_renews_before_first_wait(self) -> None:
+        coordinator = UserMCPDispatchCoordinator(
+            storage=_FakeStorage(),
+            gateway=_FakeGateway(),
+            selector=_SequenceSelector(),
+        )
+        renewed = []
+        stop = asyncio.Event()
+
+        async def renew(authority):
+            renewed.append(authority.outbox_id)
+            stop.set()
+
+        coordinator._renew_dispatch_claim = renew
+        await coordinator._maintain_dispatch_claim(
+            _DispatchAuthority("intent-1", "outbox-1", "worker", "token"),
+            stop,
+        )
+
+        self.assertEqual(renewed, ["outbox-1"])
 
     async def test_oversized_result_after_dispatch_is_closed_failed(self) -> None:
         storage = _FakeStorage()

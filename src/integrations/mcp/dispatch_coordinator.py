@@ -47,6 +47,13 @@ from src.core.models import (
 )
 from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
 from src.integrations.mcp.client import MCPRemoteError
+from src.integrations.mcp.attachment_materialization import (
+    MCPAttachmentMaterializationError,
+    MCPJobWorkflowKind,
+    identify_mcp_job_workflow,
+    materialize_mcp_attachment_action,
+)
+from src.integrations.mcp.job_workflows import MCPJobWorkflowError
 from src.integrations.mcp.credentials import MCPAuditReferenceSigner
 from src.integrations.mcp.gateway_models import MCPCallOutcome, MCPCallOutcomeKind, MCPTaskServerScope
 from src.integrations.mcp.cp7_artifacts import (
@@ -302,12 +309,15 @@ class UserMCPDispatchCoordinator:
             return self._error("mcp_task_not_found", "MCP task is not available.")
         owner_user_id, conversation_id, root_message_id = identity
         attachment_summaries: tuple[MCPAttachmentSummary, ...] = ()
+        selected_attachments: tuple[TaskInputAttachment, ...] = ()
         if binding_mode is MCPBindingMode.EXPLICIT_COMMAND:
             try:
+                selected_attachments = _mcp_message_attachments(
+                    await self._storage.list_task_input_attachments_for_task(request.task_id),
+                    root_message_id=root_message_id,
+                )
                 attachment_summaries = _mcp_attachment_summaries(
-                    await self._storage.list_task_input_attachments_for_task(
-                        request.task_id
-                    ),
+                    selected_attachments,
                     root_message_id=root_message_id,
                 )
             except MCPAttachmentSummaryError:
@@ -404,6 +414,7 @@ class UserMCPDispatchCoordinator:
             approved_payload_entered = False
             pending_action: MCPPendingToolAction | None = None
             selector_ran = False
+            workflow_kind: MCPJobWorkflowKind | None = None
             try:
                 current_server = await self._available_server(
                     owner_user_id, current_server.server_id
@@ -856,6 +867,25 @@ class UserMCPDispatchCoordinator:
                         outcome="failed",
                         safe_error_code="mcp_tool_not_found",
                     )
+                if pending_action is None:
+                    materialized = materialize_mcp_attachment_action(
+                        catalog=catalog,
+                        tool_name=tool_name,
+                        arguments=action.arguments,
+                        attachments=selected_attachments,
+                        explicit_binding=(
+                            binding_mode is MCPBindingMode.EXPLICIT_COMMAND
+                        ),
+                    )
+                    if materialized is not None:
+                        action = replace(action, arguments=materialized.arguments)
+                        workflow_kind = materialized.workflow_kind
+                else:
+                    workflow_kind = identify_mcp_job_workflow(
+                        catalog=catalog,
+                        tool_name=tool_name,
+                        arguments=action.arguments,
+                    )
                 fingerprint = build_mcp_call_fingerprint(
                     server_id=current_server.server_id,
                     tool_name=tool_name,
@@ -1156,6 +1186,7 @@ class UserMCPDispatchCoordinator:
                         if approved_payload is not None
                         else None
                     ),
+                    workflow_kind=workflow_kind,
                 )
                 safe_call_ref = self._audit_reference_signer.safe_reference(
                     call_ref,
@@ -1188,6 +1219,22 @@ class UserMCPDispatchCoordinator:
                             selector_step,
                         )
                     )
+                    if workflow_kind is not None:
+                        result = await self._finish_branch(
+                            request,
+                            branch,
+                            status="completed",
+                            safe_summary="The OCR MCP workflow completed successfully.",
+                            result_ref=outcome.result_ref,
+                            events=events,
+                        )
+                        return await self._finalize_no_call_outcome(
+                            authority,
+                            request,
+                            result,
+                            outcome="completed",
+                            safe_error_code=None,
+                        )
                     keep_scope = True
                     continue
                 if outcome.kind is MCPCallOutcomeKind.INPUT_REQUIRED:
@@ -1355,6 +1402,30 @@ class UserMCPDispatchCoordinator:
                     authority, request, self._error(exc.code, "MCP execution failed safely."),
                     outcome="failed", safe_error_code=exc.code,
                 )
+            except MCPAttachmentMaterializationError as exc:
+                return await self._finalize_no_call_outcome(
+                    authority,
+                    request,
+                    self._error(
+                        exc.code,
+                        "The selected attachment cannot be prepared for this MCP tool.",
+                    ),
+                    outcome="failed",
+                    safe_error_code=exc.code,
+                )
+            except (MCPRemoteError, MCPJobWorkflowError) as exc:
+                code = (
+                    exc.code
+                    if isinstance(exc, MCPJobWorkflowError)
+                    else "mcp_tool_error"
+                )
+                return await self._finalize_no_call_outcome(
+                    authority,
+                    request,
+                    self._error(code, "The MCP tool failed safely."),
+                    outcome="failed",
+                    safe_error_code=code,
+                )
             except _CallReservationError as exc:
                 return await self._finalize_no_call_outcome(
                     authority, request,
@@ -1450,7 +1521,11 @@ class UserMCPDispatchCoordinator:
         self,
         authority: _DispatchAuthority,
         stop: asyncio.Event,
+        *,
+        renew_immediately: bool = True,
     ) -> None:
+        if renew_immediately:
+            await self._renew_dispatch_claim(authority)
         while not stop.is_set():
             try:
                 await asyncio.wait_for(stop.wait(), timeout=5.0)
@@ -1982,6 +2057,7 @@ class UserMCPDispatchCoordinator:
         authority: _DispatchAuthority | None = None,
         pending_action: MCPPendingToolAction | None = None,
         pending_action_payload: MCPPendingActionPayloadSnapshot | None = None,
+        workflow_kind: MCPJobWorkflowKind | None = None,
     ) -> tuple[MCPCallOutcome, str, str | None]:
         if authority is not None and (
             pending_action is None or pending_action_payload is None
@@ -2201,6 +2277,7 @@ class UserMCPDispatchCoordinator:
                     else None
                 ),
                 authorization_verified=True,
+                workflow_kind=workflow_kind,
             )
 
         claim_stop: asyncio.Event | None = None
@@ -2210,10 +2287,15 @@ class UserMCPDispatchCoordinator:
             if authority is None:
                 outcome = await invoke_gateway()
             else:
+                await self._renew_dispatch_claim(authority)
                 claim_stop = asyncio.Event()
                 gateway_task = asyncio.create_task(invoke_gateway())
                 claim_task = asyncio.create_task(
-                    self._maintain_dispatch_claim(authority, claim_stop)
+                    self._maintain_dispatch_claim(
+                        authority,
+                        claim_stop,
+                        renew_immediately=False,
+                    )
                 )
                 done, _pending = await asyncio.wait(
                     {gateway_task, claim_task},
@@ -2237,7 +2319,7 @@ class UserMCPDispatchCoordinator:
             call_ref = call_ref_holder.get("value")
             if call_ref:
                 known_terminal_failure = isinstance(
-                    exc, (MCPRemoteError, MCPResultTooLargeError)
+                    exc, (MCPRemoteError, MCPResultTooLargeError, MCPJobWorkflowError)
                 )
                 terminal_status = "failed"
                 safe_error_code = (
@@ -2356,7 +2438,10 @@ class UserMCPDispatchCoordinator:
             if dispatched:
                 result_category = (
                     MCPMetricResultCategory.FAILED
-                    if isinstance(exc, (MCPRemoteError, MCPResultTooLargeError))
+                    if isinstance(
+                        exc,
+                        (MCPRemoteError, MCPResultTooLargeError, MCPJobWorkflowError),
+                    )
                     else MCPMetricResultCategory.UNKNOWN
                 )
                 await self._record_terminal_call_metrics(
@@ -3147,6 +3232,22 @@ def _mcp_attachment_summaries(
         )
         for attachment in selected
     )
+
+
+def _mcp_message_attachments(
+    attachments: Sequence[TaskInputAttachment],
+    *,
+    root_message_id: str,
+) -> tuple[TaskInputAttachment, ...]:
+    selected = tuple(
+        attachment
+        for attachment in attachments
+        if attachment.source_kind == "message_upload"
+        and attachment.source_message_id == root_message_id
+    )
+    if len(selected) > MAX_MCP_ATTACHMENT_SUMMARIES:
+        raise MCPAttachmentSummaryError("mcp_attachment_summary_limit_exceeded")
+    return selected
 
 
 def _safe_attachment_basename(value: object) -> str:

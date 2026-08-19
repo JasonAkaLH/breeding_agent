@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Conversation, Task, UserMCPServer, UserMCPToolGrant
-from src.integrations.mcp.client import MCPClientError
+from src.integrations.mcp.client import MCPClientError, MCPRemoteError
+from src.integrations.mcp.attachment_materialization import MCPJobWorkflowKind
 from src.integrations.mcp.endpoint_policy import (
     EndpointPolicy,
     EndpointPolicyError,
@@ -831,6 +832,111 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.storage.list_live_user_mcp_scope_leases(now=self.now), []
         )
+
+    async def test_tool_result_is_error_is_not_persisted_as_success(self) -> None:
+        scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+
+        async def rejected(tool_name, arguments, **kwargs):
+            del tool_name, arguments
+            callback = kwargs.get("request_registered_callback")
+            if callback:
+                callback("remote-error-1")
+            return {
+                "isError": True,
+                "structuredContent": {
+                    "error": {
+                        "code": "INVALID_ARGUMENT",
+                        "message": "invalid source",
+                    }
+                },
+            }
+
+        self.adapters[0].call_tool = rejected
+        with self.assertRaisesRegex(MCPRemoteError, "isError=true"):
+            await self.gateway.call_tool(scope, "echo", {"text": "bad"})
+
+    async def test_ocr_job_workflow_is_one_gateway_call_with_final_result(self) -> None:
+        class OCRAdapter(_Adapter):
+            async def list_tools(self):
+                self.list_count += 1
+                names = (
+                    "get_ocr_capabilities",
+                    "start_parse_job",
+                    "get_parse_job",
+                    "ack_parse_job",
+                    "cancel_parse_job",
+                )
+                return [
+                    {
+                        "name": name,
+                        "description": name,
+                        "inputSchema": {"type": "object"},
+                    }
+                    for name in names
+                ]
+
+            async def call_tool(self, tool_name, arguments, **kwargs):
+                self.call_count += 1
+                callback = kwargs.get("request_registered_callback")
+                if callback:
+                    callback(self.call_count)
+                if tool_name == "start_parse_job":
+                    content = {"job_id": "job-1", "status": "queued"}
+                elif tool_name == "get_parse_job":
+                    content = {
+                        "job_id": "job-1",
+                        "status": "succeeded",
+                        "markdown": "识别成功",
+                        "result_receipt": "receipt-1",
+                    }
+                else:
+                    content = {"job_id": "job-1", "status": "acknowledged"}
+                return {
+                    "content": [{"type": "text", "text": "safe"}],
+                    "structuredContent": content,
+                    "isError": False,
+                }
+
+        adapter = OCRAdapter()
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-ocr-workflow",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials, endpoint: adapter,
+            endpoint_revalidator=_validated_endpoint,
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+            sleep=lambda _seconds: asyncio.sleep(0),
+        )
+        try:
+            scope = await gateway.open_scope(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+            outcome = await gateway.call_tool(
+                scope,
+                "start_parse_job",
+                {
+                    "source": {
+                        "type": "base64",
+                        "data": "AA==",
+                        "mime_type": "image/png",
+                    }
+                },
+                workflow_kind=MCPJobWorkflowKind.OCR_ASYNC_JOB_V1,
+            )
+
+            self.assertEqual(outcome.kind.value, "completed")
+            self.assertEqual(adapter.call_count, 3)
+            self.assertTrue(outcome.result_ref.startswith("mcp-result-"))
+        finally:
+            await gateway.aclose()
 
     async def test_persisted_assignment_guard_blocks_shadow_call_before_send(
         self,

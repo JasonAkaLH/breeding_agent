@@ -1672,6 +1672,26 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             "completed",
         )
 
+    async def test_exact_claim_can_finalize_just_after_lease_expiry(self) -> None:
+        claimed = await self._claim()
+
+        finalized = await self.storage.finalize_mcp_dispatch(
+            self.intent_id,
+            self.outbox_id,
+            self.node.node_id,
+            "failed",
+            "mcp_tool_error",
+            claimed.revision,
+            "worker",
+            "token",
+            NOW + timedelta(minutes=5),
+        )
+
+        self.assertEqual(str(finalized), "finalized")
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        self.assertEqual(str(outbox.status), "aborted")
+        self.assertEqual(outbox.completion_mode, "failed_no_call")
+
     async def test_no_call_finish_finalizer_completes_dispatch(self) -> None:
         claimed = await self._claim()
 

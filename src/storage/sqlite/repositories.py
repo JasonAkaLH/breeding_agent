@@ -8922,8 +8922,6 @@ class SQLiteStateRepository:
             and outbox.claim_token == claim_token
             and claim_owner is not None
             and claim_token is not None
-            and outbox.lease_expires_at is not None
-            and outbox.lease_expires_at > occurred_at
         )
         allowed_outbox_statuses = {"pending", "claimed", "active"}
         if allow_without_claim:
