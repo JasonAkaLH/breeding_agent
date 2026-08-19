@@ -1278,6 +1278,8 @@ class UserMCPDispatchCoordinator:
                 return await self._wait_for_remote_task(
                     request,
                     branch,
+                    authority=authority,
+                    call_ref=call_ref,
                     safe_summary="The MCP server created a remote task.",
                     result_ref=outcome.safe_remote_task_ref,
                     events=events,
@@ -2849,13 +2851,69 @@ class UserMCPDispatchCoordinator:
         request: CapabilityExecutionRequest,
         branch: MCPBranchRecord,
         *,
+        authority: _DispatchAuthority | None,
+        call_ref: str,
         safe_summary: str,
         result_ref: str | None,
         events: Sequence[EventRecord],
         extra_output: Mapping[str, Any],
     ) -> MCPDispatchOutcome:
-        del request
         now = self._now()
+        if authority is not None:
+            intent = await self._storage.get_mcp_no_server_intent(
+                authority.intent_id
+            )
+            outbox = await self._storage.get_mcp_dispatch_resume_outbox(
+                authority.outbox_id
+            )
+            if intent is None or outbox is None or result_ref is None:
+                await self._storage.converge_mcp_unknown_no_replay(
+                    request.task_id, now
+                )
+                raise _CallReservationError("mcp_remote_task_authority_missing")
+            try:
+                published = await self._storage.publish_mcp_remote_task(
+                    authority.intent_id,
+                    authority.outbox_id,
+                    call_ref,
+                    result_ref,
+                    intent.revision,
+                    outbox.revision,
+                    authority.claim_owner,
+                    authority.claim_token,
+                    now,
+                )
+            except BaseException as exc:
+                await self._storage.converge_mcp_unknown_no_replay(
+                    request.task_id, self._now()
+                )
+                raise _CallReservationError(
+                    "mcp_remote_task_publish_failed"
+                ) from exc
+            if published is None:
+                await self._storage.converge_mcp_unknown_no_replay(
+                    request.task_id, self._now()
+                )
+                raise _CallReservationError("mcp_remote_task_publish_conflict")
+            saved = (
+                await self._storage.get_mcp_branch_record(
+                    branch.owner_user_id, branch.task_id, branch.branch_id
+                )
+                or branch
+            )
+            output = {
+                "mcp_status": "remote_task_created",
+                "mcp_branch_id": saved.branch_id,
+                "safe_summary": saved.safe_summary or _safe_text(safe_summary),
+                "result_ref": saved.result_ref,
+                "external_content_notice": EXTERNAL_CONTENT_NOTICE,
+                **{
+                    key: value
+                    for key, value in extra_output.items()
+                    if value is not None
+                },
+            }
+            return MCPDispatchOutcome(output_payload=output, events=tuple(events))
         current = (
             await self._storage.get_mcp_branch_record(
                 branch.owner_user_id, branch.task_id, branch.branch_id

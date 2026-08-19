@@ -522,6 +522,11 @@ class StoragePort(Protocol):
         candidate_snapshot: MCPTerminalCandidateSnapshot,
         result_snapshot: MCPDurableResultSnapshot | None,
         occurred_at: datetime,
+        *,
+        remote_binding_ref: str | None = None,
+        remote_claim_owner: str | None = None,
+        remote_claim_token: str | None = None,
+        remote_expected_revision: int | None = None,
     ) -> MCPTerminalResultCommitResult: ...
 
     async def finalize_mcp_dispatch(
@@ -675,6 +680,19 @@ class StoragePort(Protocol):
         *,
         published_at: datetime,
         continuation_plan: Mapping[str, Any] | None = None,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def publish_mcp_remote_task(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        safe_remote_task_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        occurred_at: datetime,
     ) -> MCPRemoteTaskBinding | None: ...
 
     async def reconcile_unpublished_mcp_remote_task_bindings(

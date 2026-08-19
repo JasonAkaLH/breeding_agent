@@ -17,6 +17,7 @@ from src.core.models import (
     MCPCallRecord,
     MCPDurableResultSnapshot,
     MCPMRTRRequestStateEvidence,
+    MCPRemoteTaskBinding,
     MCPSealedState,
     MCPPendingActionPayloadSnapshot,
     MCPPendingToolAction,
@@ -984,6 +985,119 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             str((await self.storage.get_mcp_pending_tool_action("action-1")).status),
             "consumed",
         )
+
+    async def test_remote_task_publication_adopts_binding_and_releases_dispatch_claim(
+        self,
+    ) -> None:
+        active = await self._admit()
+        binding = MCPRemoteTaskBinding(
+            safe_remote_task_ref="mcp-task:remote-1",
+            owner_user_id="alice",
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            call_ref="call-1",
+            server_id=self.server.server_id,
+            protocol_version="2026-07-28",
+            remote_task_ciphertext=b"ciphertext",
+            remote_task_nonce=b"n" * 12,
+            encryption_version=1,
+            last_status="working",
+            next_poll_at=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        await self.storage.save_mcp_remote_task_binding(binding)
+        intent = await self.storage.get_mcp_no_server_intent(self.intent_id)
+
+        published = await self.storage.publish_mcp_remote_task(
+            self.intent_id,
+            self.outbox_id,
+            "call-1",
+            binding.safe_remote_task_ref,
+            intent.revision,
+            active.revision,
+            "worker",
+            "token",
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertIsNotNone(published)
+        self.assertEqual(published.published_at, NOW + timedelta(seconds=1))
+        call = await self.storage.get_mcp_call_record(
+            "alice", self.task.task_id, "call-1"
+        )
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        branch = await self.storage.get_mcp_branch_record(
+            "alice", self.task.task_id, "branch-1"
+        )
+        self.assertEqual(call.status, "remote_pending")
+        self.assertEqual(call.result_ref, binding.safe_remote_task_ref)
+        self.assertEqual(str(outbox.status), "remote_pending")
+        self.assertIsNone(outbox.claim_token)
+        self.assertEqual(branch.active_call_ref, "call-1")
+        self.assertEqual(branch.status, "waiting_for_dependency")
+        self.assertEqual(
+            str((await self.storage.get_task_node(self.node.node_id)).status),
+            "waiting_for_dependency",
+        )
+        claimed_bindings = await self.storage.claim_due_mcp_remote_task_bindings(
+            claim_owner="remote-worker",
+            claim_token="remote-token",
+            now=NOW + timedelta(seconds=2),
+            lease_expires_at=NOW + timedelta(seconds=32),
+        )
+        self.assertEqual(len(claimed_bindings), 1)
+        claimed_binding = claimed_bindings[0]
+        candidate_snapshot, result_snapshot = self._terminal_snapshots()
+        remote_outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+            self.outbox_id
+        )
+
+        committed = await self.storage.commit_mcp_call_terminal(
+            "call-1",
+            candidate_snapshot.candidate.candidate_id,
+            self.outbox_id,
+            remote_outbox.revision,
+            None,
+            None,
+            candidate_snapshot,
+            result_snapshot,
+            NOW + timedelta(seconds=3),
+            remote_binding_ref=binding.safe_remote_task_ref,
+            remote_claim_owner="remote-worker",
+            remote_claim_token="remote-token",
+            remote_expected_revision=claimed_binding.revision,
+        )
+
+        self.assertEqual(str(committed), "committed_normal")
+        terminal_binding = await self.storage.get_mcp_remote_task_binding(
+            "alice", self.task.task_id, binding.safe_remote_task_ref
+        )
+        resumed_outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+            self.outbox_id
+        )
+        self.assertEqual(terminal_binding.last_status, "completed")
+        self.assertIsNotNone(terminal_binding.terminal_at)
+        self.assertEqual(str(resumed_outbox.status), "pending")
+        self.assertEqual(str(resumed_outbox.resume_reason), "remote_terminal")
+        self.assertEqual(
+            str((await self.storage.get_task_node(self.node.node_id)).status),
+            "ready_to_resume",
+        )
+        idempotent_finish = await self.storage.finish_mcp_remote_task_binding(
+            "alice",
+            self.task.task_id,
+            binding.safe_remote_task_ref,
+            claim_owner="remote-worker",
+            claim_token="remote-token",
+            expected_revision=claimed_binding.revision,
+            remote_status="completed",
+            call_status="completed",
+            terminal_at=NOW + timedelta(seconds=3),
+            result_ref=candidate_snapshot.candidate.safe_result_ref,
+            result_receipt_id=resumed_outbox.result_receipt_id,
+        )
+        self.assertIsNotNone(idempotent_finish)
 
     async def test_expired_active_claim_with_unreceipted_call_cannot_recover_pending(
         self,

@@ -11547,11 +11547,75 @@ def build_api_runtime(
                 raise RuntimeError("mcp_remote_task_terminal_candidate_missing")
             if candidate.safe_result_ref != result_ref:
                 raise RuntimeError("mcp_remote_task_terminal_candidate_missing")
-            committed = await storage.commit_authoritative_mcp_terminal_result(
-                binding.call_ref,
-                candidate.candidate_id,
-                ApiRuntime._utcnow_naive(),
+            if (
+                mcp_terminal_candidate_snapshot_authority is None
+                or mcp_durable_result_snapshot_authority is None
+            ):
+                raise RuntimeError("mcp_remote_task_snapshot_authority_missing")
+            sealed = secure_read_terminal_result_candidate(
+                terminal_result_root, candidate.candidate_id
             )
+            candidate_snapshot = (
+                mcp_terminal_candidate_snapshot_authority.snapshot(sealed)
+            )
+            intent_id = mcp_no_server_intent_id(
+                binding.task_id, node_id=binding.node_id
+            )
+            outbox = await storage.get_mcp_dispatch_resume_outbox(
+                mcp_dispatch_resume_outbox_id(intent_id)
+            )
+            if outbox is None:
+                raise RuntimeError("mcp_remote_task_dispatch_outbox_missing")
+            commit_kwargs = {
+                "remote_binding_ref": binding.safe_remote_task_ref,
+                "remote_claim_owner": binding.claim_owner,
+                "remote_claim_token": binding.claim_token,
+                "remote_expected_revision": binding.revision,
+            }
+            if result_ref is None:
+                committed = await storage.commit_mcp_call_terminal(
+                    binding.call_ref,
+                    candidate.candidate_id,
+                    outbox.outbox_id,
+                    outbox.revision,
+                    None,
+                    None,
+                    candidate_snapshot,
+                    None,
+                    ApiRuntime._utcnow_naive(),
+                    **commit_kwargs,
+                )
+            else:
+                if (
+                    candidate.safe_result_size_bytes is None
+                    or candidate.safe_result_content_sha256 is None
+                    or candidate.safe_result_store_kind is None
+                ):
+                    raise RuntimeError("mcp_remote_task_result_snapshot_missing")
+                async with mcp_durable_result_snapshot_authority.open_snapshot(
+                    result_ref=result_ref,
+                    owner_user_id=binding.owner_user_id,
+                    task_id=binding.task_id,
+                    node_id=binding.node_id,
+                    call_id=binding.call_ref,
+                    expected_size_bytes=candidate.safe_result_size_bytes,
+                    expected_content_sha256=(
+                        candidate.safe_result_content_sha256
+                    ),
+                    expected_store_kind=candidate.safe_result_store_kind,
+                ) as result_snapshot:
+                    committed = await storage.commit_mcp_call_terminal(
+                        binding.call_ref,
+                        candidate.candidate_id,
+                        outbox.outbox_id,
+                        outbox.revision,
+                        None,
+                        None,
+                        candidate_snapshot,
+                        result_snapshot,
+                        ApiRuntime._utcnow_naive(),
+                        **commit_kwargs,
+                    )
             if str(committed) == "conflict":
                 raise RuntimeError("mcp_remote_task_terminal_commit_conflict")
             return mcp_terminal_receipt_id(

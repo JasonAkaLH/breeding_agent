@@ -7354,7 +7354,12 @@ class SQLiteStateRepository:
         return None if row is None else _row_to_mcp_terminal_projection(row)
 
     def commit_authoritative_mcp_terminal_result(
-        self, call_id: str, candidate_id: str, occurred_at: datetime
+        self,
+        call_id: str,
+        candidate_id: str,
+        occurred_at: datetime,
+        *,
+        update_dispatch_outbox: bool = True,
     ) -> MCPTerminalResultCommitResult:
         if self._terminal_candidate_reader is None:
             raise RuntimeError("mcp_terminal_candidate_reader_unavailable")
@@ -7575,19 +7580,21 @@ class SQLiteStateRepository:
                 created_at=occurred_at,
             )
             result = MCPTerminalResultCommitResult.COMMITTED_NORMAL
-        outbox.revision = int(outbox.revision) + 1
-        outbox.updated_at = occurred_at
-        outbox.result_receipt_id = receipt_id
-        if late:
-            if outbox.status != "completed" or outbox.completion_mode != "unknown_no_replay":
-                return MCPTerminalResultCommitResult.CONFLICT
-        else:
-            outbox.status = "active"
-            outbox.completed_at = None
-            outbox.completion_mode = None
-            outbox.resume_reason = "ordinary_terminal"
-            outbox.resume_receipt_id = receipt_id
-            outbox.resume_answer_id = None
+        if update_dispatch_outbox:
+            outbox.revision = int(outbox.revision) + 1
+            outbox.updated_at = occurred_at
+            outbox.result_receipt_id = receipt_id
+            if late:
+                if outbox.status != "completed" or outbox.completion_mode != "unknown_no_replay":
+                    return MCPTerminalResultCommitResult.CONFLICT
+            else:
+                outbox.status = "active"
+                outbox.completed_at = None
+                outbox.completion_mode = None
+                outbox.resume_reason = "ordinary_terminal"
+                outbox.resume_receipt_id = receipt_id
+                outbox.resume_answer_id = None
+        if not late:
             branch.active_call_ref = None
             branch.status = str(candidate.terminal_state)
             branch.result_ref = candidate.safe_result_ref
@@ -7606,8 +7613,24 @@ class SQLiteStateRepository:
         candidate_snapshot: MCPTerminalCandidateSnapshot,
         result_snapshot: MCPDurableResultSnapshot | None,
         occurred_at: datetime,
+        *,
+        remote_binding_ref: str | None = None,
+        remote_claim_owner: str | None = None,
+        remote_claim_token: str | None = None,
+        remote_expected_revision: int | None = None,
     ) -> MCPTerminalResultCommitResult:
         candidate = candidate_snapshot.candidate
+        remote_values = (
+            remote_binding_ref,
+            remote_claim_owner,
+            remote_claim_token,
+            remote_expected_revision,
+        )
+        if any(value is not None for value in remote_values) and not all(
+            value is not None for value in remote_values
+        ):
+            raise ValueError("mcp_remote_terminal_claim_incomplete")
+        remote = remote_binding_ref is not None
         if (
             candidate.call_id != call_id
             or candidate.candidate_id != candidate_id
@@ -7641,6 +7664,18 @@ class SQLiteStateRepository:
             select(MCPDispatchResumeOutboxRow)
             .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
             .with_for_update()
+        )
+        binding = (
+            self._session.scalar(
+                select(MCPRemoteTaskBindingRow)
+                .where(
+                    MCPRemoteTaskBindingRow.safe_remote_task_ref
+                    == remote_binding_ref
+                )
+                .with_for_update()
+            )
+            if remote
+            else None
         )
         if pre_call is not None and pre_call.pending_action_id is not None:
             self._session.scalar(
@@ -7714,6 +7749,29 @@ class SQLiteStateRepository:
         if existing is not None:
             if existing.candidate_id != candidate_id:
                 return MCPTerminalResultCommitResult.CONFLICT
+        elif remote:
+            if (
+                binding is None
+                or binding.call_ref != call_id
+                or binding.owner_user_id != candidate.owner_user_id
+                or binding.task_id != candidate.task_id
+                or binding.node_id != candidate.node_id
+                or binding.server_id != candidate.server_id
+                or binding.published_at is None
+                or binding.terminal_at is not None
+                or binding.claim_owner != remote_claim_owner
+                or binding.claim_token != remote_claim_token
+                or binding.lease_expires_at is None
+                or binding.lease_expires_at <= occurred_at
+                or int(binding.revision or 0) != remote_expected_revision
+                or outbox.status != "remote_pending"
+                or int(outbox.revision) != expected_outbox_revision
+                or outbox.claim_owner is not None
+                or outbox.claim_token is not None
+                or call.status != "remote_pending"
+                or not call.may_have_dispatched
+            ):
+                return MCPTerminalResultCommitResult.CONFLICT
         elif (
             outbox.status != "active"
             or int(outbox.revision) != expected_outbox_revision
@@ -7730,7 +7788,10 @@ class SQLiteStateRepository:
         self._terminal_candidate_reader = lambda _call_id, _candidate_id: candidate
         try:
             result = self.commit_authoritative_mcp_terminal_result(
-                call_id, candidate_id, occurred_at
+                call_id,
+                candidate_id,
+                occurred_at,
+                update_dispatch_outbox=not remote,
             )
         finally:
             self._terminal_candidate_reader = original_reader
@@ -7750,6 +7811,62 @@ class SQLiteStateRepository:
         )
         if result is MCPTerminalResultCommitResult.ALREADY_COMMITTED:
             return result
+        if remote:
+            assert binding is not None
+            assert remote_expected_revision is not None
+            binding.last_status = str(candidate.terminal_state)
+            binding.next_poll_at = None
+            binding.updated_at = occurred_at
+            binding.terminal_at = occurred_at
+            binding.claim_owner = None
+            binding.claim_token = None
+            binding.lease_expires_at = None
+            binding.revision = remote_expected_revision + 1
+            if candidate.terminal_state is MCPTerminalState.COMPLETED:
+                outbox.status = "pending"
+                outbox.claim_owner = None
+                outbox.claim_token = None
+                outbox.lease_expires_at = None
+                outbox.revision = int(outbox.revision) + 1
+                outbox.updated_at = occurred_at
+                outbox.result_receipt_id = receipt_id
+                outbox.resume_reason = "remote_terminal"
+                outbox.resume_receipt_id = receipt_id
+                outbox.resume_answer_id = None
+                node = self._session.get(TaskNodeRow, candidate.node_id)
+                if node is not None:
+                    node.status = str(NodeStatus.READY_TO_RESUME)
+                remote_outbox_id = f"mcp-remote-terminal:{call_id}"
+                insert_statement = (
+                    postgresql_insert(MCPRemoteTaskOutboxRow)
+                    if self._session.bind is not None
+                    and self._session.bind.dialect.name == "postgresql"
+                    else sqlite_insert(MCPRemoteTaskOutboxRow)
+                )
+                self._session.execute(
+                    insert_statement.values(
+                        outbox_id=remote_outbox_id,
+                        kind="terminal_continuation",
+                        owner_user_id=candidate.owner_user_id,
+                        task_id=candidate.task_id,
+                        node_id=candidate.node_id,
+                        call_ref=call_id,
+                        safe_remote_task_ref=remote_binding_ref,
+                        payload={
+                            "call_status": str(candidate.terminal_state),
+                            "result_ref": candidate.safe_result_ref,
+                            "result_receipt_id": receipt_id,
+                            "safe_error_code": candidate.safe_error_code,
+                            "continuation_plan": dict(
+                                binding.continuation_plan or {}
+                            ),
+                        },
+                        status="pending",
+                        revision=0,
+                        created_at=occurred_at,
+                        updated_at=occurred_at,
+                    ).on_conflict_do_nothing()
+                )
         if candidate.terminal_state in {
             MCPTerminalState.FAILED,
             MCPTerminalState.CANCELLED,
@@ -7771,7 +7888,7 @@ class SQLiteStateRepository:
                 claim_owner=claim_owner,
                 claim_token=claim_token,
                 occurred_at=occurred_at,
-                allow_without_claim=False,
+                allow_without_claim=remote,
             )
             if finalized is MCPDispatchFinalizeResult.CONFLICT:
                 raise RuntimeError("mcp_terminal_finalize_conflict")
@@ -8820,6 +8937,150 @@ class SQLiteStateRepository:
         row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
         return None if row is None else _row_to_mcp_remote_task(row)
 
+    def publish_mcp_remote_task(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        safe_remote_task_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        occurred_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        binding_candidate = self._session.get(
+            MCPRemoteTaskBindingRow, safe_remote_task_ref
+        )
+        if binding_candidate is None:
+            return None
+        self._lock_mcp_owner_guard(binding_candidate.owner_user_id, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == binding_candidate.owner_user_id,
+                UserMCPServerRow.server_id == binding_candidate.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        binding = self._session.scalar(
+            select(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref
+                == safe_remote_task_ref
+            )
+            .with_for_update()
+        )
+        call = self._session.scalar(
+            select(MCPCallRecordRow)
+            .where(MCPCallRecordRow.call_ref == call_id)
+            .with_for_update()
+        )
+        branch = (
+            self._session.scalar(
+                select(MCPBranchRecordRow)
+                .where(MCPBranchRecordRow.branch_id == call.branch_id)
+                .with_for_update()
+            )
+            if call is not None
+            else None
+        )
+        task = (
+            self._session.scalar(
+                select(TaskRow).where(TaskRow.task_id == call.task_id).with_for_update()
+            )
+            if call is not None
+            else None
+        )
+        node = (
+            self._session.scalar(
+                select(TaskNodeRow)
+                .where(TaskNodeRow.node_id == call.node_id)
+                .with_for_update()
+            )
+            if call is not None
+            else None
+        )
+        if (
+            binding is not None
+            and binding.published_at is not None
+            and call is not None
+            and call.status == "remote_pending"
+            and outbox is not None
+            and outbox.status == "remote_pending"
+        ):
+            return _row_to_mcp_remote_task(binding)
+        if (
+            server is None
+            or intent is None
+            or outbox is None
+            or binding is None
+            or call is None
+            or branch is None
+            or task is None
+            or node is None
+            or int(intent.revision) != expected_intent_revision
+            or int(outbox.revision) != expected_outbox_revision
+            or intent.status != "dispatched"
+            or outbox.status != "active"
+            or outbox.claim_owner != claim_owner
+            or outbox.claim_token != claim_token
+            or outbox.lease_expires_at is None
+            or outbox.lease_expires_at <= occurred_at
+            or binding.published_at is not None
+            or binding.terminal_at is not None
+            or binding.call_ref != call.call_ref
+            or binding.owner_user_id != call.owner_user_id
+            or binding.task_id != call.task_id
+            or binding.node_id != call.node_id
+            or binding.server_id != call.server_id
+            or binding.protocol_version != call.protocol_version
+            or call.status != "active"
+            or not call.may_have_dispatched
+            or call.terminal_at is not None
+            or branch.active_call_ref != call.call_ref
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status not in {str(NodeStatus.RUNNING), str(NodeStatus.READY_TO_RESUME)}
+            or not _mcp_server_is_available(server)
+            or int(server.config_version) != int(call.server_config_version or 0)
+            or int(server.security_version) != int(call.server_security_version)
+        ):
+            return None
+        binding.published_at = occurred_at
+        binding.next_poll_at = occurred_at
+        binding.updated_at = occurred_at
+        binding.revision = int(binding.revision or 0) + 1
+        call.status = "remote_pending"
+        call.result_ref = safe_remote_task_ref
+        call.updated_at = occurred_at
+        branch.status = "waiting_for_dependency"
+        branch.result_ref = safe_remote_task_ref
+        branch.safe_summary = "The MCP server created a remote task."
+        branch.updated_at = occurred_at
+        outbox.status = "remote_pending"
+        outbox.claim_owner = None
+        outbox.claim_token = None
+        outbox.lease_expires_at = None
+        outbox.resume_reason = "initial"
+        outbox.resume_receipt_id = None
+        outbox.resume_answer_id = None
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        node.status = str(NodeStatus.WAITING_FOR_DEPENDENCY)
+        self._session.flush()
+        return _row_to_mcp_remote_task(binding)
+
     def list_unpublished_mcp_remote_task_bindings(
         self, *, limit: int = 1000
     ) -> list[MCPRemoteTaskBinding]:
@@ -9111,6 +9372,41 @@ class SQLiteStateRepository:
             .execution_options(synchronize_session=False)
         )
         if not result.rowcount:
+            binding_row = self._session.get(
+                MCPRemoteTaskBindingRow, safe_remote_task_ref
+            )
+            call_row = (
+                None
+                if binding_row is None
+                else self._session.get(MCPCallRecordRow, binding_row.call_ref)
+            )
+            receipt = (
+                None
+                if result_receipt_id is None
+                else self._session.get(
+                    MCPTerminalResultReceiptRow, result_receipt_id
+                )
+            )
+            if (
+                binding_row is not None
+                and call_row is not None
+                and binding_row.owner_user_id == owner_user_id
+                and binding_row.task_id == task_id
+                and binding_row.terminal_at is not None
+                and int(binding_row.revision or 0) == expected_revision + 1
+                and binding_row.last_status == remote_status
+                and call_row.status == call_status
+                and call_row.result_ref == result_ref
+                and (
+                    result_receipt_id is None
+                    or (
+                        receipt is not None
+                        and receipt.call_id == call_row.call_ref
+                        and receipt.safe_result_ref == result_ref
+                    )
+                )
+            ):
+                return _row_to_mcp_remote_task(binding_row)
             return None
         binding_row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
         if binding_row is None:
@@ -12466,6 +12762,11 @@ class SQLiteStorage(StoragePort):
         candidate_snapshot: MCPTerminalCandidateSnapshot,
         result_snapshot: MCPDurableResultSnapshot | None,
         occurred_at: datetime,
+        *,
+        remote_binding_ref: str | None = None,
+        remote_claim_owner: str | None = None,
+        remote_claim_token: str | None = None,
+        remote_expected_revision: int | None = None,
     ) -> MCPTerminalResultCommitResult:
         return await self._run(
             lambda state, collab: state.commit_mcp_call_terminal(
@@ -12478,6 +12779,10 @@ class SQLiteStorage(StoragePort):
                 candidate_snapshot,
                 result_snapshot,
                 occurred_at,
+                remote_binding_ref=remote_binding_ref,
+                remote_claim_owner=remote_claim_owner,
+                remote_claim_token=remote_claim_token,
+                remote_expected_revision=remote_expected_revision,
             )
         )
 
@@ -12814,6 +13119,32 @@ class SQLiteStorage(StoragePort):
                 safe_remote_task_ref,
                 published_at=published_at,
                 continuation_plan=continuation_plan,
+            )
+        )
+
+    async def publish_mcp_remote_task(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        safe_remote_task_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        occurred_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.publish_mcp_remote_task(
+                intent_id,
+                outbox_id,
+                call_id,
+                safe_remote_task_ref,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                occurred_at,
             )
         )
 

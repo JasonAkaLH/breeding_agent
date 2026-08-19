@@ -1055,6 +1055,193 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.shutdown()
 
+    async def test_remote_task_response_is_adopted_before_dispatch_returns(self) -> None:
+        class Selector:
+            async def select(self, _context):
+                return MCPSelectorAction(
+                    MCPSelectorActionType.CALL_TOOL,
+                    tool_name="start_job",
+                    arguments={"job": "durable"},
+                )
+
+        class RemoteGateway:
+            def __init__(self, storage) -> None:
+                self.recovery = MCPRecoveryService(
+                    storage, recovery_cipher(b"a" * 32)
+                )
+                self.catalog = ToolCatalogSnapshot(
+                    server_id="server-remote-adopt",
+                    effective_protocol_version="2026-07-28",
+                    tools=(
+                        MCPToolDescriptor(
+                            name="start_job",
+                            description="start job",
+                            input_schema={"type": "object"},
+                            input_schema_sha256="schema-remote-adopt",
+                        ),
+                    ),
+                )
+
+            async def open_scope(self, principal, platform_task_id, server_id, **_kwargs):
+                return MCPTaskServerScope(
+                    "scope-remote-adopt",
+                    principal.username,
+                    platform_task_id,
+                    server_id,
+                    1,
+                    1,
+                )
+
+            async def list_tools(self, _scope):
+                return self.catalog
+
+            async def call_tool(
+                self, scope, tool_name, arguments, callbacks, **kwargs
+            ):
+                call_ref = "call-remote-adopt"
+                await callbacks.on_created(call_ref)
+                await callbacks.on_registered(call_ref)
+                await self.recovery.save_remote_task(
+                    MCPRecoveryCallContext(
+                        owner_user_id=scope.owner_user_id,
+                        task_id=scope.platform_task_id,
+                        node_id="node-remote-adopt",
+                        call_ref=call_ref,
+                        continuation_plan=kwargs.get("continuation_plan"),
+                    ),
+                    server_id=scope.server_id,
+                    protocol_version="2026-07-28",
+                    safe_remote_task_ref="mcp-task:remote-adopt",
+                    remote_task_id="remote-private-id",
+                    status="working",
+                    poll_interval_ms=1000,
+                )
+                return MCPCallOutcome.task_created(
+                    "mcp-task:remote-adopt", status="working"
+                )
+
+            async def close_scope(self, _scope, _reason):
+                return None
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            now = runtime._utcnow_naive()
+            task = Task(
+                task_id="task-remote-adopt",
+                conversation_id="conversation-remote-adopt",
+                root_message_id="message-remote-adopt",
+                status=TaskStatus.RUNNING,
+                mcp_execution_mode="user_scoped",
+                mcp_shadow_enabled=False,
+                mcp_rollout_config_version="cp7",
+                mcp_route_reason_code="enforce_selected",
+                mcp_rollout_mode="enforce",
+            )
+            node = TaskNode(
+                node_id="node-remote-adopt",
+                task_id=task.task_id,
+                capability_id="mcp.dispatch",
+                status=NodeStatus.RUNNING,
+            )
+            server = UserMCPServer(
+                server_id="server-remote-adopt",
+                owner_user_id="alice",
+                display_name="Remote server",
+                routing_description="remote task",
+                endpoint_url="https://example.test/mcp",
+                transport=UserMCPTransport.STREAMABLE_HTTP,
+                health_status=UserMCPHealthStatus.AVAILABLE,
+                created_at=now,
+                updated_at=now,
+            )
+            await runtime.storage.save_conversation(
+                Conversation(task.conversation_id, "alice")
+            )
+            await runtime.storage.save_message(
+                Message(
+                    task.root_message_id,
+                    task.conversation_id,
+                    MessageRole.USER,
+                    "start remote job",
+                    task_id=task.task_id,
+                )
+            )
+            await runtime.storage.save_task(task)
+            await runtime.storage.save_task_node(node)
+            await runtime.storage.create_user_mcp_server(server)
+            await runtime.storage.save_user_mcp_tool_grant(
+                UserMCPToolGrant(
+                    grant_id="grant-remote-adopt",
+                    owner_user_id="alice",
+                    server_id=server.server_id,
+                    tool_name="start_job",
+                    server_security_version=server.security_version,
+                    input_schema_sha256="schema-remote-adopt",
+                    granted_at=now,
+                )
+            )
+            coordinator = UserMCPDispatchCoordinator(
+                storage=runtime.storage,
+                gateway=RemoteGateway(runtime.storage),
+                selector=Selector(),
+                audit_reference_signer=runtime._mcp_audit_reference_signer,
+                pending_action_payload_store=runtime._mcp_pending_action_payload_store,
+                terminal_candidate_snapshot_authority=(
+                    runtime._mcp_terminal_candidate_snapshot_authority
+                ),
+                durable_result_snapshot_authority=(
+                    runtime._mcp_durable_result_snapshot_authority
+                ),
+                terminal_result_root=runtime._mcp_terminal_result_root,
+                now_fn=lambda: now,
+                terminal_now_fn=lambda: now.replace(tzinfo=timezone.utc),
+            )
+
+            outcome = await coordinator.dispatch(
+                CapabilityExecutionRequest(
+                    capability_id="mcp.dispatch",
+                    conversation_id=task.conversation_id,
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    input_payload={"server_id": server.server_id},
+                    metadata={"user_message": "start remote job"},
+                ),
+                server_id=server.server_id,
+            )
+
+            self.assertEqual(outcome.output_payload["mcp_status"], "remote_task_created")
+            binding = await runtime.storage.get_mcp_remote_task_binding(
+                "alice", task.task_id, "mcp-task:remote-adopt"
+            )
+            call = await runtime.storage.get_mcp_call_record(
+                "alice", task.task_id, "call-remote-adopt"
+            )
+            intent = await runtime.storage.get_mcp_no_server_intent(
+                mcp_no_server_intent_id(task.task_id, node_id=node.node_id)
+            )
+            outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(
+                mcp_dispatch_resume_outbox_id(intent.intent_id)
+            )
+            self.assertIsNotNone(binding.published_at)
+            self.assertEqual(call.status, "remote_pending")
+            self.assertEqual(str(outbox.status), "remote_pending")
+            self.assertEqual(
+                str((await runtime.storage.get_task_node(node.node_id)).status),
+                "waiting_for_dependency",
+            )
+            await runtime.shutdown()
+
     async def test_v2_open_interrupt_waits_then_recovers_automatic_metadata(
         self,
     ) -> None:

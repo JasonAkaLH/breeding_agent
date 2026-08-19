@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 from uuid import uuid4
@@ -670,6 +670,12 @@ class MCPRemoteTaskRecoveryWorker:
             result = await handler.poll(client, binding)
             await _stop_renewer(renew_stop, renewer)
             now = self._now()
+            authoritative_binding = replace(
+                binding,
+                claim_owner=self._instance_id,
+                claim_token=claim_token,
+                revision=revision["value"],
+            )
             next_poll_at = None
             if not result.terminal and result.status != "input_required":
                 next_poll_at = now + timedelta(
@@ -688,7 +694,9 @@ class MCPRemoteTaskRecoveryWorker:
                         )
                     result_ref = str(
                         await _await_maybe(
-                            self._result_persister(binding, result.final_result)
+                            self._result_persister(
+                                authoritative_binding, result.final_result
+                            )
                         )
                     ).strip()
                     if not result_ref or result_ref == binding.safe_remote_task_ref:
@@ -698,12 +706,15 @@ class MCPRemoteTaskRecoveryWorker:
                 if self._terminal_sealer is not None:
                     await _await_maybe(
                         self._terminal_sealer(
-                            binding, call_status, result_ref, safe_error_code
+                            authoritative_binding,
+                            call_status,
+                            result_ref,
+                            safe_error_code,
                         )
                     )
                 if self._result_committer is not None:
                     committed = await _await_maybe(
-                        self._result_committer(binding, result_ref)
+                        self._result_committer(authoritative_binding, result_ref)
                     )
                     result_receipt_id = (
                         None if committed is None else str(committed).strip()
@@ -732,13 +743,13 @@ class MCPRemoteTaskRecoveryWorker:
                     if self._terminal_sealer is not None:
                         await _await_maybe(
                             self._terminal_sealer(
-                                binding, "failed", None, safe_error
+                                authoritative_binding, "failed", None, safe_error
                             )
                         )
                     result_receipt_id = None
                     if self._result_committer is not None:
                         committed = await _await_maybe(
-                            self._result_committer(binding, None)
+                            self._result_committer(authoritative_binding, None)
                         )
                         result_receipt_id = (
                             None if committed is None else str(committed).strip()

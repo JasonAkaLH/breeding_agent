@@ -1026,6 +1026,55 @@ class PostgreSQLStorage(SQLiteStorage):
             ),
         )
 
+    async def publish_mcp_remote_task(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        call_id: str,
+        safe_remote_task_ref: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        occurred_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        with self._session_factory() as session:
+            call = session.get(MCPCallRecordRow, call_id)
+            if call is None:
+                return None
+            values = (
+                call.owner_user_id,
+                call.server_id,
+                call.pending_action_id,
+                call.branch_id,
+                call.task_id,
+                call.node_id,
+            )
+        owner_user_id, server_id, action_id, branch_id, task_id, node_id = values
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            intent_id=intent_id,
+            outbox_id=outbox_id,
+            pending_action_id=action_id,
+            branch_id=branch_id,
+            call_id=call_id,
+            task_id=task_id,
+            node_id=node_id,
+            operation=lambda state: state.publish_mcp_remote_task(
+                intent_id,
+                outbox_id,
+                call_id,
+                safe_remote_task_ref,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                occurred_at,
+            ),
+        )
+
     async def finalize_mcp_dispatch_no_call(
         self,
         intent_id: str,
@@ -1061,6 +1110,11 @@ class PostgreSQLStorage(SQLiteStorage):
         candidate_snapshot: MCPTerminalCandidateSnapshot,
         result_snapshot: MCPDurableResultSnapshot | None,
         occurred_at: datetime,
+        *,
+        remote_binding_ref: str | None = None,
+        remote_claim_owner: str | None = None,
+        remote_claim_token: str | None = None,
+        remote_expected_revision: int | None = None,
     ) -> MCPTerminalResultCommitResult:
         candidate = candidate_snapshot.candidate
         with self._session_factory() as session:
@@ -1091,6 +1145,10 @@ class PostgreSQLStorage(SQLiteStorage):
                 candidate_snapshot,
                 result_snapshot,
                 occurred_at,
+                remote_binding_ref=remote_binding_ref,
+                remote_claim_owner=remote_claim_owner,
+                remote_claim_token=remote_claim_token,
+                remote_expected_revision=remote_expected_revision,
             ),
         )
 
