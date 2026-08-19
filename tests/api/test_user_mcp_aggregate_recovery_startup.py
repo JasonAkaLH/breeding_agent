@@ -387,6 +387,76 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
 
         await runtime._validate_terminal_cp7_mcp_authority([intent])
 
+    async def test_stopped_after_call_is_valid_resolved_restart_authority(
+        self,
+    ) -> None:
+        storage = AsyncMock()
+        intent = SimpleNamespace(
+            intent_id="intent-stopped-after-call",
+            owner_user_id="alice",
+            task_id="task-stopped-after-call",
+            node_id="node-stopped-after-call",
+            status="resolved",
+            terminal_at=datetime(2026, 8, 19, 11, 0, 0),
+        )
+        storage.get_task.return_value = SimpleNamespace(
+            status=TaskStatus.COMPLETED
+        )
+        storage.get_task_node.return_value = SimpleNamespace(
+            status=NodeStatus.COMPLETED
+        )
+        storage.list_events_for_task.return_value = []
+        storage.get_mcp_dispatch_resume_outbox.return_value = SimpleNamespace(
+            status="completed",
+            completion_mode="stopped_after_call",
+            result_receipt_id="receipt-1",
+        )
+        storage.list_mcp_call_records.return_value = [
+            SimpleNamespace(call_ref="call-1", may_have_dispatched=True)
+        ]
+        storage.get_mcp_terminal_result_receipt_for_call.return_value = (
+            SimpleNamespace(result_receipt_id="receipt-1")
+        )
+        runtime = self._runtime(storage)
+
+        await runtime._validate_terminal_cp7_mcp_authority([intent])
+
+    async def test_completed_no_call_is_valid_resolved_restart_authority(
+        self,
+    ) -> None:
+        intent_id = "intent-completed-no-call"
+        intent = SimpleNamespace(
+            intent_id=intent_id,
+            owner_user_id="alice",
+            task_id="task-completed-no-call",
+            node_id="node-completed-no-call",
+            status="resolved",
+            terminal_at=datetime(2026, 8, 19, 11, 0, 0),
+        )
+        storage = AsyncMock()
+        storage.get_task.return_value = SimpleNamespace(
+            status=TaskStatus.COMPLETED
+        )
+        storage.get_task_node.return_value = SimpleNamespace(
+            status=NodeStatus.COMPLETED
+        )
+        storage.list_events_for_task.return_value = [
+            SimpleNamespace(
+                event_id=f"mcp-dispatch-finalized:v1:{intent_id}:1",
+                event_type="mcp.dispatch_finalized",
+                payload={"completion_mode": "completed"},
+            )
+        ]
+        storage.get_mcp_dispatch_resume_outbox.return_value = SimpleNamespace(
+            status="completed",
+            completion_mode="completed",
+            result_receipt_id=None,
+        )
+        storage.list_mcp_call_records.return_value = []
+        runtime = self._runtime(storage)
+
+        await runtime._validate_terminal_cp7_mcp_authority([intent])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9307,9 +9307,22 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     await self.storage.get_mcp_terminal_result_receipt_for_call(call.call_ref)
                     for call in calls if call.may_have_dispatched
                 ]
-                no_call = outbox is not None and str(outbox.status) == "aborted"
+                no_call = bool(
+                    outbox is not None
+                    and (
+                        str(outbox.status) == "aborted"
+                        or (
+                            str(outbox.status) == "completed"
+                            and outbox.completion_mode == "completed"
+                            and not any(
+                                call.may_have_dispatched for call in calls
+                            )
+                        )
+                    )
+                )
                 if no_call:
                     expected_node_status = {
+                        "completed": NodeStatus.COMPLETED,
                         "stopped_no_call": NodeStatus.COMPLETED,
                         "failed_no_call": NodeStatus.FAILED,
                         "cancelled_no_call": NodeStatus.CANCELLED,
@@ -9335,6 +9348,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     if (
                         outbox.completion_mode
                         not in {
+                            "completed",
                             "stopped_no_call",
                             "failed_no_call",
                             "cancelled_no_call",
@@ -9352,7 +9366,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     or outbox is None
                     or str(outbox.status) != "completed"
                     or outbox.completion_mode
-                    not in {"completed", "failed_after_call", "cancelled_after_call"}
+                    not in {
+                        "completed",
+                        "stopped_after_call",
+                        "failed_after_call",
+                        "cancelled_after_call",
+                    }
                     or outbox.result_receipt_id is None
                     or not receipts
                     or any(receipt is None for receipt in receipts)
