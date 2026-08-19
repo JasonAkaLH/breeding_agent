@@ -5,7 +5,10 @@ from typing import Any
 
 from src.core.enums import ArtifactType
 from src.core.models import Artifact
-from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
+from src.storage.artifact_files import (
+    is_active_managed_output_file,
+    parse_file_storage_ref,
+)
 
 from .dto import ArtifactResponse
 
@@ -72,7 +75,9 @@ def artifact_response(artifact: Artifact) -> ArtifactResponse:
 
 
 def _is_active_file_artifact(artifact: Artifact) -> bool:
-    return is_active_skill_output_file(parse_file_storage_ref(artifact.storage_ref))
+    return is_active_managed_output_file(
+        parse_file_storage_ref(artifact.storage_ref)
+    )
 
 
 def _json_object(storage_ref: str) -> dict[str, Any] | None:

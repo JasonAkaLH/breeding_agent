@@ -89,6 +89,18 @@ class MCPTemporaryResultRef:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class MCPDurableResultIdentity:
+    result_ref: str
+    owner_user_id: str | None
+    task_id: str
+    node_id: str | None
+    call_id: str | None
+    size_bytes: int
+    content_sha256: str
+    store_kind: str = "durable_content_addressed"
+
+
 @dataclass(slots=True)
 class _HeldDurableResult:
     snapshot: MCPDurableResultSnapshot
@@ -234,6 +246,17 @@ class MCPDurableResultSnapshotAuthority:
             "Durable MCP result descriptor is not held."
         )
 
+    def list_result_identities(
+        self,
+        *,
+        after_result_ref: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[MCPDurableResultIdentity, ...]:
+        return self._store.list_durable_result_identities(
+            after_result_ref=after_result_ref,
+            limit=limit,
+        )
+
     async def verify_completed_result(
         self,
         *,
@@ -260,6 +283,60 @@ class MCPDurableResultSnapshotAuthority:
             expected_store_kind=receipt.safe_result_store_kind,
         ):
             return receipt.safe_result_ref
+
+    async def copy_to_artifact_file(
+        self,
+        *,
+        result_ref: str,
+        owner_user_id: str,
+        task_id: str,
+        node_id: str,
+        call_id: str,
+        expected_size_bytes: int,
+        expected_content_sha256: str,
+        expected_store_kind: str,
+        file_store,
+        artifact_id: str,
+        filename: str,
+    ):
+        async with self.open_snapshot(
+            result_ref=result_ref,
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            node_id=node_id,
+            call_id=call_id,
+            expected_size_bytes=expected_size_bytes,
+            expected_content_sha256=expected_content_sha256,
+            expected_store_kind=expected_store_kind,
+        ) as snapshot:
+            with self._lock:
+                held = next(
+                    (
+                        item
+                        for item in self._held.get(result_ref, ())
+                        if item.snapshot == snapshot
+                    ),
+                    None,
+                )
+            if held is None:
+                raise MCPTemporaryResultError(
+                    "Durable MCP result snapshot is not held."
+                )
+            stored = await asyncio.to_thread(
+                file_store.save_file,
+                artifact_id=artifact_id,
+                filename=filename,
+                source_path=held.data_path,
+            )
+            self.revalidate(snapshot)
+            if (
+                stored.size_bytes != snapshot.size_bytes
+                or "sha256:" + stored.sha256 != snapshot.content_sha256
+            ):
+                raise MCPTemporaryResultError(
+                    "Durable MCP result artifact copy verification failed."
+                )
+            return snapshot, stored
 
 
 @runtime_checkable
@@ -810,6 +887,35 @@ class MCPTemporaryResultStore:
 
     def active_task_keys(self) -> frozenset[str]:
         return frozenset(self._tasks.values())
+
+    def list_durable_result_identities(
+        self,
+        *,
+        after_result_ref: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[MCPDurableResultIdentity, ...]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_durable_result_inventory_limit_invalid")
+        values: list[MCPDurableResultIdentity] = []
+        for result_ref, stored in sorted(self._results.items()):
+            if after_result_ref is not None and result_ref <= after_result_ref:
+                continue
+            if not stored.promoted or stored.path is None:
+                continue
+            values.append(
+                MCPDurableResultIdentity(
+                    result_ref=result_ref,
+                    owner_user_id=stored.owner_user_id,
+                    task_id=stored.task_id,
+                    node_id=stored.node_id,
+                    call_id=stored.call_ref,
+                    size_bytes=stored.size_bytes,
+                    content_sha256="sha256:" + stored.sha256,
+                )
+            )
+            if len(values) == limit:
+                break
+        return tuple(values)
 
     def _task_key(self, task_id: str) -> str:
         normalized = str(task_id)
@@ -1719,6 +1825,7 @@ __all__ = [
     "MCPAdmissionLease",
     "MCPCapacityUnavailableError",
     "MCPFairAdmissionQueue",
+    "MCPDurableResultIdentity",
     "MCPDurableResultSnapshotAuthority",
     "MCPResultTooLargeError",
     "MCPResultSink",

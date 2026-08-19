@@ -221,6 +221,14 @@ def mcp_dispatch_resume_outbox_id(intent_id: str) -> str:
     )
 
 
+def mcp_durable_result_artifact_id(result_ref: str) -> str:
+    return deterministic_id(
+        prefix="mcp-result-artifact:v1:",
+        domain="maf.user_mcp.durable_result_artifact.v1",
+        subject={"result_ref": str(result_ref)},
+    )
+
+
 def mcp_terminal_candidate_id(call_id: str, result_payload_sha256: str) -> str:
     _require_identifier_component(call_id, "call_id")
     _require_sha256(result_payload_sha256, "result_payload_sha256")
@@ -603,6 +611,7 @@ __all__ = [
     "cp7_restore_id",
     "deterministic_id",
     "mcp_dispatch_resume_outbox_id",
+    "mcp_durable_result_artifact_id",
     "mcp_no_server_intent_id",
     "mcp_terminal_candidate_id",
     "mcp_terminal_projection_id",

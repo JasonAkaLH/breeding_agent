@@ -344,7 +344,12 @@ class StoragePort(Protocol):
     ) -> list[MCPNoServerIntent]: ...
 
     async def list_mcp_no_server_intents(
-        self, *, limit: int = 10_000
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        after_updated_at: datetime | None = None,
+        after_intent_id: str | None = None,
+        limit: int = 10_000,
     ) -> list[MCPNoServerIntent]: ...
 
     async def create_user_mcp_initial_intent(
@@ -385,7 +390,12 @@ class StoragePort(Protocol):
     ) -> MCPPendingToolAction | None: ...
 
     async def list_mcp_dispatch_resume_outboxes(
-        self, *, limit: int = 10_000
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        after_updated_at: datetime | None = None,
+        after_outbox_id: str | None = None,
+        limit: int = 10_000,
     ) -> list[MCPDispatchResumeOutbox]: ...
 
     async def claim_mcp_dispatch_resume_outbox(
@@ -571,6 +581,26 @@ class StoragePort(Protocol):
         self, *, limit: int = 1000
     ) -> list[MCPDurableResultLifecycle]: ...
 
+    async def get_mcp_durable_result_lifecycle(
+        self, result_ref: str
+    ) -> MCPDurableResultLifecycle | None: ...
+
+    async def reconcile_mcp_durable_result_lifecycle(
+        self,
+        snapshot: MCPDurableResultSnapshot,
+        occurred_at: datetime,
+    ) -> MCPDurableResultLifecycle | None: ...
+
+    async def mark_mcp_durable_result_artifact_owned(
+        self,
+        result_ref: str,
+        expected_revision: int,
+        artifact_id: str,
+        expected_size_bytes: int,
+        expected_content_sha256: str,
+        occurred_at: datetime,
+    ) -> MCPDurableResultLifecycle | None: ...
+
     async def claim_mcp_durable_result_deletions(
         self, now: datetime, *, limit: int = 1000
     ) -> list[MCPDurableResultLifecycle]: ...
@@ -603,6 +633,14 @@ class StoragePort(Protocol):
     ) -> MCPNoServerConvergenceResult: ...
 
     async def cancel_mcp_dispatch(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult: ...
+
+    async def converge_inactive_mcp_dispatch(
         self,
         intent_id: str,
         outbox_id: str,

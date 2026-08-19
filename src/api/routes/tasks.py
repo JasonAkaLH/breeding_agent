@@ -14,7 +14,10 @@ from src.core.enums import ArtifactType, EventVisibility, NodeStatus, TaskStatus
 from src.core.models import Artifact, EventRecord
 from src.lifecycle.mcp_presence import MCPPresenceConnection
 from src.integrations.mcp.gateway_models import MCPCancelStatus, MCPContinueStatus
-from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
+from src.storage.artifact_files import (
+    is_active_managed_output_file,
+    parse_file_storage_ref,
+)
 
 from ..artifact_responses import artifact_response, should_return_task_artifact
 from ..auth import get_optional_owned_conversation, require_authenticated_user, require_task_owner
@@ -423,7 +426,7 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     await require_task_owner(runtime, artifact.task_id, user)
     metadata = parse_file_storage_ref(artifact.storage_ref)
-    if not is_active_skill_output_file(metadata):
+    if not is_active_managed_output_file(metadata):
         await runtime.storage.append_event(
             _artifact_event(
                 artifact=artifact,

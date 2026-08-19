@@ -51,13 +51,7 @@ class MCPAggregateStartupReconciler:
             completed.append(name)
         return tuple(completed)
 
-
-async def no_op_recovery_stage() -> None:
-    return None
-
-
 __all__ = [
     "MCPAggregateRecoveryStages",
     "MCPAggregateStartupReconciler",
-    "no_op_recovery_stage",
 ]

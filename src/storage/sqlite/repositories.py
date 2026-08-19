@@ -143,6 +143,7 @@ from src.integrations.mcp.cp7_artifacts import (
     canonical_json_bytes,
     canonical_sha256,
     mcp_dispatch_resume_outbox_id,
+    mcp_durable_result_artifact_id,
     mcp_no_server_intent_id,
     mcp_terminal_projection_id,
     mcp_terminal_receipt_id,
@@ -4665,16 +4666,53 @@ class SQLiteStateRepository:
         return [_row_to_mcp_no_server_intent(row) for row in rows]
 
     def list_mcp_no_server_intents(
-        self, *, limit: int = 10_000
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        after_updated_at: datetime | None = None,
+        after_intent_id: str | None = None,
+        limit: int = 10_000,
     ) -> list[MCPNoServerIntent]:
         if isinstance(limit, bool) or limit < 1 or limit > 10_000:
             raise ValueError("mcp_intent_scan_limit_invalid")
+        if bool(after_updated_at is None) != bool(after_intent_id is None):
+            raise ValueError("mcp_intent_scan_cursor_invalid")
+        normalized_statuses = tuple(dict.fromkeys(statuses))
+        allowed_statuses = {
+            "armed",
+            "available",
+            "unavailable",
+            "dispatched",
+            "resolved",
+            "converged",
+            "unknown",
+        }
+        if any(status not in allowed_statuses for status in normalized_statuses):
+            raise ValueError("mcp_intent_scan_status_invalid")
+        statement = select(MCPNoServerIntentRow)
+        if normalized_statuses:
+            statement = statement.where(
+                MCPNoServerIntentRow.status.in_(normalized_statuses)
+            )
+        if after_updated_at is not None and after_intent_id is not None:
+            statement = statement.where(
+                or_(
+                    MCPNoServerIntentRow.updated_at > after_updated_at,
+                    and_(
+                        MCPNoServerIntentRow.updated_at == after_updated_at,
+                        MCPNoServerIntentRow.intent_id > after_intent_id,
+                    ),
+                )
+            )
+        keyset_scan = bool(normalized_statuses or after_updated_at is not None)
         rows = self._session.scalars(
-            select(MCPNoServerIntentRow)
-            .order_by(MCPNoServerIntentRow.created_at, MCPNoServerIntentRow.intent_id)
-            .limit(limit + 1)
+            statement.order_by(
+                MCPNoServerIntentRow.updated_at,
+                MCPNoServerIntentRow.intent_id,
+            )
+            .limit(limit if keyset_scan else limit + 1)
         ).all()
-        if len(rows) > limit:
+        if not keyset_scan and len(rows) > limit:
             raise RuntimeError("mcp_intent_scan_limit_exceeded")
         return [_row_to_mcp_no_server_intent(row) for row in rows]
 
@@ -4990,19 +5028,55 @@ class SQLiteStateRepository:
         return None if not rows else _row_to_mcp_pending_action(rows[0])
 
     def list_mcp_dispatch_resume_outboxes(
-        self, *, limit: int = 10_000
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        after_updated_at: datetime | None = None,
+        after_outbox_id: str | None = None,
+        limit: int = 10_000,
     ) -> list[MCPDispatchResumeOutbox]:
         if isinstance(limit, bool) or limit < 1 or limit > 10_000:
             raise ValueError("mcp_dispatch_resume_scan_limit_invalid")
+        if bool(after_updated_at is None) != bool(after_outbox_id is None):
+            raise ValueError("mcp_dispatch_resume_scan_cursor_invalid")
+        normalized_statuses = tuple(dict.fromkeys(statuses))
+        allowed_statuses = {
+            "pending",
+            "claimed",
+            "active",
+            "waiting_approval",
+            "waiting_input",
+            "remote_pending",
+            "completed",
+            "aborted",
+        }
+        if any(status not in allowed_statuses for status in normalized_statuses):
+            raise ValueError("mcp_dispatch_resume_scan_status_invalid")
+        statement = select(MCPDispatchResumeOutboxRow)
+        if normalized_statuses:
+            statement = statement.where(
+                MCPDispatchResumeOutboxRow.status.in_(normalized_statuses)
+            )
+        if after_updated_at is not None and after_outbox_id is not None:
+            statement = statement.where(
+                or_(
+                    MCPDispatchResumeOutboxRow.updated_at > after_updated_at,
+                    and_(
+                        MCPDispatchResumeOutboxRow.updated_at == after_updated_at,
+                        MCPDispatchResumeOutboxRow.outbox_id > after_outbox_id,
+                    ),
+                )
+            )
+        keyset_scan = bool(normalized_statuses or after_updated_at is not None)
         rows = self._session.scalars(
-            select(MCPDispatchResumeOutboxRow)
+            statement
             .order_by(
-                MCPDispatchResumeOutboxRow.created_at,
+                MCPDispatchResumeOutboxRow.updated_at,
                 MCPDispatchResumeOutboxRow.outbox_id,
             )
-            .limit(limit + 1)
+            .limit(limit if keyset_scan else limit + 1)
         ).all()
-        if len(rows) > limit:
+        if not keyset_scan and len(rows) > limit:
             raise RuntimeError("mcp_dispatch_resume_scan_limit_exceeded")
         return [_row_to_mcp_dispatch_resume(row) for row in rows]
 
@@ -7122,7 +7196,8 @@ class SQLiteStateRepository:
         if existing_receipt is not None:
             return MCPNoServerConvergenceResult.ALREADY_CONVERGED
         task_already_failed = task.status == str(TaskStatus.FAILED)
-        if task.status in _TERMINAL_TASK_STATUSES and not task_already_failed:
+        task_already_cancelled = task.status == str(TaskStatus.CANCELLED)
+        if task.status == str(TaskStatus.COMPLETED):
             return MCPNoServerConvergenceResult.ALREADY_TERMINAL
         intents = self._session.scalars(
             select(MCPNoServerIntentRow)
@@ -7152,7 +7227,7 @@ class SQLiteStateRepository:
         if conversation is None or conversation.username != intent.owner_user_id:
             raise RuntimeError("mcp_no_server_owner_binding_corrupt")
         dispatched = [row for row in calls if row.may_have_dispatched]
-        if task_already_failed and not dispatched:
+        if (task_already_failed or task_already_cancelled) and not dispatched:
             return MCPNoServerConvergenceResult.ALREADY_TERMINAL
         if dispatched:
             if intent.node_id is None:
@@ -7197,23 +7272,27 @@ class SQLiteStateRepository:
                 f"mcp-execution-status-unknown:v1:{call.call_ref}:"
                 f"{unknown_revision}:01-unknown"
             )
-            existing_task_failed_event = self._session.scalar(
+            terminal_task_status = "failed"
+            terminal_node_status = "failed"
+            terminal_event_type = "task.failed"
+            existing_task_terminal_event = self._session.scalar(
                 select(EventRecordRow)
                 .where(
                     EventRecordRow.task_id == task_id,
-                    EventRecordRow.event_type == "task.failed",
+                    EventRecordRow.event_type == terminal_event_type,
                 )
                 .order_by(
                     EventRecordRow.created_at.desc(),
                     EventRecordRow.event_id.desc(),
                 )
             )
-            failed_event_id = (
-                existing_task_failed_event.event_id
-                if task_already_failed and existing_task_failed_event is not None
+            terminal_event_id = (
+                existing_task_terminal_event.event_id
+                if task_already_failed
+                and existing_task_terminal_event is not None
                 else (
                     f"mcp-execution-status-unknown:v1:{call.call_ref}:"
-                    f"{unknown_revision}:02-task-failed"
+                    f"{unknown_revision}:02-task-{terminal_task_status}"
                 )
             )
             existing_projection = self._session.get(
@@ -7266,10 +7345,10 @@ class SQLiteStateRepository:
                     reason_code="trusted_terminal_result_absent",
                     unknown_intent_revision=unknown_revision,
                     unknown_event_id=unknown_event_id,
-                    task_failed_event_id=failed_event_id,
+                    task_failed_event_id=terminal_event_id,
                     unknown_terminal_at=occurred_at,
-                    task_terminal_status="failed",
-                    node_terminal_status="failed",
+                    task_terminal_status=terminal_task_status,
+                    node_terminal_status=terminal_node_status,
                     result_receipt_id=None,
                     result_payload_sha256=None,
                     resolved_terminal_state=None,
@@ -7305,21 +7384,21 @@ class SQLiteStateRepository:
                     "no_replay": True,
                     "result_receipt_id": None,
                     "predecessor_event_id": (
-                        failed_event_id
+                        terminal_event_id
                         if task_already_failed
-                        and existing_task_failed_event is not None
+                        and existing_task_terminal_event is not None
                         else None
                     ),
                 },
                 created_at=occurred_at,
             )
-            if not task_already_failed or existing_task_failed_event is None:
+            if not task_already_failed or existing_task_terminal_event is None:
                 self._insert_or_compare_event(
-                    event_id=failed_event_id,
+                    event_id=terminal_event_id,
                     conversation_id=task.conversation_id,
                     task_id=task_id,
                     node_id=node.node_id,
-                    event_type="task.failed",
+                    event_type=terminal_event_type,
                     payload={
                         "schema": "maf.user_mcp.unknown_task_failed.v1",
                         "projection_id": projection_id,
@@ -8369,6 +8448,176 @@ class SQLiteStateRepository:
         ).all()
         return [_row_to_mcp_durable_result_lifecycle(row) for row in rows]
 
+    def get_mcp_durable_result_lifecycle(
+        self, result_ref: str
+    ) -> MCPDurableResultLifecycle | None:
+        row = self._session.get(MCPDurableResultLifecycleRow, result_ref)
+        return None if row is None else _row_to_mcp_durable_result_lifecycle(row)
+
+    def reconcile_mcp_durable_result_lifecycle(
+        self,
+        snapshot: MCPDurableResultSnapshot,
+        occurred_at: datetime,
+    ) -> MCPDurableResultLifecycle | None:
+        existing = self._session.scalar(
+            select(MCPDurableResultLifecycleRow)
+            .where(
+                MCPDurableResultLifecycleRow.result_ref == snapshot.result_ref
+            )
+            .with_for_update()
+        )
+        identity_values = {
+            "owner_user_id": snapshot.owner_user_id,
+            "task_id": snapshot.task_id,
+            "node_id": snapshot.node_id,
+            "call_id": snapshot.call_id,
+            "content_sha256": snapshot.content_sha256,
+            "size_bytes": snapshot.size_bytes,
+            "data_filename": snapshot.data_filename,
+            "manifest_filename": snapshot.manifest_filename,
+            "data_file_sha256": snapshot.data_file_sha256,
+            "manifest_file_sha256": snapshot.manifest_file_sha256,
+            "store_kind": snapshot.store_kind,
+        }
+        if existing is not None:
+            _require_exact_row(
+                existing,
+                identity_values,
+                "mcp_durable_result_lifecycle_conflict",
+            )
+            return _row_to_mcp_durable_result_lifecycle(existing)
+        call = self._session.scalar(
+            select(MCPCallRecordRow)
+            .where(MCPCallRecordRow.call_ref == snapshot.call_id)
+            .with_for_update()
+        )
+        receipt = self._session.scalar(
+            select(MCPTerminalResultReceiptRow)
+            .where(MCPTerminalResultReceiptRow.call_id == snapshot.call_id)
+            .with_for_update()
+        )
+        if call is not None and (
+            call.owner_user_id != snapshot.owner_user_id
+            or call.task_id != snapshot.task_id
+            or call.node_id != snapshot.node_id
+        ):
+            raise RuntimeError("mcp_durable_result_call_identity_conflict")
+        if receipt is not None:
+            optional_result_values = (
+                (receipt.safe_result_size_bytes, snapshot.size_bytes),
+                (
+                    receipt.safe_result_content_sha256,
+                    snapshot.content_sha256,
+                ),
+                (receipt.safe_result_store_kind, snapshot.store_kind),
+            )
+            if (
+                receipt.owner_user_id != snapshot.owner_user_id
+                or receipt.task_id != snapshot.task_id
+                or receipt.node_id != snapshot.node_id
+                or receipt.safe_result_ref != snapshot.result_ref
+                or receipt.terminal_state != "completed"
+                or any(
+                    actual is not None and actual != expected
+                    for actual, expected in optional_result_values
+                )
+            ):
+                raise RuntimeError("mcp_durable_result_receipt_identity_conflict")
+            outbox = self._session.scalar(
+                select(MCPDispatchResumeOutboxRow)
+                .where(MCPDispatchResumeOutboxRow.intent_id == receipt.intent_id)
+                .with_for_update()
+            )
+            reason = "dispatch_resolved"
+            created_at = receipt.committed_at
+            eligible_at = (
+                receipt.committed_at + timedelta(hours=24)
+                if outbox is not None
+                and outbox.status in {"completed", "aborted"}
+                else None
+            )
+        else:
+            if call is not None and call.terminal_at is None:
+                return None
+            reason = "orphan"
+            created_at = (
+                call.terminal_at
+                if call is not None and call.terminal_at is not None
+                else occurred_at
+            )
+            eligible_at = created_at + timedelta(hours=24)
+        row = MCPDurableResultLifecycleRow(
+            result_ref=snapshot.result_ref,
+            **identity_values,
+            status="retained",
+            reason=reason,
+            revision=0,
+            eligible_at=eligible_at,
+            deleted_at=None,
+            created_at=created_at,
+            updated_at=occurred_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_durable_result_lifecycle(row)
+
+    def mark_mcp_durable_result_artifact_owned(
+        self,
+        result_ref: str,
+        expected_revision: int,
+        artifact_id: str,
+        expected_size_bytes: int,
+        expected_content_sha256: str,
+        occurred_at: datetime,
+    ) -> MCPDurableResultLifecycle | None:
+        row = self._session.scalar(
+            select(MCPDurableResultLifecycleRow)
+            .where(MCPDurableResultLifecycleRow.result_ref == result_ref)
+            .with_for_update()
+        )
+        artifact = self._session.scalar(
+            select(ArtifactRow)
+            .where(ArtifactRow.artifact_id == artifact_id)
+            .with_for_update()
+        )
+        try:
+            artifact_metadata = (
+                json.loads(artifact.storage_ref)
+                if artifact is not None
+                else None
+            )
+        except json.JSONDecodeError:
+            artifact_metadata = None
+        if (
+            row is None
+            or artifact is None
+            or artifact_id != mcp_durable_result_artifact_id(result_ref)
+            or artifact.task_id != row.task_id
+            or artifact.producer_node_id != row.node_id
+            or not artifact.is_complete
+            or not isinstance(artifact_metadata, dict)
+            or artifact_metadata.get("source_kind") != "mcp_result"
+            or artifact_metadata.get("result_ref") != result_ref
+            or artifact_metadata.get("size_bytes") != expected_size_bytes
+            or artifact_metadata.get("sha256")
+            != expected_content_sha256.removeprefix("sha256:")
+            or artifact_metadata.get("retention_status") != "active"
+            or row.size_bytes != expected_size_bytes
+            or row.content_sha256 != expected_content_sha256
+        ):
+            return None
+        if row.status == "artifact_owned":
+            return _row_to_mcp_durable_result_lifecycle(row)
+        if row.status != "retained" or int(row.revision) != expected_revision:
+            return None
+        row.status = "artifact_owned"
+        row.reason = "artifact_promoted"
+        row.eligible_at = occurred_at
+        row.revision = int(row.revision) + 1
+        row.updated_at = occurred_at
+        self._session.flush()
+        return _row_to_mcp_durable_result_lifecycle(row)
+
     def claim_mcp_durable_result_deletions(
         self, now: datetime, *, limit: int = 1000
     ) -> list[MCPDurableResultLifecycle]:
@@ -8377,7 +8626,9 @@ class SQLiteStateRepository:
         rows = self._session.scalars(
             select(MCPDurableResultLifecycleRow)
             .where(
-                MCPDurableResultLifecycleRow.status == "retained",
+                MCPDurableResultLifecycleRow.status.in_(
+                    ("retained", "artifact_owned")
+                ),
                 MCPDurableResultLifecycleRow.eligible_at.is_not(None),
                 MCPDurableResultLifecycleRow.eligible_at <= now,
             )
@@ -8431,7 +8682,11 @@ class SQLiteStateRepository:
             or int(row.revision) != expected_revision
         ):
             return None
-        row.status = "retained"
+        row.status = (
+            "artifact_owned"
+            if row.reason == "artifact_promoted"
+            else "retained"
+        )
         row.eligible_at = retry_at
         row.revision = int(row.revision) + 1
         row.updated_at = retry_at
@@ -8833,6 +9088,139 @@ class SQLiteStateRepository:
             node_id=node_id,
             outcome="cancelled",
             safe_error_code="mcp_dispatch_cancelled",
+            expected_outbox_revision=int(outbox.revision),
+            claim_owner=outbox.claim_owner,
+            claim_token=outbox.claim_token,
+            occurred_at=occurred_at,
+            allow_without_claim=True,
+        )
+
+    def converge_inactive_mcp_dispatch(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        candidate = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        if candidate is None or candidate.intent_id != intent_id:
+            return MCPDispatchFinalizeResult.CONFLICT
+        self._lock_mcp_owner_guard(candidate.owner_user_id, occurred_at)
+        self._session.scalar(
+            select(UserMCPServerRow.server_id)
+            .where(
+                UserMCPServerRow.owner_user_id == candidate.owner_user_id,
+                UserMCPServerRow.server_id == candidate.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if (
+            intent is None
+            or outbox is None
+            or intent.node_id != node_id
+            or outbox.intent_id != intent_id
+        ):
+            return MCPDispatchFinalizeResult.CONFLICT
+        self._session.scalars(
+            select(MCPPendingToolActionRow.action_id)
+            .where(
+                MCPPendingToolActionRow.task_id == intent.task_id,
+                MCPPendingToolActionRow.node_id == node_id,
+            )
+            .order_by(MCPPendingToolActionRow.action_id)
+            .with_for_update()
+        ).all()
+        self._session.scalar(
+            select(MCPBranchRecordRow.branch_id)
+            .where(
+                MCPBranchRecordRow.task_id == intent.task_id,
+                MCPBranchRecordRow.node_id == node_id,
+            )
+            .with_for_update()
+        )
+        calls = self._session.scalars(
+            select(MCPCallRecordRow)
+            .where(
+                MCPCallRecordRow.task_id == intent.task_id,
+                MCPCallRecordRow.node_id == node_id,
+            )
+            .order_by(MCPCallRecordRow.call_sequence)
+            .with_for_update()
+        ).all()
+        unreceipted = []
+        for call in calls:
+            if not call.may_have_dispatched:
+                continue
+            receipt = self._session.scalar(
+                select(MCPTerminalResultReceiptRow.result_receipt_id)
+                .where(MCPTerminalResultReceiptRow.call_id == call.call_ref)
+                .with_for_update()
+            )
+            if receipt is None:
+                unreceipted.append(call)
+        task = self._session.scalar(
+            select(TaskRow)
+            .where(TaskRow.task_id == intent.task_id)
+            .with_for_update()
+        )
+        self._session.scalar(
+            select(TaskNodeRow.node_id)
+            .where(TaskNodeRow.node_id == node_id)
+            .with_for_update()
+        )
+        if task is None or (
+            task.status == str(TaskStatus.RUNNING)
+            and task.cancel_requested_at is None
+        ):
+            return MCPDispatchFinalizeResult.CONFLICT
+        if unreceipted:
+            if intent.status != "dispatched":
+                return MCPDispatchFinalizeResult.CONFLICT
+            converged = self.converge_user_mcp_no_server(
+                task.task_id,
+                occurred_at,
+            )
+            return (
+                MCPDispatchFinalizeResult.FINALIZED
+                if converged
+                in {
+                    MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY,
+                    MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+                }
+                else MCPDispatchFinalizeResult.CONFLICT
+            )
+        if task.cancel_requested_at is not None or task.status == str(
+            TaskStatus.CANCELLED
+        ):
+            outcome = "cancelled"
+        elif task.status == str(TaskStatus.FAILED):
+            outcome = "failed"
+        elif task.status == str(TaskStatus.COMPLETED):
+            outcome = "completed" if any(
+                call.may_have_dispatched for call in calls
+            ) else "stopped"
+        else:
+            return MCPDispatchFinalizeResult.CONFLICT
+        return self._finalize_mcp_dispatch_rows(
+            intent_id=intent_id,
+            outbox_id=outbox_id,
+            node_id=node_id,
+            outcome=outcome,
+            safe_error_code=(
+                "mcp_dispatch_cancelled"
+                if outcome == "cancelled"
+                else "mcp_inactive_task_recovery"
+            ),
             expected_outbox_revision=int(outbox.revision),
             claim_owner=outbox.claim_owner,
             claim_token=outbox.claim_token,
@@ -12820,10 +13208,20 @@ class SQLiteStorage(StoragePort):
         )
 
     async def list_mcp_no_server_intents(
-        self, *, limit: int = 10_000
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        after_updated_at: datetime | None = None,
+        after_intent_id: str | None = None,
+        limit: int = 10_000,
     ) -> list[MCPNoServerIntent]:
         return await self._run(
-            lambda state, collab: state.list_mcp_no_server_intents(limit=limit)
+            lambda state, collab: state.list_mcp_no_server_intents(
+                statuses=statuses,
+                after_updated_at=after_updated_at,
+                after_intent_id=after_intent_id,
+                limit=limit,
+            )
         )
 
     async def create_user_mcp_initial_intent(
@@ -12889,10 +13287,20 @@ class SQLiteStorage(StoragePort):
         )
 
     async def list_mcp_dispatch_resume_outboxes(
-        self, *, limit: int = 10_000
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        after_updated_at: datetime | None = None,
+        after_outbox_id: str | None = None,
+        limit: int = 10_000,
     ) -> list[MCPDispatchResumeOutbox]:
         return await self._run(
-            lambda state, collab: state.list_mcp_dispatch_resume_outboxes(limit=limit)
+            lambda state, collab: state.list_mcp_dispatch_resume_outboxes(
+                statuses=statuses,
+                after_updated_at=after_updated_at,
+                after_outbox_id=after_outbox_id,
+                limit=limit,
+            )
         )
 
     async def claim_mcp_dispatch_resume_outbox(
@@ -13295,6 +13703,47 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def get_mcp_durable_result_lifecycle(
+        self, result_ref: str
+    ) -> MCPDurableResultLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_durable_result_lifecycle(
+                result_ref
+            )
+        )
+
+    async def reconcile_mcp_durable_result_lifecycle(
+        self,
+        snapshot: MCPDurableResultSnapshot,
+        occurred_at: datetime,
+    ) -> MCPDurableResultLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.reconcile_mcp_durable_result_lifecycle(
+                snapshot,
+                occurred_at,
+            )
+        )
+
+    async def mark_mcp_durable_result_artifact_owned(
+        self,
+        result_ref: str,
+        expected_revision: int,
+        artifact_id: str,
+        expected_size_bytes: int,
+        expected_content_sha256: str,
+        occurred_at: datetime,
+    ) -> MCPDurableResultLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.mark_mcp_durable_result_artifact_owned(
+                result_ref,
+                expected_revision,
+                artifact_id,
+                expected_size_bytes,
+                expected_content_sha256,
+                occurred_at,
+            )
+        )
+
     async def claim_mcp_durable_result_deletions(
         self, now: datetime, *, limit: int = 1000
     ) -> list[MCPDurableResultLifecycle]:
@@ -13367,6 +13816,22 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.cancel_mcp_dispatch(
                 intent_id, outbox_id, node_id, occurred_at
+            )
+        )
+
+    async def converge_inactive_mcp_dispatch(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        return await self._run(
+            lambda state, collab: state.converge_inactive_mcp_dispatch(
+                intent_id,
+                outbox_id,
+                node_id,
+                occurred_at,
             )
         )
 

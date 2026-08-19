@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -143,7 +143,6 @@ from src.integrations.mcp.audit import MCPAuditService
 from src.integrations.mcp.aggregate_recovery import (
     MCPAggregateRecoveryStages,
     MCPAggregateStartupReconciler,
-    no_op_recovery_stage,
 )
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
@@ -153,6 +152,7 @@ from src.integrations.mcp.dispatch_coordinator import (
 )
 from src.integrations.mcp.cp7_terminal_results import (
     MCPTerminalCandidateSnapshotAuthority,
+    TERMINAL_CANDIDATE_WARNING_THRESHOLD,
     enumerate_unconsumed_terminal_result_candidates,
     terminal_now_utc_second,
     seal_terminal_result_candidate,
@@ -322,7 +322,11 @@ from src.storage.postgres import PostgreSQLStorage, bootstrap_postgres_database,
 from src.storage.postgres.session import validate_mcp_rollout_connection_role
 from src.auth.postgres_invalidation_bus import PostgresAuthInvalidationBus
 from src.state.runtime_factory import StatePlatformBackend, build_state_platform_runtime_config
-from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
+from src.storage.artifact_files import (
+    LocalArtifactFileStore,
+    is_active_managed_output_file,
+    parse_file_storage_ref,
+)
 from src.storage.conversation_files import (
     ConversationFileIndexWriter,
     LocalConversationFileStore,
@@ -732,6 +736,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._mcp_rollout_instance_admission = mcp_rollout_instance_admission
         self._mcp_rollout_metric_recorder = mcp_rollout_metric_recorder
         self._mcp_terminal_result_root = mcp_terminal_result_root
+        self._mcp_startup_terminal_candidates: tuple[Any, ...] | None = None
         self._mcp_legacy_retirement_binding = mcp_legacy_retirement_binding
         self._mcp_cp7_safety_facade = mcp_cp7_safety_facade
         self._mcp_cp7_open_boundary = mcp_cp7_open_boundary
@@ -788,6 +793,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._mcp_auth_invalidation_task: asyncio.Task[None] | None = None
         self._mcp_audit_retention_task: asyncio.Task[None] | None = None
         self._mcp_continuation_consumer_task: asyncio.Task[None] | None = None
+        self._mcp_post_ready_recovery_task: asyncio.Task[None] | None = None
+        self._mcp_post_ready_recovery_error: BaseException | None = None
         self._mcp_continuation_consumer_id = f"api-continuation:{uuid4().hex}"
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
@@ -4336,7 +4343,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     async def _delete_conversation_file_artifacts(self, conversation_id: str) -> None:
         for artifact in await self.storage.list_artifacts_for_conversation(conversation_id):
             metadata = parse_file_storage_ref(artifact.storage_ref)
-            if is_active_skill_output_file(metadata):
+            if is_active_managed_output_file(metadata):
                 self.artifact_file_store.delete(str(metadata.get("storage_key")))
         try:
             self.conversation_file_store.delete_conversation_dir(conversation_id)
@@ -8542,14 +8549,26 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 enumerate_terminal_candidates=(
                     self._strict_enumerate_mcp_terminal_candidates
                 ),
-                reconcile_terminal_candidates=self._reconcile_cp7_mcp_authority,
+                reconcile_terminal_candidates=(
+                    self._reconcile_mcp_terminal_candidates
+                ),
                 reconcile_remote_bindings=self._reconcile_mcp_remote_bindings,
-                reconcile_mrtr_evidence=no_op_recovery_stage,
-                reconcile_pending_actions=no_op_recovery_stage,
-                reconcile_resume_envelopes=no_op_recovery_stage,
-                recover_expired_claims=no_op_recovery_stage,
-                converge_unknown_no_replay=self._recover_user_mcp_calls,
-                validate_invariants=no_op_recovery_stage,
+                reconcile_mrtr_evidence=(
+                    self._validate_mcp_mrtr_recovery_evidence
+                ),
+                reconcile_pending_actions=(
+                    self._validate_mcp_pending_action_recovery_evidence
+                ),
+                reconcile_resume_envelopes=(
+                    self._validate_mcp_resume_envelope_authority
+                ),
+                recover_expired_claims=(
+                    self._recover_expired_mcp_dispatch_claims
+                ),
+                converge_unknown_no_replay=(
+                    self._converge_inactive_and_unknown_mcp_dispatches
+                ),
+                validate_invariants=self._validate_mcp_aggregate_invariants,
             )
         )
         await aggregate_reconciler.run()
@@ -8617,113 +8636,151 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 self._mcp_rollout_metric_recorder.run_continuous_zero_series(),
                 name="mcp-rollout-zero-series",
             )
+        if (
+            self._mcp_post_ready_recovery_task is None
+            or self._mcp_post_ready_recovery_task.done()
+        ):
+            self._mcp_post_ready_recovery_error = None
+            self._mcp_post_ready_recovery_task = asyncio.create_task(
+                self._reconcile_mcp_dispatch_recovery(),
+                name="mcp-post-ready-dispatch-recovery",
+            )
+            self._mcp_post_ready_recovery_task.add_done_callback(
+                self._handle_mcp_post_ready_recovery_exit
+            )
 
     async def _repair_mcp_terminal_candidate_lifecycle(self) -> None:
         candidate_manager = self._mcp_terminal_candidate_lifecycle_manager
         if candidate_manager is not None:
+            while (
+                await candidate_manager.repair_incomplete(limit=1000) == 1000
+            ):
+                pass
             await candidate_manager.run_once(limit=1000)
         result_manager = self._mcp_durable_result_lifecycle_manager
         if result_manager is not None:
-            await result_manager.run_once(limit=1000)
+            while await result_manager.repair_incomplete(limit=1000) == 1000:
+                pass
 
     async def _strict_enumerate_mcp_terminal_candidates(self) -> None:
         root = self._mcp_terminal_result_root
         if root is None:
+            self._mcp_startup_terminal_candidates = ()
             return
-        await asyncio.to_thread(
+        sealed = await asyncio.to_thread(
             enumerate_unconsumed_terminal_result_candidates,
             root,
         )
+        if len(sealed) >= TERMINAL_CANDIDATE_WARNING_THRESHOLD:
+            if self._audit_sink is not None:
+                await self._audit_sink.record(
+                    "mcp.terminal_candidate_capacity_warning",
+                    {
+                        "active_candidate_count": len(sealed),
+                        "status": "warning",
+                    },
+                )
+            manager = self._mcp_terminal_candidate_lifecycle_manager
+            while (
+                manager is not None
+                and len(sealed) >= TERMINAL_CANDIDATE_WARNING_THRESHOLD
+            ):
+                _repaired, archived, _deleted = await manager.run_once(limit=1000)
+                if archived == 0:
+                    break
+                sealed = await asyncio.to_thread(
+                    enumerate_unconsumed_terminal_result_candidates,
+                    root,
+                )
+        self._mcp_startup_terminal_candidates = sealed
 
-    async def _reconcile_cp7_mcp_authority(self) -> None:
-        root = self._mcp_terminal_result_root
-        sealed_by_intent: dict[str, list[MCPValidatedTerminalResultCandidate]] = {}
-        if root is not None:
-            sealed = await asyncio.to_thread(
-                enumerate_unconsumed_terminal_result_candidates, root
+    async def _reconcile_mcp_terminal_candidates(self) -> None:
+        sealed = self._mcp_startup_terminal_candidates
+        if sealed is None:
+            await self._strict_enumerate_mcp_terminal_candidates()
+            sealed = self._mcp_startup_terminal_candidates or ()
+        for item in sealed:
+            candidate = item.candidate
+            aggregate_snapshot_ready = bool(
+                self._mcp_terminal_candidate_snapshot_authority is not None
+                and (
+                    candidate.terminal_state is not MCPTerminalState.COMPLETED
+                    or (
+                        self._mcp_durable_result_snapshot_authority is not None
+                        and candidate.safe_result_ref is not None
+                        and candidate.safe_result_size_bytes is not None
+                        and candidate.safe_result_content_sha256 is not None
+                        and candidate.safe_result_store_kind is not None
+                    )
+                )
             )
-            for item in sealed:
-                sealed_by_intent.setdefault(item.candidate.intent_id, []).append(
-                    item.candidate
+            if aggregate_snapshot_ready:
+                candidate_snapshot = (
+                    self._mcp_terminal_candidate_snapshot_authority.snapshot(item)
                 )
-                candidate = item.candidate
-                aggregate_snapshot_ready = bool(
-                    self._mcp_terminal_candidate_snapshot_authority is not None
-                    and (
-                        candidate.terminal_state is not MCPTerminalState.COMPLETED
-                        or (
-                            self._mcp_durable_result_snapshot_authority is not None
-                            and candidate.safe_result_ref is not None
-                            and candidate.safe_result_size_bytes is not None
-                            and candidate.safe_result_content_sha256 is not None
-                            and candidate.safe_result_store_kind is not None
-                        )
-                    )
-                )
-                if aggregate_snapshot_ready:
-                    candidate_snapshot = (
-                        self._mcp_terminal_candidate_snapshot_authority.snapshot(
-                            item
-                        )
-                    )
-                    if candidate.terminal_state is MCPTerminalState.COMPLETED:
-                        async with self._mcp_durable_result_snapshot_authority.open_snapshot(
-                            result_ref=str(candidate.safe_result_ref),
-                            owner_user_id=candidate.owner_user_id,
-                            task_id=candidate.task_id,
-                            node_id=candidate.node_id,
-                            call_id=candidate.call_id,
-                            expected_size_bytes=int(
-                                candidate.safe_result_size_bytes
-                            ),
-                            expected_content_sha256=str(
-                                candidate.safe_result_content_sha256
-                            ),
-                            expected_store_kind=str(
-                                candidate.safe_result_store_kind
-                            ),
-                        ) as result_snapshot:
-                            result = await self.storage.recover_mcp_terminal_candidate(
-                                candidate_snapshot,
-                                result_snapshot,
-                                self._utcnow_naive(),
-                            )
-                    else:
+                if candidate.terminal_state is MCPTerminalState.COMPLETED:
+                    async with self._mcp_durable_result_snapshot_authority.open_snapshot(
+                        result_ref=str(candidate.safe_result_ref),
+                        owner_user_id=candidate.owner_user_id,
+                        task_id=candidate.task_id,
+                        node_id=candidate.node_id,
+                        call_id=candidate.call_id,
+                        expected_size_bytes=int(candidate.safe_result_size_bytes),
+                        expected_content_sha256=str(
+                            candidate.safe_result_content_sha256
+                        ),
+                        expected_store_kind=str(
+                            candidate.safe_result_store_kind
+                        ),
+                    ) as result_snapshot:
                         result = await self.storage.recover_mcp_terminal_candidate(
                             candidate_snapshot,
-                            None,
+                            result_snapshot,
                             self._utcnow_naive(),
                         )
                 else:
-                    result = await self.storage.commit_authoritative_mcp_terminal_result(
-                        candidate.call_id,
-                        candidate.candidate_id,
+                    result = await self.storage.recover_mcp_terminal_candidate(
+                        candidate_snapshot,
+                        None,
                         self._utcnow_naive(),
                     )
-                if str(result) == "conflict":
-                    raise RuntimeError("mcp_terminal_candidate_reconciliation_conflict")
-                await self.storage.finish_mcp_remote_task_binding_from_receipt(
+            else:
+                result = await self.storage.commit_authoritative_mcp_terminal_result(
                     candidate.call_id,
-                    mcp_terminal_receipt_id(
-                        candidate.call_id,
-                        candidate.result_payload_sha256,
-                    ),
+                    candidate.candidate_id,
                     self._utcnow_naive(),
                 )
+            if str(result) == "conflict":
+                raise RuntimeError("mcp_terminal_candidate_reconciliation_conflict")
+            await self.storage.finish_mcp_remote_task_binding_from_receipt(
+                candidate.call_id,
+                mcp_terminal_receipt_id(
+                    candidate.call_id,
+                    candidate.result_payload_sha256,
+                ),
+                self._utcnow_naive(),
+            )
+        result_manager = self._mcp_durable_result_lifecycle_manager
+        if result_manager is not None:
+            await result_manager.run_once(limit=1000)
 
-        all_intents = await self.storage.list_mcp_no_server_intents()
-        await self._validate_terminal_cp7_mcp_authority(all_intents)
-        intents = [
-            intent
-            for intent in all_intents
-            if str(intent.status)
-            in {"armed", "available", "unavailable", "dispatched"}
-        ]
-        outboxes = {
-            item.intent_id: item
-            for item in await self.storage.list_mcp_dispatch_resume_outboxes()
-        }
-        for intent in intents:
+    async def _reconcile_cp7_mcp_authority(self) -> None:
+        """Compatibility entry point for focused recovery tests and operators."""
+
+        await self._strict_enumerate_mcp_terminal_candidates()
+        await self._reconcile_mcp_terminal_candidates()
+        await self._reconcile_mcp_dispatch_recovery()
+
+    async def _reconcile_mcp_dispatch_recovery(self) -> None:
+        sealed_by_intent: dict[str, list[MCPValidatedTerminalResultCandidate]] = {}
+        for item in self._mcp_startup_terminal_candidates or ():
+            sealed_by_intent.setdefault(item.candidate.intent_id, []).append(
+                item.candidate
+            )
+
+        async for intent in self._iter_mcp_no_server_intents(
+            statuses=("armed", "available", "unavailable", "dispatched")
+        ):
             if str(intent.status) == "armed":
                 await self.storage.resolve_user_mcp_target_intent(
                     intent.intent_id, self._utcnow_naive()
@@ -8750,7 +8807,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 continue
             if str(intent.status) == "available":
                 expected_id = mcp_dispatch_resume_outbox_id(intent.intent_id)
-                outbox = outboxes.get(intent.intent_id)
+                outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+                    expected_id
+                )
                 if outbox is None or outbox.outbox_id != expected_id:
                     raise RuntimeError("mcp_dispatch_resume_outbox_missing")
                 envelope = dict(intent.resume_envelope_json or {})
@@ -8948,7 +9007,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     envelope_version = mcp_dispatch_resume_envelope_version(envelope)
                     if envelope_version == "v2":
                         validate_mcp_dispatch_resume_envelope_v2(envelope)
-                    outbox = outboxes.get(intent.intent_id)
+                    outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+                        mcp_dispatch_resume_outbox_id(intent.intent_id)
+                    )
                     if (
                         outbox is None
                         or envelope_sha != intent.resume_envelope_sha256
@@ -9055,10 +9116,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 )
 
     async def _validate_terminal_cp7_mcp_authority(self, intents: list[Any]) -> None:
-        outboxes = {
-            item.intent_id: item
-            for item in await self.storage.list_mcp_dispatch_resume_outboxes()
-        }
         for intent in intents:
             status = str(intent.status)
             if status not in {"unknown", "converged", "resolved"}:
@@ -9075,7 +9132,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 event.event_id: event
                 for event in await self.storage.list_events_for_task(intent.task_id)
             }
-            outbox = outboxes.get(intent.intent_id)
+            outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+                mcp_dispatch_resume_outbox_id(intent.intent_id)
+            )
             if status == "unknown":
                 calls = await self.storage.list_mcp_call_records(
                     intent.owner_user_id, intent.task_id
@@ -9088,10 +9147,18 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     if call.may_have_dispatched
                 ]
                 authoritative = [projection for projection in projections if projection is not None]
+                projection = authoritative[0] if len(authoritative) == 1 else None
+                expected_terminal_event_type = (
+                    "task.cancelled"
+                    if projection is not None
+                    and projection.task_terminal_status == "cancelled"
+                    else "task.failed"
+                )
                 if (
-                    task.status != TaskStatus.FAILED
+                    projection is None
+                    or str(task.status) != projection.task_terminal_status
                     or node is None
-                    or node.status != NodeStatus.FAILED
+                    or str(node.status) != projection.node_terminal_status
                     or not projections
                     or any(
                         projection is None
@@ -9099,12 +9166,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         or str(projection.status) not in {"unknown", "late_result_resolved"}
                         for projection in projections
                     )
-                    or len(authoritative) != 1
-                    or authoritative[0].unknown_event_id not in events
-                    or authoritative[0].task_failed_event_id not in events
-                    or events[authoritative[0].unknown_event_id].event_type
+                    or projection.unknown_event_id not in events
+                    or projection.task_failed_event_id not in events
+                    or events[projection.unknown_event_id].event_type
                     != "mcp.execution_status_unknown"
-                    or events[authoritative[0].task_failed_event_id].event_type != "task.failed"
+                    or events[projection.task_failed_event_id].event_type
+                    != expected_terminal_event_type
                     or outbox is None
                     or str(outbox.status) != "completed"
                     or outbox.completion_mode != "unknown_no_replay"
@@ -9115,7 +9182,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     await self.user_mcp_audit_service.record(
                         owner_user_id=intent.owner_user_id,
                         event_type="mcp.authority_terminal_reconciled",
-                        occurred_at=authoritative[0].unknown_terminal_at,
+                        occurred_at=projection.unknown_terminal_at,
                         task_id=intent.task_id,
                         node_id=intent.node_id,
                         safe_payload={
@@ -9125,7 +9192,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         },
                         source_ref=(
                             "mcp-authority-terminal-reconciled:"
-                            f"{authoritative[0].projection_id}"
+                            f"{projection.projection_id}"
                         ),
                     )
             elif status == "resolved":
@@ -9263,6 +9330,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             and self._mcp_cp7_safety_facade.ready
         ):
             self._mcp_cp7_fatal_exit(70)
+
+    def _handle_mcp_post_ready_recovery_exit(
+        self, task: asyncio.Task[None]
+    ) -> None:
+        if task.cancelled():
+            return
+        try:
+            self._mcp_post_ready_recovery_error = task.exception()
+        except asyncio.CancelledError:
+            return
 
     async def _admit_mcp_rollout_instance(self) -> None:
         admission = self._mcp_rollout_instance_admission
@@ -9419,11 +9496,253 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             if len(converged) < 1000:
                 return
 
+    async def _converge_inactive_and_unknown_mcp_dispatches(self) -> None:
+        async for intent in self._iter_mcp_no_server_intents(
+            statuses=("available", "dispatched")
+        ):
+            task = await self.storage.get_task(intent.task_id)
+            if task is None:
+                raise RuntimeError("mcp_startup_dispatch_task_missing")
+            if (
+                task.status == TaskStatus.RUNNING
+                and task.cancel_requested_at is None
+            ):
+                continue
+            if intent.node_id is None:
+                raise RuntimeError("mcp_startup_dispatch_node_missing")
+            result = await self.storage.converge_inactive_mcp_dispatch(
+                intent.intent_id,
+                mcp_dispatch_resume_outbox_id(intent.intent_id),
+                intent.node_id,
+                self._utcnow_naive(),
+            )
+            if str(result) == "conflict":
+                raise RuntimeError("mcp_startup_inactive_dispatch_conflict")
+        await self._recover_user_mcp_calls()
+
     async def _reconcile_mcp_remote_bindings(self) -> None:
         await self.storage.reconcile_unpublished_mcp_remote_task_bindings(
             now=self._utcnow_naive(),
             limit=1000,
         )
+
+    async def _iter_mcp_no_server_intents(
+        self, *, statuses: tuple[str, ...]
+    ) -> AsyncIterator[Any]:
+        after_updated_at: datetime | None = None
+        after_intent_id: str | None = None
+        while True:
+            page = await self.storage.list_mcp_no_server_intents(
+                statuses=statuses,
+                after_updated_at=after_updated_at,
+                after_intent_id=after_intent_id,
+                limit=1000,
+            )
+            for intent in page:
+                yield intent
+            if len(page) < 1000:
+                return
+            last = page[-1]
+            after_updated_at = last.updated_at
+            after_intent_id = last.intent_id
+
+    async def _iter_mcp_dispatch_resume_outboxes(
+        self, *, statuses: tuple[str, ...]
+    ) -> AsyncIterator[Any]:
+        after_updated_at: datetime | None = None
+        after_outbox_id: str | None = None
+        while True:
+            page = await self.storage.list_mcp_dispatch_resume_outboxes(
+                statuses=statuses,
+                after_updated_at=after_updated_at,
+                after_outbox_id=after_outbox_id,
+                limit=1000,
+            )
+            for outbox in page:
+                yield outbox
+            if len(page) < 1000:
+                return
+            last = page[-1]
+            after_updated_at = last.updated_at
+            after_outbox_id = last.outbox_id
+
+    async def _validate_mcp_mrtr_recovery_evidence(self) -> None:
+        async for outbox in self._iter_mcp_dispatch_resume_outboxes(
+            statuses=("waiting_input",)
+        ):
+            task = await self.storage.get_task(outbox.task_id)
+            node = await self.storage.get_task_node(outbox.node_id)
+            if (
+                task is None
+                or node is None
+                or task.status != TaskStatus.RUNNING
+                or task.cancel_requested_at is not None
+            ):
+                continue
+            interrupts = [
+                item
+                for item in await self.storage.list_interrupts_for_task(
+                    outbox.task_id
+                )
+                if item.node_id == outbox.node_id
+                and item.reason_code == "mcp_input_required"
+                and item.status == InterruptStatus.OPEN
+            ]
+            if len(interrupts) != 1:
+                raise RuntimeError("mcp_startup_mrtr_interrupt_authority_invalid")
+            sealed_ref = str(
+                interrupts[0].required_fields.get("sealed_request_state_ref") or ""
+            )
+            sealed = (
+                None
+                if not sealed_ref
+                else await self.storage.get_mcp_sealed_state(
+                    outbox.owner_user_id,
+                    outbox.task_id,
+                    sealed_ref,
+                )
+            )
+            if (
+                sealed is None
+                or sealed.task_id != outbox.task_id
+                or sealed.node_id != outbox.node_id
+                or sealed.owner_user_id != outbox.owner_user_id
+                or node.status != NodeStatus.WAITING_FOR_INPUT
+            ):
+                raise RuntimeError("mcp_startup_mrtr_evidence_authority_invalid")
+
+    async def _validate_mcp_pending_action_recovery_evidence(self) -> None:
+        async for outbox in self._iter_mcp_dispatch_resume_outboxes(
+            statuses=("waiting_approval",)
+        ):
+            task = await self.storage.get_task(outbox.task_id)
+            node = await self.storage.get_task_node(outbox.node_id)
+            if (
+                task is None
+                or node is None
+                or task.status != TaskStatus.RUNNING
+                or task.cancel_requested_at is not None
+            ):
+                continue
+            interrupts = [
+                item
+                for item in await self.storage.list_interrupts_for_task(
+                    outbox.task_id
+                )
+                if item.node_id == outbox.node_id
+                and item.reason_code == "mcp_tool_approval_required"
+                and item.status == InterruptStatus.OPEN
+            ]
+            action = (
+                None
+                if len(interrupts) != 1
+                else await self.storage.get_mcp_pending_tool_action_for_interrupt(
+                    interrupts[0].interrupt_id
+                )
+            )
+            if (
+                len(interrupts) != 1
+                or action is None
+                or str(action.status) != "waiting_approval"
+                or action.owner_user_id != outbox.owner_user_id
+                or action.task_id != outbox.task_id
+                or action.node_id != outbox.node_id
+                or action.server_id != outbox.server_id
+                or node.status != NodeStatus.WAITING_FOR_INPUT
+            ):
+                raise RuntimeError(
+                    "mcp_startup_pending_action_authority_invalid"
+                )
+
+    async def _validate_mcp_resume_envelope_authority(self) -> None:
+        async for intent in self._iter_mcp_no_server_intents(
+            statuses=("armed",)
+        ):
+            await self.storage.resolve_user_mcp_target_intent(
+                intent.intent_id,
+                self._utcnow_naive(),
+            )
+        async for intent in self._iter_mcp_no_server_intents(
+            statuses=("available",)
+        ):
+            outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+                mcp_dispatch_resume_outbox_id(intent.intent_id)
+            )
+            envelope = dict(intent.resume_envelope_json or {})
+            digest = canonical_sha256(envelope)
+            if (
+                outbox is None
+                or outbox.outbox_id != mcp_dispatch_resume_outbox_id(
+                    intent.intent_id
+                )
+                or digest != intent.resume_envelope_sha256
+                or digest != outbox.resume_envelope_sha256
+                or canonical_sha256(
+                    {
+                        "intent_id": intent.intent_id,
+                        "node_id": intent.node_id,
+                        "owner_user_id": intent.owner_user_id,
+                        "resume_envelope_sha256": digest,
+                        "server_id": intent.requested_server_id,
+                        "task_id": intent.task_id,
+                    }
+                )
+                != outbox.payload_sha256
+            ):
+                raise RuntimeError("mcp_startup_resume_envelope_authority_invalid")
+            if mcp_dispatch_resume_envelope_version(envelope) == "v2":
+                validate_mcp_dispatch_resume_envelope_v2(envelope)
+
+    async def _recover_expired_mcp_dispatch_claims(self) -> None:
+        now = self._utcnow_naive()
+        async for outbox in self._iter_mcp_dispatch_resume_outboxes(
+            statuses=("claimed", "active")
+        ):
+            if (
+                str(outbox.status) not in {"claimed", "active"}
+                or outbox.lease_expires_at is None
+                or outbox.lease_expires_at > now
+            ):
+                continue
+            await self.storage.release_or_recover_mcp_dispatch_claim(
+                outbox.outbox_id,
+                outbox.revision,
+                now,
+            )
+
+    async def _validate_mcp_aggregate_invariants(self) -> None:
+        async for intent in self._iter_mcp_no_server_intents(
+            statuses=("unknown", "converged", "resolved")
+        ):
+            await self._validate_terminal_cp7_mcp_authority([intent])
+        async for outbox in self._iter_mcp_dispatch_resume_outboxes(
+            statuses=(
+                "pending",
+                "claimed",
+                "active",
+                "waiting_approval",
+                "waiting_input",
+                "remote_pending",
+            )
+        ):
+            task = await self.storage.get_task(outbox.task_id)
+            if task is None:
+                raise RuntimeError("mcp_startup_dispatch_task_missing")
+            if (
+                task.status != TaskStatus.RUNNING
+                or task.cancel_requested_at is not None
+            ):
+                raise RuntimeError("mcp_startup_inactive_dispatch_not_converged")
+            claimed = str(outbox.status) in {"claimed", "active"}
+            claim_fields_present = bool(
+                outbox.claim_owner
+                and outbox.claim_token
+                and outbox.lease_expires_at is not None
+            )
+            if claimed != claim_fields_present:
+                raise RuntimeError("mcp_startup_dispatch_claim_shape_invalid")
+        await self._validate_mcp_mrtr_recovery_evidence()
+        await self._validate_mcp_pending_action_recovery_evidence()
 
     async def _record_recovered_unknown_metrics(self, call, task) -> None:
         recorder = self._mcp_rollout_metric_recorder
@@ -9552,6 +9871,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
     async def shutdown(self) -> None:
         await self._quiesce_cp7_for_shutdown()
+        if self._mcp_post_ready_recovery_task is not None:
+            if not self._mcp_post_ready_recovery_task.done():
+                self._mcp_post_ready_recovery_task.cancel()
+            await asyncio.gather(
+                self._mcp_post_ready_recovery_task,
+                return_exceptions=True,
+            )
+            self._mcp_post_ready_recovery_task = None
         if self._mcp_cp7_minute_task is not None:
             self._mcp_cp7_minute_task.cancel()
             await asyncio.gather(self._mcp_cp7_minute_task, return_exceptions=True)
@@ -11063,6 +11390,7 @@ def build_api_runtime(
         mcp_durable_result_lifecycle_manager = MCPDurableResultLifecycleManager(
             storage,
             mcp_durable_result_snapshot_authority,
+            artifact_file_store=artifact_file_store,
         )
 
     user_mcp_config_service = None

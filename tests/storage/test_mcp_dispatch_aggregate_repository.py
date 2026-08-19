@@ -8,8 +8,15 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from src.core.enums import NodeStatus, TaskStatus, UserMCPHealthStatus, UserMCPTransport
+from src.core.enums import (
+    ArtifactType,
+    NodeStatus,
+    TaskStatus,
+    UserMCPHealthStatus,
+    UserMCPTransport,
+)
 from src.core.models import (
+    Artifact,
     Conversation,
     Interrupt,
     InterruptAnswer,
@@ -32,6 +39,7 @@ from src.core.models import (
 )
 from src.integrations.mcp.cp7_artifacts import (
     canonical_sha256,
+    mcp_durable_result_artifact_id,
     mcp_no_server_intent_id,
     mcp_terminal_candidate_id,
 )
@@ -54,6 +62,7 @@ from src.storage.sqlite.models import (
     MCPTerminalCandidateLifecycleRow,
     UserMCPToolGrantRow,
 )
+from src.storage.artifact_files import build_file_storage_ref
 
 
 NOW = datetime(2026, 8, 18, 8, 0, 0)
@@ -246,6 +255,43 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             NOW,
             NOW + timedelta(seconds=30),
         )
+
+    async def test_recovery_scans_use_status_and_stable_keyset_cursor(self) -> None:
+        intents = await self.storage.list_mcp_no_server_intents(
+            statuses=("available",),
+            limit=1,
+        )
+        self.assertEqual([item.intent_id for item in intents], [self.intent_id])
+        self.assertEqual(
+            await self.storage.list_mcp_no_server_intents(
+                statuses=("available",),
+                after_updated_at=intents[-1].updated_at,
+                after_intent_id=intents[-1].intent_id,
+                limit=1,
+            ),
+            [],
+        )
+
+        outboxes = await self.storage.list_mcp_dispatch_resume_outboxes(
+            statuses=("pending",),
+            limit=1,
+        )
+        self.assertEqual([item.outbox_id for item in outboxes], [self.outbox_id])
+        self.assertEqual(
+            await self.storage.list_mcp_dispatch_resume_outboxes(
+                statuses=("pending",),
+                after_updated_at=outboxes[-1].updated_at,
+                after_outbox_id=outboxes[-1].outbox_id,
+                limit=1,
+            ),
+            [],
+        )
+
+        with self.assertRaisesRegex(ValueError, "mcp_intent_scan_cursor_invalid"):
+            await self.storage.list_mcp_no_server_intents(
+                after_intent_id=self.intent_id,
+                limit=1,
+            )
 
     def _call(
         self,
@@ -1235,6 +1281,18 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(str(committed), "committed_normal")
 
+        with self.sessions() as session:
+            session.delete(
+                session.get(MCPDurableResultLifecycleRow, "mcp-result-1")
+            )
+            session.commit()
+        backfilled = await self.storage.reconcile_mcp_durable_result_lifecycle(
+            result_snapshot,
+            committed_at,
+        )
+        self.assertEqual(str(backfilled.reason), "dispatch_resolved")
+        self.assertIsNone(backfilled.eligible_at)
+
         archiving = await self.storage.claim_mcp_terminal_candidate_archives(
             committed_at, limit=1000
         )
@@ -1269,6 +1327,40 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(deleted.status), "deleted")
         self.assertIsNone(deleted.eligible_at)
 
+        artifact_id = mcp_durable_result_artifact_id("mcp-result-1")
+        await self.storage.save_artifact(
+            Artifact(
+                artifact_id=artifact_id,
+                task_id=self.task.task_id,
+                producer_node_id=self.node.node_id,
+                artifact_type=ArtifactType.FILE,
+                storage_ref=build_file_storage_ref(
+                    {
+                        "source_kind": "mcp_result",
+                        "result_ref": "mcp-result-1",
+                        "size_bytes": 2,
+                        "sha256": "a" * 64,
+                        "retention_status": "active",
+                    }
+                ),
+                is_complete=True,
+                created_at=committed_at,
+            )
+        )
+        result_lifecycle = await self.storage.get_mcp_durable_result_lifecycle(
+            "mcp-result-1"
+        )
+        promoted = await self.storage.mark_mcp_durable_result_artifact_owned(
+            "mcp-result-1",
+            result_lifecycle.revision,
+            artifact_id,
+            2,
+            "sha256:" + "a" * 64,
+            committed_at,
+        )
+        self.assertEqual(str(promoted.status), "artifact_owned")
+        self.assertEqual(str(promoted.reason), "artifact_promoted")
+
         with self.sessions() as session:
             result_row = session.get(MCPDurableResultLifecycleRow, "mcp-result-1")
             result_row.eligible_at = committed_at
@@ -1287,6 +1379,21 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             result_deleted.deleted_at,
             committed_at + timedelta(seconds=2),
         )
+
+    async def test_untracked_terminal_result_is_classified_as_orphan(self) -> None:
+        _candidate_snapshot, result_snapshot = self._terminal_snapshots(
+            call_ref="missing-call",
+            result_ref="mcp-orphan-result",
+        )
+
+        orphan = await self.storage.reconcile_mcp_durable_result_lifecycle(
+            result_snapshot,
+            NOW,
+        )
+
+        self.assertEqual(str(orphan.reason), "orphan")
+        self.assertEqual(str(orphan.status), "retained")
+        self.assertEqual(orphan.eligible_at, NOW + timedelta(hours=24))
 
     async def test_completed_terminal_commit_keeps_dispatch_active_until_finalizer(
         self,
@@ -1640,6 +1747,44 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             str((await self.storage.get_task(self.task.task_id)).status), "failed"
         )
+
+    async def test_cancel_requested_unknown_converges_to_failed_no_replay_projection(
+        self,
+    ) -> None:
+        await self._admit()
+        self.assertIsNotNone(
+            await self.storage.compare_and_set_task(
+                replace(
+                    self.task,
+                    cancel_requested_at=NOW,
+                    updated_at=NOW,
+                ),
+                expected_from_status=TaskStatus.RUNNING,
+            )
+        )
+
+        converged = await self.storage.converge_inactive_mcp_dispatch(
+            self.intent_id,
+            self.outbox_id,
+            self.node.node_id,
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(str(converged), "finalized")
+        self.assertEqual(
+            str((await self.storage.get_task(self.task.task_id)).status),
+            "failed",
+        )
+        self.assertEqual(
+            str((await self.storage.get_task_node(self.node.node_id)).status),
+            "failed",
+        )
+        projection = await self.storage.get_mcp_execution_terminal_projection(
+            "call-1"
+        )
+        self.assertTrue(projection.no_replay)
+        self.assertEqual(projection.task_terminal_status, "failed")
+        self.assertEqual(projection.node_terminal_status, "failed")
 
     async def test_payload_identity_drift_rolls_back_without_call(self) -> None:
         claimed = await self._claim()
