@@ -7,10 +7,13 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.migrate_mcp_dispatch_aggregate import run_report
+from scripts.migrate_mcp_dispatch_aggregate import main, run_apply, run_report
 from src.storage.mcp_dispatch_aggregate_migration import (
+    MCPDispatchAggregateAuthorityConflictError,
     MCPDispatchAggregateMigrationError,
+    apply_sqlite_dispatch_aggregate,
     build_postgres_aggregate_cutover_plan,
     create_or_adopt_sqlite_aggregate_backup,
     inspect_sqlite_dispatch_aggregate,
@@ -24,6 +27,19 @@ from src.storage.sqlite import bootstrap_sqlite_database, create_sqlite_engine
 
 
 class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
+    def _create_empty_legacy_database(self, path: Path) -> None:
+        connection = sqlite3.connect(path)
+        try:
+            connection.executescript(
+                "CREATE TABLE mcp_dispatch_resume_outbox ("
+                "outbox_id TEXT PRIMARY KEY, intent_id TEXT, status TEXT);"
+                "CREATE TABLE mcp_call_record ("
+                "call_ref TEXT PRIMARY KEY, status TEXT);"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def test_fresh_sqlite_report_is_closed_redacted_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "runtime.sqlite3"
@@ -174,6 +190,176 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
                     database_path="runtime.sqlite3",
                     dsn_env="CP7_POSTGRES_VALIDATION_DSN",
                 )
+            )
+
+    def test_apply_empty_legacy_sqlite_is_atomic_recorded_and_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            self._create_empty_legacy_database(path)
+            before = inspect_sqlite_dispatch_aggregate(path).as_payload()
+            report_sha = str(before["report_sha256"])
+
+            applied = run_apply(
+                Namespace(
+                    apply=True,
+                    database_path=str(path),
+                    dsn_env=None,
+                    expected_report_sha=report_sha.removeprefix("sha256:"),
+                )
+            )
+
+            self.assertEqual(applied["result"], "applied")
+            after = inspect_sqlite_dispatch_aggregate(path).as_payload()
+            self.assertFalse(after["migration_required"])
+            connection = sqlite3.connect(path)
+            try:
+                row = connection.execute(
+                    "SELECT report_sha256, status, revision, backup_basename, "
+                    "backup_sha256 FROM mcp_dispatch_aggregate_migration"
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(row[0], report_sha)
+            self.assertEqual(row[1], "applied")
+            self.assertEqual(row[2], 3)
+            self.assertTrue(row[3])
+            self.assertTrue(str(row[4]).startswith("sha256:"))
+            self.assertTrue(path.with_name(row[3]).is_file())
+
+            retried = apply_sqlite_dispatch_aggregate(
+                path,
+                expected_report_sha256=report_sha,
+            ).as_payload()
+            self.assertEqual(retried["result"], "already_applied")
+
+    def test_apply_rejects_report_drift_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            self._create_empty_legacy_database(path)
+            with self.assertRaisesRegex(
+                MCPDispatchAggregateMigrationError,
+                "report_changed",
+            ):
+                apply_sqlite_dispatch_aggregate(
+                    path,
+                    expected_report_sha256="0" * 64,
+                )
+            connection = sqlite3.connect(path)
+            try:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+            finally:
+                connection.close()
+            self.assertNotIn("mcp_dispatch_aggregate_migration", tables)
+
+    def test_sqlite_apply_rolls_back_table_swap_and_retries_from_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            self._create_empty_legacy_database(path)
+            report_sha = str(
+                inspect_sqlite_dispatch_aggregate(path).as_payload()[
+                    "report_sha256"
+                ]
+            )
+            from src.storage import mcp_dispatch_aggregate_migration as migration
+
+            original_replace = migration._replace_empty_sqlite_table
+            calls = 0
+
+            def fail_after_first_swap(connection, table_name):
+                nonlocal calls
+                original_replace(connection, table_name)
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("injected_swap_failure")
+
+            with patch.object(
+                migration,
+                "_replace_empty_sqlite_table",
+                side_effect=fail_after_first_swap,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected_swap_failure"):
+                    apply_sqlite_dispatch_aggregate(
+                        path,
+                        expected_report_sha256=report_sha,
+                    )
+
+            rolled_back = inspect_sqlite_dispatch_aggregate(path).as_payload()
+            self.assertTrue(rolled_back["migration_required"])
+            connection = sqlite3.connect(path)
+            try:
+                status = connection.execute(
+                    "SELECT status FROM mcp_dispatch_aggregate_migration"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(status, "backed_up")
+
+            retried = apply_sqlite_dispatch_aggregate(
+                path,
+                expected_report_sha256=report_sha,
+            )
+            self.assertEqual(retried.result, "applied")
+
+    def test_apply_business_rows_is_authority_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            self._create_empty_legacy_database(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "INSERT INTO mcp_call_record VALUES ('private-call', 'active')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            report = inspect_sqlite_dispatch_aggregate(path).as_payload()
+            with self.assertRaises(MCPDispatchAggregateAuthorityConflictError):
+                apply_sqlite_dispatch_aggregate(
+                    path,
+                    expected_report_sha256=str(report["report_sha256"]),
+                )
+
+    def test_cli_exit_codes_are_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            self._create_empty_legacy_database(path)
+            self.assertEqual(
+                main(
+                    [
+                        "--apply",
+                        "--database-path",
+                        str(path),
+                        "--expected-report-sha",
+                        "0" * 64,
+                    ]
+                ),
+                2,
+            )
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "INSERT INTO mcp_call_record VALUES ('private-call', 'active')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            blocked = inspect_sqlite_dispatch_aggregate(path).as_payload()
+            self.assertEqual(
+                main(
+                    [
+                        "--apply",
+                        "--database-path",
+                        str(path),
+                        "--expected-report-sha",
+                        str(blocked["report_sha256"]).removeprefix("sha256:"),
+                    ]
+                ),
+                3,
             )
 
     def test_postgres_cutover_plan_uses_bounded_lock_and_not_valid_replacement(

@@ -382,7 +382,13 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         action = await self.storage.get_latest_approved_mcp_tool_action(
             "alice", self.task.task_id, self.node.node_id
         )
-        self.assertIsNone(action)
+        self.assertIsNotNone(action)
+        self.assertEqual(action.action_id, "action-1")
+        self.assertIsNone(
+            await self.storage.get_latest_approved_mcp_tool_action(
+                "other-owner", self.task.task_id, self.node.node_id
+            )
+        )
 
     async def test_suspend_and_allow_once_commit_action_interrupt_answer_and_cursor(self) -> None:
         action, interrupt = await self._suspend_for_approval()
@@ -634,14 +640,6 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
                 ).status
             ),
             "invalidated",
-        )
-
-        self.assertIsNotNone(action)
-        self.assertEqual(action.action_id, "action-1")
-        self.assertIsNone(
-            await self.storage.get_latest_approved_mcp_tool_action(
-                "other-owner", self.task.task_id, self.node.node_id
-            )
         )
 
     def _terminal_snapshots(

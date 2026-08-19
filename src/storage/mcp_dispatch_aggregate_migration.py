@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime, timezone
 import hashlib
 import os
 import sqlite3
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Mapping
 
 from sqlalchemy import Engine, inspect, text
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from src.integrations.mcp.cp7_artifacts import canonical_sha256
 from src.state.postgres.runtime_schema import POSTGRES_RUNTIME_SCHEMA_VERSION
@@ -56,6 +59,12 @@ _MIGRATION_TRANSITIONS = {
 
 
 class MCPDispatchAggregateMigrationError(RuntimeError):
+    pass
+
+
+class MCPDispatchAggregateAuthorityConflictError(
+    MCPDispatchAggregateMigrationError
+):
     pass
 
 
@@ -111,6 +120,25 @@ class PostgresAggregateCutoverPlan:
     @property
     def plan_sha256(self) -> str:
         return canonical_sha256({"statements": list(self.statements)})
+
+
+@dataclass(frozen=True, slots=True)
+class MCPDispatchAggregateApplyResult:
+    backend: str
+    result: str
+    report_sha256: str
+    table_states: Mapping[str, str]
+    row_counts: Mapping[str, int]
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "schema": "maf.user_mcp.dispatch_aggregate_migration_apply.v1",
+            "backend": self.backend,
+            "result": self.result,
+            "report_sha256": self.report_sha256,
+            "table_states": dict(sorted(self.table_states.items())),
+            "row_counts": dict(sorted(self.row_counts.items())),
+        }
 
 
 def validate_migration_transition(current: str, target: str) -> None:
@@ -207,113 +235,123 @@ def inspect_sqlite_dispatch_aggregate(
         f"file:{path.resolve(strict=True)}?mode=ro", uri=True
     )
     try:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        table_states: dict[str, str] = {}
-        row_counts: dict[str, int] = {}
-        status_counts: dict[str, dict[str, int]] = {}
-        blockers: list[str] = []
-        for table_name, statuses in (
-            ("mcp_dispatch_resume_outbox", _OUTBOX_STATUSES),
-            ("mcp_call_record", _CALL_STATUSES),
-        ):
-            if table_name not in tables:
-                table_states[table_name] = "absent"
-                row_counts[table_name] = 0
-                status_counts[table_name] = _empty_status_counts(statuses)
-                continue
-            columns = {
-                str(row[1])
-                for row in connection.execute(
-                    f'PRAGMA table_info("{table_name}")'
-                )
-            }
-            expected_columns = set(
-                SQLiteBase.metadata.tables[table_name].columns.keys()
-            )
-            state = (
-                "final"
-                if columns == expected_columns
-                and _sqlite_table_contract_matches(
-                    connection, table_name
-                )
-                else "legacy"
-            )
-            table_states[table_name] = state
-            count = int(
-                connection.execute(
-                    f'SELECT COUNT(*) FROM "{table_name}"'
-                ).fetchone()[0]
-            )
-            row_counts[table_name] = count
-            counts = _sqlite_status_counts(connection, table_name, statuses)
-            status_counts[table_name] = counts
-            if counts["other"]:
-                blockers.append(f"{table_name}_unknown_status_rows")
-            if state == "legacy" and count:
-                blockers.append(f"{table_name}_business_rows_require_writer")
-        return MCPDispatchAggregateMigrationReport(
-            backend="sqlite",
-            table_states=table_states,
-            row_counts=row_counts,
-            status_counts=status_counts,
-            blocker_reason_codes=tuple(sorted(set(blockers))),
-        )
+        return _inspect_sqlite_dispatch_aggregate_connection(connection)
     finally:
         connection.close()
+
+
+def _inspect_sqlite_dispatch_aggregate_connection(
+    connection: sqlite3.Connection,
+) -> MCPDispatchAggregateMigrationReport:
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    table_states: dict[str, str] = {}
+    row_counts: dict[str, int] = {}
+    status_counts: dict[str, dict[str, int]] = {}
+    blockers: list[str] = []
+    for table_name, statuses in (
+        ("mcp_dispatch_resume_outbox", _OUTBOX_STATUSES),
+        ("mcp_call_record", _CALL_STATUSES),
+    ):
+        if table_name not in tables:
+            table_states[table_name] = "absent"
+            row_counts[table_name] = 0
+            status_counts[table_name] = _empty_status_counts(statuses)
+            continue
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                f'PRAGMA table_info("{table_name}")'
+            )
+        }
+        expected_columns = set(
+            SQLiteBase.metadata.tables[table_name].columns.keys()
+        )
+        state = (
+            "final"
+            if columns == expected_columns
+            and _sqlite_table_contract_matches(connection, table_name)
+            else "legacy"
+        )
+        table_states[table_name] = state
+        count = int(
+            connection.execute(
+                f'SELECT COUNT(*) FROM "{table_name}"'
+            ).fetchone()[0]
+        )
+        row_counts[table_name] = count
+        counts = _sqlite_status_counts(connection, table_name, statuses)
+        status_counts[table_name] = counts
+        if counts["other"]:
+            blockers.append(f"{table_name}_unknown_status_rows")
+        if state == "legacy" and count:
+            blockers.append(f"{table_name}_business_rows_require_writer")
+    return MCPDispatchAggregateMigrationReport(
+        backend="sqlite",
+        table_states=table_states,
+        row_counts=row_counts,
+        status_counts=status_counts,
+        blocker_reason_codes=tuple(sorted(set(blockers))),
+    )
 
 
 def inspect_postgres_dispatch_aggregate(
     engine: Engine,
 ) -> MCPDispatchAggregateMigrationReport:
-    inspector = inspect(engine)
+    with engine.connect() as connection:
+        return _inspect_postgres_dispatch_aggregate_connection(connection)
+
+
+def _inspect_postgres_dispatch_aggregate_connection(
+    connection,
+) -> MCPDispatchAggregateMigrationReport:
+    inspector = inspect(connection)
     tables = set(inspector.get_table_names())
     table_states: dict[str, str] = {}
     row_counts: dict[str, int] = {}
     status_counts: dict[str, dict[str, int]] = {}
     blockers: list[str] = []
-    with engine.connect() as connection:
-        for table_name, statuses in (
-            ("mcp_dispatch_resume_outbox", _OUTBOX_STATUSES),
-            ("mcp_call_record", _CALL_STATUSES),
-        ):
-            if table_name not in tables:
-                table_states[table_name] = "absent"
-                row_counts[table_name] = 0
-                status_counts[table_name] = _empty_status_counts(statuses)
-                continue
-            columns = {
-                str(column["name"])
-                for column in inspector.get_columns(table_name)
-            }
-            expected_columns = set(
-                SQLiteBase.metadata.tables[table_name].columns.keys()
-            )
-            state = (
-                "final"
-                if columns == expected_columns
-                and _postgres_table_contract_matches(inspector, table_name)
-                else "legacy"
-            )
-            table_states[table_name] = state
-            count = int(
-                connection.execute(
-                    text(f'SELECT COUNT(*) FROM "{table_name}"')
-                ).scalar_one()
-            )
-            row_counts[table_name] = count
-            counts = _sqlalchemy_status_counts(
-                connection, table_name, statuses
-            )
-            status_counts[table_name] = counts
-            if counts["other"]:
-                blockers.append(f"{table_name}_unknown_status_rows")
-            if state == "legacy" and count:
-                blockers.append(f"{table_name}_business_rows_require_writer")
+    for table_name, statuses in (
+        ("mcp_dispatch_resume_outbox", _OUTBOX_STATUSES),
+        ("mcp_call_record", _CALL_STATUSES),
+    ):
+        if table_name not in tables:
+            table_states[table_name] = "absent"
+            row_counts[table_name] = 0
+            status_counts[table_name] = _empty_status_counts(statuses)
+            continue
+        columns = {
+            str(column["name"])
+            for column in inspector.get_columns(table_name)
+        }
+        expected_columns = set(
+            SQLiteBase.metadata.tables[table_name].columns.keys()
+        )
+        state = (
+            "final"
+            if columns == expected_columns
+            and _postgres_table_contract_matches(inspector, table_name)
+            else "legacy"
+        )
+        table_states[table_name] = state
+        count = int(
+            connection.execute(
+                text(f'SELECT COUNT(*) FROM "{table_name}"')
+            ).scalar_one()
+        )
+        row_counts[table_name] = count
+        counts = _sqlalchemy_status_counts(
+            connection, table_name, statuses
+        )
+        status_counts[table_name] = counts
+        if counts["other"]:
+            blockers.append(f"{table_name}_unknown_status_rows")
+        if state == "legacy" and count:
+            blockers.append(f"{table_name}_business_rows_require_writer")
     return MCPDispatchAggregateMigrationReport(
         backend="postgresql",
         table_states=table_states,
@@ -321,6 +359,270 @@ def inspect_postgres_dispatch_aggregate(
         status_counts=status_counts,
         blocker_reason_codes=tuple(sorted(set(blockers))),
     )
+
+
+def apply_sqlite_dispatch_aggregate(
+    database_path: str | os.PathLike[str],
+    *,
+    expected_report_sha256: str,
+) -> MCPDispatchAggregateApplyResult:
+    expected = _normalize_expected_report_sha(expected_report_sha256)
+    report = inspect_sqlite_dispatch_aggregate(database_path)
+    if not report.migration_required:
+        if report.as_payload()["report_sha256"] != expected:
+            connection = sqlite3.connect(
+                f"file:{Path(database_path).resolve(strict=True)}?mode=ro",
+                uri=True,
+            )
+            try:
+                table_exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='mcp_dispatch_aggregate_migration'"
+                ).fetchone()
+                applied = (
+                    None
+                    if table_exists is None
+                    else connection.execute(
+                        "SELECT 1 FROM mcp_dispatch_aggregate_migration "
+                        "WHERE backend='sqlite' AND schema_version=? "
+                        "AND report_sha256=? AND status='applied'",
+                        (MCP_DISPATCH_AGGREGATE_SCHEMA_VERSION, expected),
+                    ).fetchone()
+                )
+            finally:
+                connection.close()
+            if applied is None:
+                _require_expected_report(report, expected)
+        return _apply_result(report, result="already_applied")
+    _require_expected_report(report, expected)
+    _require_apply_eligible(report)
+
+    source = Path(database_path).resolve(strict=True)
+    migration_id = f"mcp-dispatch-aggregate:{MCP_DISPATCH_AGGREGATE_SCHEMA_VERSION}:sqlite"
+    now = _migration_timestamp()
+    connection = sqlite3.connect(str(source), timeout=3, isolation_level=None)
+    try:
+        _ensure_sqlite_migration_table(connection)
+        row = connection.execute(
+            "SELECT report_sha256, backup_basename, backup_sha256, status "
+            "FROM mcp_dispatch_aggregate_migration WHERE migration_id = ?",
+            (migration_id,),
+        ).fetchone()
+        if row is None:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO mcp_dispatch_aggregate_migration "
+                "(migration_id, backend, schema_version, report_sha256, "
+                "backup_basename, backup_sha256, status, revision, "
+                "failure_reason_code, created_at, updated_at) "
+                "VALUES (?, 'sqlite', ?, ?, NULL, NULL, 'planned', 0, NULL, ?, ?)",
+                (migration_id, MCP_DISPATCH_AGGREGATE_SCHEMA_VERSION, expected, now, now),
+            )
+            connection.commit()
+            migration_status = "planned"
+            expected_backup_sha = None
+        else:
+            stored_report_sha, _, expected_backup_sha, migration_status = row
+            if stored_report_sha != expected:
+                raise MCPDispatchAggregateAuthorityConflictError(
+                    "mcp_dispatch_aggregate_migration_state_conflict"
+                )
+            if migration_status == "applied":
+                final_report = inspect_sqlite_dispatch_aggregate(source)
+                if final_report.migration_required:
+                    raise MCPDispatchAggregateAuthorityConflictError(
+                        "mcp_dispatch_aggregate_applied_schema_drift"
+                    )
+                return _apply_result(final_report, result="already_applied")
+            if migration_status not in {"planned", "backed_up"}:
+                raise MCPDispatchAggregateAuthorityConflictError(
+                    "mcp_dispatch_aggregate_migration_state_conflict"
+                )
+    finally:
+        connection.close()
+
+    backup = create_or_adopt_sqlite_aggregate_backup(
+        source,
+        report_sha256=expected,
+        migration_status=migration_status,
+        expected_backup_sha256=expected_backup_sha,
+    )
+    if backup is None:
+        raise MCPDispatchAggregateMigrationError(
+            "mcp_dispatch_aggregate_backup_required"
+        )
+
+    connection = sqlite3.connect(str(source), timeout=3, isolation_level=None)
+    foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    try:
+        if migration_status == "planned":
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE mcp_dispatch_aggregate_migration SET "
+                "backup_basename = ?, backup_sha256 = ?, status = 'backed_up', "
+                "revision = revision + 1, updated_at = ? "
+                "WHERE migration_id = ? AND status = 'planned' "
+                "AND report_sha256 = ?",
+                (backup.basename, backup.sha256, _migration_timestamp(), migration_id, expected),
+            ).rowcount
+            if updated != 1:
+                connection.rollback()
+                raise MCPDispatchAggregateAuthorityConflictError(
+                    "mcp_dispatch_aggregate_migration_state_conflict"
+                )
+            connection.commit()
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("BEGIN EXCLUSIVE")
+        current = _inspect_sqlite_dispatch_aggregate_connection(connection)
+        _require_expected_report(current, expected)
+        _require_apply_eligible(current)
+        updated = connection.execute(
+            "UPDATE mcp_dispatch_aggregate_migration SET status = 'applying', "
+            "revision = revision + 1, updated_at = ? "
+            "WHERE migration_id = ? AND status = 'backed_up' "
+            "AND backup_basename = ? AND backup_sha256 = ?",
+            (_migration_timestamp(), migration_id, backup.basename, backup.sha256),
+        ).rowcount
+        if updated != 1:
+            raise MCPDispatchAggregateAuthorityConflictError(
+                "mcp_dispatch_aggregate_migration_state_conflict"
+            )
+        for table_name in ("mcp_call_record", "mcp_dispatch_resume_outbox"):
+            if current.table_states.get(table_name) != "legacy":
+                continue
+            if current.row_counts.get(table_name) != 0:
+                raise MCPDispatchAggregateAuthorityConflictError(
+                    "mcp_dispatch_aggregate_business_rows_require_writer"
+                )
+            _replace_empty_sqlite_table(connection, table_name)
+        final = _inspect_sqlite_dispatch_aggregate_connection(connection)
+        if final.migration_required or final.blocker_reason_codes:
+            raise MCPDispatchAggregateAuthorityConflictError(
+                "mcp_dispatch_aggregate_post_apply_contract_invalid"
+            )
+        connection.execute(
+            "UPDATE mcp_dispatch_aggregate_migration SET status = 'applied', "
+            "revision = revision + 1, failure_reason_code = NULL, updated_at = ? "
+            "WHERE migration_id = ? AND status = 'applying'",
+            (_migration_timestamp(), migration_id),
+        )
+        connection.commit()
+    except BaseException:
+        with contextlib.suppress(sqlite3.Error):
+            connection.rollback()
+        raise
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
+        connection.close()
+    return _apply_result(final, result="applied")
+
+
+def apply_postgres_dispatch_aggregate(
+    engine: Engine,
+    *,
+    expected_report_sha256: str,
+) -> MCPDispatchAggregateApplyResult:
+    expected = _normalize_expected_report_sha(expected_report_sha256)
+    report = inspect_postgres_dispatch_aggregate(engine)
+    if not report.migration_required:
+        if report.as_payload()["report_sha256"] != expected:
+            with engine.connect() as connection:
+                if "mcp_dispatch_aggregate_migration" not in set(
+                    inspect(connection).get_table_names()
+                ):
+                    _require_expected_report(report, expected)
+                applied = connection.execute(
+                    text(
+                        "SELECT 1 FROM mcp_dispatch_aggregate_migration "
+                        "WHERE backend='postgresql' AND schema_version=:schema_version "
+                        "AND report_sha256=:report_sha AND status='applied'"
+                    ),
+                    {
+                        "schema_version": MCP_DISPATCH_AGGREGATE_SCHEMA_VERSION,
+                        "report_sha": expected,
+                    },
+                ).first()
+                if applied is None:
+                    _require_expected_report(report, expected)
+        return _apply_result(report, result="already_applied")
+    _require_expected_report(report, expected)
+    _require_apply_eligible(report)
+    with engine.begin() as connection:
+        connection.execute(text("SET LOCAL lock_timeout = '3s'"))
+        connection.execute(text("SET LOCAL statement_timeout = '30s'"))
+        connection.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('mcp_dispatch_aggregate_v1'))")
+        )
+        connection.execute(
+            text(
+                "LOCK TABLE mcp_call_record, mcp_dispatch_resume_outbox "
+                "IN ACCESS EXCLUSIVE MODE"
+            )
+        )
+        _ensure_postgres_migration_table(connection)
+        migration_id = (
+            f"mcp-dispatch-aggregate:{MCP_DISPATCH_AGGREGATE_SCHEMA_VERSION}:postgresql"
+        )
+        now = _migration_timestamp()
+        connection.execute(
+            text(
+                "INSERT INTO mcp_dispatch_aggregate_migration "
+                "(migration_id, backend, schema_version, report_sha256, "
+                "backup_basename, backup_sha256, status, revision, "
+                "failure_reason_code, created_at, updated_at) "
+                "VALUES (:migration_id, 'postgresql', :schema_version, :report_sha, "
+                "NULL, NULL, 'planned', 0, NULL, :now, :now) "
+                "ON CONFLICT (migration_id) DO NOTHING"
+            ),
+            {
+                "migration_id": migration_id,
+                "schema_version": MCP_DISPATCH_AGGREGATE_SCHEMA_VERSION,
+                "report_sha": expected,
+                "now": now,
+            },
+        )
+        migration_row = connection.execute(
+            text(
+                "SELECT report_sha256, status FROM "
+                "mcp_dispatch_aggregate_migration "
+                "WHERE migration_id = :migration_id FOR UPDATE"
+            ),
+            {"migration_id": migration_id},
+        ).one()
+        if migration_row.report_sha256 != expected or migration_row.status != "planned":
+            raise MCPDispatchAggregateAuthorityConflictError(
+                "mcp_dispatch_aggregate_migration_state_conflict"
+            )
+        current = _inspect_postgres_dispatch_aggregate_connection(connection)
+        _require_expected_report(current, expected)
+        _require_apply_eligible(current)
+        inspection = _postgres_schema_inspection(connection)
+        plan = build_postgres_aggregate_cutover_plan(inspection)
+        connection.execute(
+            text(
+                "UPDATE mcp_dispatch_aggregate_migration SET status = 'applying', "
+                "revision = revision + 1, updated_at = :now "
+                "WHERE migration_id = :migration_id AND status = 'planned'"
+            ),
+            {"migration_id": migration_id, "now": _migration_timestamp()},
+        )
+        for statement in plan.statements[3:]:
+            connection.execute(text(statement.rstrip(";")))
+        final = _inspect_postgres_dispatch_aggregate_connection(connection)
+        if final.migration_required or final.blocker_reason_codes:
+            raise MCPDispatchAggregateAuthorityConflictError(
+                "mcp_dispatch_aggregate_post_apply_contract_invalid"
+            )
+        connection.execute(
+            text(
+                "UPDATE mcp_dispatch_aggregate_migration SET status = 'applied', "
+                "revision = revision + 1, updated_at = :now "
+                "WHERE migration_id = :migration_id AND status = 'applying'"
+            ),
+            {"migration_id": migration_id, "now": _migration_timestamp()},
+        )
+    return _apply_result(final, result="applied")
 
 
 def create_or_adopt_sqlite_aggregate_backup(
@@ -390,6 +692,138 @@ def create_or_adopt_sqlite_aggregate_backup(
             backup.unlink()
         _fsync_directory(backup.parent)
         raise
+
+
+def _normalize_expected_report_sha(value: str) -> str:
+    raw = str(value).strip().lower()
+    if raw.startswith("sha256:"):
+        raw = raw.removeprefix("sha256:")
+    if len(raw) != 64 or any(character not in "0123456789abcdef" for character in raw):
+        raise MCPDispatchAggregateMigrationError(
+            "mcp_dispatch_aggregate_expected_report_sha_invalid"
+        )
+    return "sha256:" + raw
+
+
+def _require_expected_report(
+    report: MCPDispatchAggregateMigrationReport,
+    expected: str,
+) -> None:
+    if report.as_payload()["report_sha256"] != expected:
+        raise MCPDispatchAggregateMigrationError(
+            "mcp_dispatch_aggregate_report_changed"
+        )
+
+
+def _require_apply_eligible(
+    report: MCPDispatchAggregateMigrationReport,
+) -> None:
+    if not report.apply_eligible:
+        raise MCPDispatchAggregateAuthorityConflictError(
+            report.blocker_reason_codes[0]
+            if report.blocker_reason_codes
+            else "mcp_dispatch_aggregate_apply_not_eligible"
+        )
+
+
+def _apply_result(
+    report: MCPDispatchAggregateMigrationReport,
+    *,
+    result: str,
+) -> MCPDispatchAggregateApplyResult:
+    return MCPDispatchAggregateApplyResult(
+        backend=report.backend,
+        result=result,
+        report_sha256=str(report.as_payload()["report_sha256"]),
+        table_states=report.table_states,
+        row_counts=report.row_counts,
+    )
+
+
+def _migration_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _ensure_sqlite_migration_table(connection: sqlite3.Connection) -> None:
+    table = SQLiteBase.metadata.tables["mcp_dispatch_aggregate_migration"]
+    connection.execute(str(CreateTable(table, if_not_exists=True).compile(dialect=sqlite.dialect())))
+    for index in sorted(table.indexes, key=lambda item: str(item.name)):
+        connection.execute(
+            str(CreateIndex(index, if_not_exists=True).compile(dialect=sqlite.dialect()))
+        )
+
+
+def _ensure_postgres_migration_table(connection) -> None:
+    table = SQLiteBase.metadata.tables["mcp_dispatch_aggregate_migration"]
+    connection.execute(
+        text(
+            str(
+                CreateTable(table, if_not_exists=True).compile(
+                    dialect=postgresql.dialect()
+                )
+            )
+        )
+    )
+    for index in sorted(table.indexes, key=lambda item: str(item.name)):
+        connection.execute(
+            text(
+                str(
+                    CreateIndex(index, if_not_exists=True).compile(
+                        dialect=postgresql.dialect()
+                    )
+                )
+            )
+        )
+
+
+def _replace_empty_sqlite_table(
+    connection: sqlite3.Connection,
+    table_name: str,
+) -> None:
+    table = SQLiteBase.metadata.tables[table_name]
+    connection.execute(f'DROP TABLE "{table_name}"')
+    connection.execute(str(CreateTable(table).compile(dialect=sqlite.dialect())))
+    for index in sorted(table.indexes, key=lambda item: str(item.name)):
+        connection.execute(str(CreateIndex(index).compile(dialect=sqlite.dialect())))
+
+
+def _postgres_schema_inspection(connection) -> SchemaInspection:
+    inspector = inspect(connection)
+    tables: dict[str, dict[str, str]] = {}
+    checks: dict[str, dict[str, str]] = {}
+    for table_name in inspector.get_table_names():
+        tables[table_name] = {
+            str(column["name"]): _postgres_column_type(column)
+            for column in inspector.get_columns(table_name)
+        }
+        checks[table_name] = {
+            str(item["name"]): str(item["sqltext"])
+            for item in inspector.get_check_constraints(table_name)
+            if item.get("name") and item.get("sqltext")
+        }
+    enum_types = tuple(
+        str(row[0])
+        for row in connection.execute(
+            text("SELECT typname FROM pg_type WHERE typname = 'state_command_status'")
+        ).all()
+    )
+    return SchemaInspection(
+        tables=tables,
+        enum_types=enum_types,
+        check_constraints=checks,
+        triggers=(),
+    )
+
+
+def _postgres_column_type(column: Mapping[str, object]) -> str:
+    rendered = str(column["type"]).lower()
+    if rendered in {"text", "bigint", "boolean"}:
+        return rendered
+    if rendered.startswith("timestamp"):
+        return "timestamp with time zone"
+    if rendered.startswith("character varying"):
+        return "text"
+    return rendered
 
 
 def _empty_status_counts(statuses: tuple[str, ...]) -> dict[str, int]:
@@ -594,12 +1028,16 @@ def _fsync_directory(path: Path) -> None:
 
 
 __all__ = [
+    "MCPDispatchAggregateApplyResult",
+    "MCPDispatchAggregateAuthorityConflictError",
     "MCPDispatchAggregateMigrationError",
     "MCPDispatchAggregateMigrationReport",
     "MCP_DISPATCH_AGGREGATE_REPORT_SCHEMA",
     "MCP_DISPATCH_AGGREGATE_SCHEMA_VERSION",
     "SQLiteAggregateBackup",
     "PostgresAggregateCutoverPlan",
+    "apply_postgres_dispatch_aggregate",
+    "apply_sqlite_dispatch_aggregate",
     "build_postgres_aggregate_cutover_plan",
     "create_or_adopt_sqlite_aggregate_backup",
     "inspect_postgres_dispatch_aggregate",
