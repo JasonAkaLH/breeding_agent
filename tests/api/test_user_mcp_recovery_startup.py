@@ -542,12 +542,19 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                         tool_name="lookup",
                         arguments={"query": "original-approved-value"},
                     )
+                if self.call_count == 2:
+                    return MCPSelectorAction(
+                        MCPSelectorActionType.CALL_TOOL,
+                        tool_name="extract",
+                        arguments={"document_ref": "second-approved-value"},
+                    )
                 return MCPSelectorAction(MCPSelectorActionType.FINISH)
 
         class DurableCompletedGateway:
             def __init__(self, result_store) -> None:
                 self.result_store = result_store
                 self.call_count = 0
+                self.asserted_arguments = []
                 self.catalog = ToolCatalogSnapshot(
                     server_id="server-approval-resume",
                     effective_protocol_version="2026-07-28",
@@ -560,6 +567,17 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                                 "properties": {"query": {"type": "string"}},
                             },
                             input_schema_sha256="schema-approval-resume",
+                        ),
+                        MCPToolDescriptor(
+                            name="extract",
+                            description="extract",
+                            input_schema={
+                                "type": "object",
+                                "properties": {
+                                    "document_ref": {"type": "string"}
+                                },
+                            },
+                            input_schema_sha256="schema-approval-extract",
                         ),
                     ),
                 )
@@ -581,8 +599,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 self, scope, tool_name, arguments, callbacks, **_kwargs
             ):
                 self.call_count += 1
-                self.asserted_arguments = (tool_name, dict(arguments))
-                call_ref = "call-approval-resume"
+                self.asserted_arguments.append((tool_name, dict(arguments)))
+                call_ref = f"call-approval-resume-{self.call_count}"
                 await callbacks.on_created(call_ref)
                 await callbacks.on_registered(call_ref)
                 sink = self.result_store.create_sink(
@@ -715,23 +733,70 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(str(accepted), "accepted")
 
-            completed = await coordinator.dispatch(request, server_id=server.server_id)
+            waiting_second = await coordinator.dispatch(
+                request, server_id=server.server_id
+            )
 
-            self.assertIsNone(completed.error)
+            self.assertEqual(
+                waiting_second.output_payload["mcp_status"], "approval_required"
+            )
             self.assertEqual(gateway.call_count, 1)
             self.assertEqual(selector.call_count, 2)
             self.assertEqual(
                 gateway.asserted_arguments,
-                ("lookup", {"query": "original-approved-value"}),
+                [("lookup", {"query": "original-approved-value"})],
             )
-            call = await runtime.storage.get_mcp_call_record(
-                "alice", task.task_id, "call-approval-resume"
+            accepted_second = await runtime.storage.accept_mcp_tool_approval(
+                waiting_second.interrupt.interrupt_id,
+                InterruptAnswer(
+                    interrupt_answer_id="answer-approval-resume-2",
+                    interrupt_id=waiting_second.interrupt.interrupt_id,
+                    answer_payload={"mcp_tool_approval": "allow_once"},
+                    source_message_id="answer-message-approval-resume-2",
+                    accepted=True,
+                    created_at=now,
+                    accepted_at=now,
+                ),
+                "allow_once",
+                now,
             )
-            action = await runtime.storage.get_mcp_pending_tool_action(
-                call.pending_action_id
+            self.assertEqual(str(accepted_second), "accepted")
+
+            completed = await coordinator.dispatch(request, server_id=server.server_id)
+
+            self.assertIsNone(completed.error)
+            self.assertEqual(gateway.call_count, 2)
+            self.assertEqual(selector.call_count, 3)
+            self.assertEqual(
+                gateway.asserted_arguments,
+                [
+                    ("lookup", {"query": "original-approved-value"}),
+                    ("extract", {"document_ref": "second-approved-value"}),
+                ],
             )
-            self.assertEqual(call.status, "completed")
-            self.assertEqual(str(action.status), "consumed")
+            calls = await runtime.storage.list_mcp_call_records(
+                "alice", task.task_id
+            )
+            self.assertEqual([call.status for call in calls], ["completed", "completed"])
+            self.assertEqual(
+                [
+                    str(
+                        (
+                            await runtime.storage.get_mcp_pending_tool_action(
+                                call.pending_action_id
+                            )
+                        ).status
+                    )
+                    for call in calls
+                ],
+                ["consumed", "consumed"],
+            )
+            outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(
+                mcp_dispatch_resume_outbox_id(
+                    mcp_no_server_intent_id(task.task_id, node_id=node.node_id)
+                )
+            )
+            self.assertEqual(outbox.approval_round_total, 2)
             self.assertEqual(
                 str((await runtime.storage.get_task_node(node.node_id)).status),
                 "completed",

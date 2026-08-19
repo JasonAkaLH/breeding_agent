@@ -5661,6 +5661,7 @@ class SQLiteStateRepository:
         record: MCPCallRecord,
         occurred_at: datetime,
         *,
+        allow_claimed_later: bool = False,
         cp7_candidate_id: str | None = None,
         cp7_epoch_id: str | None = None,
     ) -> bool:
@@ -5710,7 +5711,11 @@ class SQLiteStateRepository:
             or outbox.intent_id != intent_id
             or not (first_call or later_call)
             or (first_call and outbox.status != "claimed")
-            or (later_call and outbox.status != "active")
+            or (
+                later_call
+                and outbox.status
+                not in ({"active", "claimed"} if allow_claimed_later else {"active"})
+            )
             or int(intent.revision) != expected_intent_revision
             or int(outbox.revision) != expected_outbox_revision
             or record.owner_user_id != intent.owner_user_id
@@ -5833,7 +5838,7 @@ class SQLiteStateRepository:
             or int(outbox.revision) != expected_outbox_revision
             or not (
                 (first_call and outbox.status == "claimed")
-                or (later_call and outbox.status == "active")
+                or (later_call and outbox.status in {"active", "claimed"})
             )
             or outbox.claim_owner != claim_owner
             or outbox.claim_token != claim_token
@@ -5931,6 +5936,7 @@ class SQLiteStateRepository:
             expected_outbox_revision,
             record,
             occurred_at,
+            allow_claimed_later=True,
             cp7_candidate_id=cp7_candidate_id,
             cp7_epoch_id=cp7_epoch_id,
         )
