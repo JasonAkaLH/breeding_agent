@@ -15,7 +15,7 @@ from src.core.models import Artifact, EventRecord
 from src.lifecycle.mcp_presence import MCPPresenceConnection
 from src.integrations.mcp.gateway_models import MCPCancelStatus, MCPContinueStatus
 from src.storage.artifact_files import (
-    is_active_managed_output_file,
+    is_active_skill_output_file,
     parse_file_storage_ref,
 )
 
@@ -410,14 +410,16 @@ async def get_task_artifacts(task_id: str, request: Request) -> TaskArtifactsRes
     user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
     artifacts = await runtime.storage.list_artifacts_for_task(task_id)
-    return TaskArtifactsResponse(
-        task_id=task_id,
-        artifacts=[
-            artifact_response(artifact)
-            for artifact in artifacts
-            if should_return_task_artifact(artifact)
-        ],
-    )
+    responses = []
+    for artifact in artifacts:
+        if should_return_task_artifact(artifact):
+            responses.append(
+                await artifact_response(
+                    artifact,
+                    artifact_file_store=runtime.artifact_file_store,
+                )
+            )
+    return TaskArtifactsResponse(task_id=task_id, artifacts=responses)
 
 
 @router.get("/api/v1/artifacts/{artifact_id}/download")
@@ -429,7 +431,7 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     await require_task_owner(runtime, artifact.task_id, user)
     metadata = parse_file_storage_ref(artifact.storage_ref)
-    if not is_active_managed_output_file(metadata):
+    if not is_active_skill_output_file(metadata):
         await runtime.storage.append_event(
             _artifact_event(
                 artifact=artifact,

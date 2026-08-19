@@ -268,6 +268,79 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
         self.assertEqual(artifact["mime_type"], "text/plain")
         self.assertEqual(artifact["download_url"], f"/api/v1/artifacts/{conversation_id}:file-active/download")
 
+    async def test_mcp_result_file_is_public_text_and_cannot_be_downloaded(self) -> None:
+        conversation_id = "conv-history-mcp-result-text"
+        await self._save_conversation_with_messages(conversation_id)
+        task_id = f"{conversation_id}:task-1"
+        artifact_id = "mcp-result-artifact:v1:" + "a" * 64
+        original_text = '{"result":{"content":[{"type":"text","text":"原始返回"}]}}'
+        source_path = self.workspace / "mcp-result-text-source.json"
+        source_path.write_text(original_text, encoding="utf-8")
+        stored = self.runtime.artifact_file_store.save_file(
+            artifact_id=artifact_id,
+            filename="01-tool-result.json",
+            source_path=source_path,
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                artifact_id,
+                task_id,
+                f"{conversation_id}:mcp-tool",
+                ArtifactType.FILE,
+                build_file_storage_ref(
+                    {
+                        "version": 1,
+                        "source_kind": "mcp_result",
+                        "storage_key": stored.storage_key,
+                        "filename": stored.filename,
+                        "mime_type": "application/json",
+                        "size_bytes": stored.size_bytes,
+                        "sha256": stored.sha256,
+                        "summary": "MCP Tool原始返回：tool",
+                        "retention_status": "active",
+                    }
+                ),
+                summary="MCP Tool原始返回：tool",
+                is_complete=True,
+                created_at=datetime(2026, 6, 3, 1, 0, 3),
+            )
+        )
+
+        task_response = await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")
+        history_response = await self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages"
+        )
+        download_response = await self.client.get(
+            f"/api/v1/artifacts/{artifact_id}/download"
+        )
+
+        self.assertEqual(task_response.status_code, 200)
+        task_artifact = next(
+            item
+            for item in task_response.json()["artifacts"]
+            if item["artifact_id"] == artifact_id
+        )
+        self.assertEqual(task_artifact["artifact_type"], "text")
+        self.assertEqual(task_artifact["storage_ref"], original_text)
+        self.assertIsNone(task_artifact["download_url"])
+        self.assertIsNone(task_artifact["filename"])
+
+        self.assertEqual(history_response.status_code, 200)
+        assistant_message = next(
+            message
+            for message in history_response.json()["messages"]
+            if message["role"] == "assistant"
+        )
+        self.assertEqual(
+            next(
+                item
+                for item in assistant_message["artifacts"]
+                if item["artifact_id"] == artifact_id
+            )["storage_ref"],
+            original_text,
+        )
+        self.assertEqual(download_response.status_code, 404)
+
     async def test_conversation_messages_include_ocr_raw_text_artifact_when_text_is_present(self) -> None:
         conversation_id = "conv-history-ocr"
         await self._save_conversation_with_messages(conversation_id)

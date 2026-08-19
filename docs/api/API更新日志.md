@@ -8,6 +8,12 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-20 增量：MCP Tool原始返回改为Text Artifact
+
+MCP结果仍复用既有公共Artifact列表，不新增endpoint。对于内部metadata为`source_kind=mcp_result`的artifact，`GET /api/v1/tasks/{task_id}/artifacts`及Conversation history中的`artifacts`现在返回`artifact_type=text`，`storage_ref`为经过size、SHA-256和UTF-8校验的原始JSON文本；`filename`与`download_url`为空。历史已生成的MCP结果在读取时使用相同投影，无需迁移或重放Tool调用。
+
+`GET /api/v1/artifacts/{artifact_id}/download`不再允许MCP结果artifact，直接请求返回404；该下载接口继续服务active Skill output文件。
+
 ## 2026-08-19 增量：MCP Tool完整原始返回Artifact与闭合状态
 
 成功的用户级MCP业务Call现在把receipt绑定的完整durable JSON结果投影为现有公共file Artifact；客户端继续通过

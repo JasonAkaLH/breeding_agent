@@ -34,6 +34,12 @@ export interface OcrRawTextDisplayModel {
   jobId?: string;
 }
 
+export interface MCPResultTextDisplayModel {
+  artifactId: string;
+  title: string;
+  text: string;
+}
+
 export type CapabilityArtifactDisplay =
   | {
       kind: 'data_query';
@@ -46,6 +52,10 @@ export type CapabilityArtifactDisplay =
   | {
       kind: 'ocr_raw_text';
       result: OcrRawTextDisplayModel;
+    }
+  | {
+      kind: 'mcp_result_text';
+      result: MCPResultTextDisplayModel;
     };
 
 export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): CapabilityArtifactDisplay[] {
@@ -56,6 +66,7 @@ export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): 
     displays.push({ kind: 'data_query', result: dataQueryResult });
   }
   displays.push(...parseOcrRawTextDisplays(artifacts).map((result) => ({ kind: 'ocr_raw_text' as const, result })));
+  displays.push(...parseMCPResultTextDisplays(artifacts).map((result) => ({ kind: 'mcp_result_text' as const, result })));
   displays.push(...parseFileArtifactDisplays(artifacts).map((result) => ({ kind: 'file' as const, result })));
   return displays;
 }
@@ -66,7 +77,18 @@ export function summarizeCapabilityArtifactDisplays(displays: CapabilityArtifact
   if (first.kind === 'data_query') return first.result.summary;
   if (first.kind === 'file') return first.result.summary;
   if (first.kind === 'ocr_raw_text') return first.result.title;
+  if (first.kind === 'mcp_result_text') return first.result.title;
   return '';
+}
+
+export function parseMCPResultTextDisplays(artifacts: ArtifactResponse[]): MCPResultTextDisplayModel[] {
+  return artifacts
+    .filter(isMCPResultTextArtifact)
+    .map((artifact) => ({
+      artifactId: artifact.artifact_id,
+      title: stringOrFallback(artifact.summary, 'MCP Tool原始返回'),
+      text: artifact.storage_ref,
+    }));
 }
 
 export function parseOcrRawTextDisplays(artifacts: ArtifactResponse[]): OcrRawTextDisplayModel[] {
@@ -148,10 +170,17 @@ export function parseDataQueryArtifacts(artifacts: ArtifactResponse[]): DataQuer
 }
 
 export function parseAssistantTextArtifact(artifacts: ArtifactResponse[]): string | null {
-  const textArtifacts = artifacts.filter((artifact) => artifact.artifact_type === 'text');
+  const textArtifacts = artifacts.filter(
+    (artifact) => artifact.artifact_type === 'text' && !isMCPResultTextArtifact(artifact),
+  );
   const textArtifact = textArtifacts.find(isMainAgentTextArtifact) ?? textArtifacts[0];
   if (!textArtifact) return null;
   return textArtifact.storage_ref || textArtifact.summary || null;
+}
+
+function isMCPResultTextArtifact(artifact: ArtifactResponse): boolean {
+  return artifact.artifact_type === 'text'
+    && artifact.artifact_id.startsWith('mcp-result-artifact:v1:');
 }
 
 function isSummaryArtifact(artifact: ArtifactResponse): boolean {

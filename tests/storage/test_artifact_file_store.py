@@ -61,6 +61,53 @@ class LocalArtifactFileStoreTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.open_path("../secret.txt")
 
+    def test_read_utf8_verifies_size_digest_and_encoding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.json"
+            source.write_text('{"text":"原始返回"}', encoding="utf-8")
+            store = LocalArtifactFileStore(root / "store")
+            record = store.save_file(
+                artifact_id="art-text",
+                filename="result.json",
+                source_path=source,
+            )
+
+            self.assertEqual(
+                store.read_utf8(
+                    record.storage_key,
+                    expected_size_bytes=record.size_bytes,
+                    expected_sha256=record.sha256,
+                ),
+                '{"text":"原始返回"}',
+            )
+            with self.assertRaises(ValueError):
+                store.read_utf8(
+                    record.storage_key,
+                    expected_size_bytes=record.size_bytes + 1,
+                    expected_sha256=record.sha256,
+                )
+            with self.assertRaises(ValueError):
+                store.read_utf8(
+                    record.storage_key,
+                    expected_size_bytes=record.size_bytes,
+                    expected_sha256="0" * 64,
+                )
+
+            binary_source = root / "binary.bin"
+            binary_source.write_bytes(b"\xff")
+            binary = store.save_file(
+                artifact_id="art-binary",
+                filename="result.json",
+                source_path=binary_source,
+            )
+            with self.assertRaises(ValueError):
+                store.read_utf8(
+                    binary.storage_key,
+                    expected_size_bytes=binary.size_bytes,
+                    expected_sha256=binary.sha256,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -245,7 +245,12 @@ async def _history_display_artifacts_by_task_id(
     artifacts = await runtime.storage.list_artifacts_for_conversation(conversation_id)
     for artifact in artifacts:
         if _is_history_artifact_for_assistant_message(artifact, assistant_task_ids):
-            grouped[artifact.task_id].append(artifact_response(artifact))
+            grouped[artifact.task_id].append(
+                await artifact_response(
+                    artifact,
+                    artifact_file_store=runtime.artifact_file_store,
+                )
+            )
     return grouped
 
 

@@ -121,6 +121,68 @@ class LocalArtifactFileStore:
     def open_path(self, storage_key: str) -> Path:
         return self._resolve_storage_key(storage_key)
 
+    def read_utf8(
+        self,
+        storage_key: str,
+        *,
+        expected_size_bytes: int,
+        expected_sha256: str,
+    ) -> str:
+        if (
+            isinstance(expected_size_bytes, bool)
+            or not isinstance(expected_size_bytes, int)
+            or expected_size_bytes < 0
+        ):
+            raise ValueError("Artifact expected size is invalid")
+        expected_digest = str(expected_sha256).removeprefix("sha256:")
+        if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+            raise ValueError("Artifact expected digest is invalid")
+        path = self._resolve_storage_key(storage_key)
+        _validate_private_directory(path.parent)
+        before = path.stat(follow_symlinks=False)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        digest = hashlib.sha256()
+        body = bytearray()
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if opened.st_size != expected_size_bytes:
+                raise ValueError("Artifact content identity changed")
+            while chunk := handle.read(1024 * 1024):
+                body.extend(chunk)
+                digest.update(chunk)
+            after = os.fstat(handle.fileno())
+        after_path = path.stat(follow_symlinks=False)
+        identities = {
+            (
+                item.st_dev,
+                item.st_ino,
+                item.st_mode,
+                item.st_uid,
+                item.st_nlink,
+                item.st_size,
+            )
+            for item in (before, opened, after, after_path)
+        }
+        if (
+            len(identities) != 1
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or len(body) != expected_size_bytes
+            or digest.hexdigest() != expected_digest
+        ):
+            raise ValueError("Artifact content identity changed")
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Artifact content is not UTF-8 text") from exc
+
     def delete(self, storage_key: str) -> bool:
         path = self._resolve_storage_key(storage_key)
         existed = path.exists()

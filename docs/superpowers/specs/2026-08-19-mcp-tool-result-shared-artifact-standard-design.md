@@ -1,5 +1,7 @@
 # MCP Tool原始返回复用公共Artifact标准设计
 
+> 2026-08-20增量：公共展示与下载规则已由`2026-08-20-mcp-result-text-artifact-design.md`替代。内部受校验文件副本和生命周期继续有效，但公共API统一返回`text` artifact且不再允许下载。
+
 ## 状态
 
 - 日期：2026-08-19

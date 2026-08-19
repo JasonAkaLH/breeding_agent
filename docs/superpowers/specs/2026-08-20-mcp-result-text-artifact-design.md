@@ -6,6 +6,10 @@ MCP Tool JSON results are public text artifacts, not downloadable files. The pub
 
 The verified managed-file copy remains an internal persistence detail. Keeping it preserves the existing byte-count, SHA-256, lifecycle CAS, recovery, and historical backfill guarantees without copying result bodies into the artifact database row.
 
+## Implementation Status
+
+Implemented on `main` on 2026-08-20. Backend task/history APIs, the download boundary, secure UTF-8 reads, frontend parsing/rendering, regression tests, API documentation, and repository indexes all follow this design. No database migration or external dependency was added.
+
 ## Scope
 
 - Apply the text projection to both newly created and existing MCP result artifacts whose managed-file metadata has `source_kind=mcp_result`.

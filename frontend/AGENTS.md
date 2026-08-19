@@ -9,7 +9,7 @@
 - `src/components/mathJaxRuntime.ts`: lazy, same-origin, self-hosted MathJax runtime.
 - `src/components/MCPSettingsPanel.tsx`: user-scoped MCP Server configuration and Grant management; new public HTTP endpoints require an explicit plaintext-risk confirmation, and save failures stay visible inside the active modal.
 - `src/api/taskEvents.ts`, `src/domain/taskEvents.ts`: authenticated task-event transport and deterministic reducer; CP7 terminal events and MCP result-Artifact projections use closed payload schemas, canonical per-Call folding, conflict detection, and explicit resync state.
-- `src/domain/artifacts.ts`: artifact display projection; `producer_node_id` is an opaque correlation key and must not be parsed for capability or product semantics.
+- `src/domain/artifacts.ts`: artifact display projection; `producer_node_id` is an opaque correlation key and must not be parsed for capability or product semantics. MCP result text is identified by its deterministic artifact-id domain, rendered as supplemental raw text, and excluded from assistant-answer selection.
 - `src/components/MCPApprovalDialog.tsx`, `src/components/MCPRuntimeStatus.tsx`: accessible Tool approval and task execution status/control surfaces; unknown and recovered-late CP7 outcomes remain failed/no-replay and disable call controls; deferred/permanent raw-result Artifact states use aggregate Alerts and are copied into completed assistant history without extending SSE lifetime.
 - `scripts/prepare_mathjax_assets.mjs`: reproducible allowlisted MathJax asset preparation.
 

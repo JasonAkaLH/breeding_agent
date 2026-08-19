@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 from src.core.enums import ArtifactType
 from src.core.models import Artifact
 from src.storage.artifact_files import (
+    LocalArtifactFileStore,
     is_active_managed_output_file,
     parse_file_storage_ref,
 )
@@ -42,7 +44,11 @@ def should_return_history_display_artifact(artifact: Artifact) -> bool:
     return role == _HISTORY_OCR_ROLE and _has_ocr_text(payload)
 
 
-def artifact_response(artifact: Artifact) -> ArtifactResponse:
+async def artifact_response(
+    artifact: Artifact,
+    *,
+    artifact_file_store: LocalArtifactFileStore,
+) -> ArtifactResponse:
     if artifact.artifact_type != ArtifactType.FILE:
         return ArtifactResponse(
             artifact_id=artifact.artifact_id,
@@ -55,6 +61,32 @@ def artifact_response(artifact: Artifact) -> ArtifactResponse:
         )
 
     metadata = parse_file_storage_ref(artifact.storage_ref) or {}
+    if metadata.get("source_kind") == "mcp_result":
+        size_bytes = _optional_int(metadata.get("size_bytes"))
+        sha256 = _optional_string(metadata.get("sha256"))
+        storage_key = _optional_string(metadata.get("storage_key"))
+        if (
+            metadata.get("retention_status") != "active"
+            or size_bytes is None
+            or sha256 is None
+            or storage_key is None
+        ):
+            raise ValueError("mcp_result_artifact_metadata_invalid")
+        body = await asyncio.to_thread(
+            artifact_file_store.read_utf8,
+            storage_key,
+            expected_size_bytes=size_bytes,
+            expected_sha256=sha256,
+        )
+        return ArtifactResponse(
+            artifact_id=artifact.artifact_id,
+            producer_node_id=artifact.producer_node_id,
+            artifact_type=str(ArtifactType.TEXT),
+            storage_ref=body,
+            summary=str(metadata.get("summary") or artifact.summary or ""),
+            is_complete=artifact.is_complete,
+            created_at=artifact.created_at,
+        )
     return ArtifactResponse(
         artifact_id=artifact.artifact_id,
         producer_node_id=artifact.producer_node_id,

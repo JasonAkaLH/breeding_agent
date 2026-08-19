@@ -3036,6 +3036,30 @@ describe('App', () => {
     expect(api.downloadArtifact).toHaveBeenCalledWith('art-file-1', 'layout.html');
   });
 
+  it('renders MCP result text as a collapsible raw-return card without a download action', async () => {
+    const rawResult = '{"result":{"content":[{"type":"text","text":"原始返回"}]}}';
+    const api = makeApi({
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [
+          { artifact_id: `mcp-result-artifact:v1:${'a'.repeat(64)}`, producer_node_id: 'task-1:mcp-tool', artifact_type: 'text', storage_ref: rawResult, summary: 'MCP Tool原始返回：tool', is_complete: true, created_at: null },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '调用 MCP' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const title = await screen.findByText('MCP Tool原始返回：tool');
+    const messageBody = title.closest('.message-assistant')?.querySelector('.message-body') as HTMLElement;
+    expect(messageBody.querySelector('.markdown-content')).not.toBeInTheDocument();
+    expect(messageBody.querySelector('.mcp-result-text-content')?.textContent).toBe(rawResult);
+    expect(within(messageBody).getByRole('button', { name: '展开原文' })).toBeInTheDocument();
+    expect(within(messageBody).queryByRole('button', { name: /下\s*载/ })).not.toBeInTheDocument();
+    expect(api.downloadArtifact).not.toHaveBeenCalled();
+  });
+
   it('renders OCR raw text artifacts as a collapsible card inside the assistant bubble', async () => {
     const api = makeApi({
       getTaskArtifacts: vi.fn(async () => ({

@@ -2096,10 +2096,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       const response = await api.getTaskArtifacts(taskId);
       const artifactDisplays = parseCapabilityArtifactDisplays(response.artifacts);
       const fallbackText = parseAssistantTextArtifact(response.artifacts);
-      const artifactSummary = summarizeCapabilityArtifactDisplays(artifactDisplays);
-      if (fallbackText || artifactDisplays.length > 0) {
+      const nonMCPArtifactSummary = summarizeCapabilityArtifactDisplays(
+        artifactDisplays.filter((display) => display.kind !== 'mcp_result_text'),
+      );
+      const fallbackContent = fallbackText || nonMCPArtifactSummary;
+      if (fallbackContent || artifactDisplays.length > 0) {
         updateAssistantMessage(assistantId, {
-          content: fallbackText ?? artifactSummary,
+          ...(fallbackContent ? { content: fallbackContent } : {}),
           artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
           finalContentLoaded: true,
           replyCompleted: true,
@@ -3460,6 +3463,9 @@ function CapabilityArtifactPanel({
   if (display.kind === 'ocr_raw_text') {
     return <OcrRawTextCard result={display.result} />;
   }
+  if (display.kind === 'mcp_result_text') {
+    return <MCPResultTextCard result={display.result} />;
+  }
   if (display.kind === 'file') {
     return <FileArtifactCard result={display.result} onDownloadArtifact={onDownloadArtifact} />;
   }
@@ -3476,7 +3482,28 @@ function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): strin
   if (display.kind === 'ocr_raw_text') {
     return `${display.kind}:${display.result.artifactId}`;
   }
+  if (display.kind === 'mcp_result_text') {
+    return `${display.kind}:${display.result.artifactId}`;
+  }
   return 'capability-artifact';
+}
+
+function MCPResultTextCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'mcp_result_text' }>['result'] }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <Card
+      size="small"
+      className="capability-card mcp-result-text-card"
+      title={result.title}
+      extra={(
+        <Button type="link" size="small" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? '收起原文' : '展开原文'}
+        </Button>
+      )}
+    >
+      <pre className={`ocr-raw-text-content mcp-result-text-content ${expanded ? 'ocr-raw-text-content-expanded' : ''}`}>{result.text}</pre>
+    </Card>
+  );
 }
 
 function OcrRawTextCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'ocr_raw_text' }>['result'] }) {

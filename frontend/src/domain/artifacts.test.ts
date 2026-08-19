@@ -236,6 +236,37 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(summarizeCapabilityArtifactDisplays(displays)).toBe('OCR 回传原文：scan.png');
   });
 
+  it('renders MCP result text as a supplemental artifact without replacing the assistant answer', () => {
+    const mcpText = '{"result":{"content":[{"type":"text","text":"原始返回"}]}}';
+    const artifacts = [
+      artifact({
+        artifact_id: 'main_agent_text:1',
+        artifact_type: 'text',
+        storage_ref: '主代理总结',
+        summary: 'final',
+      }),
+      artifact({
+        artifact_id: `mcp-result-artifact:v1:${'a'.repeat(64)}`,
+        artifact_type: 'text',
+        storage_ref: mcpText,
+        summary: 'MCP Tool原始返回：tool',
+      }),
+    ];
+
+    expect(parseAssistantTextArtifact(artifacts)).toBe('主代理总结');
+    expect(parseAssistantTextArtifact([artifacts[1]])).toBeNull();
+    expect(parseCapabilityArtifactDisplays(artifacts)).toEqual([
+      {
+        kind: 'mcp_result_text',
+        result: {
+          artifactId: `mcp-result-artifact:v1:${'a'.repeat(64)}`,
+          title: 'MCP Tool原始返回：tool',
+          text: mcpText,
+        },
+      },
+    ]);
+  });
+
   it('does not turn unrelated capability summaries into data-query cards', () => {
     const displays = parseCapabilityArtifactDisplays([
       artifact({
