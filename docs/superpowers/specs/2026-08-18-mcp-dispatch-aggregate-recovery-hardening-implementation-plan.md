@@ -4,6 +4,8 @@
 
 - 日期：2026-08-18
 - 状态：**96% — Pass with recorded assumptions**；通过95%信心门，Blocking=0、Major=0
+- 实施状态：**Phase 0～4仓库实现与本地SQLite cutover已完成**；待用户OCR人工smoke，且真实
+  PostgreSQL validation DSN未提供，不能声明跨backend外部验收完成。
 - 设计依据：
   `docs/superpowers/specs/2026-08-18-mcp-dispatch-aggregate-recovery-hardening-design.md`
 - 设计基线提交：`4a0eb30`
@@ -24,8 +26,8 @@ migration重排、锁序/retention/故障边界一致性、最终文件/命令/�
 | concurrency与崩溃恢复 | 96% | 固定锁序、claim/cancel线性化和17个注入hook逐项闭合 |
 | testability与交付门禁 | 97% | 每个green checkpoint有定向module，最终全量后端/前端/Rust相关门禁明确 |
 
-最终文档置信度为96%。该结论只评价开发计划可实施性，不代表代码、migration、真实
-PostgreSQL、完整回归、本地OCR smoke或生产部署已经完成。
+最终文档置信度为96%。代码与migration的实际完成证据、全量回归例外和外部缺口见第16节；
+本地完成仍不代表真实PostgreSQL、OCR人工smoke或生产部署完成。
 
 ## 1. 计划选择
 
@@ -867,3 +869,44 @@ npm run build
 
 当前没有需要改变产品范围的开放问题。任何提高容量/保留期、增加新密钥领域、部署`prod`、
 修改Sidecar authority或自动修复旧失败任务的请求，都必须先更新design并重新审批。
+
+## 16. 2026-08-19实施结果
+
+Phase 0～4已按green checkpoint落地，主要提交从`4eb8676`开始，最终阶段包括：
+
+- `9075033`：固定十阶段startup aggregate recovery；
+- `2ce9b36`：closed report、SHA防漂移与SQLite/PostgreSQL受控apply；
+- `db5ec70`：64 Selector step、20 approval round与Task generation singleflight；
+- `18df4b6`：candidate active/archive、30天保留和部分移动/删除恢复；
+- `fde3dfc`：durable result 24小时宽限、held snapshot互斥与双文件删除恢复；
+- `bc7b3fe`：closed aggregate transition与`execution_crash`前端脱敏；
+- `6c57f1c`：编号1～17的故障注入proof矩阵。
+
+本地`runtime/dev.sqlite3`在确认无旧backend writer与文件占用后完成：
+
+```text
+report: legacy + 0 Call rows + 0 outbox rows + apply_eligible=true
+apply: applied
+same-report retry: already_applied
+final report: both tables=final, migration_required=false
+migration row: applied, revision=3
+integrity: ok
+backup: mode=0600, link_count=1
+```
+
+验证结果：
+
+- compileall、core 46、storage 357（6项外部环境skip）、lifecycle 25、orchestration 167、
+  main-agent capability 65、MCP-tool capability 14以及本次MCP/API定向144项通过；
+- integrations 616项中615项通过；唯一失败是既有shadow manifest错误文案断言期望
+  `every closed scenario`，实现返回`every current scenario exactly once`，与本变更无关；
+- API 463项中457项通过；6项失败集中在缺少本地Git-ignored Skill checkout及既有legacy Skill
+  输入行为，与本变更定向回归无重叠；`tests/capabilities/skill_tool`没有可发现测试；
+- E2E MCP soft-binding已通过；cancel-late-result用例仍因现有取消路径主动cancel执行handle而等不到
+  `task.late_result_discarded`，属于既有生命周期测试/实现矛盾；
+- frontend 21个文件、298项测试、typecheck与production build通过；仅保留既有chunk size警告；
+- 真实PostgreSQL validation DSN未配置，对应skip不计为通过；未运行`prod`部署或真实OCR人工smoke。
+
+本轮当前实际SQLite authority在cutover前没有legacy Call/receipt，因此candidate/result backfill无需
+产生行；migration对含无法唯一分类的legacy业务行继续退出3，不在startup猜测迁移或删除。下一步
+只允许启动本地新backend并由用户创建新OCR Task验证；旧失败Task不自动复活或重放。

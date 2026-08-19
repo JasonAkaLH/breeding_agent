@@ -8700,9 +8700,8 @@ class SQLiteStateRepository:
                 .with_for_update()
             ).all()
         }
-        if outcome == "completed" and (
-            not had_call
-            or not calls
+        if outcome == "completed" and had_call and (
+            not calls
             or calls[-1].call_ref not in receipts
             or receipts[calls[-1].call_ref].terminal_state != "completed"
         ):

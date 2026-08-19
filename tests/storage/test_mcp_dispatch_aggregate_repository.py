@@ -1565,6 +1565,28 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             "completed",
         )
 
+    async def test_no_call_finish_finalizer_completes_dispatch(self) -> None:
+        claimed = await self._claim()
+
+        finalized = await self.storage.finalize_mcp_dispatch(
+            self.intent_id,
+            self.outbox_id,
+            self.node.node_id,
+            "completed",
+            None,
+            claimed.revision,
+            "worker",
+            "token",
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(str(finalized), "finalized")
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        node = await self.storage.get_task_node(self.node.node_id)
+        self.assertEqual(str(outbox.status), "completed")
+        self.assertEqual(outbox.completion_mode, "completed")
+        self.assertEqual(str(node.status), "completed")
+
     async def test_terminal_snapshot_drift_rolls_back_receipt_and_call(self) -> None:
         active = await self._admit()
         candidate_snapshot, result_snapshot = self._terminal_snapshots()

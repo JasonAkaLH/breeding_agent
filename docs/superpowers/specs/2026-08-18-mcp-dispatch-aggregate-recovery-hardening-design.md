@@ -4,6 +4,8 @@
 
 - 日期：2026-08-18
 - 结论：**96% — Pass with recorded assumptions**；已通过95%信心门，Blocking=0、Major=0
+- 实施状态：2026-08-19 已在`main`完成Phase 0～4仓库实现与本地SQLite v6 cutover；
+  未执行`prod`部署，真实PostgreSQL validation DSN与用户OCR人工smoke仍是外部完成证据。
 - 适用范围：当前 `main` 分支 user-scoped MCP 的 SQL authority、Coordinator、Gateway、
   Tool approval、MRTR、remote Task 和启动恢复路径
 - 前置设计：
@@ -23,8 +25,8 @@ consumer与状态转换核对、跨重启I/O与并发安全、迁移/兼容/验�
 | 迁移、兼容与回滚 | 95% | v1/v2双读、受控cutover和旧binary门禁明确 |
 | 可观测性与验收证据 | 96% | 18项FR、8项NFR全部映射自动化证据 |
 
-最终文档置信度为96%。保留的假设在文末列明；该分数评价设计的可实施性，不代表代码、
-真实PostgreSQL集成、完整回归或生产部署已经完成。
+最终文档置信度为96%。保留的假设在文末列明；该分数评价设计本身。实现状态与验证缺口以
+对应implementation plan第16节为准，不把本地SQLite/CI证据等同于真实PostgreSQL或生产部署。
 
 ## 设计优先级
 
