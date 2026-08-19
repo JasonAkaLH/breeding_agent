@@ -2,9 +2,10 @@
 
 ## 实施状态（2026-08-19）
 
-- Phase 0～5代码和文档已完成；外部`ocr_mcp`修改前文件备份位于仓库外权限`0600`目录。
-- 自动证据：定向106项、storage 362项、恢复/API 55项、ocr_mcp 57项通过；integrations 632项仅有既有shadow manifest错误文案断言失败。
-- Phase 6本地backend重建与用户报纸PNG真实smoke尚未完成，因此当前不宣称最终验收通过或远端OCR源码已部署。
+- Phase 0～6代码、文档、本地服务重建和真实smoke已完成；外部`ocr_mcp`修改前文件备份位于仓库外权限`0600`目录。
+- 自动证据：定向116项、storage 362项、恢复/API 55项、ocr_mcp 57项通过；integrations 633项仅有既有shadow manifest错误文案断言失败。
+- 最终Task `task-ca55b408b0f7`以1个Call完成：durable result 50,149 bytes，最终回答2,685字符且包含图片标题；Task/两Node/branch/intent/outbox/receipt全部终态一致，1,065字符v2信封不含Base64、input payload或dependency outputs。
+- 本地验收通过不代表外部`ocr_mcp`严格schema源码已部署到远端；远端当前旧版本已兼容完成本次OCR调用。
 
 ## 1. 完成声明
 

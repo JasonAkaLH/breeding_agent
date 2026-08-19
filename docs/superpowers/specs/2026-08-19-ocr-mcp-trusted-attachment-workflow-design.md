@@ -6,7 +6,7 @@
 - 适用范围：`main` 分支 user-scoped MCP、外部 `ocr_mcp` source schema、真实 OCR 人工验收
 - 决策：采用可信本地附件物化 + 单一逻辑 OCR workflow；不把 OCR 特例塞进恢复信封
 - 用户授权：自主设计、实施、复审与验证，直到本地修复完成
-- 实施状态：主仓代码、外部`ocr_mcp`严格source schema与自动回归已完成；本地服务重建和用户报纸PNG真实smoke待执行
+- 实施状态：主仓代码、外部`ocr_mcp`严格source schema、自动回归和用户报纸PNG本地真实smoke均已完成；严格schema源码尚未部署到远端OCR endpoint
 
 ## 背景与故障证据
 
