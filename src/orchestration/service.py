@@ -26,6 +26,7 @@ from src.integrations.agent_skills.missing_input_interrupt import (
 
 from .backpressure import BackpressureGuard
 from .completion_policy import CompletionPolicy, CompletionStatus
+from .mcp_route_handoff import normalize_selected_mcp_route
 from .models import OrchestrationRequest, OrchestrationRunResult, WorkflowNodePlan, WorkflowPlan
 from .planner_node_identity import validate_canonical_model_node_identity
 from .registry import CapabilityRegistry, InstanceRegistry
@@ -644,6 +645,28 @@ class OrchestrationService:
         dependency_outputs: dict[str, dict[str, Any]],
     ) -> tuple[TaskNode, dict[str, Any]]:
         await self._assert_mcp_continuation_execution_owned(request)
+        route_handoff = normalize_selected_mcp_route(
+            capability_id=node_plan.capability_id,
+            input_payload=node_plan.input_payload,
+            node_metadata=node_plan.metadata,
+            pinned_server_id_present="mcp_dispatch_server_id" in request.metadata,
+            pinned_server_id=request.metadata.get("mcp_dispatch_server_id"),
+            available_server_ids=frozenset(
+                profile.server_id.strip()
+                for profile in request.available_mcp_servers
+                if profile.server_id.strip()
+            ),
+        )
+        if route_handoff.rejection_code is not None:
+            return await self._reject_mcp_selected_route(
+                request=request,
+                task_node=task_node,
+                rejection_code=route_handoff.rejection_code,
+            )
+        node_plan = replace(
+            node_plan,
+            metadata=dict(route_handoff.normalized_node_metadata),
+        )
         instance = self._scheduler.select_instance(node_plan.capability_id)
         running = replace(
             task_node,
@@ -835,6 +858,53 @@ class OrchestrationService:
             )
         )
         return completed, dict(result.output_payload)
+
+    async def _reject_mcp_selected_route(
+        self,
+        *,
+        request: OrchestrationRequest,
+        task_node: TaskNode,
+        rejection_code: str,
+    ) -> tuple[TaskNode, dict[str, Any]]:
+        failed = replace(
+            task_node,
+            status=NodeStatus.FAILED,
+            finished_at=self._utcnow_naive(),
+        )
+        failed = await self._storage.compare_and_set_task_node(
+            failed,
+            expected_from_status=task_node.status,
+        )
+        if failed is not None:
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    node_id=task_node.node_id,
+                    event_type="node.failed",
+                    payload={"code": rejection_code},
+                )
+            )
+            return failed, {}
+
+        latest_task = await self._storage.get_task(request.task_id)
+        latest_node = await self._storage.get_task_node(task_node.node_id)
+        if latest_node is None:
+            raise RuntimeError("mcp_selected_route_rejection_node_missing")
+        if (
+            latest_node.status
+            in {NodeStatus.CANCELLED, NodeStatus.BLOCKED_BY_CANCELLATION}
+            or (
+                latest_task is not None
+                and (
+                    latest_task.cancel_requested_at is not None
+                    or latest_task.status
+                    in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}
+                )
+            )
+        ):
+            return latest_node, {}
+        raise RuntimeError("mcp_selected_route_rejection_conflict")
 
     async def resume_persisted_mcp_dispatch_node(
         self,

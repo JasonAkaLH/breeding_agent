@@ -135,6 +135,13 @@ class MCPDispatchResumeV2Test(OrchestrationSQLiteTestCase):
         self.assertEqual(output, {"safe_summary": "done"})
         self.assertEqual(captured[0].input_payload, {"server_id": "server-a"})
         self.assertEqual(
+            captured[0].metadata["mcp_binding_mode"],
+            "explicit_command",
+        )
+        self.assertNotIn("mcp_dispatch_server_id", captured[0].metadata)
+        self.assertNotIn("forced_by_mcp_command", captured[0].metadata)
+        self.assertNotIn("mcp_command", captured[0].metadata)
+        self.assertEqual(
             captured[0].dependency_outputs,
             {
                 "node-dependency": {
@@ -146,6 +153,7 @@ class MCPDispatchResumeV2Test(OrchestrationSQLiteTestCase):
         self.assertEqual(captured[0].metadata["user_message"], "root text")
         self.assertNotIn("dependency_outputs", envelope)
         self.assertNotIn("metadata", envelope)
+        self.assertNotIn("base64", str(envelope).lower())
 
     def test_v2_missing_artifact_summary_fails_before_execution(self) -> None:
         _task, _node, envelope, request = self._fixtures(summary=None)
