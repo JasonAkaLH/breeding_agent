@@ -8475,6 +8475,92 @@ class SQLiteStateRepository:
         row = self._session.get(MCPDurableResultLifecycleRow, result_ref)
         return None if row is None else _row_to_mcp_durable_result_lifecycle(row)
 
+    def list_projectable_mcp_durable_result_lifecycles(
+        self,
+        *,
+        after_updated_at: datetime | None = None,
+        after_result_ref: str | None = None,
+        limit: int = 1000,
+    ) -> list[MCPDurableResultLifecycle]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_durable_result_lifecycle_limit_invalid")
+        if (after_updated_at is None) != (after_result_ref is None):
+            raise ValueError("mcp_durable_result_lifecycle_cursor_invalid")
+        conditions = [
+            MCPDurableResultLifecycleRow.status == "retained",
+            MCPDurableResultLifecycleRow.reason == "dispatch_resolved",
+        ]
+        if after_updated_at is not None and after_result_ref is not None:
+            conditions.append(
+                or_(
+                    MCPDurableResultLifecycleRow.updated_at > after_updated_at,
+                    and_(
+                        MCPDurableResultLifecycleRow.updated_at
+                        == after_updated_at,
+                        MCPDurableResultLifecycleRow.result_ref
+                        > after_result_ref,
+                    ),
+                )
+            )
+        rows = self._session.scalars(
+            select(MCPDurableResultLifecycleRow)
+            .where(*conditions)
+            .order_by(
+                MCPDurableResultLifecycleRow.updated_at,
+                MCPDurableResultLifecycleRow.result_ref,
+            )
+            .limit(limit)
+        ).all()
+        return [_row_to_mcp_durable_result_lifecycle(row) for row in rows]
+
+    def summarize_mcp_durable_result_backfill(
+        self, now: datetime
+    ) -> dict[str, int]:
+        rows = self._session.execute(
+            select(
+                MCPDurableResultLifecycleRow.status,
+                MCPDurableResultLifecycleRow.reason,
+                func.count(),
+                func.coalesce(func.sum(MCPDurableResultLifecycleRow.size_bytes), 0),
+            ).group_by(
+                MCPDurableResultLifecycleRow.status,
+                MCPDurableResultLifecycleRow.reason,
+            )
+        ).all()
+        summary: dict[str, int] = {
+            "retained_dispatch_resolved": 0,
+            "retained_dispatch_resolved_due": 0,
+            "artifact_owned": 0,
+            "retained_orphan": 0,
+            "deleting": 0,
+            "total_size_bytes": 0,
+        }
+        for status, reason, count, size_bytes in rows:
+            count_value = int(count)
+            summary["total_size_bytes"] += int(size_bytes)
+            if status == "retained" and reason == "dispatch_resolved":
+                summary["retained_dispatch_resolved"] = count_value
+            elif status == "artifact_owned":
+                summary["artifact_owned"] += count_value
+            elif status == "retained" and reason == "orphan":
+                summary["retained_orphan"] = count_value
+            elif status == "deleting":
+                summary["deleting"] += count_value
+        summary["retained_dispatch_resolved_due"] = int(
+            self._session.scalar(
+                select(func.count())
+                .select_from(MCPDurableResultLifecycleRow)
+                .where(
+                    MCPDurableResultLifecycleRow.status == "retained",
+                    MCPDurableResultLifecycleRow.reason == "dispatch_resolved",
+                    MCPDurableResultLifecycleRow.eligible_at.is_not(None),
+                    MCPDurableResultLifecycleRow.eligible_at <= now,
+                )
+            )
+            or 0
+        )
+        return summary
+
     def reconcile_mcp_durable_result_lifecycle(
         self,
         snapshot: MCPDurableResultSnapshot,
@@ -8647,8 +8733,12 @@ class SQLiteStateRepository:
         rows = self._session.scalars(
             select(MCPDurableResultLifecycleRow)
             .where(
-                MCPDurableResultLifecycleRow.status.in_(
-                    ("retained", "artifact_owned")
+                or_(
+                    MCPDurableResultLifecycleRow.status == "artifact_owned",
+                    and_(
+                        MCPDurableResultLifecycleRow.status == "retained",
+                        MCPDurableResultLifecycleRow.reason == "orphan",
+                    ),
                 ),
                 MCPDurableResultLifecycleRow.eligible_at.is_not(None),
                 MCPDurableResultLifecycleRow.eligible_at <= now,
@@ -8666,6 +8756,32 @@ class SQLiteStateRepository:
             row.updated_at = now
         self._session.flush()
         return [_row_to_mcp_durable_result_lifecycle(row) for row in rows]
+
+    def claim_mcp_dispatch_result_deletion(
+        self,
+        result_ref: str,
+        expected_revision: int,
+        now: datetime,
+    ) -> MCPDurableResultLifecycle | None:
+        row = self._session.scalar(
+            select(MCPDurableResultLifecycleRow)
+            .where(MCPDurableResultLifecycleRow.result_ref == result_ref)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status != "retained"
+            or row.reason != "dispatch_resolved"
+            or int(row.revision) != expected_revision
+            or row.eligible_at is None
+            or row.eligible_at > now
+        ):
+            return None
+        row.status = "deleting"
+        row.revision = int(row.revision) + 1
+        row.updated_at = now
+        self._session.flush()
+        return _row_to_mcp_durable_result_lifecycle(row)
 
     def finish_mcp_durable_result_deletion(
         self, result_ref: str, expected_revision: int, deleted_at: datetime
@@ -13731,6 +13847,32 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def list_projectable_mcp_durable_result_lifecycles(
+        self,
+        *,
+        after_updated_at: datetime | None = None,
+        after_result_ref: str | None = None,
+        limit: int = 1000,
+    ) -> list[MCPDurableResultLifecycle]:
+        return await self._run(
+            lambda state, collab: (
+                state.list_projectable_mcp_durable_result_lifecycles(
+                    after_updated_at=after_updated_at,
+                    after_result_ref=after_result_ref,
+                    limit=limit,
+                )
+            )
+        )
+
+    async def summarize_mcp_durable_result_backfill(
+        self, now: datetime
+    ) -> Mapping[str, int]:
+        return await self._run(
+            lambda state, collab: state.summarize_mcp_durable_result_backfill(
+                now
+            )
+        )
+
     async def reconcile_mcp_durable_result_lifecycle(
         self,
         snapshot: MCPDurableResultSnapshot,
@@ -13769,6 +13911,20 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.claim_mcp_durable_result_deletions(
                 now, limit=limit
+            )
+        )
+
+    async def claim_mcp_dispatch_result_deletion(
+        self,
+        result_ref: str,
+        expected_revision: int,
+        now: datetime,
+    ) -> MCPDurableResultLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_dispatch_result_deletion(
+                result_ref,
+                expected_revision,
+                now,
             )
         )
 

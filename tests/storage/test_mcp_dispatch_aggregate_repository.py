@@ -1395,6 +1395,84 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(orphan.status), "retained")
         self.assertEqual(orphan.eligible_at, NOW + timedelta(hours=24))
 
+    async def test_dispatch_result_projection_query_and_exact_deletion_authority(
+        self,
+    ) -> None:
+        with self.sessions() as session:
+            for index, (status, reason) in enumerate(
+                (
+                    ("retained", "dispatch_resolved"),
+                    ("retained", "orphan"),
+                    ("artifact_owned", "artifact_promoted"),
+                ),
+                start=1,
+            ):
+                session.add(
+                    MCPDurableResultLifecycleRow(
+                        result_ref=f"projection-result-{index}",
+                        owner_user_id="alice",
+                        task_id=f"projection-task-{index}",
+                        node_id=f"projection-node-{index}",
+                        call_id=f"projection-call-{index}",
+                        content_sha256="sha256:" + str(index) * 64,
+                        size_bytes=index,
+                        data_filename=f"projection-data-{index}.json",
+                        manifest_filename=f"projection-manifest-{index}.json",
+                        data_file_sha256=str(index) * 64,
+                        manifest_file_sha256=str(index + 3) * 64,
+                        store_kind="durable_content_addressed",
+                        status=status,
+                        reason=reason,
+                        revision=0,
+                        eligible_at=NOW,
+                        deleted_at=None,
+                        created_at=NOW,
+                        updated_at=NOW + timedelta(seconds=index),
+                    )
+                )
+            session.commit()
+
+        projectable = (
+            await self.storage.list_projectable_mcp_durable_result_lifecycles(
+                limit=1000
+            )
+        )
+        self.assertEqual(
+            [item.result_ref for item in projectable],
+            ["projection-result-1"],
+        )
+        summary = await self.storage.summarize_mcp_durable_result_backfill(NOW)
+        self.assertEqual(summary["retained_dispatch_resolved"], 1)
+        self.assertEqual(summary["retained_dispatch_resolved_due"], 1)
+        self.assertEqual(summary["retained_orphan"], 1)
+        self.assertEqual(summary["artifact_owned"], 1)
+        self.assertEqual(summary["total_size_bytes"], 6)
+
+        bulk = await self.storage.claim_mcp_durable_result_deletions(
+            NOW, limit=1000
+        )
+        self.assertEqual(
+            {item.result_ref for item in bulk},
+            {"projection-result-2", "projection-result-3"},
+        )
+        retained = await self.storage.get_mcp_durable_result_lifecycle(
+            "projection-result-1"
+        )
+        self.assertEqual(str(retained.status), "retained")
+        self.assertIsNone(
+            await self.storage.claim_mcp_dispatch_result_deletion(
+                retained.result_ref,
+                retained.revision + 1,
+                NOW,
+            )
+        )
+        exact = await self.storage.claim_mcp_dispatch_result_deletion(
+            retained.result_ref,
+            retained.revision,
+            NOW,
+        )
+        self.assertEqual(str(exact.status), "deleting")
+
     async def test_completed_terminal_commit_keeps_dispatch_active_until_finalizer(
         self,
     ) -> None:

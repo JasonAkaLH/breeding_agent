@@ -585,6 +585,18 @@ class StoragePort(Protocol):
         self, result_ref: str
     ) -> MCPDurableResultLifecycle | None: ...
 
+    async def list_projectable_mcp_durable_result_lifecycles(
+        self,
+        *,
+        after_updated_at: datetime | None = None,
+        after_result_ref: str | None = None,
+        limit: int = 1000,
+    ) -> list[MCPDurableResultLifecycle]: ...
+
+    async def summarize_mcp_durable_result_backfill(
+        self, now: datetime
+    ) -> Mapping[str, int]: ...
+
     async def reconcile_mcp_durable_result_lifecycle(
         self,
         snapshot: MCPDurableResultSnapshot,
@@ -604,6 +616,13 @@ class StoragePort(Protocol):
     async def claim_mcp_durable_result_deletions(
         self, now: datetime, *, limit: int = 1000
     ) -> list[MCPDurableResultLifecycle]: ...
+
+    async def claim_mcp_dispatch_result_deletion(
+        self,
+        result_ref: str,
+        expected_revision: int,
+        now: datetime,
+    ) -> MCPDurableResultLifecycle | None: ...
 
     async def finish_mcp_durable_result_deletion(
         self, result_ref: str, expected_revision: int, deleted_at: datetime
