@@ -23,6 +23,7 @@
 - `superpowers/specs/2026-08-18-mcp-dispatch-aggregate-recovery-hardening-design.md`：通过95%信心门且已在`main`完成Phase 0～4仓库实现的 MCP dispatch 聚合状态机与恢复加固设计；保持v2引用式信封和no-replay，统一Tool approval、普通多Call、MRTR、remote Task、durable result、terminal candidate、claim、取消线性化与startup recovery的SQL原子状态合同；真实PostgreSQL与OCR人工smoke仍是外部证据。
 - `superpowers/specs/2026-08-18-mcp-dispatch-aggregate-recovery-hardening-implementation-plan.md`：以96%置信度通过95%信心门并已执行的开发计划；记录5个Phase green checkpoint、本地SQLite report/apply/retry、candidate/result lifecycle、18项FR/8项NFR、17个故障注入边界、完整回归例外与真实PostgreSQL缺口。
 - `superpowers/specs/2026-08-18-mcp-approval-event-stream-resubscribe-design.md`：连续 MCP Tool 审批的前端事件流恢复设计；审批成功后沿用普通 Interrupt 合同重新订阅当前 Task SSE，使不同 Tool 的后续审批无需刷新即可出现，同时保持 `always_allow` 的 per-Tool 边界。
+- `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-design.md`：以旧OCR Skill为行为基准，为显式用户MCP绑定增加execution-only单附件Base64物化与单一逻辑start/poll/ack workflow；同时修复标准`isError=true`误记completed、短Call不续claim及异常后aggregate终态残留，保持64 KiB引用式信封不含实际I/O。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
@@ -40,3 +41,4 @@
 | `prd/backend/skill-workbench/README.md`（父入口：`prd/backend/22-Skill运行闭环Workbench总纲PRD.md`） | 已拆分为阶段零至阶段四；待实施 | 按阶段实施 Workbench policy/runtime state/stage placement、内部 capability/executor、runtime loop/finalizer/Skill refinement、事件 graph prompt 脱敏、contract / health diagnostics。 |
 | `prd/MCP/user-scoped-on-demand/` | 阶段一、阶段二业务闭环和阶段三 CP-0～CP-6 仓库实现已落地；CP7-A 开发候选待人工验收 | `main` 首次部署的单一在线根密钥与五领域派生已按 `superpowers/specs/2026-08-14-maf-master-key-domain-derivation-design.md` 实施并通过自动验收；只有明确回复“可以退役”后才执行 CP7-B 物理删除。`prod`、根密钥轮换和旧密文迁移仍不在当前范围。 |
 | `superpowers/specs/2026-08-18-mcp-dispatch-aggregate-recovery-hardening-design.md`及对应implementation plan | Phase 0～4仓库实现、本地SQLite cutover与17边界自动proof已完成 | 重启本地新backend后由用户创建新OCR Task做approval/恢复smoke；补充真实PostgreSQL validation DSN证据。不得自动复活旧失败Task或把本地证据当作`prod`部署。 |
+| `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-design.md` | 真实故障与Skill/OCR源码对照已完成；设计待实施 | 完成可信附件物化、OCR逻辑workflow、isError/claim/finalizer修复与用户报纸PNG真实smoke；大于10 MiB companion upload和远端OCR源码部署保持独立后续工作。 |
