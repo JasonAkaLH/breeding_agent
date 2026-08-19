@@ -8,6 +8,19 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-19 增量：MCP Tool完整原始返回Artifact与闭合状态
+
+成功的用户级MCP业务Call现在把receipt绑定的完整durable JSON结果投影为现有公共file Artifact；客户端继续通过
+`GET /api/v1/tasks/{task_id}/artifacts`和`GET /api/v1/artifacts/{artifact_id}/download`读取，不新增endpoint，
+`storage_ref`仍不会对外暴露。文件名为按Call顺序生成的安全名称，例如`01-start_parse_job-result.json`。
+
+`TaskSummaryResponse`和completed assistant `MessageResponse`加法新增最多20项的
+`mcp_result_artifact_projections`。每项严格包含`schema`、不可逆`safe_call_ref`、
+`status=ready|deferred|permanent_failure`、闭合`reason_code`和`artifact_count=0|1`；非法、冲突或超限历史
+fail closed为空列表。任务SSE加法新增`mcp.result_artifact_projection`同形事件。客户端应在`deferred`时提示完整文件
+仍在生成，在`permanent_failure`时提示文件未能保留；不得展示内部reason、result ref、storage key或原始Tool返回。
+`ready`只清除提示，不应提前关闭Task SSE或主动触发Artifact终态加载。旧客户端忽略新增字段/事件仍兼容。
+
 ## 2026-08-17 增量：`$` 用户级 MCP Server Soft Binding
 
 `POST /api/v1/conversations/chat-messages` 新增 closed `metadata.mcp_server_binding={"server_id":"..."}`。该字段只能与 `routing_mode=force_capability`、`capability_id=mcp.dispatch` 同时出现；反向组合也成立，强制 `mcp.dispatch` 缺少binding返回422。binding请求的metadata只允许 `mcp_server_binding`、`upload_ids`、`upload_sheet_selections`、`deep_thinking`、`main_agent_reasoning_effort`。目标Server不存在、跨用户、disabled、unavailable、待删除或已删除统一返回409 `mcp_bound_server_unavailable`，user-scoped runtime不可承载时返回503 `mcp_feature_unavailable`。

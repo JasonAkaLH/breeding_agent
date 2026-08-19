@@ -8,9 +8,9 @@
 - `src/components/MathFormula.tsx`: React lifecycle boundary for asynchronous formula conversion and readable fallback.
 - `src/components/mathJaxRuntime.ts`: lazy, same-origin, self-hosted MathJax runtime.
 - `src/components/MCPSettingsPanel.tsx`: user-scoped MCP Server configuration and Grant management; new public HTTP endpoints require an explicit plaintext-risk confirmation, and save failures stay visible inside the active modal.
-- `src/api/taskEvents.ts`, `src/domain/taskEvents.ts`: authenticated task-event transport and deterministic reducer; CP7 terminal events use closed payload schemas, predecessor-aware replay, conflict detection, and explicit resync state.
+- `src/api/taskEvents.ts`, `src/domain/taskEvents.ts`: authenticated task-event transport and deterministic reducer; CP7 terminal events and MCP result-Artifact projections use closed payload schemas, canonical per-Call folding, conflict detection, and explicit resync state.
 - `src/domain/artifacts.ts`: artifact display projection; `producer_node_id` is an opaque correlation key and must not be parsed for capability or product semantics.
-- `src/components/MCPApprovalDialog.tsx`, `src/components/MCPRuntimeStatus.tsx`: accessible Tool approval and task execution status/control surfaces; unknown and recovered-late CP7 outcomes remain failed/no-replay and disable call controls.
+- `src/components/MCPApprovalDialog.tsx`, `src/components/MCPRuntimeStatus.tsx`: accessible Tool approval and task execution status/control surfaces; unknown and recovered-late CP7 outcomes remain failed/no-replay and disable call controls; deferred/permanent raw-result Artifact states use aggregate Alerts and are copied into completed assistant history without extending SSE lifetime.
 - `scripts/prepare_mathjax_assets.mjs`: reproducible allowlisted MathJax asset preparation.
 
 ## Formula Rendering Constraints
@@ -25,6 +25,6 @@
 ## Verification
 
 - Run focused component/parser/runtime tests before the full frontend suite.
-- For CP7 terminal projection changes, run `src/api/taskEvents.test.ts`, `src/domain/taskEvents.test.ts`, `src/components/MCPRuntimeStatus.test.tsx`, and the restore/replay cases in `src/App.test.tsx`.
+- For CP7 terminal or MCP result-Artifact projection changes, run `src/api/taskEvents.test.ts`, `src/domain/taskEvents.test.ts`, `src/components/MCPRuntimeStatus.test.tsx`, and the restore/replay cases in `src/App.test.tsx`.
 - Run `npm run typecheck` and `npm run build` for production changes.
 - Verify both root and configured subpath builds when changing asset URLs or Vite base handling.

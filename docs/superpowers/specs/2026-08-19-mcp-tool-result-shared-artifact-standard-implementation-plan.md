@@ -4,7 +4,7 @@
 
 - 日期：2026-08-19
 - 分支：`main`
-- 状态：计划已通过`document-perfectization`，待实施
+- 状态：计划已通过`document-perfectization`并完成Checkpoint A/B、restart修复、自动门禁和本地历史补投；外部OCR/真实PG保留为明确缺口
 - 设计依据：`2026-08-19-mcp-tool-result-shared-artifact-standard-design.md`
 - 设计信心门：十轮一致性复审，99/100，Pass with recorded assumptions
 - 计划信心门：九轮审计/修订，99/100，Pass with recorded assumptions
@@ -12,6 +12,25 @@
 
 本计划中的“原始返回”只指Adapter/Gateway规范化后、由completed receipt绑定的authoritative durable result
 完整字节；不包含HTTP headers、SSE frame、SDK对象、credential、网络诊断或失败Call远端错误体。
+
+### 实际执行记录（2026-08-19）
+
+| 检查点 | 提交 | 结果 |
+|---|---|---|
+| Checkpoint A | `fe45624` | projector、closed event/fold、Storage keyset/summary/精确删除CAS完成，未装配writer |
+| Checkpoint B | `712d216` | ordinary/approval/remote/reconciler、Task/Message API、SSE reducer、MessageBubble Alert一次性激活 |
+| Restart修复 | `07bde65` | startup validator与writer的`completed`无Call、`stopped_after_call`合法终态恢复对称 |
+| 文档checkpoint | 本文最终提交 | 记录自动门禁、本地补投、已知失败与外部证据缺口 |
+
+实际验证结果：
+
+- 聚焦后端93项、restart/storage相关70项、前端全量304项、TypeScript production build通过；
+- core 46、storage 363（6项环境skip）、lifecycle 25、orchestration 181、main-agent capability 65、
+  MCP capability 14、observability 34通过；integrations 640中639通过，唯一失败是既有shadow错误文案断言；
+- API全量476项曾出现1个本功能filtered-reader异常传播，修复后其精确回归与本功能套件通过；其余6项Skill/API失败
+  和cancel-late E2E失败已在Checkpoint A快照复现；`tests/capabilities/skill_tool`为0测试，`skill/sql-query`目录不存在；
+- 本地开发卷50条候选中31条安全补投、31/31文件校验与公共HTTP下载通过；19条缺Call authority保持retained；
+- 全新用户PNG OCR因缺少具体外发目的地授权未执行，真实PostgreSQL DSN未验证，`prod`未部署。
 
 ## 1. 实施参与者与交付价值
 

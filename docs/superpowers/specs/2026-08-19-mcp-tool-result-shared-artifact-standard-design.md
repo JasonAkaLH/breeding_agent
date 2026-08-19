@@ -4,10 +4,26 @@
 
 - 日期：2026-08-19
 - 分支：`main`
-- 状态：设计已确认并通过document-perfectization复审，尚未实施
+- 状态：设计已确认并通过document-perfectization复审；`main`仓库实现、本地开发卷补投和公共下载验收已完成
 - 用户决策：MCP产物标准直接复用Skill最终进入的公共Artifact标准；成功Call展示完整原始返回，失败或取消Call只展示脱敏错误码
 - 范围：用户级`mcp.dispatch`成功Tool Call的durable result投影、补偿与公共Artifact展示
 - 信心门：99/100，无Blocking或Major问题
+
+## 实施结果（2026-08-19）
+
+- Checkpoint A：`fe45624 feat(mcp): define result artifact projection authority`；
+- Checkpoint B：`712d216 feat(mcp): publish complete tool results as artifacts`；
+- restart authority对称性修复：`07bde65 fix(mcp): accept valid resolved restart states`；
+- 自动门禁：前端全量304项和production build通过；本功能聚焦后端93项、restart/storage相关70项通过；
+- 本地开发卷预检为50条`retained / dispatch_resolved`、0条到期、310,962 bytes；首轮补投后31条生成
+  公共Artifact并由`artifact_owned → deleting → deleted`删除源，31/31文件的size和SHA与lifecycle/receipt一致，
+  事件全部为`ready/promoted`且raw authority泄漏扫描为0；
+- 其余19条均缺少Call authority但仍有receipt，不满足本设计的完整identity条件，保持retained且不猜测恢复；
+- 公共Task Artifact列表与download均返回200，下载字节和SHA精确匹配；backend、frontend与runtime-sidecar健康；
+- 全量后端仍有实施前已存在的1项shadow错误文案、6项Skill/API和1项cancel-late E2E失败；已用Checkpoint A
+  源码快照复现，不计为本设计通过；`skill/sql-query`本地兼容目录不存在，真实PostgreSQL未运行；
+- 全新2,326,771-byte用户PNG OCR需要把具体文件发送到具体外部MCP目的地；当前没有这项新增外发授权，因此未执行。
+  `prod`未部署。
 
 ## 用户、干系人与受影响系统
 
