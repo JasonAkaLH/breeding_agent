@@ -10,12 +10,29 @@ from .client import MCPRemoteError
 
 _WORKING_STATUSES = frozenset({"queued", "running", "working", "cancelling"})
 _FAILED_STATUSES = frozenset({"failed", "cancelled", "expired", "gone"})
+MAX_OCR_TEXT_PROJECTION_CHARS = 20_000
 
 
 class MCPJobWorkflowError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+def extract_ocr_text_projection(result: Mapping[str, Any]) -> str | None:
+    structured = result.get("structuredContent")
+    if not isinstance(structured, Mapping):
+        return None
+    markdown = structured.get("markdown")
+    if not isinstance(markdown, str) or not markdown.strip():
+        return None
+    normalized = markdown.strip()
+    if len(normalized) <= MAX_OCR_TEXT_PROJECTION_CHARS:
+        return normalized
+    return (
+        normalized[:MAX_OCR_TEXT_PROJECTION_CHARS]
+        + "\n\n[OCR text truncated at the trusted projection limit]"
+    )
 
 
 async def run_ocr_async_job_workflow(
@@ -174,4 +191,9 @@ def _non_empty_string(value: object) -> str | None:
     return normalized or None
 
 
-__all__ = ["MCPJobWorkflowError", "run_ocr_async_job_workflow"]
+__all__ = [
+    "MAX_OCR_TEXT_PROJECTION_CHARS",
+    "MCPJobWorkflowError",
+    "extract_ocr_text_projection",
+    "run_ocr_async_job_workflow",
+]

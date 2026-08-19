@@ -42,7 +42,7 @@ from .gateway_models import (
 )
 from .invalidation import MCPInvalidationAction, MCPServerInvalidated
 from .attachment_materialization import MCPJobWorkflowKind
-from .job_workflows import run_ocr_async_job_workflow
+from .job_workflows import extract_ocr_text_projection, run_ocr_async_job_workflow
 from .rollout_evidence import (
     MCPCallKind,
     MCPMetricAdapter,
@@ -1100,7 +1100,11 @@ class MCPGateway:
                         request_registered_callback=registered,
                         sleep=self._sleep,
                         result_persisted_callback=(
-                            lambda result: self._normalize_outcome(result, sink)
+                            lambda result: self._normalize_outcome(
+                                result,
+                                sink,
+                                external_text=extract_ocr_text_projection(result),
+                            )
                         ),
                     )
                 )
@@ -1129,7 +1133,13 @@ class MCPGateway:
             raise MCPGatewayError("mcp_scope_closed")
         return outcome
 
-    async def _normalize_outcome(self, raw: Any, sink: Any) -> MCPCallOutcome:
+    async def _normalize_outcome(
+        self,
+        raw: Any,
+        sink: Any,
+        *,
+        external_text: str | None = None,
+    ) -> MCPCallOutcome:
         if isinstance(raw, MCPInputRequiredOutcome):
             await sink.abort()
             requests = tuple(dict(value) for value in raw.input_requests.values())
@@ -1170,6 +1180,7 @@ class MCPGateway:
                     else None
                 ),
                 result_store_kind="durable_content_addressed",
+                external_text=external_text,
             )
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
         await sink.write(encoded)
@@ -1180,6 +1191,7 @@ class MCPGateway:
             byte_size=ref.size_bytes,
             result_content_sha256=f"sha256:{ref.sha256}",
             result_store_kind="durable_content_addressed",
+            external_text=external_text,
         )
 
     async def continue_call(

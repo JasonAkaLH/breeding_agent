@@ -935,6 +935,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(outcome.kind.value, "completed")
             self.assertEqual(adapter.call_count, 3)
             self.assertTrue(outcome.result_ref.startswith("mcp-result-"))
+            self.assertEqual(outcome.external_text, "识别成功")
         finally:
             await gateway.aclose()
 

@@ -33,6 +33,7 @@ from src.storage.sqlite.models import (
     MailboxDeliveryRow,
     MailboxMessageRow,
     MessageRow,
+    MCPNoServerIntentRow,
     TaskEdgeRow,
     TaskInputAttachmentRow,
     TaskNodeRow,
@@ -94,6 +95,27 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                     task_id="task-delete",
                     capability_id="main_agent.respond",
                     status=NodeStatus.RUNNING,
+                )
+            )
+            session.add(
+                MCPNoServerIntentRow(
+                    intent_id="intent-delete",
+                    owner_user_id="alice",
+                    task_id="task-delete",
+                    node_id=None,
+                    trigger="initial_no_profile",
+                    requested_server_id=None,
+                    requested_server_config_version=None,
+                    requested_server_security_version=None,
+                    owner_server_set_fingerprint="sha256:owner-set",
+                    resume_envelope_json=None,
+                    resume_envelope_sha256=None,
+                    status="resolved",
+                    revision=1,
+                    evidence_sha256="sha256:evidence",
+                    created_at=now,
+                    updated_at=now,
+                    terminal_at=now,
                 )
             )
             state_repo.save_task_edge("task-delete", TaskEdge(from_node_id="node-delete", to_node_id="node-next"))
@@ -202,6 +224,7 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
         self.assertGreaterEqual(deleted_counts["task"], 1)
         self.assertGreaterEqual(deleted_counts["event_record"], 1)
         self.assertGreaterEqual(deleted_counts["task_input_attachment"], 1)
+        self.assertGreaterEqual(deleted_counts["mcp_no_server_intent"], 1)
         self.assertGreaterEqual(deleted_counts["mailbox_delivery"], 1)
         self.assertGreaterEqual(deleted_counts["interrupt_answer"], 1)
         with self.session_factory() as session:
@@ -219,6 +242,7 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                 InterruptRow,
                 InterruptAnswerRow,
                 CheckpointRow,
+                MCPNoServerIntentRow,
             ):
                 self.assertEqual(session.scalar(select(func.count()).select_from(row_type)), 0, row_type.__name__)
             self.assertEqual(session.scalar(select(func.count()).select_from(AuthUserTokenRow)), 1)

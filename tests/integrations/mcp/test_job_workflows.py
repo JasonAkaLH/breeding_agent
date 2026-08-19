@@ -6,6 +6,7 @@ import unittest
 from src.integrations.mcp.client import MCPRemoteError
 from src.integrations.mcp.job_workflows import (
     MCPJobWorkflowError,
+    extract_ocr_text_projection,
     run_ocr_async_job_workflow,
 )
 
@@ -32,6 +33,17 @@ class _Adapter:
 
 
 class OCRAsyncJobWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    def test_extracts_bounded_markdown_projection(self) -> None:
+        self.assertEqual(
+            extract_ocr_text_projection(
+                _result({"status": "succeeded", "markdown": "  # OCR\n识别成功  "})
+            ),
+            "# OCR\n识别成功",
+        )
+        self.assertIsNone(
+            extract_ocr_text_projection(_result({"status": "succeeded"}))
+        )
+
     async def test_runs_start_poll_success_and_ack(self) -> None:
         final = _result(
             {

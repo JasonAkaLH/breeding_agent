@@ -2593,8 +2593,12 @@ class PostgreSQLStorage(SQLiteStorage):
             "event_record": 0,
             "artifact": 0,
             "task_input_attachment": 0,
+            "mcp_remote_task_outbox": 0,
             "mcp_remote_task_binding": 0,
             "mcp_sealed_state": 0,
+            "mcp_pending_tool_action": 0,
+            "mcp_dispatch_resume_outbox": 0,
+            "mcp_no_server_intent": 0,
             "mcp_call_record": 0,
             "mcp_branch_record": 0,
             "mcp_connection_lease": 0,
@@ -2701,6 +2705,42 @@ class PostgreSQLStorage(SQLiteStorage):
                 DELETE FROM task_input_attachment a
                 USING task t
                 WHERE a.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_pending_tool_action",
+                """
+                DELETE FROM mcp_pending_tool_action a
+                USING task t
+                WHERE a.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_dispatch_resume_outbox",
+                """
+                DELETE FROM mcp_dispatch_resume_outbox o
+                USING task t
+                WHERE o.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_no_server_intent",
+                """
+                DELETE FROM mcp_no_server_intent i
+                USING task t
+                WHERE i.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_remote_task_outbox",
+                """
+                DELETE FROM mcp_remote_task_outbox o
+                USING task t
+                WHERE o.task_id = t.task_id
                   AND t.conversation_id = :conversation_id
                 """,
             ),

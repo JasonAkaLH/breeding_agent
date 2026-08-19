@@ -74,6 +74,7 @@ class MCPCallOutcome:
     byte_size: int | None = None
     result_content_sha256: str | None = None
     result_store_kind: str | None = None
+    external_text: str | None = None
 
     @classmethod
     def completed(
@@ -84,6 +85,7 @@ class MCPCallOutcome:
         byte_size: int | None = None,
         result_content_sha256: str | None = None,
         result_store_kind: str | None = None,
+        external_text: str | None = None,
     ) -> "MCPCallOutcome":
         return cls(
             kind=MCPCallOutcomeKind.COMPLETED,
@@ -92,6 +94,7 @@ class MCPCallOutcome:
             byte_size=byte_size,
             result_content_sha256=result_content_sha256,
             result_store_kind=result_store_kind,
+            external_text=external_text,
         )
 
     @classmethod

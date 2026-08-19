@@ -799,7 +799,12 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        gateway = _FakeGateway(MCPCallOutcome.completed("result-safe"))
+        gateway = _FakeGateway(
+            MCPCallOutcome.completed(
+                "result-safe",
+                external_text="# OCR\n助力双方交往 搭建友谊桥梁",
+            )
+        )
         gateway.catalog = ToolCatalogSnapshot(
             server_id="server-a",
             effective_protocol_version="2025-11-25",
@@ -868,6 +873,7 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["workflow_kind"].value, "ocr_async_job_v1")
         self.assertEqual(len(selector.contexts), 1)
         self.assertEqual(outcome.output_payload["mcp_status"], "completed")
+        self.assertIn("助力双方交往", outcome.output_payload["content"])
 
     async def test_resumes_accepted_always_allow_and_persists_exact_grant_and_call_barriers(self) -> None:
         storage = _FakeStorage()

@@ -2567,6 +2567,9 @@ class SQLiteStateRepository:
             "mcp_remote_task_outbox": 0,
             "mcp_remote_task_binding": 0,
             "mcp_sealed_state": 0,
+            "mcp_pending_tool_action": 0,
+            "mcp_dispatch_resume_outbox": 0,
+            "mcp_no_server_intent": 0,
             "mcp_call_record": 0,
             "mcp_branch_record": 0,
             "mcp_connection_lease": 0,
@@ -2600,6 +2603,24 @@ class SQLiteStateRepository:
             _delete(
                 "task_input_attachment",
                 delete(TaskInputAttachmentRow).where(TaskInputAttachmentRow.task_id.in_(task_ids)),
+            )
+            _delete(
+                "mcp_pending_tool_action",
+                delete(MCPPendingToolActionRow).where(
+                    MCPPendingToolActionRow.task_id.in_(task_ids)
+                ),
+            )
+            _delete(
+                "mcp_dispatch_resume_outbox",
+                delete(MCPDispatchResumeOutboxRow).where(
+                    MCPDispatchResumeOutboxRow.task_id.in_(task_ids)
+                ),
+            )
+            _delete(
+                "mcp_no_server_intent",
+                delete(MCPNoServerIntentRow).where(
+                    MCPNoServerIntentRow.task_id.in_(task_ids)
+                ),
             )
             _delete(
                 "mcp_remote_task_outbox",

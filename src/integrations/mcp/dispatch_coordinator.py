@@ -1220,13 +1220,22 @@ class UserMCPDispatchCoordinator:
                         )
                     )
                     if workflow_kind is not None:
+                        external_text = str(outcome.external_text or "").strip()
                         result = await self._finish_branch(
                             request,
                             branch,
                             status="completed",
-                            safe_summary="The OCR MCP workflow completed successfully.",
+                            safe_summary=(
+                                external_text
+                                or "The OCR MCP workflow completed successfully."
+                            ),
                             result_ref=outcome.result_ref,
                             events=events,
+                            extra_output={
+                                "content": external_text or None,
+                                "mcp_tool": tool_name,
+                                "output_size_bytes": outcome.byte_size,
+                            },
                         )
                         return await self._finalize_no_call_outcome(
                             authority,
