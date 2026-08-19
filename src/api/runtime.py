@@ -9205,10 +9205,28 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 ]
                 no_call = outbox is not None and str(outbox.status) == "aborted"
                 if no_call:
+                    expected_node_status = {
+                        "stopped_no_call": NodeStatus.COMPLETED,
+                        "failed_no_call": NodeStatus.FAILED,
+                        "cancelled_no_call": NodeStatus.CANCELLED,
+                    }.get(outbox.completion_mode)
                     no_call_events = [
                         event for event in events.values()
-                        if event.event_type == "mcp.dispatch_no_call"
-                        and event.payload.get("intent_id") == intent.intent_id
+                        if (
+                            event.event_type == "mcp.dispatch_no_call"
+                            and event.event_id.startswith(
+                                f"mcp-dispatch-no-call:v1:{intent.intent_id}:"
+                            )
+                            and event.payload.get("intent_id") == intent.intent_id
+                        )
+                        or (
+                            event.event_type == "mcp.dispatch_finalized"
+                            and event.event_id.startswith(
+                                f"mcp-dispatch-finalized:v1:{intent.intent_id}:"
+                            )
+                            and event.payload.get("completion_mode")
+                            == outbox.completion_mode
+                        )
                     ]
                     if (
                         outbox.completion_mode
@@ -9221,7 +9239,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         or len(no_call_events) != 1
                         or any(call.may_have_dispatched for call in calls)
                         or node is None
-                        or node.status not in {NodeStatus.COMPLETED, NodeStatus.FAILED}
+                        or node.status != expected_node_status
                     ):
                         raise RuntimeError("mcp_resolved_no_call_authority_incomplete")
                 elif (

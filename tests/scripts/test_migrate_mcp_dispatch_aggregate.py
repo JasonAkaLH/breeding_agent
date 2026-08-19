@@ -40,6 +40,49 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def _create_populated_supported_legacy_database(self, path: Path) -> None:
+        connection = sqlite3.connect(path)
+        try:
+            connection.executescript(
+                "CREATE TABLE mcp_call_record ("
+                "call_ref TEXT PRIMARY KEY, branch_id TEXT NOT NULL, "
+                "owner_user_id TEXT NOT NULL, task_id TEXT NOT NULL, "
+                "node_id TEXT NOT NULL, server_id TEXT NOT NULL, "
+                "tool_name TEXT NOT NULL, status TEXT NOT NULL, "
+                "call_sequence INTEGER NOT NULL, arguments_sha256 TEXT NOT NULL, "
+                "server_security_version INTEGER NOT NULL, "
+                "server_config_version INTEGER, input_schema_sha256 TEXT NOT NULL, "
+                "protocol_version TEXT, input_field_names TEXT, "
+                "may_have_dispatched INTEGER NOT NULL, result_ref TEXT, "
+                "output_size_bytes INTEGER, safe_error_code TEXT, "
+                "created_at TEXT, updated_at TEXT, terminal_at TEXT);"
+                "CREATE TABLE mcp_dispatch_resume_outbox ("
+                "outbox_id TEXT PRIMARY KEY, intent_id TEXT NOT NULL, "
+                "owner_user_id TEXT NOT NULL, task_id TEXT NOT NULL, "
+                "node_id TEXT NOT NULL, server_id TEXT NOT NULL, "
+                "resume_envelope_sha256 TEXT NOT NULL, payload_sha256 TEXT NOT NULL, "
+                "status TEXT NOT NULL, claim_owner TEXT, claim_token TEXT, "
+                "lease_expires_at TEXT, revision INTEGER NOT NULL, "
+                "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                "completed_at TEXT, result_receipt_id TEXT, completion_mode TEXT);"
+                "INSERT INTO mcp_call_record VALUES ("
+                "'private-call','private-branch','private-owner','private-task',"
+                "'private-node','private-server','private-tool','active',1,"
+                "'sha256:arguments',1,1,'sha256:schema','2025-06-18','[]',1,"
+                "NULL,NULL,NULL,'2026-08-18T00:00:00+00:00',"
+                "'2026-08-18T00:00:00+00:00',NULL);"
+                "INSERT INTO mcp_dispatch_resume_outbox VALUES ("
+                "'private-outbox','private-intent','private-owner','private-task',"
+                "'private-node','private-server','sha256:envelope','sha256:payload',"
+                "'claimed','private-claim-owner','private-claim-token',"
+                "'2026-08-18T00:01:00+00:00',2,"
+                "'2026-08-18T00:00:00+00:00','2026-08-18T00:00:00+00:00',"
+                "NULL,NULL,NULL);"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def test_fresh_sqlite_report_is_closed_redacted_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "runtime.sqlite3"
@@ -232,6 +275,57 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
             ).as_payload()
             self.assertEqual(retried["result"], "already_applied")
 
+    def test_apply_supported_business_rows_preserves_identity_and_adds_defaults(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            self._create_populated_supported_legacy_database(path)
+            before = inspect_sqlite_dispatch_aggregate(path).as_payload()
+
+            self.assertTrue(before["migration_required"])
+            self.assertTrue(before["apply_eligible"])
+            self.assertEqual(before["blocker_reason_codes"], [])
+
+            applied = apply_sqlite_dispatch_aggregate(
+                path,
+                expected_report_sha256=str(before["report_sha256"]),
+            ).as_payload()
+
+            self.assertEqual(applied["result"], "applied")
+            after = inspect_sqlite_dispatch_aggregate(path).as_payload()
+            self.assertFalse(after["migration_required"])
+            self.assertEqual(after["row_counts"]["mcp_call_record"], 1)
+            self.assertEqual(
+                after["row_counts"]["mcp_dispatch_resume_outbox"], 1
+            )
+            connection = sqlite3.connect(path)
+            try:
+                call = connection.execute(
+                    "SELECT call_ref, status, may_have_dispatched, "
+                    "pending_action_id, continuation_of_call_ref "
+                    "FROM mcp_call_record"
+                ).fetchone()
+                outbox = connection.execute(
+                    "SELECT outbox_id, status, resume_reason, resume_receipt_id, "
+                    "resume_answer_id, selector_step_total, approval_round_total "
+                    "FROM mcp_dispatch_resume_outbox"
+                ).fetchone()
+                integrity = connection.execute(
+                    "PRAGMA integrity_check"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(
+                call,
+                ("private-call", "active", 1, None, None),
+            )
+            self.assertEqual(
+                outbox,
+                ("private-outbox", "claimed", "initial", None, None, 0, 0),
+            )
+            self.assertEqual(integrity, "ok")
+
     def test_apply_rejects_report_drift_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "legacy.sqlite3"
@@ -305,7 +399,65 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
             )
             self.assertEqual(retried.result, "applied")
 
-    def test_apply_business_rows_is_authority_conflict(self) -> None:
+    def test_business_row_swap_rolls_back_without_identity_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            self._create_populated_supported_legacy_database(path)
+            report_sha = str(
+                inspect_sqlite_dispatch_aggregate(path).as_payload()[
+                    "report_sha256"
+                ]
+            )
+            from src.storage import mcp_dispatch_aggregate_migration as migration
+
+            original_replace = migration._replace_sqlite_table_preserving_rows
+
+            def fail_after_first_swap(connection, table_name):
+                original_replace(connection, table_name)
+                raise RuntimeError("injected_business_swap_failure")
+
+            with patch.object(
+                migration,
+                "_replace_sqlite_table_preserving_rows",
+                side_effect=fail_after_first_swap,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected_business_swap_failure",
+                ):
+                    apply_sqlite_dispatch_aggregate(
+                        path,
+                        expected_report_sha256=report_sha,
+                    )
+
+            rolled_back = inspect_sqlite_dispatch_aggregate(path).as_payload()
+            self.assertTrue(rolled_back["migration_required"])
+            self.assertTrue(rolled_back["apply_eligible"])
+            connection = sqlite3.connect(path)
+            try:
+                call_ids = connection.execute(
+                    "SELECT call_ref FROM mcp_call_record"
+                ).fetchall()
+                outbox_ids = connection.execute(
+                    "SELECT outbox_id FROM mcp_dispatch_resume_outbox"
+                ).fetchall()
+                temporary_tables = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name LIKE '__maf_v6_%'"
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(call_ids, [("private-call",)])
+            self.assertEqual(outbox_ids, [("private-outbox",)])
+            self.assertEqual(temporary_tables, [])
+
+            retried = apply_sqlite_dispatch_aggregate(
+                path,
+                expected_report_sha256=report_sha,
+            )
+            self.assertEqual(retried.result, "applied")
+
+    def test_apply_unsupported_business_row_shape_is_authority_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "legacy.sqlite3"
             self._create_empty_legacy_database(path)
@@ -370,8 +522,19 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
         tables = {
             name: dict(columns) for name, columns in inspection.tables.items()
         }
-        tables["mcp_dispatch_resume_outbox"].pop("resume_reason")
-        tables["mcp_call_record"].pop("pending_action_id")
+        for column_name in (
+            "resume_reason",
+            "resume_receipt_id",
+            "resume_answer_id",
+            "selector_step_total",
+            "approval_round_total",
+        ):
+            tables["mcp_dispatch_resume_outbox"].pop(column_name)
+        for column_name in (
+            "pending_action_id",
+            "continuation_of_call_ref",
+        ):
+            tables["mcp_call_record"].pop(column_name)
         checks = {
             table: dict(constraints)
             for table, constraints in inspection.check_constraints.items()
@@ -399,6 +562,18 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
         self.assertIn("pg_advisory_xact_lock", sql)
         self.assertIn("ADD COLUMN resume_reason", sql)
         self.assertIn("ADD COLUMN pending_action_id", sql)
+        self.assertIn(
+            "ADD COLUMN resume_reason text NOT NULL DEFAULT 'initial'",
+            sql,
+        )
+        self.assertIn(
+            "ADD COLUMN selector_step_total bigint NOT NULL DEFAULT 0",
+            sql,
+        )
+        self.assertIn(
+            "ADD COLUMN approval_round_total bigint NOT NULL DEFAULT 0",
+            sql,
+        )
         self.assertIn("NOT VALID", sql)
         self.assertLess(
             sql.index("VALIDATE CONSTRAINT"),

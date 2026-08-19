@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, MetaData, inspect, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateIndex, CreateTable
 
@@ -49,6 +49,19 @@ _CALL_STATUSES = (
     "remote_pending",
     "unknown",
 )
+_AGGREGATE_ADDITIVE_COLUMN_DEFAULTS: dict[str, dict[str, str]] = {
+    "mcp_call_record": {
+        "pending_action_id": "NULL",
+        "continuation_of_call_ref": "NULL",
+    },
+    "mcp_dispatch_resume_outbox": {
+        "resume_reason": "'initial'",
+        "resume_receipt_id": "NULL",
+        "resume_answer_id": "NULL",
+        "selector_step_total": "0",
+        "approval_round_total": "0",
+    },
+}
 _MIGRATION_TRANSITIONS = {
     "planned": frozenset({"backed_up", "applying", "failed"}),
     "backed_up": frozenset({"applying", "failed"}),
@@ -288,8 +301,16 @@ def _inspect_sqlite_dispatch_aggregate_connection(
         status_counts[table_name] = counts
         if counts["other"]:
             blockers.append(f"{table_name}_unknown_status_rows")
-        if state == "legacy" and count:
-            blockers.append(f"{table_name}_business_rows_require_writer")
+        if (
+            state == "legacy"
+            and count
+            and not _aggregate_business_rows_supported(
+                table_name,
+                actual_columns=columns,
+                expected_columns=expected_columns,
+            )
+        ):
+            blockers.append(f"{table_name}_business_rows_shape_unsupported")
     return MCPDispatchAggregateMigrationReport(
         backend="sqlite",
         table_states=table_states,
@@ -350,8 +371,16 @@ def _inspect_postgres_dispatch_aggregate_connection(
         status_counts[table_name] = counts
         if counts["other"]:
             blockers.append(f"{table_name}_unknown_status_rows")
-        if state == "legacy" and count:
-            blockers.append(f"{table_name}_business_rows_require_writer")
+        if (
+            state == "legacy"
+            and count
+            and not _aggregate_business_rows_supported(
+                table_name,
+                actual_columns=columns,
+                expected_columns=expected_columns,
+            )
+        ):
+            blockers.append(f"{table_name}_business_rows_shape_unsupported")
     return MCPDispatchAggregateMigrationReport(
         backend="postgresql",
         table_states=table_states,
@@ -490,11 +519,10 @@ def apply_sqlite_dispatch_aggregate(
         for table_name in ("mcp_call_record", "mcp_dispatch_resume_outbox"):
             if current.table_states.get(table_name) != "legacy":
                 continue
-            if current.row_counts.get(table_name) != 0:
-                raise MCPDispatchAggregateAuthorityConflictError(
-                    "mcp_dispatch_aggregate_business_rows_require_writer"
-                )
-            _replace_empty_sqlite_table(connection, table_name)
+            if current.row_counts.get(table_name) == 0:
+                _replace_empty_sqlite_table(connection, table_name)
+            else:
+                _replace_sqlite_table_preserving_rows(connection, table_name)
         final = _inspect_sqlite_dispatch_aggregate_connection(connection)
         if final.migration_required or final.blocker_reason_codes:
             raise MCPDispatchAggregateAuthorityConflictError(
@@ -785,6 +813,130 @@ def _replace_empty_sqlite_table(
     connection.execute(str(CreateTable(table).compile(dialect=sqlite.dialect())))
     for index in sorted(table.indexes, key=lambda item: str(item.name)):
         connection.execute(str(CreateIndex(index).compile(dialect=sqlite.dialect())))
+
+
+def _replace_sqlite_table_preserving_rows(
+    connection: sqlite3.Connection,
+    table_name: str,
+) -> None:
+    table = SQLiteBase.metadata.tables[table_name]
+    actual_columns = {
+        str(row[1])
+        for row in connection.execute(f'PRAGMA table_info("{table_name}")')
+    }
+    expected_columns = set(table.columns.keys())
+    if not _aggregate_business_rows_supported(
+        table_name,
+        actual_columns=actual_columns,
+        expected_columns=expected_columns,
+    ):
+        raise MCPDispatchAggregateAuthorityConflictError(
+            f"{table_name}_business_rows_shape_unsupported"
+        )
+
+    temporary_name = f"__maf_v6_{table_name}"
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (temporary_name,),
+    ).fetchone() is not None:
+        raise MCPDispatchAggregateAuthorityConflictError(
+            "mcp_dispatch_aggregate_temporary_table_conflict"
+        )
+
+    temporary_metadata = MetaData()
+    temporary_table = table.to_metadata(
+        temporary_metadata,
+        name=temporary_name,
+    )
+    connection.execute(
+        str(CreateTable(temporary_table).compile(dialect=sqlite.dialect()))
+    )
+
+    defaults = _AGGREGATE_ADDITIVE_COLUMN_DEFAULTS[table_name]
+    ordered_columns = [column.name for column in table.columns]
+    insert_columns = ", ".join(
+        _quote_sqlite_identifier(column_name)
+        for column_name in ordered_columns
+    )
+    select_values = ", ".join(
+        _quote_sqlite_identifier(column_name)
+        if column_name in actual_columns
+        else defaults[column_name]
+        for column_name in ordered_columns
+    )
+    connection.execute(
+        f"INSERT INTO {_quote_sqlite_identifier(temporary_name)} "
+        f"({insert_columns}) SELECT {select_values} "
+        f"FROM {_quote_sqlite_identifier(table_name)}"
+    )
+
+    primary_keys = [column.name for column in table.primary_key.columns]
+    if len(primary_keys) != 1:
+        raise MCPDispatchAggregateMigrationError(
+            "mcp_dispatch_aggregate_primary_key_contract_invalid"
+        )
+    primary_key = _quote_sqlite_identifier(primary_keys[0])
+    key_drift = any(
+        connection.execute(
+            f"SELECT {primary_key} FROM {_quote_sqlite_identifier(left)} "
+            "EXCEPT "
+            f"SELECT {primary_key} FROM {_quote_sqlite_identifier(right)} "
+            "LIMIT 1"
+        ).fetchone()
+        is not None
+        for left, right in (
+            (table_name, temporary_name),
+            (temporary_name, table_name),
+        )
+    )
+    if key_drift:
+        raise MCPDispatchAggregateAuthorityConflictError(
+            "mcp_dispatch_aggregate_primary_key_drift"
+        )
+
+    source_count = int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {_quote_sqlite_identifier(table_name)}"
+        ).fetchone()[0]
+    )
+    copied_count = int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {_quote_sqlite_identifier(temporary_name)}"
+        ).fetchone()[0]
+    )
+    if source_count != copied_count:
+        raise MCPDispatchAggregateAuthorityConflictError(
+            "mcp_dispatch_aggregate_row_count_drift"
+        )
+
+    connection.execute(f"DROP TABLE {_quote_sqlite_identifier(table_name)}")
+    connection.execute(
+        f"ALTER TABLE {_quote_sqlite_identifier(temporary_name)} "
+        f"RENAME TO {_quote_sqlite_identifier(table_name)}"
+    )
+    for index in sorted(table.indexes, key=lambda item: str(item.name)):
+        connection.execute(
+            str(CreateIndex(index).compile(dialect=sqlite.dialect()))
+        )
+
+
+def _aggregate_business_rows_supported(
+    table_name: str,
+    *,
+    actual_columns: set[str],
+    expected_columns: set[str],
+) -> bool:
+    defaults = _AGGREGATE_ADDITIVE_COLUMN_DEFAULTS.get(table_name)
+    if defaults is None:
+        return False
+    return (
+        not (actual_columns - expected_columns)
+        and (expected_columns - actual_columns) <= set(defaults)
+    )
+
+
+def _quote_sqlite_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
 
 
 def _postgres_schema_inspection(connection) -> SchemaInspection:

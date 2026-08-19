@@ -298,6 +298,39 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         ):
             await runtime._validate_mcp_aggregate_invariants()
 
+    async def test_cancelled_no_call_accepts_cancelled_node_authority(self) -> None:
+        storage = AsyncMock()
+        intent = SimpleNamespace(
+            intent_id="intent-1",
+            owner_user_id="alice",
+            task_id="task-1",
+            node_id="node-1",
+            status="resolved",
+            terminal_at=datetime(2026, 8, 19, 11, 0, 0),
+        )
+        storage.get_task.return_value = SimpleNamespace(
+            status=TaskStatus.CANCELLED
+        )
+        storage.get_task_node.return_value = SimpleNamespace(
+            status=NodeStatus.CANCELLED
+        )
+        storage.list_events_for_task.return_value = [
+            SimpleNamespace(
+                event_id="mcp-dispatch-finalized:v1:intent-1:4",
+                event_type="mcp.dispatch_finalized",
+                payload={"completion_mode": "cancelled_no_call"},
+            )
+        ]
+        storage.get_mcp_dispatch_resume_outbox.return_value = SimpleNamespace(
+            status="aborted",
+            completion_mode="cancelled_no_call",
+            result_receipt_id=None,
+        )
+        storage.list_mcp_call_records.return_value = []
+        runtime = self._runtime(storage)
+
+        await runtime._validate_terminal_cp7_mcp_authority([intent])
+
 
 if __name__ == "__main__":
     unittest.main()
