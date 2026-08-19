@@ -7895,6 +7895,104 @@ class SQLiteStateRepository:
         self._session.flush()
         return result
 
+    def recover_mcp_terminal_candidate(
+        self,
+        candidate_snapshot: MCPTerminalCandidateSnapshot,
+        result_snapshot: MCPDurableResultSnapshot | None,
+        occurred_at: datetime,
+    ) -> MCPTerminalResultCommitResult:
+        candidate = candidate_snapshot.candidate
+        outbox_id = mcp_dispatch_resume_outbox_id(candidate.intent_id)
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        call = self._session.scalar(
+            select(MCPCallRecordRow)
+            .where(MCPCallRecordRow.call_ref == candidate.call_id)
+            .with_for_update()
+        )
+        if outbox is None or call is None:
+            return MCPTerminalResultCommitResult.CONFLICT
+        existing = self._session.scalar(
+            select(MCPTerminalResultReceiptRow)
+            .where(MCPTerminalResultReceiptRow.call_id == candidate.call_id)
+            .with_for_update()
+        )
+        if existing is not None:
+            return self.commit_mcp_call_terminal(
+                candidate.call_id,
+                candidate.candidate_id,
+                outbox_id,
+                int(outbox.revision),
+                None,
+                None,
+                candidate_snapshot,
+                result_snapshot,
+                occurred_at,
+            )
+        binding = self._session.scalar(
+            select(MCPRemoteTaskBindingRow)
+            .where(MCPRemoteTaskBindingRow.call_ref == candidate.call_id)
+            .with_for_update()
+        )
+        startup_owner = "mcp-aggregate-startup"
+        startup_token = f"candidate:{candidate.candidate_id}"
+        if outbox.status == "remote_pending" and binding is not None:
+            if (
+                binding.terminal_at is not None
+                or (
+                    binding.claim_token is not None
+                    and binding.lease_expires_at is not None
+                    and binding.lease_expires_at > occurred_at
+                )
+            ):
+                return MCPTerminalResultCommitResult.CONFLICT
+            binding.claim_owner = startup_owner
+            binding.claim_token = startup_token
+            binding.lease_expires_at = occurred_at + timedelta(seconds=30)
+            binding.revision = int(binding.revision or 0) + 1
+            binding.updated_at = occurred_at
+            self._session.flush()
+            return self.commit_mcp_call_terminal(
+                candidate.call_id,
+                candidate.candidate_id,
+                outbox_id,
+                int(outbox.revision),
+                None,
+                None,
+                candidate_snapshot,
+                result_snapshot,
+                occurred_at,
+                remote_binding_ref=binding.safe_remote_task_ref,
+                remote_claim_owner=startup_owner,
+                remote_claim_token=startup_token,
+                remote_expected_revision=int(binding.revision),
+            )
+        if outbox.status != "active" or (
+            outbox.lease_expires_at is not None
+            and outbox.lease_expires_at > occurred_at
+        ):
+            return MCPTerminalResultCommitResult.CONFLICT
+        outbox.claim_owner = startup_owner
+        outbox.claim_token = startup_token
+        outbox.lease_expires_at = occurred_at + timedelta(seconds=30)
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        self._session.flush()
+        return self.commit_mcp_call_terminal(
+            candidate.call_id,
+            candidate.candidate_id,
+            outbox_id,
+            int(outbox.revision),
+            startup_owner,
+            startup_token,
+            candidate_snapshot,
+            result_snapshot,
+            occurred_at,
+        )
+
     def _insert_or_compare_terminal_lifecycle(
         self,
         candidate_snapshot: MCPTerminalCandidateSnapshot,
@@ -12783,6 +12881,18 @@ class SQLiteStorage(StoragePort):
                 remote_claim_owner=remote_claim_owner,
                 remote_claim_token=remote_claim_token,
                 remote_expected_revision=remote_expected_revision,
+            )
+        )
+
+    async def recover_mcp_terminal_candidate(
+        self,
+        candidate_snapshot: MCPTerminalCandidateSnapshot,
+        result_snapshot: MCPDurableResultSnapshot | None,
+        occurred_at: datetime,
+    ) -> MCPTerminalResultCommitResult:
+        return await self._run(
+            lambda state, collab: state.recover_mcp_terminal_candidate(
+                candidate_snapshot, result_snapshot, occurred_at
             )
         )
 

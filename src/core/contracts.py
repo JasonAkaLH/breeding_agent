@@ -529,6 +529,13 @@ class StoragePort(Protocol):
         remote_expected_revision: int | None = None,
     ) -> MCPTerminalResultCommitResult: ...
 
+    async def recover_mcp_terminal_candidate(
+        self,
+        candidate_snapshot: MCPTerminalCandidateSnapshot,
+        result_snapshot: MCPDurableResultSnapshot | None,
+        occurred_at: datetime,
+    ) -> MCPTerminalResultCommitResult: ...
+
     async def finalize_mcp_dispatch(
         self,
         intent_id: str,

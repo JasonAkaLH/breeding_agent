@@ -1152,6 +1152,36 @@ class PostgreSQLStorage(SQLiteStorage):
             ),
         )
 
+    async def recover_mcp_terminal_candidate(
+        self,
+        candidate_snapshot: MCPTerminalCandidateSnapshot,
+        result_snapshot: MCPDurableResultSnapshot | None,
+        occurred_at: datetime,
+    ) -> MCPTerminalResultCommitResult:
+        candidate = candidate_snapshot.candidate
+        with self._session_factory() as session:
+            call = session.get(MCPCallRecordRow, candidate.call_id)
+            branch_id = None if call is None else call.branch_id
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=candidate.owner_user_id,
+            server_id=candidate.server_id,
+            intent_id=candidate.intent_id,
+            outbox_id=mcp_dispatch_resume_outbox_id(candidate.intent_id),
+            branch_id=branch_id,
+            call_id=candidate.call_id,
+            candidate_id=candidate.candidate_id,
+            terminal_candidate=candidate,
+            result_ref=(
+                None if result_snapshot is None else result_snapshot.result_ref
+            ),
+            task_id=candidate.task_id,
+            node_id=candidate.node_id,
+            operation=lambda state: state.recover_mcp_terminal_candidate(
+                candidate_snapshot, result_snapshot, occurred_at
+            ),
+        )
+
     async def finalize_mcp_dispatch(
         self,
         intent_id: str,

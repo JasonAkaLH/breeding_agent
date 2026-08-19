@@ -140,6 +140,11 @@ from src.integrations.mcp.credentials import (
     MasterKeySentinelCipher,
 )
 from src.integrations.mcp.audit import MCPAuditService
+from src.integrations.mcp.aggregate_recovery import (
+    MCPAggregateRecoveryStages,
+    MCPAggregateStartupReconciler,
+    no_op_recovery_stage,
+)
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
 from src.integrations.mcp.dispatch_coordinator import (
@@ -8475,7 +8480,23 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             self._engine.dispose()
             raise
         await self._admit_mcp_rollout_instance()
-        await self._reconcile_cp7_mcp_authority()
+        aggregate_reconciler = MCPAggregateStartupReconciler(
+            MCPAggregateRecoveryStages(
+                repair_lifecycle_markers=no_op_recovery_stage,
+                enumerate_terminal_candidates=(
+                    self._strict_enumerate_mcp_terminal_candidates
+                ),
+                reconcile_terminal_candidates=self._reconcile_cp7_mcp_authority,
+                reconcile_remote_bindings=self._reconcile_mcp_remote_bindings,
+                reconcile_mrtr_evidence=no_op_recovery_stage,
+                reconcile_pending_actions=no_op_recovery_stage,
+                reconcile_resume_envelopes=no_op_recovery_stage,
+                recover_expired_claims=no_op_recovery_stage,
+                converge_unknown_no_replay=self._recover_user_mcp_calls,
+                validate_invariants=no_op_recovery_stage,
+            )
+        )
+        await aggregate_reconciler.run()
         if self._mcp_cp7_safety_facade is not None:
             if self._mcp_cp7_open_boundary is None:
                 raise RuntimeError("mcp_cp7_open_boundary_missing")
@@ -8509,7 +8530,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 name="mcp-auth-invalidation-listener",
             )
         if self.mcp_remote_task_recovery_worker is not None:
-            await self._recover_user_mcp_calls()
             await self.mcp_remote_task_recovery_worker.start()
             self._mcp_continuation_consumer_task = asyncio.create_task(
                 self._run_mcp_continuation_commands_forever(),
@@ -8542,6 +8562,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 name="mcp-rollout-zero-series",
             )
 
+    async def _strict_enumerate_mcp_terminal_candidates(self) -> None:
+        root = self._mcp_terminal_result_root
+        if root is None:
+            return
+        await asyncio.to_thread(
+            enumerate_unconsumed_terminal_result_candidates,
+            root,
+        )
+
     async def _reconcile_cp7_mcp_authority(self) -> None:
         root = self._mcp_terminal_result_root
         sealed_by_intent: dict[str, list[MCPValidatedTerminalResultCandidate]] = {}
@@ -8553,18 +8582,67 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 sealed_by_intent.setdefault(item.candidate.intent_id, []).append(
                     item.candidate
                 )
-                result = await self.storage.commit_authoritative_mcp_terminal_result(
-                    item.candidate.call_id,
-                    item.candidate.candidate_id,
-                    self._utcnow_naive(),
+                candidate = item.candidate
+                aggregate_snapshot_ready = bool(
+                    self._mcp_terminal_candidate_snapshot_authority is not None
+                    and (
+                        candidate.terminal_state is not MCPTerminalState.COMPLETED
+                        or (
+                            self._mcp_durable_result_snapshot_authority is not None
+                            and candidate.safe_result_ref is not None
+                            and candidate.safe_result_size_bytes is not None
+                            and candidate.safe_result_content_sha256 is not None
+                            and candidate.safe_result_store_kind is not None
+                        )
+                    )
                 )
+                if aggregate_snapshot_ready:
+                    candidate_snapshot = (
+                        self._mcp_terminal_candidate_snapshot_authority.snapshot(
+                            item
+                        )
+                    )
+                    if candidate.terminal_state is MCPTerminalState.COMPLETED:
+                        async with self._mcp_durable_result_snapshot_authority.open_snapshot(
+                            result_ref=str(candidate.safe_result_ref),
+                            owner_user_id=candidate.owner_user_id,
+                            task_id=candidate.task_id,
+                            node_id=candidate.node_id,
+                            call_id=candidate.call_id,
+                            expected_size_bytes=int(
+                                candidate.safe_result_size_bytes
+                            ),
+                            expected_content_sha256=str(
+                                candidate.safe_result_content_sha256
+                            ),
+                            expected_store_kind=str(
+                                candidate.safe_result_store_kind
+                            ),
+                        ) as result_snapshot:
+                            result = await self.storage.recover_mcp_terminal_candidate(
+                                candidate_snapshot,
+                                result_snapshot,
+                                self._utcnow_naive(),
+                            )
+                    else:
+                        result = await self.storage.recover_mcp_terminal_candidate(
+                            candidate_snapshot,
+                            None,
+                            self._utcnow_naive(),
+                        )
+                else:
+                    result = await self.storage.commit_authoritative_mcp_terminal_result(
+                        candidate.call_id,
+                        candidate.candidate_id,
+                        self._utcnow_naive(),
+                    )
                 if str(result) == "conflict":
                     raise RuntimeError("mcp_terminal_candidate_reconciliation_conflict")
                 await self.storage.finish_mcp_remote_task_binding_from_receipt(
-                    item.candidate.call_id,
+                    candidate.call_id,
                     mcp_terminal_receipt_id(
-                        item.candidate.call_id,
-                        item.candidate.result_payload_sha256,
+                        candidate.call_id,
+                        candidate.result_payload_sha256,
                     ),
                     self._utcnow_naive(),
                 )
@@ -9241,10 +9319,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             self._track_conversation_delete_task(conversation.conversation_id, task)
 
     async def _recover_user_mcp_calls(self) -> None:
-        await self.storage.reconcile_unpublished_mcp_remote_task_bindings(
-            now=self._utcnow_naive(),
-            limit=1000,
-        )
         while True:
             converged = await self.storage.converge_dispatched_mcp_calls_to_unknown(
                 now=self._utcnow_naive(),
@@ -9280,6 +9354,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 )
             if len(converged) < 1000:
                 return
+
+    async def _reconcile_mcp_remote_bindings(self) -> None:
+        await self.storage.reconcile_unpublished_mcp_remote_task_bindings(
+            now=self._utcnow_naive(),
+            limit=1000,
+        )
 
     async def _record_recovered_unknown_metrics(self, call, task) -> None:
         recorder = self._mcp_rollout_metric_recorder

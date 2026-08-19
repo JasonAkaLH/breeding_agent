@@ -382,6 +382,7 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         action = await self.storage.get_latest_approved_mcp_tool_action(
             "alice", self.task.task_id, self.node.node_id
         )
+        self.assertIsNone(action)
 
     async def test_suspend_and_allow_once_commit_action_interrupt_answer_and_cursor(self) -> None:
         action, interrupt = await self._suspend_for_approval()
@@ -1137,6 +1138,30 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
                 ).status
             ),
             "active",
+        )
+
+    async def test_startup_recovers_sealed_candidate_after_expired_dispatch_claim(
+        self,
+    ) -> None:
+        await self._admit()
+        candidate_snapshot, result_snapshot = self._terminal_snapshots()
+
+        recovered = await self.storage.recover_mcp_terminal_candidate(
+            candidate_snapshot,
+            result_snapshot,
+            NOW + timedelta(seconds=31),
+        )
+
+        self.assertEqual(str(recovered), "committed_normal")
+        call = await self.storage.get_mcp_call_record(
+            "alice", self.task.task_id, "call-1"
+        )
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        self.assertEqual(call.status, "completed")
+        self.assertEqual(str(outbox.status), "active")
+        self.assertEqual(outbox.claim_owner, "mcp-aggregate-startup")
+        self.assertIsNotNone(
+            await self.storage.get_mcp_terminal_result_receipt_for_call("call-1")
         )
 
     async def test_completed_terminal_commit_keeps_dispatch_active_until_finalizer(
