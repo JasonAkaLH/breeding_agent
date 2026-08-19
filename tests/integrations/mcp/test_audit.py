@@ -44,6 +44,41 @@ class _SafetyDetector:
 
 
 class MCPAuditServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_aggregate_transition_requires_exact_closed_payload(self) -> None:
+        storage = _Storage()
+        service = MCPAuditService(storage=storage, now_fn=lambda: NOW)
+        event = EventRecord(
+            event_id="aggregate-transition",
+            conversation_id="conv-a",
+            task_id="task-a",
+            node_id="node-a",
+            event_type="mcp.aggregate_transition",
+            payload={
+                "schema": "maf.user_mcp.aggregate_transition.v1",
+                "operation": "terminal_commit",
+                "result": "committed",
+                "reason_code": "ordinary_terminal",
+            },
+            visibility=EventVisibility.AUDIT_ONLY,
+            created_at=NOW,
+        )
+
+        await service.observe_event(event)
+
+        self.assertEqual(storage.events[0].safe_payload, event.payload)
+        with self.assertRaisesRegex(ValueError, "fields are not closed"):
+            await service.observe_event(
+                EventRecord(
+                    event_id="aggregate-transition-leak",
+                    conversation_id="conv-a",
+                    task_id="task-a",
+                    event_type="mcp.aggregate_transition",
+                    payload={**event.payload, "task_id": "private-task"},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    created_at=NOW,
+                )
+            )
+
     async def test_soft_binding_audit_fields_are_closed_and_preserved(self) -> None:
         storage = _Storage()
         service = MCPAuditService(storage=storage, now_fn=lambda: NOW)

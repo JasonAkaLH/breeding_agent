@@ -3544,7 +3544,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             return
         failed = replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive())
         await self.storage.save_task(failed)
-        payload: dict[str, Any] = {"code": "execution_crash", "message": str(exc)}
+        payload: dict[str, Any] = {
+            "code": "execution_crash",
+            "message": "Task execution failed safely.",
+        }
         if isinstance(exc, WorkflowPlanningError):
             payload = {
                 "code": "planning_failed",

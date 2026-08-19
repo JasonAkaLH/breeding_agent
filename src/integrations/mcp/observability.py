@@ -54,6 +54,69 @@ _TERMINAL_RESULTS = frozenset(
         MCPMetricResultCategory.UNKNOWN,
     }
 )
+MCP_AGGREGATE_TRANSITION_SCHEMA = "maf.user_mcp.aggregate_transition.v1"
+
+
+class MCPAggregateTransitionOperation(StrEnum):
+    APPROVAL_SUSPEND = "approval_suspend"
+    INPUT_SUSPEND = "input_suspend"
+    ADMISSION = "admission"
+    TERMINAL_COMMIT = "terminal_commit"
+    FINALIZE = "finalize"
+    RECOVERY = "recovery"
+    CANDIDATE_ARCHIVE = "candidate_archive"
+    CANDIDATE_DELETE = "candidate_delete"
+    RESULT_DELETE = "result_delete"
+
+
+class MCPAggregateTransitionResult(StrEnum):
+    COMMITTED = "committed"
+    ALREADY_COMMITTED = "already_committed"
+    CONFLICT = "conflict"
+    REJECTED = "rejected"
+
+
+class MCPAggregateTransitionReason(StrEnum):
+    APPROVAL = "approval"
+    MRTR = "mrtr"
+    ORDINARY_TERMINAL = "ordinary_terminal"
+    REMOTE_TERMINAL = "remote_terminal"
+    DISPATCH_FINALIZED = "dispatch_finalized"
+    UNKNOWN_NO_REPLAY = "unknown_no_replay"
+    STARTUP_RECONCILIATION = "startup_reconciliation"
+    RETENTION_ELIGIBLE = "retention_eligible"
+
+
+@dataclass(frozen=True, slots=True)
+class MCPAggregateTransition:
+    operation: MCPAggregateTransitionOperation
+    result: MCPAggregateTransitionResult
+    reason_code: MCPAggregateTransitionReason
+
+    def as_payload(self) -> dict[str, str]:
+        return {
+            "schema": MCP_AGGREGATE_TRANSITION_SCHEMA,
+            "operation": self.operation.value,
+            "result": self.result.value,
+            "reason_code": self.reason_code.value,
+        }
+
+
+def validate_mcp_aggregate_transition_payload(
+    payload: Mapping[str, Any],
+) -> MCPAggregateTransition:
+    if set(payload) != {"schema", "operation", "result", "reason_code"}:
+        raise ValueError("MCP aggregate transition fields are not closed")
+    if payload.get("schema") != MCP_AGGREGATE_TRANSITION_SCHEMA:
+        raise ValueError("MCP aggregate transition schema is invalid")
+    try:
+        return MCPAggregateTransition(
+            operation=MCPAggregateTransitionOperation(str(payload["operation"])),
+            result=MCPAggregateTransitionResult(str(payload["result"])),
+            reason_code=MCPAggregateTransitionReason(str(payload["reason_code"])),
+        )
+    except ValueError as exc:
+        raise ValueError("MCP aggregate transition value is invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,6 +757,11 @@ def _json_value(value: Any) -> Any:
 
 
 __all__ = [
+    "MCPAggregateTransition",
+    "MCPAggregateTransitionOperation",
+    "MCPAggregateTransitionReason",
+    "MCPAggregateTransitionResult",
+    "MCP_AGGREGATE_TRANSITION_SCHEMA",
     "MCPRolloutMetricContext",
     "MCPRolloutMetricRecorder",
     "is_mcp_terminal_call_sample",
@@ -703,4 +771,5 @@ __all__ = [
     "mcp_metric_bucket_to_record",
     "mcp_terminal_call_sample_count",
     "validate_mcp_evidence_snapshot_record",
+    "validate_mcp_aggregate_transition_payload",
 ]

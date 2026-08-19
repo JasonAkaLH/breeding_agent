@@ -451,8 +451,8 @@ class UploadsAPITest(APITestCase):
         events = await self.runtime.storage.list_events_for_task(task_id)
         failed = next(event for event in events if event.event_type == "task.failed")
         self.assertEqual(failed.payload["code"], "execution_crash")
-        self.assertIn(upload_id, failed.payload["message"])
-        self.assertIn("re-upload", failed.payload["message"])
+        self.assertEqual(failed.payload["message"], "Task execution failed safely.")
+        self.assertNotIn(upload_id, failed.payload["message"])
 
     async def test_delete_index_failure_keeps_deleted_fact_and_records_repair_marker(self) -> None:
         upload = await self.client.post(

@@ -77,6 +77,12 @@ from src.integrations.mcp.rollout_evidence import (
     MCPMetricTransport,
     MCPSafetyRedLine,
 )
+from src.integrations.mcp.observability import (
+    MCPAggregateTransition,
+    MCPAggregateTransitionOperation,
+    MCPAggregateTransitionReason,
+    MCPAggregateTransitionResult,
+)
 from src.integrations.mcp.resume_envelope import (
     MCP_DISPATCH_RESUME_ENVELOPE_REVIEW_BYTES,
     MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2,
@@ -947,6 +953,16 @@ class UserMCPDispatchCoordinator:
                             raise _CallReservationError(
                                 "mcp_approval_suspend_conflict"
                             )
+                        await self._record_aggregate_transition(
+                            request,
+                            operation=MCPAggregateTransitionOperation.APPROVAL_SUSPEND,
+                            result=(
+                                MCPAggregateTransitionResult.ALREADY_COMMITTED
+                                if str(suspended) == "already_suspended"
+                                else MCPAggregateTransitionResult.COMMITTED
+                            ),
+                            reason=MCPAggregateTransitionReason.APPROVAL,
+                        )
                         await self._record_permission_metric(
                             request,
                             server=current_server,
@@ -1398,6 +1414,16 @@ class UserMCPDispatchCoordinator:
             )
             if str(finalized) == "conflict":
                 raise RuntimeError("mcp_dispatch_finalize_conflict")
+            await self._record_aggregate_transition(
+                request,
+                operation=MCPAggregateTransitionOperation.FINALIZE,
+                result=MCPAggregateTransitionResult.COMMITTED,
+                reason=(
+                    MCPAggregateTransitionReason.UNKNOWN_NO_REPLAY
+                    if safe_error_code == "execution_status_unknown"
+                    else MCPAggregateTransitionReason.DISPATCH_FINALIZED
+                ),
+            )
         return result
 
     async def _renew_dispatch_claim(
@@ -2304,6 +2330,16 @@ class UserMCPDispatchCoordinator:
                             raise _CallReservationError(
                                 "mcp_terminal_result_commit_conflict"
                             ) from exc
+                        await self._record_aggregate_transition(
+                            request,
+                            operation=MCPAggregateTransitionOperation.TERMINAL_COMMIT,
+                            result=(
+                                MCPAggregateTransitionResult.ALREADY_COMMITTED
+                                if str(committed) == "already_committed"
+                                else MCPAggregateTransitionResult.COMMITTED
+                            ),
+                            reason=MCPAggregateTransitionReason.ORDINARY_TERMINAL,
+                        )
                     else:
                         await self._storage.converge_mcp_unknown_no_replay(
                             request.task_id, self._now()
@@ -2501,6 +2537,16 @@ class UserMCPDispatchCoordinator:
                 raise RuntimeError(
                     "mcp_terminal_result_commit_convergence_conflict"
                 )
+            await self._record_aggregate_transition(
+                request,
+                operation=MCPAggregateTransitionOperation.TERMINAL_COMMIT,
+                result=(
+                    MCPAggregateTransitionResult.ALREADY_COMMITTED
+                    if str(committed) == "already_committed"
+                    else MCPAggregateTransitionResult.COMMITTED
+                ),
+                reason=MCPAggregateTransitionReason.ORDINARY_TERMINAL,
+            )
             result_receipt_id = mcp_terminal_receipt_id(
                 call_ref, result_payload_sha256
             )
@@ -2755,6 +2801,25 @@ class UserMCPDispatchCoordinator:
     async def _record_live_event(self, event: EventRecord) -> None:
         if self._live_event_recorder is not None:
             await self._live_event_recorder(event)
+
+    async def _record_aggregate_transition(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        operation: MCPAggregateTransitionOperation,
+        result: MCPAggregateTransitionResult,
+        reason: MCPAggregateTransitionReason,
+    ) -> None:
+        transition = MCPAggregateTransition(operation, result, reason)
+        await self._record_live_event(
+            _event(
+                request,
+                "mcp.aggregate_transition",
+                transition.as_payload(),
+                -3,
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
 
     async def _route_another_server(
         self,

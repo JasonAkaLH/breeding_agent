@@ -10,10 +10,14 @@ from src.core.models import EventRecord, MCPAuditEvent, MCPShadowAuditSample
 
 from .shadow_evidence import validate_shadow_audit_sample
 from .safety_detectors import AuthoritativeMCPSafetyDetector
+from .observability import (
+    validate_mcp_aggregate_transition_payload,
+)
 
 
 MCP_AUDIT_RETENTION_DAYS = 30
 MCP_AUDIT_CLEANUP_BATCH_SIZE = 1000
+MCP_AGGREGATE_TRANSITION_EVENT_TYPE = "mcp.aggregate_transition"
 MCP_ROLLOUT_AUDIT_EVENT_TYPES = frozenset(
     {
         "mcp.rollout.route_assigned",
@@ -125,6 +129,8 @@ class MCPAuditService:
             return
         occurred_at = event.created_at or self._now()
         await self._reject_secret_payload(event.payload, occurred_at=occurred_at)
+        if event.event_type == MCP_AGGREGATE_TRANSITION_EVENT_TYPE:
+            validate_mcp_aggregate_transition_payload(event.payload)
         safe_payload = _safe_payload(event.payload, event_type=event.event_type)
         await self.record(
             owner_user_id=conversation.username,
@@ -225,6 +231,9 @@ def _safe_payload(
     payload: Mapping[str, Any], *, event_type: str | None = None
 ) -> dict[str, Any]:
     allowed_fields = _SAFE_PAYLOAD_FIELDS
+    if event_type == MCP_AGGREGATE_TRANSITION_EVENT_TYPE:
+        transition = validate_mcp_aggregate_transition_payload(payload)
+        return transition.as_payload()
     if event_type in MCP_ROLLOUT_AUDIT_EVENT_TYPES:
         allowed_fields = _ROLLOUT_SAFE_PAYLOAD_FIELDS
     safe: dict[str, Any] = {}
@@ -271,4 +280,5 @@ __all__ = [
     "MCPAuditService",
     "MCP_AUDIT_RETENTION_DAYS",
     "MCP_ROLLOUT_AUDIT_EVENT_TYPES",
+    "MCP_AGGREGATE_TRANSITION_EVENT_TYPE",
 ]
