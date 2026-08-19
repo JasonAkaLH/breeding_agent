@@ -9,6 +9,7 @@ import os
 import secrets
 import shutil
 import stat
+import threading
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
@@ -16,6 +17,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from src.core.models import MCPCallRecord, MCPDurableResultSnapshot, MCPTerminalResultReceipt
 
 from .client import MCPClientError, MCPProtocolError
 
@@ -79,6 +82,122 @@ class MCPTemporaryResultRef:
             "sha256": self.sha256,
             "storage": self.storage,
         }
+
+
+@dataclass(slots=True)
+class _HeldDurableResult:
+    snapshot: MCPDurableResultSnapshot
+    data_descriptor: int
+    manifest_descriptor: int
+    data_path: Path
+    manifest_path: Path
+    data_identity: tuple[int, ...]
+    manifest_identity: tuple[int, ...]
+
+
+class MCPDurableResultSnapshotAuthority:
+    def __init__(self, store: "MCPTemporaryResultStore") -> None:
+        self._store = store
+        self._held: dict[str, list[_HeldDurableResult]] = {}
+        self._lock = threading.Lock()
+
+    @asynccontextmanager
+    async def open_snapshot(
+        self,
+        *,
+        result_ref: str,
+        owner_user_id: str,
+        task_id: str,
+        node_id: str,
+        call_id: str,
+        expected_size_bytes: int,
+        expected_content_sha256: str,
+        expected_store_kind: str,
+    ) -> AsyncIterator[MCPDurableResultSnapshot]:
+        stored = self._store._results.get(str(result_ref))
+        held = await asyncio.to_thread(
+            _open_durable_result_snapshot,
+            stored,
+            result_ref=str(result_ref),
+            owner_user_id=str(owner_user_id),
+            task_id=str(task_id),
+            node_id=str(node_id),
+            call_id=str(call_id),
+            expected_size_bytes=expected_size_bytes,
+            expected_content_sha256=expected_content_sha256,
+            expected_store_kind=expected_store_kind,
+        )
+        with self._lock:
+            self._held.setdefault(str(result_ref), []).append(held)
+        try:
+            yield held.snapshot
+        finally:
+            with self._lock:
+                entries = self._held.get(str(result_ref), [])
+                if held in entries:
+                    entries.remove(held)
+                if not entries:
+                    self._held.pop(str(result_ref), None)
+            os.close(held.data_descriptor)
+            os.close(held.manifest_descriptor)
+
+    def revalidate(
+        self, snapshot: MCPDurableResultSnapshot
+    ) -> MCPDurableResultSnapshot:
+        with self._lock:
+            entries = tuple(self._held.get(snapshot.result_ref, ()))
+        for held in entries:
+            if held.snapshot != snapshot:
+                continue
+            try:
+                data = os.fstat(held.data_descriptor)
+                manifest = os.fstat(held.manifest_descriptor)
+                data_path = os.stat(held.data_path, follow_symlinks=False)
+                manifest_path = os.stat(held.manifest_path, follow_symlinks=False)
+            except OSError as exc:
+                raise MCPTemporaryResultError(
+                    "Durable MCP result descriptor identity changed."
+                ) from exc
+            if (
+                _result_file_identity(data) != held.data_identity
+                or _result_file_identity(data_path) != held.data_identity
+                or _result_file_identity(manifest) != held.manifest_identity
+                or _result_file_identity(manifest_path) != held.manifest_identity
+            ):
+                raise MCPTemporaryResultError(
+                    "Durable MCP result descriptor identity changed."
+                )
+            return snapshot
+        raise MCPTemporaryResultError(
+            "Durable MCP result descriptor is not held."
+        )
+
+    async def verify_completed_result(
+        self,
+        *,
+        call: MCPCallRecord,
+        receipt: MCPTerminalResultReceipt,
+    ) -> str:
+        if (
+            receipt.safe_result_ref is None
+            or receipt.safe_result_size_bytes is None
+            or receipt.safe_result_content_sha256 is None
+            or receipt.safe_result_store_kind is None
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result receipt is incomplete."
+            )
+        async with self.open_snapshot(
+            result_ref=receipt.safe_result_ref,
+            owner_user_id=call.owner_user_id,
+            task_id=call.task_id,
+            node_id=call.node_id,
+            call_id=call.call_ref,
+            expected_size_bytes=receipt.safe_result_size_bytes,
+            expected_content_sha256=receipt.safe_result_content_sha256,
+            expected_store_kind=receipt.safe_result_store_kind,
+        ):
+            return receipt.safe_result_ref
 
 
 @runtime_checkable
@@ -1116,6 +1235,224 @@ def _read_private_file(path: Path) -> bytes:
         return handle.read()
 
 
+def _open_durable_result_snapshot(
+    stored: _StoredResult | None,
+    *,
+    result_ref: str,
+    owner_user_id: str,
+    task_id: str,
+    node_id: str,
+    call_id: str,
+    expected_size_bytes: int,
+    expected_content_sha256: str,
+    expected_store_kind: str,
+) -> _HeldDurableResult:
+    if (
+        stored is None
+        or not stored.promoted
+        or stored.path is None
+        or stored.memory is not None
+        or stored.owner_user_id != owner_user_id
+        or stored.task_id != task_id
+        or stored.node_id != node_id
+        or stored.call_ref != call_id
+        or stored.size_bytes != expected_size_bytes
+        or expected_content_sha256 != f"sha256:{stored.sha256}"
+        or expected_store_kind != "durable_content_addressed"
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result snapshot identity verification failed."
+        )
+    data_path = stored.path
+    manifest_path = data_path.with_suffix(".manifest.json")
+    _validate_private_directory(data_path.parent)
+    data_descriptor = -1
+    manifest_descriptor = -1
+    try:
+        data_before = os.stat(data_path, follow_symlinks=False)
+        manifest_before = os.stat(manifest_path, follow_symlinks=False)
+        data_descriptor = os.open(
+            data_path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        manifest_descriptor = os.open(
+            manifest_path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        data_opened = os.fstat(data_descriptor)
+        manifest_opened = os.fstat(manifest_descriptor)
+        _validate_result_snapshot_file(data_opened, maximum_size=MAX_DURABLE_MCP_RESULT_BYTES)
+        _validate_result_snapshot_file(manifest_opened, maximum_size=64 * 1024)
+        if (
+            _result_file_identity(data_before)
+            != _result_file_identity(data_opened)
+            or _result_file_identity(manifest_before)
+            != _result_file_identity(manifest_opened)
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result snapshot path identity changed."
+            )
+        digest = hashlib.sha256()
+        remaining = data_opened.st_size
+        while remaining:
+            chunk = os.read(data_descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise MCPTemporaryResultError(
+                    "Durable MCP result snapshot data was truncated."
+                )
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(data_descriptor, 1):
+            raise MCPTemporaryResultError(
+                "Durable MCP result snapshot data grew during read."
+            )
+        manifest_bytes = _read_descriptor_exact(
+            manifest_descriptor, manifest_opened.st_size
+        )
+        try:
+            manifest_value = json.loads(manifest_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MCPTemporaryResultError(
+                "Durable MCP result snapshot manifest is invalid."
+            ) from exc
+        if not isinstance(manifest_value, dict):
+            raise MCPTemporaryResultError(
+                "Durable MCP result snapshot manifest is invalid."
+            )
+        parsed = _parse_durable_result_manifest(manifest_value)
+        expected_manifest = (
+            result_ref,
+            expected_size_bytes,
+            stored.sha256,
+            task_id,
+            stored.scope_id,
+            owner_user_id,
+            node_id,
+            call_id,
+        )
+        if (
+            parsed != expected_manifest
+            or data_path.name != f"{result_ref}.json"
+            or manifest_path.name != f"{result_ref}.manifest.json"
+            or digest.hexdigest() != stored.sha256
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result snapshot authority drifted."
+            )
+        data_after = os.fstat(data_descriptor)
+        manifest_after = os.fstat(manifest_descriptor)
+        data_after_path = os.stat(data_path, follow_symlinks=False)
+        manifest_after_path = os.stat(manifest_path, follow_symlinks=False)
+        if (
+            _result_file_identity(data_opened) != _result_file_identity(data_after)
+            or _result_file_identity(data_after)
+            != _result_file_identity(data_after_path)
+            or _result_file_identity(manifest_opened)
+            != _result_file_identity(manifest_after)
+            or _result_file_identity(manifest_after)
+            != _result_file_identity(manifest_after_path)
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result snapshot identity changed during read."
+            )
+        snapshot = MCPDurableResultSnapshot(
+            result_ref=result_ref,
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            node_id=node_id,
+            call_id=call_id,
+            content_sha256=expected_content_sha256,
+            size_bytes=expected_size_bytes,
+            store_kind=expected_store_kind,
+            data_filename=data_path.name,
+            manifest_filename=manifest_path.name,
+            data_file_sha256="sha256:" + stored.sha256,
+            manifest_file_sha256=(
+                "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+            ),
+            data_file_device=data_after.st_dev,
+            data_file_inode=data_after.st_ino,
+            data_file_mode=stat.S_IMODE(data_after.st_mode),
+            data_file_owner_uid=data_after.st_uid,
+            manifest_file_device=manifest_after.st_dev,
+            manifest_file_inode=manifest_after.st_ino,
+            manifest_file_mode=stat.S_IMODE(manifest_after.st_mode),
+            manifest_file_owner_uid=manifest_after.st_uid,
+        )
+        held = _HeldDurableResult(
+            snapshot=snapshot,
+            data_descriptor=data_descriptor,
+            manifest_descriptor=manifest_descriptor,
+            data_path=data_path,
+            manifest_path=manifest_path,
+            data_identity=_result_file_identity(data_after),
+            manifest_identity=_result_file_identity(manifest_after),
+        )
+        data_descriptor = -1
+        manifest_descriptor = -1
+        return held
+    except OSError as exc:
+        raise MCPTemporaryResultError(
+            "Durable MCP result snapshot file is unsafe or missing."
+        ) from exc
+    finally:
+        if data_descriptor >= 0:
+            os.close(data_descriptor)
+        if manifest_descriptor >= 0:
+            os.close(manifest_descriptor)
+
+
+def _validate_result_snapshot_file(
+    value: os.stat_result, *, maximum_size: int
+) -> None:
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or value.st_uid != os.getuid()
+        or stat.S_IMODE(value.st_mode) != 0o600
+        or value.st_nlink != 1
+        or value.st_size < 0
+        or value.st_size > maximum_size
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result snapshot file identity is invalid."
+        )
+
+
+def _result_file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_descriptor_exact(descriptor: int, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = os.read(descriptor, min(remaining, 64 * 1024))
+        if not chunk:
+            raise MCPTemporaryResultError(
+                "Durable MCP result snapshot manifest was truncated."
+            )
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise MCPTemporaryResultError(
+            "Durable MCP result snapshot manifest grew during read."
+        )
+    return b"".join(chunks)
+
+
 def _read_private_json(path: Path) -> dict[str, object]:
     try:
         value = json.loads(_read_private_file(path).decode("utf-8"))
@@ -1232,6 +1569,7 @@ __all__ = [
     "MCPAdmissionLease",
     "MCPCapacityUnavailableError",
     "MCPFairAdmissionQueue",
+    "MCPDurableResultSnapshotAuthority",
     "MCPResultTooLargeError",
     "MCPResultSink",
     "MCPTemporaryResultCapacity",

@@ -5771,11 +5771,13 @@ class SQLiteStateRepository:
         record: MCPCallRecord,
         occurred_at: datetime,
         *,
+        action_candidate: MCPPendingToolAction | None = None,
         cp7_candidate_id: str | None = None,
         cp7_epoch_id: str | None = None,
     ) -> bool:
-        candidate_action = self._session.get(MCPPendingToolActionRow, action_id)
-        if candidate_action is None:
+        candidate_action_row = self._session.get(MCPPendingToolActionRow, action_id)
+        candidate_action = candidate_action_row or action_candidate
+        if candidate_action is None or candidate_action.action_id != action_id:
             return False
         self._lock_mcp_owner_guard(candidate_action.owner_user_id, occurred_at)
         server = self._session.scalar(
@@ -5801,6 +5803,7 @@ class SQLiteStateRepository:
             .where(MCPPendingToolActionRow.action_id == action_id)
             .with_for_update()
         )
+        action_source = action or action_candidate
         branch = self._session.scalar(
             select(MCPBranchRecordRow)
             .where(MCPBranchRecordRow.branch_id == record.branch_id)
@@ -5820,12 +5823,12 @@ class SQLiteStateRepository:
             server is None
             or intent is None
             or outbox is None
-            or action is None
+            or action_source is None
             or branch is None
             or task is None
             or node is None
-            or action.status != "approved"
-            or int(action.revision) != expected_action_revision
+            or str(action_source.status) != "approved"
+            or int(action_source.revision) != expected_action_revision
             or int(intent.revision) != expected_intent_revision
             or int(outbox.revision) != expected_outbox_revision
             or not (
@@ -5837,10 +5840,10 @@ class SQLiteStateRepository:
             or outbox.lease_expires_at is None
             or outbox.lease_expires_at <= occurred_at
             or intent.intent_id != outbox.intent_id
-            or action.owner_user_id != outbox.owner_user_id
-            or action.task_id != outbox.task_id
-            or action.node_id != outbox.node_id
-            or action.server_id != outbox.server_id
+            or action_source.owner_user_id != outbox.owner_user_id
+            or action_source.task_id != outbox.task_id
+            or action_source.node_id != outbox.node_id
+            or action_source.server_id != outbox.server_id
             or task.status != str(TaskStatus.RUNNING)
             or task.cancel_requested_at is not None
             or task.mcp_execution_mode != "user_scoped"
@@ -5852,24 +5855,24 @@ class SQLiteStateRepository:
                 str(NodeStatus.RUNNING),
                 str(NodeStatus.READY_TO_RESUME),
             }
-            or branch.owner_user_id != action.owner_user_id
-            or branch.task_id != action.task_id
-            or branch.node_id != action.node_id
+            or branch.owner_user_id != action_source.owner_user_id
+            or branch.task_id != action_source.task_id
+            or branch.node_id != action_source.node_id
             or branch.active_call_ref is not None
             or int(branch.tool_call_count) >= int(branch.max_tool_calls)
             or not _mcp_server_is_available(server)
-            or int(server.config_version) != action.server_config_version
-            or int(server.security_version) != action.server_security_version
+            or int(server.config_version) != action_source.server_config_version
+            or int(server.security_version) != action_source.server_security_version
             or record.pending_action_id != action_id
-            or record.owner_user_id != action.owner_user_id
-            or record.task_id != action.task_id
-            or record.node_id != action.node_id
-            or record.server_id != action.server_id
-            or record.tool_name != action.tool_name
-            or record.arguments_sha256 != action.arguments_sha256
-            or record.server_config_version != action.server_config_version
-            or record.server_security_version != action.server_security_version
-            or record.input_schema_sha256 != action.input_schema_sha256
+            or record.owner_user_id != action_source.owner_user_id
+            or record.task_id != action_source.task_id
+            or record.node_id != action_source.node_id
+            or record.server_id != action_source.server_id
+            or record.tool_name != action_source.tool_name
+            or record.arguments_sha256 != action_source.arguments_sha256
+            or record.server_config_version != action_source.server_config_version
+            or record.server_security_version != action_source.server_security_version
+            or record.input_schema_sha256 != action_source.input_schema_sha256
         ):
             return False
         if self._pending_action_payload_reader is None:
@@ -5878,7 +5881,7 @@ class SQLiteStateRepository:
             payload_snapshot
         )
         if revalidated != payload_snapshot or not _pending_snapshot_matches_action(
-            payload_snapshot, action
+            payload_snapshot, action_source
         ):
             raise RuntimeError("mcp_pending_action_payload_binding_conflict")
         if (
@@ -5889,31 +5892,31 @@ class SQLiteStateRepository:
         ):
             raise RuntimeError("mcp_pending_action_payload_file_identity_invalid")
         approval_proven = False
-        if action.accepted_answer_id is not None:
+        if action_source.accepted_answer_id is not None:
             answer = self._session.scalar(
                 select(InterruptAnswerRow)
                 .where(
                     InterruptAnswerRow.interrupt_answer_id
-                    == action.accepted_answer_id
+                    == action_source.accepted_answer_id
                 )
                 .with_for_update()
             )
             approval_proven = (
                 answer is not None
                 and bool(answer.accepted)
-                and answer.interrupt_id == action.approval_interrupt_id
+                and answer.interrupt_id == action_source.approval_interrupt_id
             )
         if not approval_proven:
             grant = self._session.scalar(
                 select(UserMCPToolGrantRow)
                 .where(
-                    UserMCPToolGrantRow.owner_user_id == action.owner_user_id,
-                    UserMCPToolGrantRow.server_id == action.server_id,
-                    UserMCPToolGrantRow.tool_name == action.tool_name,
+                    UserMCPToolGrantRow.owner_user_id == action_source.owner_user_id,
+                    UserMCPToolGrantRow.server_id == action_source.server_id,
+                    UserMCPToolGrantRow.tool_name == action_source.tool_name,
                     UserMCPToolGrantRow.server_security_version
-                    == action.server_security_version,
+                    == action_source.server_security_version,
                     UserMCPToolGrantRow.input_schema_sha256
-                    == action.input_schema_sha256,
+                    == action_source.input_schema_sha256,
                     UserMCPToolGrantRow.invalidated_at.is_(None),
                 )
                 .with_for_update()
@@ -5933,10 +5936,21 @@ class SQLiteStateRepository:
         )
         if not admitted:
             return False
-        action.status = "consumed"
-        action.revision = int(action.revision) + 1
-        action.updated_at = occurred_at
-        action.consumed_at = occurred_at
+        if action is None:
+            assert action_candidate is not None
+            values = _mcp_pending_action_values(action_candidate)
+            values.update(
+                status="consumed",
+                revision=int(action_candidate.revision) + 1,
+                updated_at=occurred_at,
+                consumed_at=occurred_at,
+            )
+            self._session.add(MCPPendingToolActionRow(**values))
+        else:
+            action.status = "consumed"
+            action.revision = int(action.revision) + 1
+            action.updated_at = occurred_at
+            action.consumed_at = occurred_at
         self._session.flush()
         return True
 
@@ -11748,6 +11762,7 @@ class SQLiteStorage(StoragePort):
         record: MCPCallRecord,
         occurred_at: datetime,
         *,
+        action_candidate: MCPPendingToolAction | None = None,
         cp7_candidate_id: str | None = None,
         cp7_epoch_id: str | None = None,
     ) -> bool:
@@ -11764,6 +11779,7 @@ class SQLiteStorage(StoragePort):
                 payload_snapshot,
                 record,
                 occurred_at,
+                action_candidate=action_candidate,
                 cp7_candidate_id=cp7_candidate_id,
                 cp7_epoch_id=cp7_epoch_id,
             )

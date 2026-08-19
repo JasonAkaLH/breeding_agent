@@ -18,6 +18,7 @@ from src.integrations.mcp.cp7_artifacts import (
 from src.integrations.mcp.cp7_terminal_results import (
     CP7TerminalResultCorruptionError,
     CP7TerminalResultLimitError,
+    MCPTerminalCandidateSnapshotAuthority,
     TERMINAL_CANDIDATE_SCHEMA,
     TERMINAL_CANDIDATE_SCHEMA_V1,
     compare_terminal_result_candidate,
@@ -219,6 +220,25 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             self.assertIsNone(restored.safe_result_content_sha256)
             self.assertIsNone(restored.safe_result_size_bytes)
             self.assertIsNone(restored.safe_result_store_kind)
+            snapshot = MCPTerminalCandidateSnapshotAuthority(root).snapshot(
+                secure_read_terminal_result_candidate(root, candidate.candidate_id)
+            )
+            self.assertEqual(snapshot.candidate_schema, TERMINAL_CANDIDATE_SCHEMA_V1)
+
+    def test_candidate_snapshot_revalidates_exact_active_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            candidate = _completed_candidate()
+            authority = MCPTerminalCandidateSnapshotAuthority(root)
+            sealed = seal_terminal_result_candidate(root, candidate).sealed
+            snapshot = authority.snapshot(sealed)
+
+            self.assertEqual(snapshot.candidate_schema, TERMINAL_CANDIDATE_SCHEMA)
+            self.assertEqual(authority.revalidate(snapshot), snapshot)
+
+            terminal_call_index_path(root, candidate.call_id).unlink()
+            with self.assertRaises(CP7TerminalResultCorruptionError):
+                authority.revalidate(snapshot)
 
     def test_unknown_candidate_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

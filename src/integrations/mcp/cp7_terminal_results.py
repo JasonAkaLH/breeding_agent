@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AbstractSet, Mapping
 
-from src.core.models import MCPValidatedTerminalResultCandidate, MCPTerminalState
+from src.core.models import (
+    MCPTerminalCandidateSnapshot,
+    MCPValidatedTerminalResultCandidate,
+    MCPTerminalState,
+)
 from src.integrations.mcp.cp7_artifacts import (
     CP7ArtifactConflictError,
     CP7ArtifactValidationError,
@@ -49,6 +53,7 @@ class CP7TerminalResultLimitError(CP7TerminalResultCorruptionError):
 @dataclass(frozen=True, slots=True)
 class SealedTerminalResultCandidate:
     candidate: MCPValidatedTerminalResultCandidate
+    candidate_schema: str
     candidate_file_sha256: str
     candidate_payload_sha256: str
     task_index_file_sha256: str
@@ -251,11 +256,52 @@ def _read_and_validate_candidate(
         )
     return SealedTerminalResultCandidate(
         candidate=candidate,
+        candidate_schema=candidate_envelope.schema,
         candidate_file_sha256=candidate_envelope.artifact.file_sha256,
         candidate_payload_sha256=candidate_envelope.payload_sha256,
         task_index_file_sha256=task_envelope.artifact.file_sha256,
         call_index_file_sha256=call_envelope.artifact.file_sha256,
     )
+
+
+class MCPTerminalCandidateSnapshotAuthority:
+    def __init__(self, root: str | os.PathLike[str]) -> None:
+        self._root = _validated_root(root)
+
+    def snapshot(
+        self, sealed: SealedTerminalResultCandidate
+    ) -> MCPTerminalCandidateSnapshot:
+        candidate = sealed.candidate
+        return MCPTerminalCandidateSnapshot(
+            candidate=candidate,
+            candidate_schema=sealed.candidate_schema,
+            active_candidate_filename=terminal_candidate_path(
+                self._root, candidate.candidate_id
+            ).name,
+            active_task_index_filename=terminal_task_index_path(
+                self._root, candidate.task_id, candidate.candidate_id
+            ).name,
+            active_call_index_filename=terminal_call_index_path(
+                self._root, candidate.call_id
+            ).name,
+            candidate_file_sha256=sealed.candidate_file_sha256,
+            task_index_file_sha256=sealed.task_index_file_sha256,
+            call_index_file_sha256=sealed.call_index_file_sha256,
+        )
+
+    def revalidate(
+        self, snapshot: MCPTerminalCandidateSnapshot
+    ) -> MCPTerminalCandidateSnapshot:
+        current = self.snapshot(
+            secure_read_terminal_result_candidate(
+                self._root, snapshot.candidate.candidate_id
+            )
+        )
+        if current != snapshot:
+            raise CP7TerminalResultCorruptionError(
+                "terminal-result candidate snapshot changed"
+            )
+        return snapshot
 
 
 def _candidate_payload(
@@ -669,6 +715,7 @@ __all__ = [
     "CP7TerminalResultCorruptionError",
     "CP7TerminalResultLimitError",
     "DEFAULT_MAXIMUM_TERMINAL_ARTIFACTS",
+    "MCPTerminalCandidateSnapshotAuthority",
     "SealedTerminalResultCandidate",
     "TERMINAL_CALL_INDEX_SCHEMA",
     "TERMINAL_CANDIDATE_SCHEMA",

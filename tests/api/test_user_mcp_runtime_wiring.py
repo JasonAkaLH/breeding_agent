@@ -1054,6 +1054,23 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 self.assertIsNotNone(runtime.capability_registry.get("mcp.dispatch"))
+                self.assertIsNotNone(runtime._mcp_pending_action_payload_store)
+                self.assertIsNotNone(
+                    runtime._mcp_terminal_candidate_snapshot_authority
+                )
+                self.assertIsNotNone(runtime._mcp_durable_result_snapshot_authority)
+                self.assertIs(
+                    runtime.storage._mcp_pending_action_payload_reader,
+                    runtime._mcp_pending_action_payload_store,
+                )
+                self.assertIs(
+                    runtime.storage._mcp_terminal_candidate_snapshot_reader,
+                    runtime._mcp_terminal_candidate_snapshot_authority,
+                )
+                self.assertIs(
+                    runtime.storage._mcp_durable_result_snapshot_reader,
+                    runtime._mcp_durable_result_snapshot_authority,
+                )
                 profiles = await runtime.available_user_mcp_server_profiles("alice")
                 self.assertEqual(len(profiles), 1)
                 self.assertEqual(profiles[0].display_name, "CRM")

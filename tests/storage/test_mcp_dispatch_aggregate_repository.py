@@ -782,6 +782,41 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(intent.status), "dispatched")
         self.assertEqual(self.reader.calls, 1)
 
+    async def test_valid_grant_admits_exact_action_candidate_without_prior_row(self) -> None:
+        with self.sessions() as session:
+            session.delete(session.get(MCPPendingToolActionRow, "action-1"))
+            session.commit()
+        candidate, _interrupt = self._approval_candidate()
+        candidate = replace(
+            candidate,
+            status=MCPPendingToolActionStatus.APPROVED,
+            approval_interrupt_id=None,
+            approved_at=NOW,
+        )
+        claimed = await self._claim()
+        intent = await self.storage.get_mcp_no_server_intent(self.intent_id)
+
+        admitted = await self.storage.admit_approved_mcp_action(
+            self.intent_id,
+            self.outbox_id,
+            candidate.action_id,
+            intent.revision,
+            claimed.revision,
+            candidate.revision,
+            "worker",
+            "token",
+            self.snapshot,
+            self._call(),
+            NOW,
+            action_candidate=candidate,
+        )
+
+        self.assertTrue(admitted)
+        saved = await self.storage.get_mcp_pending_tool_action(candidate.action_id)
+        self.assertEqual(str(saved.status), "consumed")
+        self.assertEqual(saved.revision, 1)
+        self.assertEqual(saved.approved_at, NOW)
+
     async def test_expired_active_claim_with_unreceipted_call_cannot_recover_pending(
         self,
     ) -> None:

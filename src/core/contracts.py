@@ -464,6 +464,7 @@ class StoragePort(Protocol):
         record: MCPCallRecord,
         occurred_at: datetime,
         *,
+        action_candidate: MCPPendingToolAction | None = None,
         cp7_candidate_id: str | None = None,
         cp7_epoch_id: str | None = None,
     ) -> bool: ...

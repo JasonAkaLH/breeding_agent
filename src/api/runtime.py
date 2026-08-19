@@ -146,11 +146,18 @@ from src.integrations.mcp.dispatch_coordinator import (
     UserMCPDispatchCoordinator,
 )
 from src.integrations.mcp.cp7_terminal_results import (
+    MCPTerminalCandidateSnapshotAuthority,
     enumerate_unconsumed_terminal_result_candidates,
     terminal_now_utc_second,
     seal_terminal_result_candidate,
     secure_read_terminal_result_candidate,
 )
+from src.integrations.mcp.pending_action_payloads import (
+    MAX_PENDING_ACTION_ARGUMENT_BYTES,
+    MCPPendingActionPayloadCipher,
+    MCPPendingActionPayloadStore,
+)
+from src.integrations.mcp.selector_context import MCPDurableSelectorContextBuilder
 from src.integrations.mcp.cp7_artifacts import (
     mcp_dispatch_resume_outbox_id,
     mcp_terminal_receipt_id,
@@ -237,6 +244,7 @@ from src.integrations.mcp.invalidation import (
     PostgresMCPInvalidationBus,
 )
 from src.integrations.mcp.temporary_results import (
+    MCPDurableResultSnapshotAuthority,
     MCPTemporaryResultCapacity,
     MCPTemporaryResultCapacityConfig,
     MCPTemporaryResultJanitor,
@@ -621,6 +629,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         mcp_invalidation_bus: InMemoryMCPInvalidationBus | None = None,
         postgres_mcp_invalidation_bus: PostgresMCPInvalidationBus | None = None,
         user_mcp_result_store: MCPTemporaryResultStore | None = None,
+        mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None,
+        mcp_terminal_candidate_snapshot_authority: (
+            MCPTerminalCandidateSnapshotAuthority | None
+        ) = None,
+        mcp_durable_result_snapshot_authority: (
+            MCPDurableResultSnapshotAuthority | None
+        ) = None,
         user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
         user_mcp_presence_service: MCPTaskPresenceService | None = None,
         user_mcp_audit_service: MCPAuditService | None = None,
@@ -670,6 +685,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self.mcp_invalidation_bus = mcp_invalidation_bus
         self.postgres_mcp_invalidation_bus = postgres_mcp_invalidation_bus
         self.user_mcp_result_store = user_mcp_result_store
+        self._mcp_pending_action_payload_store = mcp_pending_action_payload_store
+        self._mcp_terminal_candidate_snapshot_authority = (
+            mcp_terminal_candidate_snapshot_authority
+        )
+        self._mcp_durable_result_snapshot_authority = (
+            mcp_durable_result_snapshot_authority
+        )
         self.user_mcp_result_janitor = user_mcp_result_janitor
         self.user_mcp_presence_service = user_mcp_presence_service
         self.user_mcp_audit_service = user_mcp_audit_service
@@ -10673,6 +10695,53 @@ def build_api_runtime(
     )
     if user_mcp_enabled and not terminal_result_root.exists():
         terminal_result_root.mkdir(mode=0o700)
+    user_mcp_result_store: MCPTemporaryResultStore | None = None
+    mcp_durable_result_snapshot_authority: MCPDurableResultSnapshotAuthority | None = None
+    mcp_terminal_candidate_snapshot_authority: (
+        MCPTerminalCandidateSnapshotAuthority | None
+    ) = None
+    mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None
+    result_root: Path | None = None
+    if user_mcp_enabled:
+        assert user_mcp_capacity_values is not None
+        result_root = Path(
+            os.environ.get("MAF_USER_MCP_TEMPORARY_RESULT_ROOT")
+            or (Path(database_path).parent / "user_mcp_results")
+        )
+        user_mcp_result_store = MCPTemporaryResultStore(
+            result_root,
+            memory_threshold_bytes=_positive_required_env_int(
+                "MAF_USER_MCP_MEMORY_RESULT_THRESHOLD_BYTES",
+                allow_default=1024 * 1024,
+            ),
+        )
+        mcp_durable_result_snapshot_authority = MCPDurableResultSnapshotAuthority(
+            user_mcp_result_store
+        )
+        mcp_terminal_candidate_snapshot_authority = (
+            MCPTerminalCandidateSnapshotAuthority(terminal_result_root)
+        )
+        pending_action_root = Path(
+            os.environ.get("MAF_USER_MCP_PENDING_ACTION_ROOT")
+            or (Path(database_path).parent / "user_mcp_pending_actions")
+        )
+
+        def pending_action_disk_available(root: Path) -> bool:
+            values = os.statvfs(root)
+            free_bytes = values.f_bavail * values.f_frsize
+            return free_bytes >= (
+                user_mcp_capacity_values[1]
+                + MAX_PENDING_ACTION_ARGUMENT_BYTES
+                + 64 * 1024
+            )
+
+        mcp_pending_action_payload_store = MCPPendingActionPayloadStore(
+            pending_action_root,
+            cipher=MCPPendingActionPayloadCipher(
+                master_key_deriver.derive(MasterKeyDomain.MCP_RECOVERY)
+            ),
+            disk_available=pending_action_disk_available,
+        )
 
     def read_terminal_candidate(call_id: str, candidate_id: str):
         sealed = secure_read_terminal_result_candidate(
@@ -10721,6 +10790,13 @@ def build_api_runtime(
             mcp_task_authority_mode=canonical_task_authority_mode,
             mcp_terminal_candidate_reader=read_terminal_candidate,
             mcp_terminal_candidate_resolver=resolve_terminal_candidate,
+            mcp_pending_action_payload_reader=mcp_pending_action_payload_store,
+            mcp_terminal_candidate_snapshot_reader=(
+                mcp_terminal_candidate_snapshot_authority
+            ),
+            mcp_durable_result_snapshot_reader=(
+                mcp_durable_result_snapshot_authority
+            ),
             **mcp_rollout_storage_kwargs,
         )
         if isinstance(engine, Engine):
@@ -10741,6 +10817,13 @@ def build_api_runtime(
             mcp_task_authority_mode=canonical_task_authority_mode,
             mcp_terminal_candidate_reader=read_terminal_candidate,
             mcp_terminal_candidate_resolver=resolve_terminal_candidate,
+            mcp_pending_action_payload_reader=mcp_pending_action_payload_store,
+            mcp_terminal_candidate_snapshot_reader=(
+                mcp_terminal_candidate_snapshot_authority
+            ),
+            mcp_durable_result_snapshot_reader=(
+                mcp_durable_result_snapshot_authority
+            ),
         )
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
         conversation_file_store = LocalConversationFileStore(
@@ -10752,7 +10835,6 @@ def build_api_runtime(
     user_mcp_gateway = None
     mcp_invalidation_bus = None
     postgres_mcp_invalidation_bus = None
-    user_mcp_result_store = None
     user_mcp_result_janitor = None
     user_mcp_presence_service = None
     user_mcp_audit_service = None
@@ -10844,16 +10926,8 @@ def build_api_runtime(
                 )
             )
 
-        result_root = Path(
-            os.environ.get("MAF_USER_MCP_TEMPORARY_RESULT_ROOT")
-            or (Path(database_path).parent / "user_mcp_results")
-        )
-        user_mcp_result_store = MCPTemporaryResultStore(
-            result_root,
-            memory_threshold_bytes=_positive_required_env_int(
-                "MAF_USER_MCP_MEMORY_RESULT_THRESHOLD_BYTES", allow_default=1024 * 1024
-            ),
-        )
+        assert result_root is not None
+        assert user_mcp_result_store is not None
         user_mcp_result_janitor = MCPTemporaryResultJanitor(
             result_root,
             safe_age_seconds=float(
@@ -11606,6 +11680,14 @@ def build_api_runtime(
     if user_mcp_routing_enabled:
         if user_mcp_gateway is None:
             raise RuntimeError("User-scoped MCP routing requires the user MCP Gateway")
+        if (
+            mcp_pending_action_payload_store is None
+            or mcp_terminal_candidate_snapshot_authority is None
+            or mcp_durable_result_snapshot_authority is None
+        ):
+            raise RuntimeError(
+                "User-scoped MCP routing requires durable dispatch authorities"
+            )
         if resolved_planner_text_generator is None:
             raise RuntimeError("User-scoped MCP routing requires the LLM planner")
         mcp_tool_selector = MCPToolSelector(
@@ -11619,6 +11701,17 @@ def build_api_runtime(
             gateway=user_mcp_gateway,
             selector=mcp_tool_selector,
             audit_reference_signer=mcp_audit_reference_signer,
+            selector_context_builder=MCPDurableSelectorContextBuilder(
+                storage=storage,
+                result_authority=mcp_durable_result_snapshot_authority,
+            ),
+            pending_action_payload_store=mcp_pending_action_payload_store,
+            terminal_candidate_snapshot_authority=(
+                mcp_terminal_candidate_snapshot_authority
+            ),
+            durable_result_snapshot_authority=(
+                mcp_durable_result_snapshot_authority
+            ),
             server_router=mcp_server_router,
             live_event_recorder=record_live_event,
             now_fn=ApiRuntime._utcnow_naive,
@@ -11801,6 +11894,13 @@ def build_api_runtime(
         mcp_invalidation_bus=mcp_invalidation_bus,
         postgres_mcp_invalidation_bus=postgres_mcp_invalidation_bus,
         user_mcp_result_store=user_mcp_result_store,
+        mcp_pending_action_payload_store=mcp_pending_action_payload_store,
+        mcp_terminal_candidate_snapshot_authority=(
+            mcp_terminal_candidate_snapshot_authority
+        ),
+        mcp_durable_result_snapshot_authority=(
+            mcp_durable_result_snapshot_authority
+        ),
         user_mcp_result_janitor=user_mcp_result_janitor,
         user_mcp_presence_service=user_mcp_presence_service,
         user_mcp_audit_service=user_mcp_audit_service,

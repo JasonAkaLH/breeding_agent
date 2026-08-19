@@ -31,7 +31,6 @@ from src.core.models import (
     MCPNoServerConvergenceReceipt,
     MCPPendingActionPayloadSnapshot,
     MCPPendingToolAction,
-    MCPPendingActionPayloadSnapshot,
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
     MCPRemoteTaskBinding,
@@ -819,6 +818,7 @@ class PostgreSQLStorage(SQLiteStorage):
         record: MCPCallRecord,
         occurred_at: datetime,
         *,
+        action_candidate: MCPPendingToolAction | None = None,
         cp7_candidate_id: str | None = None,
         cp7_epoch_id: str | None = None,
     ) -> bool:
@@ -845,6 +845,7 @@ class PostgreSQLStorage(SQLiteStorage):
                 payload_snapshot,
                 record,
                 occurred_at,
+                action_candidate=action_candidate,
                 cp7_candidate_id=cp7_candidate_id,
                 cp7_epoch_id=cp7_epoch_id,
             ),

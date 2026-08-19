@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from src.integrations.mcp.temporary_results import (
+    MCPDurableResultSnapshotAuthority,
     MCPTemporaryResultError,
     MCPTemporaryResultJanitor,
     MCPTemporaryResultStore,
@@ -49,6 +50,54 @@ class MCPDurableResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manifest_path.stat().st_ino, first_manifest_inode)
             self.assertEqual(data_path.stat().st_nlink, 1)
             self.assertEqual(manifest_path.stat().st_nlink, 1)
+
+    async def test_snapshot_authority_requires_held_exact_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=1)
+            sink = self._sink(store)
+            await sink.write(b'{"ok":true}')
+            result = await sink.finalize()
+            authority = MCPDurableResultSnapshotAuthority(store)
+
+            async with authority.open_snapshot(
+                result_ref=result.ref,
+                owner_user_id="owner-1",
+                task_id="task-1",
+                node_id="node-1",
+                call_id="call-1",
+                expected_size_bytes=result.size_bytes,
+                expected_content_sha256="sha256:" + result.sha256,
+                expected_store_kind="durable_content_addressed",
+            ) as snapshot:
+                self.assertEqual(authority.revalidate(snapshot), snapshot)
+
+            with self.assertRaises(MCPTemporaryResultError):
+                authority.revalidate(snapshot)
+
+    async def test_snapshot_authority_detects_path_identity_drift_while_held(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=1)
+            sink = self._sink(store)
+            await sink.write(b'{"ok":true}')
+            result = await sink.finalize()
+            authority = MCPDurableResultSnapshotAuthority(store)
+
+            async with authority.open_snapshot(
+                result_ref=result.ref,
+                owner_user_id="owner-1",
+                task_id="task-1",
+                node_id="node-1",
+                call_id="call-1",
+                expected_size_bytes=result.size_bytes,
+                expected_content_sha256="sha256:" + result.sha256,
+                expected_store_kind="durable_content_addressed",
+            ) as snapshot:
+                data_path = next(root.rglob(f"{result.ref}.json"))
+                os.utime(data_path, None)
+                with self.assertRaises(MCPTemporaryResultError):
+                    authority.revalidate(snapshot)
 
     async def test_result_root_symlink_is_rejected_without_following_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
