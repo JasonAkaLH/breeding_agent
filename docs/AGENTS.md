@@ -25,7 +25,7 @@
 - `superpowers/specs/2026-08-18-mcp-approval-event-stream-resubscribe-design.md`：连续 MCP Tool 审批的前端事件流恢复设计；审批成功后沿用普通 Interrupt 合同重新订阅当前 Task SSE，使不同 Tool 的后续审批无需刷新即可出现，同时保持 `always_allow` 的 per-Tool 边界。
 - `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-design.md`：以旧OCR Skill为行为基准，为显式用户MCP绑定增加execution-only单附件Base64物化与单一逻辑start/poll/ack workflow；同时修复标准`isError=true`误记completed、短Call不续claim及异常后aggregate终态残留，保持64 KiB引用式信封不含实际I/O。
 - `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-implementation-plan.md`：上述设计的分阶段开发计划，按纯materializer与job runner、Gateway、Coordinator、SQLite/PostgreSQL finalizer、外部ocr_mcp严格schema、回归checkpoint和用户报纸PNG真实smoke顺序实施。
-- `superpowers/specs/2026-08-19-mcp-auto-explicit-route-equivalence-design.md`：已确认但尚未实施的MCP路由等价性设计；只在Orchestration向Executor交接的唯一route handoff把auto已选Server归一化为现有selected-server执行合同，API Runtime、恢复Provider、执行链、v2信封、Storage与多MCP DAG零修改，并将streamed Tool `isError`保留为独立缺陷。
+- `superpowers/specs/2026-08-19-mcp-auto-explicit-route-equivalence-design.md`：已确认但尚未实施的MCP路由等价性设计；只在Orchestration向Executor交接的唯一route handoff以可信固定ID或当前Server allowlist验证authority，再把auto/explicit归一化为同一selected-server执行合同；不重推断选择来源，不修改API Runtime、恢复Provider、执行链、v2信封、Storage或多MCP DAG，并将streamed Tool `isError`保留为独立缺陷。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
@@ -44,4 +44,4 @@
 | `prd/MCP/user-scoped-on-demand/` | 阶段一、阶段二业务闭环和阶段三 CP-0～CP-6 仓库实现已落地；CP7-A 开发候选待人工验收 | `main` 首次部署的单一在线根密钥与五领域派生已按 `superpowers/specs/2026-08-14-maf-master-key-domain-derivation-design.md` 实施并通过自动验收；只有明确回复“可以退役”后才执行 CP7-B 物理删除。`prod`、根密钥轮换和旧密文迁移仍不在当前范围。 |
 | `superpowers/specs/2026-08-18-mcp-dispatch-aggregate-recovery-hardening-design.md`及对应implementation plan | Phase 0～4仓库实现、本地SQLite cutover与17边界自动proof已完成 | 重启本地新backend后由用户创建新OCR Task做approval/恢复smoke；补充真实PostgreSQL validation DSN证据。不得自动复活旧失败Task或把本地证据当作`prod`部署。 |
 | `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-design.md` | 主仓实现、外部ocr_mcp严格source schema、自动回归和用户报纸PNG本地真实smoke已完成 | 大于10 MiB companion upload和远端OCR严格schema源码部署保持独立后续工作；不得把本地源码测试记为远端发布。 |
-| `superpowers/specs/2026-08-19-mcp-auto-explicit-route-equivalence-design.md` | 设计已确认；尚未实施 | 仅在Orchestration的唯一route handoff实施auto/explicit等价；不得修改API Runtime、恢复Provider、Coordinator、materializer、workflow、Gateway、Storage或v2 envelope。 |
+| `superpowers/specs/2026-08-19-mcp-auto-explicit-route-equivalence-design.md` | 设计已确认；尚未实施 | 仅在Orchestration的唯一route handoff实施Server allowlist/fixed-ID authority及auto/explicit执行等价；不得重推断来源或修改API Runtime、恢复Provider、Coordinator、materializer、workflow、Gateway、Storage、v2 envelope。 |

@@ -6,7 +6,7 @@
 - 分支：`main`
 - 状态：设计已确认，尚未实施
 - 范围：只在Orchestration的selected-route交接边界归一化MCP路由metadata；API、恢复模块与执行链零修改
-- 自主复审：4轮（范围、现有consumer、恢复覆盖、最终一致性）；文档置信度96%
+- `document-perfectization`：2轮审阅与2轮批准修订；100/100，Pass
 
 ## 背景与故障证据
 
@@ -43,7 +43,8 @@ automatic route ┘
 1. auto与explicit选中同一Server后，交给Executor的功能性metadata和input payload一致。
 2. 复用当前已通过真实OCR smoke的显式绑定执行路径，不复制或重写执行逻辑。
 3. 由同一个交接点覆盖auto初次执行、approval恢复和startup恢复，不在三条路径分别打补丁。
-4. 保持显式绑定的UI badge和审计来源准确；auto不得显示成用户主动绑定。
+4. 保持显式绑定已有的root context、UI badge和audit evidence；route handoff不得重新推断或伪造
+   auto/explicit来源。
 5. 最新失败场景由20次错误Call变为1次成功OCR workflow并返回非空正文。
 
 ## 非目标
@@ -83,123 +84,113 @@ workflow”的兼容开关，最终导致两条功能路径不同。
 
 ## 设计
 
-### 1. 路由metadata归一化
+### 1. route authority与来源分离
 
-新增一个路由层纯适配器，例如：
+Server选择来源回答“谁选了Server”，route authority回答“这个Server是否允许进入执行”。二者
+不得混用：
+
+- explicit来源继续由既有root Message persisted binding context、public badge和
+  `mcp.server_binding_resolved` audit evidence记录；
+- automatic来源发生在Planner/Router选择时；本轮不新增或重算来源事件；
+- route handoff不得根据用户文字、附件、Tool名称、Node metadata或marker缺失来推断来源；
+- 下游`mcp_binding_mode=explicit_command`只表示selected-server执行合同，不再作为选择来源证据。
+
+删除恢复/执行交接阶段的`automatic|explicit`来源重推断，也不新增
+`mcp.route_normalized`事件。这样不会把remote continuation等未携带显式marker的合法路径误记为
+automatic，并避免为了审计增加Storage/Event I/O和新的失败面。
+
+### 2. route authority校验
+
+新增一个无I/O、无异常的路由层纯适配器，例如：
 
 ```text
 normalize_selected_mcp_route(
     capability_id,
     input_payload,
-    request_metadata,
-    node_metadata
+    node_metadata,
+    pinned_server_id,
+    available_server_ids
 ) -> {
     normalized_node_metadata,
-    selection_source
+    rejection_code
 }
 ```
 
-仅当以下条件全部满足时归一化：
+输入authority只能来自已有可信运行时状态：
 
-- `capability_id == "mcp.dispatch"`；
-- `input_payload`只有一个非空`server_id`；
-- Server选择来源能从已有system-managed request metadata闭合判断为`automatic|explicit`。
+- `pinned_server_id`取system-managed request metadata中的`mcp_dispatch_server_id`；用户提交的
+  同名metadata已被现有API denylist移除；
+- `available_server_ids`只取`OrchestrationRequest.available_mcp_servers`，不得从提示词、Planner
+  metadata或附件内容构造；
+- Node payload仍必须精确为一个非空`server_id`，不得包含Endpoint、credential、Tool或Schema。
+- payload Server和可信固定ID只在authority比较时使用`.strip()`后的值；适配器不得改写原
+  `input_payload`。`pinned_server_id`字段一旦存在但不是非空字符串，必须拒绝，不能降级使用allowlist。
 
-来源判定规则：
+校验顺序固定为：
 
-- `explicit`：request中由既有root binding authority生成的
-  `forced_by_mcp_command=true`和非空`mcp_command`必须同时存在，且request中的
-  `mcp_binding_mode=explicit_command`、`mcp_dispatch_server_id`与Node payload一致；
-- `automatic`：request中同时不存在`forced_by_mcp_command`和`mcp_command`；已有
-  `mcp_binding_mode=automatic`或仅有恢复用`mcp_dispatch_server_id`不属于显式marker；
-- `forced_by_mcp_command`和`mcp_command`只出现一部分、值冲突或Server ID不一致：路由阶段失败关闭。
+1. 非`mcp.dispatch`：原样返回，不适用authority校验；
+2. payload不是exact `{"server_id": <non-empty string>}`：原样返回，由现有Executor继续产生
+   `mcp_dispatch_payload_invalid`，不得新增重复校验错误；
+3. 存在`pinned_server_id`：payload Server必须与其相等，`available_server_ids`不能覆盖冲突；
+4. 不存在`pinned_server_id`：payload Server必须属于非空`available_server_ids`；
+5. 3或4不满足：返回`mcp_selected_route_not_authorized`，不得调用Executor或网络。
 
-用户提交的同名metadata已经由现有API denylist移除；适配器不接受用户字段作为来源证据。
+这形成两层防护：route handoff限制模型只能使用可信固定ID或当前请求的Server allowlist，现有
+Coordinator继续按Task owner重新验证Server存在、enabled、available且未删除。本轮不复制
+Coordinator的owner、config/security version或健康状态校验。
 
-归一化后的功能性执行metadata固定使用现有兼容合同：
+### 3. canonical selected-server metadata
 
-```text
-mcp_binding_mode=explicit_command
-```
-
-这里的`explicit_command`不再被解释为“用户亲自选择”，而只表示“路由层已经选定并锁定
-Server，可以进入现有selected-server执行路径”。不新增第三种执行模式，避免修改执行链。
-
-适配器只在Node metadata中覆盖`mcp_binding_mode`。它不得把
-`mcp_dispatch_server_id`、`forced_by_mcp_command`、`mcp_command`或selection source复制到Node；
-Server继续只通过既有`input_payload.server_id`交给Executor。这样auto与explicit进入Executor的
-功能性路由字段精确相同，而显示命令和选择来源仍停留在路由/UI边界。
-
-### 2. 选择来源与执行metadata隔离
-
-适配器返回一个瞬时、闭合的来源值：
+authority通过后，适配器执行精确投影：
 
 ```text
-mcp_route_selection_source=automatic|explicit
+normalized = copy(node_metadata)
+remove normalized.mcp_dispatch_server_id
+remove normalized.forced_by_mcp_command
+remove normalized.mcp_command
+set normalized.mcp_binding_mode = "explicit_command"
 ```
 
-`mcp_route_selection_source`只作为audit-only事件字段使用，不写入request/node metadata，因而
-不需要在下游再次过滤，也不传给Coordinator、materializer、workflow或Gateway。
+删除动作是必需合同，不只是“不要新增”：v2恢复当前可能已经把
+`mcp_dispatch_server_id`放在Node metadata中。投影后，Server只通过既有
+`input_payload.server_id`进入Executor，显示命令、选择来源和恢复固定ID均不进入功能性metadata。
 
-- explicit继续由Runtime从root Message的persisted binding context重建system-managed marker；
-- auto由Planner/Router选中`mcp.dispatch + server_id`且不存在显式binding marker得出来源；
-- 不根据是否存在附件、Server名称或Tool名称推断来源。
+这里的`explicit_command`不再解释为“用户亲自选择”，只表示“Server已经由路由authority选定并
+锁定，可以进入现有selected-server执行路径”。不新增第三种执行模式，不修改执行链consumer。
 
-现有public badge只负责UI显示并保持不变，不作为适配器authority。auto只记录audit-only路由事件，
-不生成显式badge。
-
-### 3. 唯一交接入口
+### 4. 唯一交接入口与失败收敛
 
 在`OrchestrationService._execute_node`把`WorkflowNodePlan`转换为
-`CapabilityExecutionRequest`之前统一调用路由适配器。适配发生在Node进入running和发出
-`node.started`事件之前，确保归一化失败时零网络调用且Node不会留下running残留。预期的路由合同
-错误使用现有Node失败收敛路径记录`node.failed`，再交给现有completion policy收敛Task；不扩展
-生命周期状态机。
+`CapabilityExecutionRequest`之前调用适配器。这是唯一业务调用点，覆盖Planner、固定Provider、
+Runtime Replanner、approval恢复、startup恢复和remote continuation产生的全部待执行
+`mcp.dispatch` Node，不在Provider或API Runtime分别打补丁。
 
-这是唯一业务调用点。它覆盖Planner、固定Provider、Runtime Replanner、approval恢复和startup
-恢复产生的全部`mcp.dispatch` Node，不在Provider或API Runtime分别打补丁。
+- authority通过：使用canonical Node metadata继续既有READY→RUNNING→Executor流程；
+- `mcp_selected_route_not_authorized`：以当前Node状态做CAS并直接收敛为FAILED，记录不含Server ID、
+  用户文字或payload的`node.failed` code，跳过scheduler/Executor/network，再由现有completion
+  policy收敛Task；
+- CAS因取消或并发状态变化失败：服从当前Task/Node authority，不覆盖新状态且不执行网络调用；
+- malformed payload：不由适配器收敛，继续使用现有Executor错误路径，保持错误码兼容。
 
-处理结果：
+该处理只复用既有Node状态和completion policy，不新增生命周期状态、不修改普通Node失败语义。
+每个多MCP DAG Node独立校验和归一化，不合并Node、不改变边或Server选择。
 
-- explicit现有metadata规范化后保持等价；
-- auto的`server_id`不变，但执行`mcp_binding_mode`变成现有selected-server合同；
-- 每个多MCP DAG Node独立归一化，不合并Node、不改变边或Server选择；
-- 非MCP Node和不合法的MCP payload保持现有fail-closed行为；
-- Task assignment、owner/Server availability与版本校验继续由现有authority执行，不在适配器复制。
+### 5. approval与恢复
 
-### 4. approval与恢复
+`MCPDispatchWorkflowProvider`和API startup代码保持不变。恢复不重新判断auto/explicit：
 
-`MCPDispatchWorkflowProvider`和API startup代码保持不变。它们可以继续在重建Node时携带
-当前的`automatic`来源标记，因为同一个交接适配器会在Executor调用前把已锁定Server统一为
-selected-server执行合同。
+- approval或startup已提供`mcp_dispatch_server_id`时，将其作为`pinned_server_id`；
+- intent、outbox和v2 envelope的Server一致性仍由既有恢复authority先行验证；
+- route handoff只验证Node payload与固定ID一致并生成canonical metadata；
+- 不读取、修改或重写v2 envelope，不重新运行Planner/Router，也不选择其他Server。
 
-恢复来源按优先级确定：
+### 6. 非功能约束
 
-1. root Message存在合法persisted binding context时，现有Runtime生成完整显式marker，适配器判定
-   来源为`explicit`；
-2. 不存在binding context时，现有intent/envelope校验仍负责锁定同一`server_id`，适配器在没有
-   显式marker时判定来源为`automatic`；
-3. marker冲突、Server身份漂移或来源无法闭合时，在路由交接阶段失败关闭。
-
-两种来源最终都输出同一个`mcp_binding_mode=explicit_command`执行合同。
-
-现有startup对intent、outbox、v2 envelope和Server身份的校验顺序不变；适配器不读取、不修改、
-不重写v2 envelope。startup仍不得重新运行Planner/Router，也不得选择其他Server。
-
-### 5. 路由来源审计
-
-纯适配器先在Node状态变化前完成。READY→RUNNING claim成功后、`node.started`和网络调用前记录
-一个audit-only `mcp.route_normalized`事件，只包含：
-
-```text
-selection_source=automatic|explicit
-execution_contract=selected_server
-```
-
-不记录Server ID、用户文字、Tool、附件、参数或result。现有Coordinator输出的
-`binding_mode=explicit_command`从本变更起只解释为selected-server执行合同，不能再用作“用户显式
-选择”的分析维度；选择来源必须读取新的route audit事件。现有显式UI badge仍是用户选择来源的
-唯一UI依据，auto不会生成badge。
+- 适配器必须为O(1)纯函数，不执行Storage、网络、Event/Audit或时间相关I/O；
+- 不记录Server ID、文件名、用户文字、附件、Tool、参数、result或credential；
+- 不增加正常MCP调用次数、Selector step、approval round或resume envelope大小；
+- 非MCP Node必须保持逐字段不变；malformed MCP payload必须保留既有错误码；
+- route authority拒绝必须在scheduler、Executor和Tool网络调用前完成。
 
 ## 数据流
 
@@ -208,7 +199,8 @@ execution_contract=selected_server
 ```text
 Planner选择server_id
 → WorkflowNodePlan(mcp.dispatch)
-→ 唯一route handoff adapter(source=automatic)
+→ available_server_ids authority校验
+→ 唯一route handoff adapter
 → mcp_binding_mode=explicit_command
 → 现有Executor/Coordinator路径
 ```
@@ -219,7 +211,8 @@ Planner选择server_id
 用户$Server
 → persisted binding preflight
 → WorkflowNodePlan(mcp.dispatch)
-→ 唯一route handoff adapter(source=explicit)
+→ pinned_server_id authority校验
+→ 唯一route handoff adapter
 → mcp_binding_mode=explicit_command
 → 同一现有Executor/Coordinator路径
 ```
@@ -229,7 +222,8 @@ Planner选择server_id
 ```text
 intent + v2 envelope锁定server_id
 → 既有resume reader重建WorkflowNodePlan
-→ 唯一route handoff adapter(source=automatic)
+→ pinned_server_id authority校验
+→ 唯一route handoff adapter
 → mcp_binding_mode=explicit_command
 → 同一现有恢复执行路径
 ```
@@ -238,24 +232,25 @@ intent + v2 envelope锁定server_id
 
 1. Server选择来源不得改变Tool参数、workflow、approval或终态语义。
 2. 同一Server、附件和用户请求的auto/explicit功能性Executor输入必须相同。
-3. `mcp_route_selection_source`不得进入执行metadata、pending payload或v2 envelope。
+3. 选择来源和显式命令字段不得进入执行metadata、pending payload或v2 envelope。
 4. auto不得获得显式用户binding badge。
 5. intent已存在后，恢复只能使用其锁定Server，不重新路由。
 6. 非MCP Node的metadata不得被路由适配器修改。
-7. 路由归一化失败必须发生在Tool网络调用之前。
+7. route authority失败必须发生在scheduler、Executor和Tool网络调用之前。
 8. selected-server合同关闭Coordinator内部的`route_another_server`能力；跨多个MCP只能由现有
    Planner/Replanner产生多个`mcp.dispatch` Node，每个Node独立选择和归一化。本轮不改该DAG。
-9. 预期路由校验错误必须使当前Node和Task按现有completion policy达到一致终态，不得残留
-   `ready|running` Node或发起Executor调用。
+9. route authority错误必须使当前Node和Task按现有completion policy达到一致终态，不得残留
+   `ready|running` Node或发起Executor调用；malformed payload继续走既有Executor失败路径。
+10. 外部提示词最多影响automatic在当前可信allowlist内的选择，不得选择allowlist外、跨owner、
+    已禁用、删除中或不可用的Server，也不得注入Endpoint、credential或执行metadata。
 
 ## 错误处理
 
 - 缺失或多余`server_id`：保留现有`mcp.dispatch` payload错误。
-- 未知选择来源：路由阶段失败关闭。
 - explicit binding context与intent不一致：保留现有authority conflict。
 - auto intent/envelope Server不一致：恢复authority corruption，阻断执行。
-- partial explicit marker或marker/payload Server冲突：`mcp_selected_route_invalid`，Node启动前按
-  现有completion policy失败收敛。
+- 固定Server与payload冲突、allowlist为空或不包含payload Server：
+  `mcp_selected_route_not_authorized`，Node启动前按现有completion policy失败收敛。
 - Server不可用或版本漂移：使用现有Server校验错误，不在路由适配器降级或换Server。
 - 执行链产生的Tool错误继续使用现有行为；本设计不改变Gateway错误解释。
 
@@ -264,19 +259,37 @@ intent + v2 envelope锁定server_id
 - 不迁移或重写既有Task、intent、outbox或v2 envelope。
 - 已终态历史Task保持不变，不自动复活20次错误Call的旧任务。
 - explicit绑定API、root Message private context和public badge合同保持不变。
+- 既有`mcp.server_binding_resolved`继续作为explicit来源audit evidence；不新增推断型来源事件。
 - legacy v1 resume reader保持不变。
 - 回滚时只撤销route adapter及其调用点，执行链无需回滚。
+
+## Rollout与迁移
+
+- 不新增feature flag、Storage schema、数据迁移、历史Task重写或v2 envelope迁移；
+- 重启服务前停止新提交并等待当前本地执行handle按既有生命周期收敛，避免把进程内Plan当作新的
+  持久化合同；
+- 部署时已经进入Executor或已有`may_have_dispatched`证据的Node继续按既有聚合恢复/no-replay规则
+  收敛，不中断、不重放；
+- 部署后的新Task、用户随后触发的approval恢复，以及既有startup v2 intent在下一次route
+  handoff使用新authority与canonical metadata合同；
+- 实施后先运行Orchestration定向回归，再重启本地前后端并执行用户PNG的全新auto Task smoke；
+- 本设计不授权`prod`部署。生产发布需另行确认目标分支、回滚窗口和运行中MCP Node状态。
 
 ## 测试与验收
 
 ### 路由单测
 
-- auto `mcp.dispatch + server_id`归一化为selected-server执行metadata；
-- explicit归一化结果与现有metadata等价；
-- selection source只进入audit，不进入Executor metadata；
+- auto exact `mcp.dispatch + server_id`只有在Server属于`available_server_ids`时归一化；
+- explicit、approval和startup固定ID只有在payload Server与`pinned_server_id`一致时归一化；
+- pinned ID存在时不能被allowlist中的另一个Server覆盖；
+- canonical投影主动删除`mcp_dispatch_server_id`、`forced_by_mcp_command`和`mcp_command`，只保留
+  `mcp_binding_mode=explicit_command`；
+- 带前后空白但非空的Server ID按`.strip()`值做authority比较且原payload不变；无效固定ID不能
+  降级使用allowlist；
 - 非MCP Node完全不变；
-- malformed payload和unknown source失败关闭。
-- 路由错误不调用Executor，Node/Task没有`ready|running`残留。
+- malformed payload原样交给现有Executor，保持`mcp_dispatch_payload_invalid`且Coordinator零调用；
+- allowlist外或固定ID冲突时不调用scheduler/Executor，Node/Task没有`ready|running`残留；
+- 用户metadata和Planner metadata不能伪造pinned ID、allowlist或执行模式。
 
 ### 等价性测试
 
@@ -284,6 +297,7 @@ intent + v2 envelope锁定server_id
 
 - Executor收到相同`input_payload`；
 - 功能性metadata相同；
+- auto/explicit进入Executor前均不含选择来源、显示命令或重复Server ID；
 - Coordinator生成相同Tool name、materialized arguments SHA和workflow kind；
 - 均只产生1个业务Call；
 - 均得到非空OCR正文和一致终态。
@@ -297,6 +311,9 @@ intent + v2 envelope锁定server_id
 - explicit恢复行为不变；
 - intent/envelope Server冲突失败关闭且零网络调用。
 - 恢复Provider和API Runtime的输出保持原样，证明修复只发生在统一route handoff。
+- v2恢复Node已有的`mcp_dispatch_server_id`在Executor前被canonical投影移除。
+- remote continuation不需要`forced_by_mcp_command`或来源重推断；pending MCP Node依靠固定ID或当前
+  allowlist完成authority校验。
 
 ### 真实回归
 
@@ -312,8 +329,8 @@ intent + v2 envelope锁定server_id
 
 允许的业务源码修改只有：
 
-- 新增`src/orchestration/mcp_route_handoff.py`：纯route adapter与闭合错误类型；
-- 修改`src/orchestration/service.py`：唯一调用点、route audit和预期错误的现有失败收敛；
+- 新增`src/orchestration/mcp_route_handoff.py`：O(1)纯route adapter与闭合result contract；
+- 修改`src/orchestration/service.py`：唯一调用点及authority拒绝的Node失败收敛；
 - 增加对应`tests/orchestration/`测试。
 
 真实OCR回归可以扩充现有API/integration测试，但不得因此修改API或integration业务源码。最终
@@ -329,6 +346,6 @@ intent + v2 envelope锁定server_id
 ## 回滚
 
 1. 停止新MCP提交并等待当前Node收敛。
-2. 回滚route adapter及Orchestration中的唯一调用点和audit-only事件。
+2. 回滚route adapter及Orchestration中的唯一调用点；没有新增audit事件需要回滚。
 3. 不修改数据库、v2 envelope、pending payload、receipt或历史Task。
 4. 恢复后auto重新使用旧`automatic`执行metadata；explicit路径不受影响。
