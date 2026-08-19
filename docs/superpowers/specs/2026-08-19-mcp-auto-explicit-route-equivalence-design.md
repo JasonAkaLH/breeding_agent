@@ -4,9 +4,12 @@
 
 - 日期：2026-08-19
 - 分支：`main`
-- 状态：设计已确认，尚未实施
+- 状态：已完成仓库实现、自动回归与本地真实 auto OCR smoke
 - 范围：只在Orchestration的selected-route交接边界归一化MCP路由metadata；API、恢复模块与执行链零修改
 - `document-perfectization`：2轮设计审阅修订及实施计划一致性复审；100/100，Pass
+- 实现证据：`task-ccc55fe702a0`以2个完成Node、1个`start_parse_job` Call完成；最终答案
+  2,688字符且包含图片标题，1,118-byte v2信封不含Base64、`input_payload`或
+  `dependency_outputs`
 
 ## 背景与故障证据
 

@@ -4,11 +4,31 @@
 
 - 日期：2026-08-19
 - 分支：`main`
-- 状态：计划已制定，尚未实施
+- 状态：Phase 0～4已完成；仓库实现、自动回归与本地真实 auto OCR smoke通过
 - 设计依据：`2026-08-19-mcp-auto-explicit-route-equivalence-design.md`
 - 设计checkpoint：`0570572`
 - 范围：只新增Orchestration route handoff、修改其唯一调用点并增加测试；不修改MCP执行链
 - `document-perfectization`：3轮审阅与授权修订；100/100，Pass
+
+## 完成证据
+
+- 新增纯`mcp_route_handoff`合同并只在`OrchestrationService._execute_node`唯一接入；业务源码diff
+  未触碰API Runtime、恢复Provider、Coordinator、Gateway、Storage、v2 envelope或OCR workflow。
+- 定向route/v2测试16项、完整Orchestration 181项、MCP dispatch capability 14项、关键API 23项
+  通过；MCP integrations 480项中479项通过，唯一失败是实施前即稳定存在的shadow manifest错误
+  文案断言不匹配，本轮未修改其源码或测试。
+- 其余根质量门禁中compileall、core 46项、storage 362项（6 skip）、lifecycle 25项、main-agent
+  65项、mcp-tool 14项和observability 34项通过；全API 473项有7项既有multi-skill/slot/task-list
+  失败，E2E 2项有1项既有Skill取消时序失败，`tests/capabilities/skill_tool`为空目录。上述失败均未经过
+  MCP route adapter，不计为通过，也未为其扩大本轮源码范围。
+- 本地真实Task `task-ccc55fe702a0`使用2,326,771-byte PNG和普通auto请求完成：Planner产生
+  `mcp.dispatch -> main_agent.respond`两个Node，只有1个`start_parse_job`业务Call；intent、outbox、
+  branch和receipt一致completed，最终答案2,688字符且包含“助力双方交往”。
+- 该Task的v2 envelope为1,118 bytes，不含Base64、`input_payload`或`dependency_outputs`；auto消息
+  metadata不含显式binding badge。
+- 本地原runtime volume在重启时暴露既有历史Task `task-af3c0637231a`的
+  `stopped_after_call`/startup invariant不一致；原volume保持未修改。真实smoke在其隔离副本中只规范化
+  该历史字段后执行，不属于`prod`部署或历史Task修复。
 
 ## 1. 完成声明
 
