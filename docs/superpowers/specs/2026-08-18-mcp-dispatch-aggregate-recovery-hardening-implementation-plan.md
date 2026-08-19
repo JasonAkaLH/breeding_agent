@@ -900,9 +900,9 @@ backup: mode=0600, link_count=1
 
 - compileall、core 46、storage 361（6项外部环境skip）、lifecycle 25、orchestration 167、
   main-agent capability 65、MCP-tool capability 14以及本次MCP/API定向144项通过；
-- integrations 616项中615项通过；唯一失败是既有shadow manifest错误文案断言期望
+- integrations 618项中617项通过；唯一失败是既有shadow manifest错误文案断言期望
   `every closed scenario`，实现返回`every current scenario exactly once`，与本变更无关；
-- API 463项中457项通过；6项失败集中在缺少本地Git-ignored Skill checkout及既有legacy Skill
+- API 472项中466项通过；6项失败集中在缺少本地Git-ignored Skill checkout及既有legacy Skill
   输入行为，与本变更定向回归无重叠；`tests/capabilities/skill_tool`没有可发现测试；
 - E2E MCP soft-binding已通过；cancel-late-result用例仍因现有取消路径主动cancel执行handle而等不到
   `task.late_result_discarded`，属于既有生命周期测试/实现矛盾；
