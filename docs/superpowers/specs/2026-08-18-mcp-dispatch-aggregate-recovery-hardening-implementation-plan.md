@@ -881,6 +881,8 @@ Phase 0～4已按green checkpoint落地，主要提交从`4eb8676`开始，最�
 - `fde3dfc`：durable result 24小时宽限、held snapshot互斥与双文件删除恢复；
 - `bc7b3fe`：closed aggregate transition与`execution_crash`前端脱敏；
 - `6c57f1c`：编号1～17的故障注入proof矩阵。
+- `96f7c65`：实施后差异审计，删除startup no-op并补齐分页、post-ready网络边界、终态聚合
+  收敛、8,000 candidate容量门、durable result backfill/orphan及确定性Artifact接管。
 
 本地`runtime/dev.sqlite3`在确认无旧backend writer与文件占用后完成：
 
@@ -896,7 +898,7 @@ backup: mode=0600, link_count=1
 
 验证结果：
 
-- compileall、core 46、storage 357（6项外部环境skip）、lifecycle 25、orchestration 167、
+- compileall、core 46、storage 361（6项外部环境skip）、lifecycle 25、orchestration 167、
   main-agent capability 65、MCP-tool capability 14以及本次MCP/API定向144项通过；
 - integrations 616项中615项通过；唯一失败是既有shadow manifest错误文案断言期望
   `every closed scenario`，实现返回`every current scenario exactly once`，与本变更无关；
@@ -908,5 +910,8 @@ backup: mode=0600, link_count=1
 - 真实PostgreSQL validation DSN未配置，对应skip不计为通过；未运行`prod`部署或真实OCR人工smoke。
 
 本轮当前实际SQLite authority在cutover前没有legacy Call/receipt，因此candidate/result backfill无需
-产生行；migration对含无法唯一分类的legacy业务行继续退出3，不在startup猜测迁移或删除。下一步
-只允许启动本地新backend并由用户创建新OCR Task验证；旧失败Task不自动复活或重放。
+产生行；实施后审计已为未来v2工件补上分页insert-or-compare backfill，并对无Call/receipt工件
+建立24小时orphan marker；identity不足的legacy工件会停止新删除而非猜测归属。migration对含无法
+唯一分类的legacy业务行继续退出3。新镜像已在隔离volume完成两次启动smoke；现有本地volume因原
+master key宿主文件缺失不得重建。下一步须先恢复原密钥，再由用户创建新OCR Task验证；旧失败Task
+不自动复活或重放。

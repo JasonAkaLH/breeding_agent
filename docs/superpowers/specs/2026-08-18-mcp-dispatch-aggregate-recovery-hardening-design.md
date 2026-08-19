@@ -5,7 +5,9 @@
 - 日期：2026-08-18
 - 结论：**96% — Pass with recorded assumptions**；已通过95%信心门，Blocking=0、Major=0
 - 实施状态：2026-08-19 已在`main`完成Phase 0～4仓库实现与本地SQLite v6 cutover；
-  未执行`prod`部署，真实PostgreSQL validation DSN与用户OCR人工smoke仍是外部完成证据。
+  实施后审计提交`96f7c65`进一步闭合十阶段真实consumer、keyset分页、post-ready网络边界、
+  candidate容量告警及durable result backfill/orphan/Artifact接管；未执行`prod`部署，真实
+  PostgreSQL validation DSN与用户OCR人工smoke仍是外部完成证据。
 - 适用范围：当前 `main` 分支 user-scoped MCP 的 SQL authority、Coordinator、Gateway、
   Tool approval、MRTR、remote Task 和启动恢复路径
 - 前置设计：
