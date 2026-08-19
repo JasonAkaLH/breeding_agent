@@ -24,6 +24,7 @@
 - `superpowers/specs/2026-08-18-mcp-dispatch-aggregate-recovery-hardening-implementation-plan.md`：以96%置信度通过95%信心门并已执行的开发计划；记录5个Phase green checkpoint、本地SQLite report/apply/retry、candidate/result lifecycle、18项FR/8项NFR、17个故障注入边界、完整回归例外与真实PostgreSQL缺口。
 - `superpowers/specs/2026-08-18-mcp-approval-event-stream-resubscribe-design.md`：连续 MCP Tool 审批的前端事件流恢复设计；审批成功后沿用普通 Interrupt 合同重新订阅当前 Task SSE，使不同 Tool 的后续审批无需刷新即可出现，同时保持 `always_allow` 的 per-Tool 边界。
 - `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-design.md`：以旧OCR Skill为行为基准，为显式用户MCP绑定增加execution-only单附件Base64物化与单一逻辑start/poll/ack workflow；同时修复标准`isError=true`误记completed、短Call不续claim及异常后aggregate终态残留，保持64 KiB引用式信封不含实际I/O。
+- `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-implementation-plan.md`：上述设计的分阶段开发计划，按纯materializer与job runner、Gateway、Coordinator、SQLite/PostgreSQL finalizer、外部ocr_mcp严格schema、回归checkpoint和用户报纸PNG真实smoke顺序实施。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
