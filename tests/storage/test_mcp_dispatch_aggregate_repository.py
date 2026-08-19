@@ -1269,6 +1269,25 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(deleted.status), "deleted")
         self.assertIsNone(deleted.eligible_at)
 
+        with self.sessions() as session:
+            result_row = session.get(MCPDurableResultLifecycleRow, "mcp-result-1")
+            result_row.eligible_at = committed_at
+            session.commit()
+        result_deleting = await self.storage.claim_mcp_durable_result_deletions(
+            committed_at, limit=1000
+        )
+        self.assertEqual(len(result_deleting), 1)
+        result_deleted = await self.storage.finish_mcp_durable_result_deletion(
+            result_deleting[0].result_ref,
+            result_deleting[0].revision,
+            committed_at + timedelta(seconds=2),
+        )
+        self.assertEqual(str(result_deleted.status), "deleted")
+        self.assertEqual(
+            result_deleted.deleted_at,
+            committed_at + timedelta(seconds=2),
+        )
+
     async def test_completed_terminal_commit_keeps_dispatch_active_until_finalizer(
         self,
     ) -> None:

@@ -18,7 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from src.core.models import MCPCallRecord, MCPDurableResultSnapshot, MCPTerminalResultReceipt
+from src.core.models import (
+    MCPCallRecord,
+    MCPDurableResultLifecycle,
+    MCPDurableResultSnapshot,
+    MCPTerminalResultReceipt,
+)
 
 from .client import MCPClientError, MCPProtocolError
 
@@ -114,10 +119,8 @@ class MCPDurableResultSnapshotAuthority:
         expected_content_sha256: str,
         expected_store_kind: str,
     ) -> AsyncIterator[MCPDurableResultSnapshot]:
-        stored = self._store._results.get(str(result_ref))
         held = await asyncio.to_thread(
-            _open_durable_result_snapshot,
-            stored,
+            self._open_and_register,
             result_ref=str(result_ref),
             owner_user_id=str(owner_user_id),
             task_id=str(task_id),
@@ -127,8 +130,6 @@ class MCPDurableResultSnapshotAuthority:
             expected_content_sha256=expected_content_sha256,
             expected_store_kind=expected_store_kind,
         )
-        with self._lock:
-            self._held.setdefault(str(result_ref), []).append(held)
         try:
             yield held.snapshot
         finally:
@@ -140,6 +141,67 @@ class MCPDurableResultSnapshotAuthority:
                     self._held.pop(str(result_ref), None)
             os.close(held.data_descriptor)
             os.close(held.manifest_descriptor)
+
+    def _open_and_register(self, **kwargs) -> _HeldDurableResult:
+        result_ref = str(kwargs["result_ref"])
+        with self._lock:
+            stored = self._store._results.get(result_ref)
+            held = _open_durable_result_snapshot(stored, **kwargs)
+            self._held.setdefault(result_ref, []).append(held)
+            return held
+
+    async def delete_lifecycle_files(
+        self,
+        lifecycle: MCPDurableResultLifecycle,
+        *,
+        fault_hook: Callable[[str, MCPDurableResultLifecycle], None] | None = None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._delete_lifecycle_files_sync,
+            lifecycle,
+            fault_hook,
+        )
+
+    def _delete_lifecycle_files_sync(
+        self,
+        lifecycle: MCPDurableResultLifecycle,
+        fault_hook: Callable[[str, MCPDurableResultLifecycle], None] | None,
+    ) -> bool:
+        with self._lock:
+            if self._held.get(lifecycle.result_ref):
+                return False
+            data_path, manifest_path = _resolve_durable_lifecycle_paths(
+                self._store.root,
+                lifecycle,
+            )
+            for path, expected_sha, point in (
+                (
+                    manifest_path,
+                    lifecycle.manifest_file_sha256,
+                    "manifest_unlink",
+                ),
+                (data_path, lifecycle.data_file_sha256, "data_unlink"),
+            ):
+                if path is None:
+                    continue
+                if _sha256_result_lifecycle_file(path) != expected_sha:
+                    raise MCPTemporaryResultError(
+                        "Durable MCP result lifecycle digest changed."
+                    )
+                path.unlink()
+                if fault_hook is not None:
+                    fault_hook(point, lifecycle)
+            parent = (
+                data_path.parent
+                if data_path is not None
+                else manifest_path.parent
+                if manifest_path is not None
+                else None
+            )
+            if parent is not None:
+                _fsync_directory(parent)
+            self._store._results.pop(lifecycle.result_ref, None)
+            return True
 
     def revalidate(
         self, snapshot: MCPDurableResultSnapshot
@@ -1026,6 +1088,94 @@ class _MemoryToFileSink:
             data = bytes(self._file_buffer)
             self._file_buffer.clear()
             await asyncio.to_thread(self._handle.write, data)
+
+
+def _resolve_durable_lifecycle_paths(
+    root: Path,
+    lifecycle: MCPDurableResultLifecycle,
+) -> tuple[Path | None, Path | None]:
+    expected_names = {
+        lifecycle.data_filename: f"{lifecycle.result_ref}.json",
+        lifecycle.manifest_filename: f"{lifecycle.result_ref}.manifest.json",
+    }
+    for actual, expected in expected_names.items():
+        if (
+            actual != expected
+            or Path(actual).name != actual
+            or "/" in actual
+            or "\\" in actual
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result lifecycle filename is invalid."
+            )
+
+    def find(name: str) -> Path | None:
+        matches = []
+        for task_dir in root.iterdir():
+            if not task_dir.name.startswith("task-"):
+                continue
+            try:
+                _validate_private_directory(task_dir)
+            except MCPTemporaryResultError:
+                raise
+            candidate = task_dir / name
+            if candidate.exists() or candidate.is_symlink():
+                matches.append(candidate)
+        if len(matches) > 1:
+            raise MCPTemporaryResultError(
+                "Durable MCP result lifecycle file is duplicated."
+            )
+        return None if not matches else matches[0]
+
+    data_path = find(lifecycle.data_filename)
+    manifest_path = find(lifecycle.manifest_filename)
+    if (
+        data_path is not None
+        and manifest_path is not None
+        and data_path.parent != manifest_path.parent
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result lifecycle files are forked."
+        )
+    return data_path, manifest_path
+
+
+def _sha256_result_lifecycle_file(path: Path) -> str:
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result lifecycle file identity is invalid."
+        )
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    digest = hashlib.sha256()
+    with os.fdopen(descriptor, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if _result_file_identity(opened) != _result_file_identity(metadata):
+            raise MCPTemporaryResultError(
+                "Durable MCP result lifecycle file identity changed."
+            )
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+    after_path = path.stat(follow_symlinks=False)
+    if (
+        _result_file_identity(after) != _result_file_identity(metadata)
+        or _result_file_identity(after_path) != _result_file_identity(metadata)
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result lifecycle file identity changed."
+        )
+    return "sha256:" + digest.hexdigest()
 
 
 class MCPTemporaryResultJanitor:

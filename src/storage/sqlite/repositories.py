@@ -77,6 +77,9 @@ from src.core.models import (
     MCPNoServerConvergenceReceipt,
     MCPNoServerIntent,
     MCPDurableResultSnapshot,
+    MCPDurableResultLifecycle,
+    MCPDurableResultLifecycleReason,
+    MCPDurableResultLifecycleStatus,
     MCPPendingActionPayloadSnapshot,
     MCPPendingToolAction,
     MCPPendingToolActionStatus,
@@ -571,6 +574,32 @@ def _row_to_mcp_terminal_candidate_lifecycle(
         archive_call_index_filename=row.archive_call_index_filename,
         consumed_at=row.consumed_at,
         eligible_at=row.eligible_at,
+    )
+
+
+def _row_to_mcp_durable_result_lifecycle(
+    row: MCPDurableResultLifecycleRow,
+) -> MCPDurableResultLifecycle:
+    return MCPDurableResultLifecycle(
+        result_ref=row.result_ref,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        call_id=row.call_id,
+        content_sha256=row.content_sha256,
+        size_bytes=int(row.size_bytes),
+        data_filename=row.data_filename,
+        manifest_filename=row.manifest_filename,
+        data_file_sha256=row.data_file_sha256,
+        manifest_file_sha256=row.manifest_file_sha256,
+        store_kind=row.store_kind,
+        status=MCPDurableResultLifecycleStatus(row.status),
+        reason=MCPDurableResultLifecycleReason(row.reason),
+        revision=int(row.revision),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        eligible_at=row.eligible_at,
+        deleted_at=row.deleted_at,
     )
 
 
@@ -8324,6 +8353,91 @@ class SQLiteStateRepository:
         self._session.flush()
         return _row_to_mcp_terminal_candidate_lifecycle(row)
 
+    def list_incomplete_mcp_durable_result_lifecycles(
+        self, *, limit: int = 1000
+    ) -> list[MCPDurableResultLifecycle]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_durable_result_lifecycle_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPDurableResultLifecycleRow)
+            .where(MCPDurableResultLifecycleRow.status == "deleting")
+            .order_by(
+                MCPDurableResultLifecycleRow.updated_at,
+                MCPDurableResultLifecycleRow.result_ref,
+            )
+            .limit(limit)
+        ).all()
+        return [_row_to_mcp_durable_result_lifecycle(row) for row in rows]
+
+    def claim_mcp_durable_result_deletions(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPDurableResultLifecycle]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_durable_result_lifecycle_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPDurableResultLifecycleRow)
+            .where(
+                MCPDurableResultLifecycleRow.status == "retained",
+                MCPDurableResultLifecycleRow.eligible_at.is_not(None),
+                MCPDurableResultLifecycleRow.eligible_at <= now,
+            )
+            .order_by(
+                MCPDurableResultLifecycleRow.eligible_at,
+                MCPDurableResultLifecycleRow.result_ref,
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+        for row in rows:
+            row.status = "deleting"
+            row.revision = int(row.revision) + 1
+            row.updated_at = now
+        self._session.flush()
+        return [_row_to_mcp_durable_result_lifecycle(row) for row in rows]
+
+    def finish_mcp_durable_result_deletion(
+        self, result_ref: str, expected_revision: int, deleted_at: datetime
+    ) -> MCPDurableResultLifecycle | None:
+        row = self._session.scalar(
+            select(MCPDurableResultLifecycleRow)
+            .where(MCPDurableResultLifecycleRow.result_ref == result_ref)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status != "deleting"
+            or int(row.revision) != expected_revision
+        ):
+            return None
+        row.status = "deleted"
+        row.eligible_at = None
+        row.deleted_at = deleted_at
+        row.revision = int(row.revision) + 1
+        row.updated_at = deleted_at
+        self._session.flush()
+        return _row_to_mcp_durable_result_lifecycle(row)
+
+    def release_mcp_durable_result_deletion(
+        self, result_ref: str, expected_revision: int, retry_at: datetime
+    ) -> MCPDurableResultLifecycle | None:
+        row = self._session.scalar(
+            select(MCPDurableResultLifecycleRow)
+            .where(MCPDurableResultLifecycleRow.result_ref == result_ref)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status != "deleting"
+            or int(row.revision) != expected_revision
+        ):
+            return None
+        row.status = "retained"
+        row.eligible_at = retry_at
+        row.revision = int(row.revision) + 1
+        row.updated_at = retry_at
+        self._session.flush()
+        return _row_to_mcp_durable_result_lifecycle(row)
+
     def finalize_mcp_dispatch_intent(
         self,
         intent_id: str,
@@ -13170,6 +13284,42 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.finish_mcp_terminal_candidate_deletion(
                 candidate_id, expected_revision, deleted_at
+            )
+        )
+
+    async def list_incomplete_mcp_durable_result_lifecycles(
+        self, *, limit: int = 1000
+    ) -> list[MCPDurableResultLifecycle]:
+        return await self._run(
+            lambda state, collab: (
+                state.list_incomplete_mcp_durable_result_lifecycles(limit=limit)
+            )
+        )
+
+    async def claim_mcp_durable_result_deletions(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPDurableResultLifecycle]:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_durable_result_deletions(
+                now, limit=limit
+            )
+        )
+
+    async def finish_mcp_durable_result_deletion(
+        self, result_ref: str, expected_revision: int, deleted_at: datetime
+    ) -> MCPDurableResultLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.finish_mcp_durable_result_deletion(
+                result_ref, expected_revision, deleted_at
+            )
+        )
+
+    async def release_mcp_durable_result_deletion(
+        self, result_ref: str, expected_revision: int, retry_at: datetime
+    ) -> MCPDurableResultLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.release_mcp_durable_result_deletion(
+                result_ref, expected_revision, retry_at
             )
         )
 

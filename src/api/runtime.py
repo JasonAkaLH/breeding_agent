@@ -162,6 +162,9 @@ from src.integrations.mcp.cp7_terminal_results import (
 from src.integrations.mcp.cp7_terminal_lifecycle import (
     MCPTerminalCandidateLifecycleManager,
 )
+from src.integrations.mcp.durable_result_lifecycle import (
+    MCPDurableResultLifecycleManager,
+)
 from src.integrations.mcp.pending_action_payloads import (
     MAX_PENDING_ACTION_ARGUMENT_BYTES,
     MCPPendingActionPayloadCipher,
@@ -649,6 +652,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         mcp_terminal_candidate_lifecycle_manager: (
             MCPTerminalCandidateLifecycleManager | None
         ) = None,
+        mcp_durable_result_lifecycle_manager: (
+            MCPDurableResultLifecycleManager | None
+        ) = None,
         user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
         user_mcp_presence_service: MCPTaskPresenceService | None = None,
         user_mcp_audit_service: MCPAuditService | None = None,
@@ -707,6 +713,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         )
         self._mcp_terminal_candidate_lifecycle_manager = (
             mcp_terminal_candidate_lifecycle_manager
+        )
+        self._mcp_durable_result_lifecycle_manager = (
+            mcp_durable_result_lifecycle_manager
         )
         self.user_mcp_result_janitor = user_mcp_result_janitor
         self.user_mcp_presence_service = user_mcp_presence_service
@@ -8607,10 +8616,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
 
     async def _repair_mcp_terminal_candidate_lifecycle(self) -> None:
-        manager = self._mcp_terminal_candidate_lifecycle_manager
-        if manager is None:
-            return
-        await manager.run_once(limit=1000)
+        candidate_manager = self._mcp_terminal_candidate_lifecycle_manager
+        if candidate_manager is not None:
+            await candidate_manager.run_once(limit=1000)
+        result_manager = self._mcp_durable_result_lifecycle_manager
+        if result_manager is not None:
+            await result_manager.run_once(limit=1000)
 
     async def _strict_enumerate_mcp_terminal_candidates(self) -> None:
         root = self._mcp_terminal_result_root
@@ -10902,6 +10913,9 @@ def build_api_runtime(
     mcp_terminal_candidate_lifecycle_manager: (
         MCPTerminalCandidateLifecycleManager | None
     ) = None
+    mcp_durable_result_lifecycle_manager: (
+        MCPDurableResultLifecycleManager | None
+    ) = None
     mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None
     result_root: Path | None = None
     if user_mcp_enabled:
@@ -11041,6 +11055,11 @@ def build_api_runtime(
     if user_mcp_enabled:
         mcp_terminal_candidate_lifecycle_manager = (
             MCPTerminalCandidateLifecycleManager(storage, terminal_result_root)
+        )
+        assert mcp_durable_result_snapshot_authority is not None
+        mcp_durable_result_lifecycle_manager = MCPDurableResultLifecycleManager(
+            storage,
+            mcp_durable_result_snapshot_authority,
         )
 
     user_mcp_config_service = None
@@ -12180,6 +12199,9 @@ def build_api_runtime(
         ),
         mcp_terminal_candidate_lifecycle_manager=(
             mcp_terminal_candidate_lifecycle_manager
+        ),
+        mcp_durable_result_lifecycle_manager=(
+            mcp_durable_result_lifecycle_manager
         ),
         user_mcp_result_janitor=user_mcp_result_janitor,
         user_mcp_presence_service=user_mcp_presence_service,

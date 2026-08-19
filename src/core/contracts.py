@@ -32,6 +32,7 @@ from .models import (
     MCPCP7SafetySnapshot,
     MCPDispatchResumeOutbox,
     MCPDurableResultSnapshot,
+    MCPDurableResultLifecycle,
     MCPDispatchFinalizeResult,
     MCPExecutionTerminalProjection,
     MCPInitialIntentCreateResult,
@@ -565,6 +566,22 @@ class StoragePort(Protocol):
     async def finish_mcp_terminal_candidate_deletion(
         self, candidate_id: str, expected_revision: int, deleted_at: datetime
     ) -> MCPTerminalCandidateLifecycle | None: ...
+
+    async def list_incomplete_mcp_durable_result_lifecycles(
+        self, *, limit: int = 1000
+    ) -> list[MCPDurableResultLifecycle]: ...
+
+    async def claim_mcp_durable_result_deletions(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPDurableResultLifecycle]: ...
+
+    async def finish_mcp_durable_result_deletion(
+        self, result_ref: str, expected_revision: int, deleted_at: datetime
+    ) -> MCPDurableResultLifecycle | None: ...
+
+    async def release_mcp_durable_result_deletion(
+        self, result_ref: str, expected_revision: int, retry_at: datetime
+    ) -> MCPDurableResultLifecycle | None: ...
 
     async def finalize_mcp_dispatch(
         self,
