@@ -423,6 +423,15 @@ class StoragePort(Protocol):
         lease_expires_at: datetime,
     ) -> MCPDispatchResumeOutbox | None: ...
 
+    async def consume_mcp_dispatch_selector_step(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        occurred_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None: ...
+
     async def release_or_recover_mcp_dispatch_claim(
         self,
         outbox_id: str,

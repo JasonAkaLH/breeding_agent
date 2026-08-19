@@ -5090,6 +5090,68 @@ class SQLiteStateRepository:
         self._session.flush()
         return _row_to_mcp_dispatch_resume(row)
 
+    def consume_mcp_dispatch_selector_step(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        occurred_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        candidate = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        if candidate is None:
+            return None
+        self._lock_mcp_owner_guard(candidate.owner_user_id, occurred_at)
+        self._session.scalar(
+            select(UserMCPServerRow.server_id)
+            .where(
+                UserMCPServerRow.owner_user_id == candidate.owner_user_id,
+                UserMCPServerRow.server_id == candidate.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == candidate.intent_id)
+            .with_for_update()
+        )
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == candidate.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == candidate.node_id)
+            .with_for_update()
+        )
+        if (
+            intent is None
+            or row is None
+            or task is None
+            or node is None
+            or int(row.revision) != expected_revision
+            or row.status not in {"claimed", "active"}
+            or row.claim_owner != claim_owner
+            or row.claim_token != claim_token
+            or row.lease_expires_at is None
+            or row.lease_expires_at <= occurred_at
+            or int(row.selector_step_total) >= 64
+            or intent.status not in {"available", "dispatched"}
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status not in {str(NodeStatus.RUNNING), str(NodeStatus.READY_TO_RESUME)}
+        ):
+            return None
+        row.selector_step_total = int(row.selector_step_total) + 1
+        row.revision = int(row.revision) + 1
+        row.updated_at = occurred_at
+        self._session.flush()
+        return _row_to_mcp_dispatch_resume(row)
+
     def release_or_recover_mcp_dispatch_claim(
         self,
         outbox_id: str,
@@ -5288,6 +5350,7 @@ class SQLiteStateRepository:
             or not claim_valid
             or int(intent.revision) != expected_intent_revision
             or int(outbox.revision) != expected_outbox_revision
+            or int(outbox.approval_round_total) >= 20
             or intent.status not in {"available", "dispatched"}
             or outbox.intent_id != intent_id
             or outbox.owner_user_id != action.owner_user_id
@@ -12621,6 +12684,24 @@ class SQLiteStorage(StoragePort):
                 expected_revision,
                 now,
                 lease_expires_at,
+            )
+        )
+
+    async def consume_mcp_dispatch_selector_step(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        occurred_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.consume_mcp_dispatch_selector_step(
+                outbox_id,
+                claim_owner,
+                claim_token,
+                expected_revision,
+                occurred_at,
             )
         )
 

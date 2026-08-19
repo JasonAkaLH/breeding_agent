@@ -48,6 +48,7 @@ from src.storage.sqlite import (
     create_sqlite_session_factory,
 )
 from src.storage.sqlite.models import (
+    MCPDispatchResumeOutboxRow,
     MCPDurableResultLifecycleRow,
     MCPPendingToolActionRow,
     MCPTerminalCandidateLifecycleRow,
@@ -766,6 +767,61 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(str(recovered.status), "pending")
         self.assertIsNone(recovered.claim_token)
+
+    async def test_selector_step_budget_is_durable_and_capped_at_sixty_four(self) -> None:
+        current = await self._claim()
+        for _ in range(64):
+            current = await self.storage.consume_mcp_dispatch_selector_step(
+                self.outbox_id,
+                "worker",
+                "token",
+                current.revision,
+                NOW,
+            )
+            self.assertIsNotNone(current)
+
+        rejected = await self.storage.consume_mcp_dispatch_selector_step(
+            self.outbox_id,
+            "worker",
+            "token",
+            current.revision,
+            NOW,
+        )
+
+        self.assertIsNone(rejected)
+        persisted = await self.storage.get_mcp_dispatch_resume_outbox(
+            self.outbox_id
+        )
+        self.assertEqual(persisted.selector_step_total, 64)
+
+    async def test_twentieth_completed_approval_round_blocks_another_suspend(self) -> None:
+        with self.sessions() as session:
+            session.delete(session.get(MCPPendingToolActionRow, "action-1"))
+            session.delete(session.get(UserMCPToolGrantRow, "grant-1"))
+            outbox = session.get(MCPDispatchResumeOutboxRow, self.outbox_id)
+            outbox.approval_round_total = 20
+            session.commit()
+        claimed = await self._claim()
+        intent = await self.storage.get_mcp_no_server_intent(self.intent_id)
+        action, interrupt = self._approval_candidate()
+
+        suspended = await self.storage.suspend_mcp_for_approval(
+            self.intent_id,
+            self.outbox_id,
+            intent.revision,
+            claimed.revision,
+            "worker",
+            "token",
+            action,
+            interrupt,
+            self.snapshot,
+            NOW,
+        )
+
+        self.assertEqual(str(suspended), "conflict")
+        self.assertIsNone(
+            await self.storage.get_mcp_pending_tool_action(action.action_id)
+        )
 
     async def test_admission_atomically_consumes_action_and_opens_network_gate(self) -> None:
         claimed = await self._claim()

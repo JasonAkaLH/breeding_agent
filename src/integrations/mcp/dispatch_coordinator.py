@@ -674,6 +674,27 @@ class UserMCPDispatchCoordinator:
                             arguments=approved_payload.arguments,
                         )
                 if action is None:
+                    if authority is not None:
+                        outbox = await self._storage.get_mcp_dispatch_resume_outbox(
+                            authority.outbox_id
+                        )
+                        if outbox is None:
+                            raise _CallReservationError(
+                                "mcp_dispatch_authority_missing"
+                            )
+                        consumed_step = (
+                            await self._storage.consume_mcp_dispatch_selector_step(
+                                authority.outbox_id,
+                                authority.claim_owner,
+                                authority.claim_token,
+                                outbox.revision,
+                                self._now(),
+                            )
+                        )
+                        if consumed_step is None:
+                            raise _CallReservationError(
+                                "mcp_selector_step_limit_exceeded"
+                            )
                     if self._selector_context_builder is not None:
                         selector_context = await self._selector_context_builder.build(
                             owner_user_id=owner_user_id,

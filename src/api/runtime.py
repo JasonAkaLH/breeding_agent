@@ -753,6 +753,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         configure_safety_shadow_sink(_build_safety_kernel_shadow_diff_sink(audit_sink))
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._execution_generations: dict[str, int] = {}
+        self._execution_wait_timeout_seconds = 30.0
         self._conversation_delete_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
         self._locally_cancelled_task_ids = local_cancelled_task_ids if local_cancelled_task_ids is not None else set()
         self._running_title_tasks: set[asyncio.Task[None]] = set()
@@ -3209,12 +3211,33 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._retain_task_skill_revision(request)
         self._retain_task_mcp_revision(request)
         async with self._lock:
-            active_task_count = len(self._running_tasks)
-            handle = asyncio.create_task(self._run_execution(request, active_task_count=active_task_count))
+            existing = self._running_tasks.get(request.task_id)
+            if existing is not None and not existing.done():
+                return existing
+            if existing is not None:
+                self._running_tasks.pop(request.task_id, None)
+            active_task_count = sum(
+                1 for item in self._running_tasks.values() if not item.done()
+            )
+            generation = self._execution_generations.get(request.task_id, 0) + 1
+            self._execution_generations[request.task_id] = generation
+            handle = asyncio.create_task(
+                self._run_execution(
+                    request,
+                    active_task_count=active_task_count,
+                    execution_generation=generation,
+                )
+            )
             self._running_tasks[request.task_id] = handle
             return handle
 
-    async def _run_execution(self, request: OrchestrationRequest, *, active_task_count: int) -> None:
+    async def _run_execution(
+        self,
+        request: OrchestrationRequest,
+        *,
+        active_task_count: int,
+        execution_generation: int | None = None,
+    ) -> None:
         shadow_handle: _MCPShadowExecutionHandle | None = None
         shadow_finalize_cancelled: asyncio.CancelledError | None = None
         result: OrchestrationRunResult | None = None
@@ -3323,7 +3346,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             finally:
                 self._locally_cancelled_task_ids.discard(request.task_id)
                 async with self._lock:
-                    self._running_tasks.pop(request.task_id, None)
+                    current_handle = self._running_tasks.get(request.task_id)
+                    if (
+                        current_handle is asyncio.current_task()
+                        and (
+                            execution_generation is None
+                            or self._execution_generations.get(request.task_id)
+                            == execution_generation
+                        )
+                    ):
+                        self._running_tasks.pop(request.task_id, None)
         if shadow_finalize_cancelled is not None:
             raise shadow_finalize_cancelled
 
@@ -10265,9 +10297,19 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             handle = self._running_tasks.get(task_id)
         if handle is None:
             return
-        await asyncio.gather(handle, return_exceptions=True)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(handle),
+                timeout=self._execution_wait_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
         async with self._lock:
-            if self._running_tasks.get(task_id) is handle:
+            if self._running_tasks.get(task_id) is handle and handle.done():
                 self._running_tasks.pop(task_id, None)
 
     async def _cancel_existing_execution(self, task_id: str) -> None:

@@ -632,6 +632,41 @@ class PostgreSQLStorage(SQLiteStorage):
                 return None
             raise
 
+    async def consume_mcp_dispatch_selector_step(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        occurred_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        def _sync() -> MCPDispatchResumeOutbox | None:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(
+                outbox_id
+            )
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.consume_mcp_dispatch_selector_step(
+                    outbox_id,
+                    claim_owner,
+                    claim_token,
+                    expected_revision,
+                    occurred_at,
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except ValueError as exc:
+            if str(exc) == "mcp_dispatch_resume_outbox_missing":
+                return None
+            raise
+
     async def release_or_recover_mcp_dispatch_claim(
         self,
         outbox_id: str,
