@@ -63,6 +63,7 @@ from .models import (
     MCPTargetIntentResolveResult,
     MCPTerminalResultCommitResult,
     MCPTerminalResultReceipt,
+    MCPTerminalCandidateLifecycle,
     MCPTerminalCandidateSnapshot,
     Message,
     PendingSkillContext,
@@ -544,6 +545,26 @@ class StoragePort(Protocol):
         result_snapshot: MCPDurableResultSnapshot | None,
         occurred_at: datetime,
     ) -> MCPTerminalResultCommitResult: ...
+
+    async def list_incomplete_mcp_terminal_candidate_lifecycles(
+        self, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]: ...
+
+    async def claim_mcp_terminal_candidate_archives(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]: ...
+
+    async def finish_mcp_terminal_candidate_archive(
+        self, candidate_id: str, expected_revision: int, archived_at: datetime
+    ) -> MCPTerminalCandidateLifecycle | None: ...
+
+    async def claim_mcp_terminal_candidate_deletions(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]: ...
+
+    async def finish_mcp_terminal_candidate_deletion(
+        self, candidate_id: str, expected_revision: int, deleted_at: datetime
+    ) -> MCPTerminalCandidateLifecycle | None: ...
 
     async def finalize_mcp_dispatch(
         self,

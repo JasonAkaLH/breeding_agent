@@ -1218,6 +1218,57 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             await self.storage.get_mcp_terminal_result_receipt_for_call("call-1")
         )
 
+    async def test_candidate_lifecycle_archive_and_delete_cas(self) -> None:
+        active = await self._admit()
+        candidate_snapshot, result_snapshot = self._terminal_snapshots()
+        committed_at = NOW + timedelta(seconds=1)
+        committed = await self.storage.commit_mcp_call_terminal(
+            "call-1",
+            candidate_snapshot.candidate.candidate_id,
+            self.outbox_id,
+            active.revision,
+            "worker",
+            "token",
+            candidate_snapshot,
+            result_snapshot,
+            committed_at,
+        )
+        self.assertEqual(str(committed), "committed_normal")
+
+        archiving = await self.storage.claim_mcp_terminal_candidate_archives(
+            committed_at, limit=1000
+        )
+        self.assertEqual(len(archiving), 1)
+        self.assertEqual(str(archiving[0].status), "archiving")
+        archived = await self.storage.finish_mcp_terminal_candidate_archive(
+            archiving[0].candidate_id,
+            archiving[0].revision,
+            committed_at + timedelta(seconds=1),
+        )
+        self.assertEqual(str(archived.status), "archived")
+        self.assertEqual(
+            archived.eligible_at,
+            committed_at + timedelta(days=30, seconds=1),
+        )
+        self.assertEqual(
+            await self.storage.claim_mcp_terminal_candidate_deletions(
+                committed_at + timedelta(days=29), limit=1000
+            ),
+            [],
+        )
+
+        deleting = await self.storage.claim_mcp_terminal_candidate_deletions(
+            committed_at + timedelta(days=31), limit=1000
+        )
+        self.assertEqual(len(deleting), 1)
+        deleted = await self.storage.finish_mcp_terminal_candidate_deletion(
+            deleting[0].candidate_id,
+            deleting[0].revision,
+            committed_at + timedelta(days=31, seconds=1),
+        )
+        self.assertEqual(str(deleted.status), "deleted")
+        self.assertIsNone(deleted.eligible_at)
+
     async def test_completed_terminal_commit_keeps_dispatch_active_until_finalizer(
         self,
     ) -> None:

@@ -36,7 +36,8 @@ TERMINAL_CANDIDATE_SCHEMA_V2 = "maf.user_mcp.cp7.terminal_result_candidate.v2"
 TERMINAL_CANDIDATE_SCHEMA = TERMINAL_CANDIDATE_SCHEMA_V2
 TERMINAL_TASK_INDEX_SCHEMA = "maf.user_mcp.cp7.terminal_result_task_index.v1"
 TERMINAL_CALL_INDEX_SCHEMA = "maf.user_mcp.cp7.terminal_result_call_index.v1"
-DEFAULT_MAXIMUM_TERMINAL_ARTIFACTS = 10_000
+DEFAULT_MAXIMUM_TERMINAL_CANDIDATES = 10_000
+DEFAULT_MAXIMUM_TERMINAL_ARTIFACTS = 3 * DEFAULT_MAXIMUM_TERMINAL_CANDIDATES
 _ARTIFACT_SIZE_LIMIT = 64 * 1024
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _UTC_SECOND_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -75,6 +76,19 @@ def seal_terminal_result_candidate(
     """Durably seal a candidate before any authority-database transaction."""
 
     root = _validated_root(artifact_root)
+    names = _bounded_names(
+        root,
+        maximum_entries=DEFAULT_MAXIMUM_TERMINAL_ARTIFACTS,
+    )
+    candidate_path = terminal_candidate_path(root, candidate.candidate_id)
+    if (
+        not candidate_path.exists()
+        and sum(name.startswith("candidate-") for name in names)
+        >= DEFAULT_MAXIMUM_TERMINAL_CANDIDATES
+    ):
+        raise CP7TerminalResultLimitError(
+            "terminal-result candidate inventory exceeds its active bound"
+        )
     payload = _candidate_payload(candidate)
     candidate_publication = publish_or_compare_immutable(
         terminal_candidate_path(root, candidate.candidate_id),
@@ -144,11 +158,30 @@ def compare_terminal_result_candidate(
     return sealed
 
 
+def secure_read_terminal_result_candidate_active_or_archive(
+    artifact_root: str | os.PathLike[str],
+    candidate_id: str,
+    *,
+    archive_root: str | os.PathLike[str] | None = None,
+) -> SealedTerminalResultCandidate:
+    root = _validated_root(artifact_root)
+    candidate_path = terminal_candidate_path(root, candidate_id)
+    if candidate_path.exists() or candidate_path.is_symlink():
+        return secure_read_terminal_result_candidate(root, candidate_id)
+    resolved_archive = _validated_root(
+        Path(archive_root)
+        if archive_root is not None
+        else root.with_name(root.name + "-archive")
+    )
+    return _read_and_validate_candidate(resolved_archive, candidate_id)
+
+
 def enumerate_unconsumed_terminal_result_candidates(
     artifact_root: str | os.PathLike[str],
     *,
     consumed_candidate_ids: AbstractSet[str] = frozenset(),
     maximum_entries: int = DEFAULT_MAXIMUM_TERMINAL_ARTIFACTS,
+    maximum_candidates: int = DEFAULT_MAXIMUM_TERMINAL_CANDIDATES,
 ) -> tuple[SealedTerminalResultCandidate, ...]:
     """Validate the whole store and return unconsumed candidates deterministically."""
 
@@ -156,11 +189,19 @@ def enumerate_unconsumed_terminal_result_candidates(
         raise CP7TerminalResultLimitError(
             "terminal-result enumeration bound is invalid"
         )
+    if isinstance(maximum_candidates, bool) or maximum_candidates <= 0:
+        raise CP7TerminalResultLimitError(
+            "terminal-result candidate enumeration bound is invalid"
+        )
     root = _validated_root(artifact_root)
     names = _bounded_names(root, maximum_entries=maximum_entries)
     candidate_names = [name for name in names if name.startswith("candidate-")]
     task_index_names = [name for name in names if name.startswith("task-index-")]
     call_index_names = [name for name in names if name.startswith("call-index-")]
+    if len(candidate_names) > maximum_candidates:
+        raise CP7TerminalResultLimitError(
+            "terminal-result candidate inventory exceeds its active bound"
+        )
     if len(candidate_names) + len(task_index_names) + len(call_index_names) != len(
         names
     ):
@@ -265,8 +306,18 @@ def _read_and_validate_candidate(
 
 
 class MCPTerminalCandidateSnapshotAuthority:
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        root: str | os.PathLike[str],
+        *,
+        archive_root: str | os.PathLike[str] | None = None,
+    ) -> None:
         self._root = _validated_root(root)
+        self._archive_root = Path(
+            archive_root
+            if archive_root is not None
+            else self._root.with_name(self._root.name + "-archive")
+        )
 
     def snapshot(
         self, sealed: SealedTerminalResultCandidate
@@ -292,10 +343,34 @@ class MCPTerminalCandidateSnapshotAuthority:
     def revalidate(
         self, snapshot: MCPTerminalCandidateSnapshot
     ) -> MCPTerminalCandidateSnapshot:
-        current = self.snapshot(
-            secure_read_terminal_result_candidate(
-                self._root, snapshot.candidate.candidate_id
+        candidate = snapshot.candidate
+        active_paths = (
+            terminal_candidate_path(self._root, candidate.candidate_id),
+            terminal_task_index_path(
+                self._root, candidate.task_id, candidate.candidate_id
+            ),
+            terminal_call_index_path(self._root, candidate.call_id),
+        )
+        if not active_paths[0].exists() and any(
+            path.exists() or path.is_symlink() for path in active_paths[1:]
+        ):
+            raise CP7TerminalResultCorruptionError(
+                "terminal-result active candidate triple is partial"
             )
+        sealed = secure_read_terminal_result_candidate_active_or_archive(
+            self._root,
+            candidate.candidate_id,
+            archive_root=self._archive_root,
+        )
+        current = MCPTerminalCandidateSnapshot(
+            candidate=sealed.candidate,
+            candidate_schema=sealed.candidate_schema,
+            active_candidate_filename=snapshot.active_candidate_filename,
+            active_task_index_filename=snapshot.active_task_index_filename,
+            active_call_index_filename=snapshot.active_call_index_filename,
+            candidate_file_sha256=sealed.candidate_file_sha256,
+            task_index_file_sha256=sealed.task_index_file_sha256,
+            call_index_file_sha256=sealed.call_index_file_sha256,
         )
         if current != snapshot:
             raise CP7TerminalResultCorruptionError(
@@ -715,6 +790,7 @@ __all__ = [
     "CP7TerminalResultCorruptionError",
     "CP7TerminalResultLimitError",
     "DEFAULT_MAXIMUM_TERMINAL_ARTIFACTS",
+    "DEFAULT_MAXIMUM_TERMINAL_CANDIDATES",
     "MCPTerminalCandidateSnapshotAuthority",
     "SealedTerminalResultCandidate",
     "TERMINAL_CALL_INDEX_SCHEMA",
@@ -729,6 +805,7 @@ __all__ = [
     "terminal_now_utc_second",
     "seal_terminal_result_candidate",
     "secure_read_terminal_result_candidate",
+    "secure_read_terminal_result_candidate_active_or_archive",
     "terminal_call_index_path",
     "terminal_candidate_path",
     "terminal_task_index_path",

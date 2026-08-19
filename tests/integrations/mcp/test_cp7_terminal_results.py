@@ -436,6 +436,24 @@ class CP7TerminalResultEnumerationTests(unittest.TestCase):
                     directory, maximum_entries=2
                 )
 
+    def test_active_candidate_count_has_an_independent_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            seal_terminal_result_candidate(directory, _completed_candidate())
+            seal_terminal_result_candidate(
+                directory,
+                _completed_candidate(
+                    call_id="call-2",
+                    task_id="task-2",
+                    result_payload_sha256="sha256:" + "c" * 64,
+                ),
+            )
+            with self.assertRaises(CP7TerminalResultLimitError):
+                enumerate_unconsumed_terminal_result_candidates(
+                    directory,
+                    maximum_entries=6,
+                    maximum_candidates=1,
+                )
+
 
 class CP7TerminalResultPathSecurityTests(unittest.TestCase):
     def test_hostile_identifiers_cannot_control_artifact_paths(self) -> None:

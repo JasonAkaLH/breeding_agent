@@ -85,6 +85,8 @@ from src.core.models import (
     MCPTerminalResultCommitResult,
     MCPTerminalResultReceipt,
     MCPTerminalCandidateSnapshot,
+    MCPTerminalCandidateLifecycle,
+    MCPTerminalCandidateLifecycleStatus,
     MCPTerminalState,
     MCPValidatedTerminalResultCandidate,
     MCPLegacyMigrationBatchResult,
@@ -542,6 +544,33 @@ def _row_to_mcp_dispatch_resume(
         resume_answer_id=row.resume_answer_id,
         selector_step_total=int(row.selector_step_total),
         approval_round_total=int(row.approval_round_total),
+    )
+
+
+def _row_to_mcp_terminal_candidate_lifecycle(
+    row: MCPTerminalCandidateLifecycleRow,
+) -> MCPTerminalCandidateLifecycle:
+    return MCPTerminalCandidateLifecycle(
+        candidate_id=row.candidate_id,
+        call_id=row.call_id,
+        task_id=row.task_id,
+        candidate_schema=row.candidate_schema,
+        active_candidate_filename=row.active_candidate_filename,
+        active_task_index_filename=row.active_task_index_filename,
+        active_call_index_filename=row.active_call_index_filename,
+        candidate_file_sha256=row.candidate_file_sha256,
+        task_index_file_sha256=row.task_index_file_sha256,
+        call_index_file_sha256=row.call_index_file_sha256,
+        status=MCPTerminalCandidateLifecycleStatus(row.status),
+        revision=int(row.revision),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        receipt_id=row.receipt_id,
+        archive_candidate_filename=row.archive_candidate_filename,
+        archive_task_index_filename=row.archive_task_index_filename,
+        archive_call_index_filename=row.archive_call_index_filename,
+        consumed_at=row.consumed_at,
+        eligible_at=row.eligible_at,
     )
 
 
@@ -8175,6 +8204,126 @@ class SQLiteStateRepository:
                 "mcp_durable_result_lifecycle_conflict",
             )
 
+    def list_incomplete_mcp_terminal_candidate_lifecycles(
+        self, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_terminal_candidate_lifecycle_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPTerminalCandidateLifecycleRow)
+            .where(
+                MCPTerminalCandidateLifecycleRow.status.in_(
+                    ("archiving", "deleting")
+                )
+            )
+            .order_by(
+                MCPTerminalCandidateLifecycleRow.updated_at,
+                MCPTerminalCandidateLifecycleRow.candidate_id,
+            )
+            .limit(limit)
+        ).all()
+        return [_row_to_mcp_terminal_candidate_lifecycle(row) for row in rows]
+
+    def claim_mcp_terminal_candidate_archives(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_terminal_candidate_lifecycle_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPTerminalCandidateLifecycleRow)
+            .where(
+                MCPTerminalCandidateLifecycleRow.status == "retained",
+                MCPTerminalCandidateLifecycleRow.eligible_at.is_not(None),
+                MCPTerminalCandidateLifecycleRow.eligible_at <= now,
+            )
+            .order_by(
+                MCPTerminalCandidateLifecycleRow.eligible_at,
+                MCPTerminalCandidateLifecycleRow.candidate_id,
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+        for row in rows:
+            row.status = "archiving"
+            row.archive_candidate_filename = row.active_candidate_filename
+            row.archive_task_index_filename = row.active_task_index_filename
+            row.archive_call_index_filename = row.active_call_index_filename
+            row.revision = int(row.revision) + 1
+            row.updated_at = now
+        self._session.flush()
+        return [_row_to_mcp_terminal_candidate_lifecycle(row) for row in rows]
+
+    def finish_mcp_terminal_candidate_archive(
+        self, candidate_id: str, expected_revision: int, archived_at: datetime
+    ) -> MCPTerminalCandidateLifecycle | None:
+        row = self._session.scalar(
+            select(MCPTerminalCandidateLifecycleRow)
+            .where(MCPTerminalCandidateLifecycleRow.candidate_id == candidate_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status != "archiving"
+            or int(row.revision) != expected_revision
+            or not row.archive_candidate_filename
+            or not row.archive_task_index_filename
+            or not row.archive_call_index_filename
+        ):
+            return None
+        row.status = "archived"
+        row.eligible_at = archived_at + timedelta(days=30)
+        row.revision = int(row.revision) + 1
+        row.updated_at = archived_at
+        self._session.flush()
+        return _row_to_mcp_terminal_candidate_lifecycle(row)
+
+    def claim_mcp_terminal_candidate_deletions(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_terminal_candidate_lifecycle_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPTerminalCandidateLifecycleRow)
+            .where(
+                MCPTerminalCandidateLifecycleRow.status == "archived",
+                MCPTerminalCandidateLifecycleRow.eligible_at.is_not(None),
+                MCPTerminalCandidateLifecycleRow.eligible_at <= now,
+            )
+            .order_by(
+                MCPTerminalCandidateLifecycleRow.eligible_at,
+                MCPTerminalCandidateLifecycleRow.candidate_id,
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+        for row in rows:
+            row.status = "deleting"
+            row.revision = int(row.revision) + 1
+            row.updated_at = now
+        self._session.flush()
+        return [_row_to_mcp_terminal_candidate_lifecycle(row) for row in rows]
+
+    def finish_mcp_terminal_candidate_deletion(
+        self, candidate_id: str, expected_revision: int, deleted_at: datetime
+    ) -> MCPTerminalCandidateLifecycle | None:
+        row = self._session.scalar(
+            select(MCPTerminalCandidateLifecycleRow)
+            .where(MCPTerminalCandidateLifecycleRow.candidate_id == candidate_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status != "deleting"
+            or int(row.revision) != expected_revision
+        ):
+            return None
+        row.status = "deleted"
+        row.eligible_at = None
+        row.revision = int(row.revision) + 1
+        row.updated_at = deleted_at
+        self._session.flush()
+        return _row_to_mcp_terminal_candidate_lifecycle(row)
+
     def finalize_mcp_dispatch_intent(
         self,
         intent_id: str,
@@ -12974,6 +13123,53 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.recover_mcp_terminal_candidate(
                 candidate_snapshot, result_snapshot, occurred_at
+            )
+        )
+
+    async def list_incomplete_mcp_terminal_candidate_lifecycles(
+        self, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]:
+        return await self._run(
+            lambda state, collab: (
+                state.list_incomplete_mcp_terminal_candidate_lifecycles(
+                    limit=limit
+                )
+            )
+        )
+
+    async def claim_mcp_terminal_candidate_archives(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_terminal_candidate_archives(
+                now, limit=limit
+            )
+        )
+
+    async def finish_mcp_terminal_candidate_archive(
+        self, candidate_id: str, expected_revision: int, archived_at: datetime
+    ) -> MCPTerminalCandidateLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.finish_mcp_terminal_candidate_archive(
+                candidate_id, expected_revision, archived_at
+            )
+        )
+
+    async def claim_mcp_terminal_candidate_deletions(
+        self, now: datetime, *, limit: int = 1000
+    ) -> list[MCPTerminalCandidateLifecycle]:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_terminal_candidate_deletions(
+                now, limit=limit
+            )
+        )
+
+    async def finish_mcp_terminal_candidate_deletion(
+        self, candidate_id: str, expected_revision: int, deleted_at: datetime
+    ) -> MCPTerminalCandidateLifecycle | None:
+        return await self._run(
+            lambda state, collab: state.finish_mcp_terminal_candidate_deletion(
+                candidate_id, expected_revision, deleted_at
             )
         )
 

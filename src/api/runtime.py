@@ -157,6 +157,10 @@ from src.integrations.mcp.cp7_terminal_results import (
     terminal_now_utc_second,
     seal_terminal_result_candidate,
     secure_read_terminal_result_candidate,
+    secure_read_terminal_result_candidate_active_or_archive,
+)
+from src.integrations.mcp.cp7_terminal_lifecycle import (
+    MCPTerminalCandidateLifecycleManager,
 )
 from src.integrations.mcp.pending_action_payloads import (
     MAX_PENDING_ACTION_ARGUMENT_BYTES,
@@ -642,6 +646,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         mcp_durable_result_snapshot_authority: (
             MCPDurableResultSnapshotAuthority | None
         ) = None,
+        mcp_terminal_candidate_lifecycle_manager: (
+            MCPTerminalCandidateLifecycleManager | None
+        ) = None,
         user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
         user_mcp_presence_service: MCPTaskPresenceService | None = None,
         user_mcp_audit_service: MCPAuditService | None = None,
@@ -697,6 +704,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         )
         self._mcp_durable_result_snapshot_authority = (
             mcp_durable_result_snapshot_authority
+        )
+        self._mcp_terminal_candidate_lifecycle_manager = (
+            mcp_terminal_candidate_lifecycle_manager
         )
         self.user_mcp_result_janitor = user_mcp_result_janitor
         self.user_mcp_presence_service = user_mcp_presence_service
@@ -8514,7 +8524,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         await self._admit_mcp_rollout_instance()
         aggregate_reconciler = MCPAggregateStartupReconciler(
             MCPAggregateRecoveryStages(
-                repair_lifecycle_markers=no_op_recovery_stage,
+                repair_lifecycle_markers=(
+                    self._repair_mcp_terminal_candidate_lifecycle
+                ),
                 enumerate_terminal_candidates=(
                     self._strict_enumerate_mcp_terminal_candidates
                 ),
@@ -8593,6 +8605,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 self._mcp_rollout_metric_recorder.run_continuous_zero_series(),
                 name="mcp-rollout-zero-series",
             )
+
+    async def _repair_mcp_terminal_candidate_lifecycle(self) -> None:
+        manager = self._mcp_terminal_candidate_lifecycle_manager
+        if manager is None:
+            return
+        await manager.run_once(limit=1000)
 
     async def _strict_enumerate_mcp_terminal_candidates(self) -> None:
         root = self._mcp_terminal_result_root
@@ -10881,6 +10899,9 @@ def build_api_runtime(
     mcp_terminal_candidate_snapshot_authority: (
         MCPTerminalCandidateSnapshotAuthority | None
     ) = None
+    mcp_terminal_candidate_lifecycle_manager: (
+        MCPTerminalCandidateLifecycleManager | None
+    ) = None
     mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None
     result_root: Path | None = None
     if user_mcp_enabled:
@@ -10925,7 +10946,7 @@ def build_api_runtime(
         )
 
     def read_terminal_candidate(call_id: str, candidate_id: str):
-        sealed = secure_read_terminal_result_candidate(
+        sealed = secure_read_terminal_result_candidate_active_or_archive(
             terminal_result_root, candidate_id
         )
         if sealed.candidate.call_id != call_id:
@@ -11015,6 +11036,11 @@ def build_api_runtime(
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
         conversation_file_store = LocalConversationFileStore(
             conversation_file_store_path or (Path(database_path).parent / "conversation_files")
+        )
+
+    if user_mcp_enabled:
+        mcp_terminal_candidate_lifecycle_manager = (
+            MCPTerminalCandidateLifecycleManager(storage, terminal_result_root)
         )
 
     user_mcp_config_service = None
@@ -12151,6 +12177,9 @@ def build_api_runtime(
         ),
         mcp_durable_result_snapshot_authority=(
             mcp_durable_result_snapshot_authority
+        ),
+        mcp_terminal_candidate_lifecycle_manager=(
+            mcp_terminal_candidate_lifecycle_manager
         ),
         user_mcp_result_janitor=user_mcp_result_janitor,
         user_mcp_presence_service=user_mcp_presence_service,
