@@ -25,6 +25,7 @@ from src.integrations.mcp.credentials import MCPRecoveryCallContext
 from src.integrations.mcp.protocol import MCP_PROTOCOL_VERSION_2026_07_28
 from src.integrations.mcp.recovery_worker import (
     MCPContinuationAdmissionResult,
+    MCPRemoteTaskProcessedResult,
     MCPRemoteTaskRecoveryError,
     MCPRemoteTaskRecoveryWorker,
     MCPRemoteTaskTerminalMetricSample,
@@ -752,6 +753,52 @@ class UserMCPRemoteTaskRecoveryWorkerTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("raw-error", serialized)
             self.assertNotIn("vendor_secret_status", serialized)
 
+    async def test_result_processor_can_turn_completed_remote_task_into_tool_error(self) -> None:
+        binding = self._binding("parsed-tool-error")
+        await self._reserve_call(binding)
+        await self.storage.save_mcp_remote_task_binding(binding)
+        client = _RecordingClient(
+            state=MCPTaskState(
+                safe_remote_task_ref=binding.safe_remote_task_ref,
+                status="completed",
+                terminal=True,
+                result={
+                    "resultType": "complete",
+                    "content": [],
+                    "isError": True,
+                },
+            )
+        )
+        processed_sources: list[str] = []
+        sealed: list[tuple[str, str | None]] = []
+
+        async def process(_binding, result, source):
+            self.assertTrue(result["isError"])
+            processed_sources.append(source)
+            return MCPRemoteTaskProcessedResult(
+                "failed", "mcp_tool_error", None
+            )
+
+        async def seal(_binding, call_status, _result_ref, safe_error_code):
+            sealed.append((call_status, safe_error_code))
+
+        worker = MCPRemoteTaskRecoveryWorker(
+            storage=self.storage,
+            client_factory=lambda _binding: client,
+            instance_id="worker-parsed-tool-error",
+            result_processor=process,
+            terminal_sealer=seal,
+            now_fn=lambda: self.now,
+        )
+
+        self.assertEqual(await worker.run_once(), 1)
+        self.assertEqual(processed_sources, ["tasks_get"])
+        self.assertEqual(sealed, [("failed", "mcp_tool_error")])
+        call = await self.storage.get_mcp_call_record(
+            binding.owner_user_id, binding.task_id, binding.call_ref
+        )
+        self.assertEqual(call.status, "failed")
+        self.assertEqual(call.safe_error_code, "mcp_tool_error")
     async def test_terminal_metrics_follow_successful_atomic_convergence(self) -> None:
         expected = {
             "completed": (

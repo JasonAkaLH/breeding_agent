@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- MCP五版本Result解析检查点5完成：新增独立闭合`MAF_USER_MCP_RESULT_PARSER_MODE=safe_hide|shadow|enforce`（缺失/未知均safe-hide），Gateway enforce对identity-bound streamed descriptor调用Result Service，不再使用`{"value": raw}`或直接信任`_mcpResultRef`；validated checkpoint按Call/protocol/source/raw/schema逐项复验后才提交terminal，`isError=true`形成Tool失败、malformed形成确定性非重试失败、checkpoint前worker/IPC失败保持unknown/no-replay，checkpoint后projection失败不回滚成功。Call原子固化`tools_call|tasks_result|tasks_get`，candidate v3/receipt保存parser/checkpoint/model digest。2025 failed Task也读取`tasks/result`，2026 failed/cancelled不解包成功result；shadow/safe-hide不改变旧terminal，enforce remote结果进入同一隔离Service。License Requirement：复用现有Gateway、Recovery与Result Service，无新增依赖或许可变更。
+
 - MCP五版本Result解析检查点4完成：每个解析job使用一次性`multiprocessing spawn`子进程，公平gate固定active=1、queued=8、per-owner=2、queue wait=30秒、wall=10秒；父进程只接收4 KiB validated checkpoint和最多192 KiB projection envelope，checkpoint后projection生成/存储失败不再改变succeeded结论。新增0700/0600、O_EXCL/O_NOFOLLOW、inode/owner/nlink复验的task-private projection staged/publish/load/janitor，temporary-result exact discard同步删除data+manifest且禁止held/terminal-published删除、失败保留索引供24小时orphan janitor重试。backend Linux容器验证512 MiB `RLIMIT_AS`、64 MiB raw边界及恶意regex可终止。License Requirement：仅使用Python标准库multiprocessing/resource与现有存储能力，无新增依赖或许可变更。
 
 - MCP五版本Result解析检查点3完成：新增`result_parsing`闭合包与五个独立版本Decoder，严格拒绝duplicate key、NaN/Infinity、lone surrogate、非JSON值、越界深度/节点/key/block，按版本解析text/image/audio/resource/resource_link与structuredContent；2025-06+使用Call冻结schema且禁止外部`$ref`，2026区分缺失与显式null并将缺`resultType`历史例外限制为pre-enforce `tasks_get`。统一模型不含raw/meta/control identity，user/agent projector执行exact JSON去重、secret/URL脱敏、binary metadata化和20,000 code points/80,000 bytes预算。License Requirement：复用现有jsonschema与标准库，无新增依赖或许可变更。

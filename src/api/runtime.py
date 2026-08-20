@@ -172,6 +172,14 @@ from src.integrations.mcp.result_artifact_projection import (
     MCPResultArtifactProjector,
     fold_mcp_result_artifact_projection_payloads,
 )
+from src.integrations.mcp.result_parsing import (
+    MCPIsolatedResultService,
+    MCPProjectionStore,
+    MCPResultDecodeRequest,
+    MCPResultParserMode,
+    MCPResultSource,
+    resolve_result_parser_mode,
+)
 from src.integrations.mcp.pending_action_payloads import (
     MAX_PENDING_ACTION_ARGUMENT_BYTES,
     MCPPendingActionPayloadCipher,
@@ -201,6 +209,7 @@ from src.integrations.mcp.cp7_safety import (
 from src.integrations.mcp.health import MCPHealthRunner
 from src.integrations.mcp.recovery_worker import (
     MCPContinuationAdmissionResult,
+    MCPRemoteTaskProcessedResult,
     MCPRemoteTaskRecoveryWorker,
     MCPRemoteTaskTerminalMetricSample,
 )
@@ -11407,6 +11416,10 @@ def build_api_runtime(
     ) = None
     mcp_result_artifact_projector: MCPResultArtifactProjector | None = None
     mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None
+    mcp_result_service: MCPIsolatedResultService | None = None
+    mcp_result_parser_mode = resolve_result_parser_mode(
+        os.environ.get("MAF_USER_MCP_RESULT_PARSER_MODE")
+    )
     result_root: Path | None = None
     if user_mcp_enabled:
         assert user_mcp_capacity_values is not None
@@ -11420,6 +11433,13 @@ def build_api_runtime(
                 "MAF_USER_MCP_MEMORY_RESULT_THRESHOLD_BYTES",
                 allow_default=1024 * 1024,
             ),
+        )
+        projection_root = Path(
+            os.environ.get("MAF_USER_MCP_RESULT_PROJECTION_ROOT")
+            or (Path(database_path).parent / "user_mcp_result_projections")
+        )
+        mcp_result_service = MCPIsolatedResultService(
+            projection_store=MCPProjectionStore(projection_root)
         )
         mcp_durable_result_snapshot_authority = MCPDurableResultSnapshotAuthority(
             user_mcp_result_store
@@ -11686,6 +11706,8 @@ def build_api_runtime(
             capacity=capacity,
             now_fn=ApiRuntime._utcnow_naive,
             endpoint_security_observer=record_endpoint_security,
+            result_service=mcp_result_service,
+            result_parser_mode=mcp_result_parser_mode,
         )
 
         async def cancel_offline_user_mcp(
@@ -12118,6 +12140,7 @@ def build_api_runtime(
             )
     if user_mcp_enabled:
         mcp_runtime_holder: dict[str, ApiRuntime] = {}
+        remote_parsed_results: dict[str, Any] = {}
 
         async def persist_remote_task_result(
             binding,
@@ -12136,6 +12159,8 @@ def build_api_runtime(
                 encoded = json.dumps(
                     dict(result),
                     ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
                 await sink.write(encoded)
@@ -12144,6 +12169,71 @@ def build_api_runtime(
                 await sink.abort()
                 raise
             return persisted.ref
+
+        async def process_remote_task_result(
+            binding,
+            result: Mapping[str, Any],
+            result_source: str,
+        ) -> MCPRemoteTaskProcessedResult:
+            if user_mcp_result_store is None or mcp_result_service is None:
+                raise RuntimeError("mcp_remote_task_result_service_unavailable")
+            result_ref = await persist_remote_task_result(binding, result)
+            descriptor = user_mcp_result_store.resolve_ref(result_ref)
+            call = await storage.get_mcp_call_record(
+                binding.owner_user_id, binding.task_id, binding.call_ref
+            )
+            if call is None or call.protocol_version != binding.protocol_version:
+                await user_mcp_result_store.discard(descriptor)
+                raise RuntimeError("mcp_remote_task_result_authority_invalid")
+            try:
+                parsed = await mcp_result_service.parse(
+                    owner_user_id=binding.owner_user_id,
+                    task_id=binding.task_id,
+                    node_id=binding.node_id,
+                    call_ref=binding.call_ref,
+                    request=MCPResultDecodeRequest(
+                        protocol_version=call.protocol_version,
+                        source=MCPResultSource(result_source),
+                        payload=user_mcp_result_store.result_parser_descriptor(
+                            descriptor
+                        ),
+                        output_schema=call.output_schema,
+                        output_schema_sha256=call.output_schema_sha256,
+                    ),
+                )
+            except BaseException:
+                await user_mcp_result_store.discard(descriptor)
+                raise
+            if mcp_result_parser_mode is MCPResultParserMode.SHADOW:
+                if parsed.projection_staging_handle is not None:
+                    mcp_result_service.discard_projection(
+                        parsed.projection_staging_handle
+                    )
+                is_error = result.get("isError", False)
+                if is_error is True:
+                    await user_mcp_result_store.discard(descriptor)
+                    return MCPRemoteTaskProcessedResult(
+                        "failed", "mcp_tool_error", None
+                    )
+                return MCPRemoteTaskProcessedResult(
+                    "completed", None, result_ref
+                )
+            checkpoint = parsed.checkpoint
+            remote_parsed_results[binding.call_ref] = parsed
+            if checkpoint.outcome == "succeeded":
+                return MCPRemoteTaskProcessedResult(
+                    "completed", None, result_ref
+                )
+            await user_mcp_result_store.discard(descriptor)
+            return MCPRemoteTaskProcessedResult(
+                "failed",
+                (
+                    "mcp_tool_error"
+                    if checkpoint.outcome == "tool_error"
+                    else "mcp_result_malformed"
+                ),
+                None,
+            )
 
         async def seal_remote_task_terminal(
             binding,
@@ -12165,6 +12255,36 @@ def build_api_runtime(
             if intent is None or call.server_config_version is None:
                 raise RuntimeError("mcp_remote_task_terminal_authority_corrupt")
             terminal_state = MCPTerminalState(call_status)
+            parsed_outcome = remote_parsed_results.get(binding.call_ref)
+            checkpoint = (
+                parsed_outcome.checkpoint
+                if parsed_outcome is not None
+                else None
+            )
+            if checkpoint is not None:
+                expected_source = (
+                    "tasks_result"
+                    if binding.protocol_version == "2025-11-25"
+                    else "tasks_get"
+                )
+                if (
+                    checkpoint.call_ref != binding.call_ref
+                    or checkpoint.protocol_version != call.protocol_version
+                    or checkpoint.source != expected_source
+                    or checkpoint.output_schema_sha256
+                    != call.output_schema_sha256
+                    or (
+                        checkpoint.outcome == "succeeded"
+                        and call_status != "completed"
+                    )
+                    or (
+                        checkpoint.outcome in {"tool_error", "malformed"}
+                        and call_status != "failed"
+                    )
+                ):
+                    raise RuntimeError(
+                        "mcp_remote_task_result_checkpoint_invalid"
+                    )
             result_descriptor = (
                 user_mcp_result_store.resolve_ref(result_ref)
                 if result_ref is not None
@@ -12182,6 +12302,14 @@ def build_api_runtime(
                     expected_sha256=result_descriptor.sha256,
                     expected_store_kind="durable_content_addressed",
                 )
+                if (
+                    checkpoint is not None
+                    and checkpoint.raw_sha256
+                    != f"sha256:{result_descriptor.sha256}"
+                ):
+                    raise RuntimeError(
+                        "mcp_remote_task_result_checkpoint_invalid"
+                    )
             payload_sha = canonical_sha256(
                 {
                     "safe_result_ref": result_ref,
@@ -12227,6 +12355,24 @@ def build_api_runtime(
                         "durable_content_addressed"
                         if result_descriptor is not None
                         else None
+                    ),
+                    result_parser_revision=(
+                        checkpoint.parser_revision
+                        if checkpoint is not None
+                        else None
+                    ),
+                    validated_checkpoint_sha256=(
+                        checkpoint.checkpoint_sha256
+                        if checkpoint is not None
+                        else None
+                    ),
+                    parsed_model_sha256=(
+                        checkpoint.parsed_model_sha256
+                        if checkpoint is not None
+                        else None
+                    ),
+                    terminal_result_source=(
+                        checkpoint.source if checkpoint is not None else None
                     ),
                 ),
             )
@@ -12312,6 +12458,22 @@ def build_api_runtime(
                     )
             if str(committed) == "conflict":
                 raise RuntimeError("mcp_remote_task_terminal_commit_conflict")
+            parsed_outcome = remote_parsed_results.pop(binding.call_ref, None)
+            if result_ref is not None:
+                user_mcp_result_store.mark_promoted(
+                    user_mcp_result_store.resolve_ref(result_ref)
+                )
+            if (
+                parsed_outcome is not None
+                and parsed_outcome.projection_staging_handle is not None
+                and mcp_result_service is not None
+            ):
+                try:
+                    mcp_result_service.publish_projection(
+                        parsed_outcome.projection_staging_handle
+                    )
+                except Exception:
+                    pass
             if (
                 result_ref is not None
                 and candidate.terminal_state is MCPTerminalState.COMPLETED
@@ -12501,6 +12663,11 @@ def build_api_runtime(
             active_metric_sink=record_remote_tasks_active_metric,
             global_metric_gap_sink=record_remote_task_global_metric_gap,
             result_persister=persist_remote_task_result,
+            result_processor=(
+                None
+                if mcp_result_parser_mode is MCPResultParserMode.SAFE_HIDE
+                else process_remote_task_result
+            ),
             result_committer=commit_remote_task_result,
             terminal_sealer=seal_remote_task_terminal,
             continuation_sink=continue_remote_task,

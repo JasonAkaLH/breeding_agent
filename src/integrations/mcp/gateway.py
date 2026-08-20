@@ -64,6 +64,18 @@ from .temporary_results import (
     MCPTemporaryResultRef,
     MCPTemporaryResultStore,
 )
+from .result_parsing.models import MCPResultDecodeRequest, MCPResultSource
+from .result_parsing.projection_store import (
+    MCPProjectionStagingHandle,
+    MCPPublishedProjection,
+)
+from .result_parsing.service import (
+    MCPIsolatedResultService,
+    MCPResultParserMode,
+    MCPResultWorkerError,
+    resolve_result_parser_mode,
+)
+from .result_parsing.worker import MCPValidatedResultCheckpoint
 
 
 SCOPE_LEASE_TTL_SECONDS = 30.0
@@ -78,6 +90,41 @@ class MCPGatewayError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class MCPResultTerminalError(MCPRemoteError):
+    def __init__(
+        self,
+        *,
+        safe_error_code: str,
+        checkpoint: MCPValidatedResultCheckpoint,
+    ) -> None:
+        super().__init__(
+            "MCP Tool result failed validated terminal parsing.",
+            remote_code=None,
+            retriable=False,
+        )
+        self.safe_error_code = safe_error_code
+        self.checkpoint = checkpoint
+        self.terminal_result_source = checkpoint.source
+
+
+@dataclass(frozen=True, slots=True)
+class _ResultParseContext:
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    protocol_version: str
+    output_schema: Mapping[str, Any] | None
+    output_schema_sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _GatewayParsedResult:
+    raw_result_ref: MCPTemporaryResultRef
+    checkpoint: MCPValidatedResultCheckpoint
+    projection_staging_handle: MCPProjectionStagingHandle | None
 
 
 class MCPAuthenticatedPrincipal(Protocol):
@@ -298,6 +345,8 @@ class MCPGateway:
         lease_ttl_seconds: float = SCOPE_LEASE_TTL_SECONDS,
         lease_renew_interval_seconds: float = SCOPE_LEASE_RENEW_INTERVAL_SECONDS,
         heartbeat_interval_seconds: float = CALL_HEARTBEAT_INTERVAL_SECONDS,
+        result_service: MCPIsolatedResultService | None = None,
+        result_parser_mode: MCPResultParserMode | str | None = None,
         discovery_timeout_seconds: float = SCOPE_DISCOVERY_TIMEOUT_SECONDS,
         discovery_retry_delay_seconds: float = SCOPE_DISCOVERY_RETRY_DELAY_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -322,6 +371,8 @@ class MCPGateway:
         self._endpoint_revalidator = endpoint_revalidator
         self._readonly_shadow_client_factory = readonly_shadow_client_factory
         self._result_store = result_store
+        self._result_service = result_service
+        self._result_parser_mode = resolve_result_parser_mode(result_parser_mode)
         self._capacity = capacity
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
         self._lease_ttl_seconds = lease_ttl_seconds
@@ -1053,6 +1104,19 @@ class MCPGateway:
                 node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
                 call_ref=call_state.call_ref,
             )
+            tool_descriptor = state.catalog.get(tool_name)
+            if tool_descriptor is None:
+                await sink.abort()
+                raise MCPGatewayError("mcp_tool_not_found")
+            result_context = _ResultParseContext(
+                owner_user_id=state.public.owner_user_id,
+                task_id=state.public.platform_task_id,
+                node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
+                call_ref=call_state.call_ref,
+                protocol_version=state.catalog.effective_protocol_version,
+                output_schema=tool_descriptor.output_schema,
+                output_schema_sha256=tool_descriptor.output_schema_sha256,
+            )
 
             def registered(request_id: str | int) -> None:
                 call_state.remote_request_id = request_id
@@ -1104,6 +1168,7 @@ class MCPGateway:
                                 result,
                                 sink,
                                 external_text=extract_ocr_text_projection(result),
+                                result_context=result_context,
                             )
                         ),
                     )
@@ -1127,7 +1192,9 @@ class MCPGateway:
         outcome = (
             raw
             if isinstance(raw, MCPCallOutcome)
-            else await self._normalize_outcome(raw, sink)
+            else await self._normalize_outcome(
+                raw, sink, result_context=result_context
+            )
         )
         if not state.accepting_calls:
             raise MCPGatewayError("mcp_scope_closed")
@@ -1139,6 +1206,7 @@ class MCPGateway:
         sink: Any,
         *,
         external_text: str | None = None,
+        result_context: _ResultParseContext | None = None,
     ) -> MCPCallOutcome:
         if isinstance(raw, MCPInputRequiredOutcome):
             await sink.abort()
@@ -1152,7 +1220,58 @@ class MCPGateway:
             return MCPCallOutcome.task_created(raw.safe_remote_task_ref, status=raw.status)
         result = raw.result if isinstance(raw, MCPCompletedOutcome) else raw
         if not isinstance(result, Mapping):
-            result = {"value": result}
+            await sink.abort()
+            raise MCPProtocolError("MCP Tool result must be a JSON object.")
+        if (
+            self._result_parser_mode is not MCPResultParserMode.SAFE_HIDE
+            and self._result_service is not None
+            and result_context is not None
+        ):
+            try:
+                parsed = await self._parse_completed_result(
+                    result,
+                    result_context=result_context,
+                )
+            except BaseException:
+                if self._result_parser_mode is MCPResultParserMode.SHADOW:
+                    parsed = None
+                else:
+                    try:
+                        await sink.abort()
+                    except RuntimeError:
+                        pass
+                    raise
+            if parsed is not None:
+                if (
+                    self._result_parser_mode is MCPResultParserMode.SHADOW
+                    and parsed.projection_staging_handle is not None
+                ):
+                    self._result_service.discard_projection(
+                        parsed.projection_staging_handle
+                    )
+                if self._result_parser_mode is MCPResultParserMode.ENFORCE:
+                    if parsed.checkpoint.outcome != "succeeded":
+                        await self._result_store.discard(parsed.raw_result_ref)
+                        raise MCPResultTerminalError(
+                            safe_error_code=(
+                                "mcp_tool_error"
+                                if parsed.checkpoint.outcome == "tool_error"
+                                else "mcp_result_malformed"
+                            ),
+                            checkpoint=parsed.checkpoint,
+                        )
+                    return MCPCallOutcome.completed(
+                        parsed.raw_result_ref.ref,
+                        content_type="application/json",
+                        byte_size=parsed.raw_result_ref.size_bytes,
+                        result_content_sha256=parsed.checkpoint.raw_sha256,
+                        result_store_kind="durable_content_addressed",
+                        external_text=external_text,
+                        terminal_result_source=parsed.checkpoint.source,
+                        validated_checkpoint=parsed.checkpoint,
+                        projection_staging_handle=parsed.projection_staging_handle,
+                    )
+                # Shadow mode deliberately preserves the legacy terminal result below.
         if result.get("isError") is True:
             await sink.abort()
             structured = result.get("structuredContent")
@@ -1192,6 +1311,79 @@ class MCPGateway:
             result_content_sha256=f"sha256:{ref.sha256}",
             result_store_kind="durable_content_addressed",
             external_text=external_text,
+        )
+
+    async def _parse_completed_result(
+        self,
+        result: Mapping[str, Any],
+        *,
+        result_context: _ResultParseContext,
+    ) -> _GatewayParsedResult | None:
+        embedded = result.get("_mcpResultRef")
+        if not isinstance(embedded, Mapping):
+            if self._result_parser_mode is MCPResultParserMode.ENFORCE:
+                raise MCPResultWorkerError(
+                    "mcp_result_live_payload_descriptor_required"
+                )
+            return None
+        ref_value = embedded.get("ref")
+        size_value = embedded.get("sizeBytes")
+        sha_value = embedded.get("sha256")
+        storage_value = embedded.get("storage")
+        if (
+            not isinstance(ref_value, str)
+            or isinstance(size_value, bool)
+            or not isinstance(size_value, int)
+            or not isinstance(sha_value, str)
+            or len(sha_value) != 64
+            or any(character not in "0123456789abcdef" for character in sha_value)
+            or storage_value != "file"
+        ):
+            raise MCPResultWorkerError("mcp_result_raw_descriptor_invalid")
+        resolved = self._result_store.resolve_ref(ref_value)
+        if (
+            resolved.size_bytes != size_value
+            or resolved.sha256 != sha_value
+            or resolved.storage != "file"
+        ):
+            raise MCPResultWorkerError("mcp_result_raw_descriptor_invalid")
+        descriptor = self._result_store.result_parser_descriptor(resolved)
+        assert self._result_service is not None
+        parsed = await self._result_service.parse(
+            owner_user_id=result_context.owner_user_id,
+            task_id=result_context.task_id,
+            node_id=result_context.node_id,
+            call_ref=result_context.call_ref,
+            request=MCPResultDecodeRequest(
+                protocol_version=result_context.protocol_version,
+                source=MCPResultSource.TOOLS_CALL,
+                payload=descriptor,
+                output_schema=result_context.output_schema,
+                output_schema_sha256=result_context.output_schema_sha256,
+            ),
+        )
+        if parsed.checkpoint.raw_sha256 != "sha256:" + resolved.sha256:
+            raise MCPResultWorkerError("mcp_result_parser_checkpoint_invalid")
+        return _GatewayParsedResult(
+            raw_result_ref=resolved,
+            checkpoint=parsed.checkpoint,
+            projection_staging_handle=parsed.projection_staging_handle,
+        )
+
+    def finalize_result_assets(
+        self, outcome: MCPCallOutcome
+    ) -> MCPPublishedProjection | None:
+        if not outcome.result_ref:
+            return None
+        result_ref = self._result_store.resolve_ref(outcome.result_ref)
+        self._result_store.mark_promoted(result_ref)
+        if (
+            outcome.projection_staging_handle is None
+            or self._result_service is None
+        ):
+            return None
+        return self._result_service.publish_projection(
+            outcome.projection_staging_handle
         )
 
     async def continue_call(

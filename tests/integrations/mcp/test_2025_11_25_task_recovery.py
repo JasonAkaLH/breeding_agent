@@ -475,12 +475,12 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             responses: list[Mapping[str, Any]] = [
                 {"taskId": raw_task_id, "status": {"state": status}}
             ]
-            if status == "completed":
+            if status in {"completed", "failed"}:
                 responses.append(
                     {
                         "content": [{"type": "text", "text": "final-2025"}],
                         "structuredContent": {"status": "complete"},
-                        "isError": False,
+                        "isError": status == "failed",
                         "_meta": {
                             "io.modelcontextprotocol/related-task": {
                                 "taskId": raw_task_id
@@ -517,7 +517,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 methods,
                 ["tasks/get", "tasks/result"]
-                if status == "completed"
+                if status in {"completed", "failed"}
                 else ["tasks/get"],
             )
             self.assertNotIn("tools/call", methods)

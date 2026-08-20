@@ -28,6 +28,7 @@ from src.integrations.mcp.result_parsing.service import (
     MAX_QUEUED_JOBS,
     MCPResultWorkerError,
     MCPResultWorkerGate,
+    resolve_result_parser_mode,
 )
 from src.integrations.mcp.result_parsing.worker import PARSER_REVISION
 from src.integrations.mcp.result_parsing.worker import (
@@ -73,6 +74,9 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
             _streaming_canonical_sha256(value),
             "sha256:" + hashlib.sha256(canonical).hexdigest(),
         )
+        self.assertEqual(str(resolve_result_parser_mode(None)), "safe_hide")
+        self.assertEqual(str(resolve_result_parser_mode("unknown")), "safe_hide")
+        self.assertEqual(str(resolve_result_parser_mode("enforce")), "enforce")
 
     async def test_mapping_is_parsed_in_spawn_worker_and_projection_is_staged_then_published(self) -> None:
         request = MCPResultDecodeRequest(

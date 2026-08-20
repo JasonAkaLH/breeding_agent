@@ -610,6 +610,7 @@ class MCPValidatedTerminalResultCandidate:
     result_parser_revision: str | None = None
     validated_checkpoint_sha256: str | None = None
     parsed_model_sha256: str | None = None
+    terminal_result_source: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

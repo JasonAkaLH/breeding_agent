@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -21,7 +22,12 @@ from src.integrations.mcp.gateway import (
     MCPCallCallbacks,
     MCPGateway,
     MCPGatewayError,
+    MCPResultTerminalError,
     _freeze_catalog,
+)
+from src.integrations.mcp.result_parsing import (
+    MCPIsolatedResultService,
+    MCPProjectionStore,
 )
 from src.integrations.mcp.invalidation import (
     MCPInvalidationAction,
@@ -74,6 +80,30 @@ class _Adapter:
 
     async def close(self):
         self.closed = True
+
+
+class _StreamingResultAdapter(_Adapter):
+    def __init__(self, result) -> None:
+        super().__init__()
+        self._result = result
+
+    async def call_tool(self, tool_name, arguments, **kwargs):
+        del tool_name, arguments
+        self.call_count += 1
+        callback = kwargs.get("request_registered_callback")
+        if callback:
+            callback(self.call_count)
+        sink = kwargs["result_sink"]
+        await sink.write(
+            json.dumps(
+                self._result,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        result_ref = await sink.finalize()
+        return {"_mcpResultRef": result_ref.as_payload()}
 
 
 class _PublicEndpointResolver:
@@ -245,6 +275,35 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             now_fn=lambda: self.now,
         )
 
+    async def _streamed_parser_gateway(self, payload, *, mode: str):
+        root = Path(self.temp_dir.name) / f"parser-{mode}-{len(self.adapters)}"
+        result_store = MCPTemporaryResultStore(root / "raw", memory_threshold_bytes=1)
+        adapter = _StreamingResultAdapter(payload)
+
+        async def client_factory(server, credentials, endpoint):
+            del server, credentials, endpoint
+            return adapter
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id=f"gateway-parser-{mode}-{len(self.adapters)}",
+            credential_loader=lambda server: {},
+            client_factory=client_factory,
+            endpoint_revalidator=_validated_endpoint,
+            result_store=result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=root / "raw",
+                free_bytes=lambda path: 10_000_000,
+            ),
+            result_service=MCPIsolatedResultService(
+                projection_store=MCPProjectionStore(root / "projections")
+            ),
+            result_parser_mode=mode,
+            now_fn=lambda: self.now,
+        )
+        return gateway, result_store
+
     async def test_catalog_freezes_bounded_output_schema_and_excludes_only_invalid_tool(self) -> None:
         server = await self.storage.get_user_mcp_server("alice", "server-1")
         catalog = _freeze_catalog(
@@ -296,6 +355,109 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         for descriptor in catalog.tools:
             self.assertIsNotNone(descriptor.output_schema)
             self.assertRegex(descriptor.output_schema_sha256, r"^sha256:[0-9a-f]{64}$")
+
+    async def test_enforce_streamed_result_classifies_is_error_before_terminal(self) -> None:
+        gateway, result_store = await self._streamed_parser_gateway(
+            {"content": [{"type": "text", "text": "failed"}], "isError": True},
+            mode="enforce",
+        )
+        try:
+            scope = await gateway.open_scope(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+            with self.assertRaises(MCPResultTerminalError) as raised:
+                await gateway.call_tool(
+                    scope,
+                    "echo",
+                    {},
+                    node_id="node-1",
+                    authorization_verified=True,
+                )
+            self.assertEqual(raised.exception.safe_error_code, "mcp_tool_error")
+            self.assertEqual(raised.exception.checkpoint.outcome, "tool_error")
+            self.assertEqual(result_store.list_durable_result_identities(), ())
+            self.assertEqual(
+                [path for path in result_store.root.rglob("*") if path.is_file()],
+                [],
+            )
+        finally:
+            await gateway.aclose()
+
+    async def test_safe_hide_and_shadow_preserve_legacy_terminal_semantics(self) -> None:
+        for mode in ("safe_hide", "shadow", "unknown-value"):
+            with self.subTest(mode=mode):
+                gateway, _result_store = await self._streamed_parser_gateway(
+                    {"content": [], "isError": True}, mode=mode
+                )
+                try:
+                    scope = await gateway.open_scope(
+                        SimpleNamespace(username="alice"), "task-1", "server-1"
+                    )
+                    outcome = await gateway.call_tool(
+                        scope,
+                        "echo",
+                        {},
+                        node_id="node-1",
+                        authorization_verified=True,
+                    )
+                    self.assertEqual(str(outcome.kind), "completed")
+                    self.assertIsNone(outcome.validated_checkpoint)
+                finally:
+                    await gateway.aclose()
+
+    async def test_enforce_malformed_streamed_result_is_deterministic_non_retry_failure(self) -> None:
+        gateway, result_store = await self._streamed_parser_gateway(
+            {"content": "invalid"}, mode="enforce"
+        )
+        try:
+            scope = await gateway.open_scope(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+            with self.assertRaises(MCPResultTerminalError) as raised:
+                await gateway.call_tool(
+                    scope,
+                    "echo",
+                    {},
+                    node_id="node-1",
+                    authorization_verified=True,
+                )
+            self.assertFalse(raised.exception.retriable)
+            self.assertEqual(
+                raised.exception.safe_error_code, "mcp_result_malformed"
+            )
+            self.assertEqual(raised.exception.checkpoint.outcome, "malformed")
+            self.assertEqual(result_store.list_durable_result_identities(), ())
+        finally:
+            await gateway.aclose()
+
+    async def test_enforce_streamed_success_returns_checkpoint_and_publishes_assets_after_terminal(self) -> None:
+        gateway, result_store = await self._streamed_parser_gateway(
+            {"content": [], "structuredContent": {"answer": 42}},
+            mode="enforce",
+        )
+        try:
+            scope = await gateway.open_scope(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+            outcome = await gateway.call_tool(
+                scope,
+                "echo",
+                {},
+                node_id="node-1",
+                authorization_verified=True,
+            )
+            self.assertEqual(outcome.validated_checkpoint.outcome, "succeeded")
+            self.assertEqual(outcome.terminal_result_source, "tools_call")
+            self.assertIsNotNone(outcome.projection_staging_handle)
+
+            published = gateway.finalize_result_assets(outcome)
+
+            self.assertIsNotNone(published)
+            result_ref = result_store.resolve_ref(outcome.result_ref)
+            await result_store.discard(result_ref)
+            self.assertEqual(result_store.resolve_ref(outcome.result_ref), result_ref)
+        finally:
+            await gateway.aclose()
 
     async def asyncTearDown(self) -> None:
         await self.gateway.aclose()

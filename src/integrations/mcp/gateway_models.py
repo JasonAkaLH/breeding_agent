@@ -5,6 +5,9 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from .result_parsing.projection_store import MCPProjectionStagingHandle
+from .result_parsing.worker import MCPValidatedResultCheckpoint
+
 
 class MCPCallOutcomeKind(StrEnum):
     COMPLETED = "completed"
@@ -78,6 +81,9 @@ class MCPCallOutcome:
     result_content_sha256: str | None = None
     result_store_kind: str | None = None
     external_text: str | None = None
+    terminal_result_source: str | None = None
+    validated_checkpoint: MCPValidatedResultCheckpoint | None = None
+    projection_staging_handle: MCPProjectionStagingHandle | None = None
 
     @classmethod
     def completed(
@@ -89,6 +95,9 @@ class MCPCallOutcome:
         result_content_sha256: str | None = None,
         result_store_kind: str | None = None,
         external_text: str | None = None,
+        terminal_result_source: str | None = None,
+        validated_checkpoint: MCPValidatedResultCheckpoint | None = None,
+        projection_staging_handle: MCPProjectionStagingHandle | None = None,
     ) -> "MCPCallOutcome":
         return cls(
             kind=MCPCallOutcomeKind.COMPLETED,
@@ -98,6 +107,9 @@ class MCPCallOutcome:
             result_content_sha256=result_content_sha256,
             result_store_kind=result_store_kind,
             external_text=external_text,
+            terminal_result_source=terminal_result_source,
+            validated_checkpoint=validated_checkpoint,
+            projection_staging_handle=projection_staging_handle,
         )
 
     @classmethod

@@ -113,7 +113,7 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             )
             self.assertEqual(
                 outcome.sealed.candidate_payload_sha256,
-                "sha256:9295eef2299e2ec284a8b4ff2f5c066b9339157efd985142be3a7d974eacc274",
+                "sha256:7b601fb83512be1172426015defca48fb25b55fd0c0eb12218b508ffcd75cb73",
             )
             raw = terminal_candidate_path(root, candidate.candidate_id).read_bytes()
             self.assertEqual(
@@ -142,6 +142,7 @@ class CP7TerminalResultSealTests(unittest.TestCase):
                         "result_parser_revision": None,
                         "validated_checkpoint_sha256": None,
                         "parsed_model_sha256": None,
+                        "terminal_result_source": None,
                         "sealed_at": "2026-08-13T12:34:56Z",
                     },
                 ),
@@ -306,6 +307,7 @@ class CP7TerminalResultSealTests(unittest.TestCase):
                 result_parser_revision="mcp-result-parser.v1",
                 validated_checkpoint_sha256="sha256:" + "c" * 64,
                 parsed_model_sha256="sha256:" + "d" * 64,
+                terminal_result_source="tools_call",
             )
             restored = seal_terminal_result_candidate(directory, checkpointed).sealed
             self.assertEqual(restored.candidate_schema, TERMINAL_CANDIDATE_SCHEMA_V3)
@@ -391,6 +393,19 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             self.assertEqual(
                 seal_terminal_result_candidate(directory, failed).sealed.candidate,
                 failed,
+            )
+        malformed = replace(
+            failed,
+            safe_error_code="mcp_result_malformed",
+            result_parser_revision="mcp-result-parser.v1",
+            validated_checkpoint_sha256="sha256:" + "1" * 64,
+            parsed_model_sha256=None,
+            terminal_result_source="tools_call",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                seal_terminal_result_candidate(directory, malformed).sealed.candidate,
+                malformed,
             )
         invalid = replace(
             _completed_candidate(), safe_result_ref_sha256="sha256:" + "0" * 64

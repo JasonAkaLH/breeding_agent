@@ -166,6 +166,7 @@ class MCPRemoteTaskPollResult:
     poll_interval_ms: int | None = None
     final_result: Mapping[str, Any] | None = None
     input_requests: Mapping[str, Any] | None = None
+    result_source: str | None = None
 
 
 class MCPRemoteTaskProtocolHandler(Protocol):
@@ -197,8 +198,9 @@ class MCP2026RemoteTaskProtocolHandler:
             status=state.status,
             terminal=state.terminal,
             poll_interval_ms=state.poll_interval_ms,
-            final_result=(state.result or {}) if state.status == "completed" else state.result,
+            final_result=(state.result or {}) if state.status == "completed" else None,
             input_requests=state.input_requests,
+            result_source=("tasks_get" if state.status == "completed" else None),
         )
 
     async def submit_input(
@@ -253,7 +255,7 @@ class MCP2025RemoteTaskProtocolHandler:
         if not isinstance(state, MCP2025TaskState):
             raise MCPRemoteTaskRecoveryError("mcp_remote_task_response_invalid")
         final_result = None
-        if state.status == "completed":
+        if state.status in {"completed", "failed"}:
             task_result = await client.tasks_result(
                 binding.safe_remote_task_ref,
                 recovery_context=context,
@@ -268,6 +270,9 @@ class MCP2025RemoteTaskProtocolHandler:
             terminal=state.terminal,
             poll_interval_ms=state.poll_interval_ms,
             final_result=final_result,
+            result_source=(
+                "tasks_result" if final_result is not None else None
+            ),
         )
 
     async def cancel(
@@ -299,6 +304,19 @@ RemoteTaskActiveMetricSink = Callable[[], Any | Awaitable[Any]]
 RemoteTaskGlobalMetricGapSink = Callable[[str], Any | Awaitable[Any]]
 RemoteTaskResultPersister = Callable[
     [MCPRemoteTaskBinding, Mapping[str, Any]], str | Awaitable[str]
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MCPRemoteTaskProcessedResult:
+    call_status: str
+    safe_error_code: str | None
+    result_ref: str | None
+
+
+RemoteTaskResultProcessor = Callable[
+    [MCPRemoteTaskBinding, Mapping[str, Any], str],
+    MCPRemoteTaskProcessedResult | Awaitable[MCPRemoteTaskProcessedResult],
 ]
 RemoteTaskResultCommitter = Callable[
     [MCPRemoteTaskBinding, str | None], str | None | Awaitable[str | None]
@@ -354,6 +372,7 @@ class MCPRemoteTaskRecoveryWorker:
         active_metric_sink: RemoteTaskActiveMetricSink | None = None,
         global_metric_gap_sink: RemoteTaskGlobalMetricGapSink | None = None,
         result_persister: RemoteTaskResultPersister | None = None,
+        result_processor: RemoteTaskResultProcessor | None = None,
         result_committer: RemoteTaskResultCommitter | None = None,
         terminal_sealer: RemoteTaskTerminalSealer | None = None,
         continuation_sink: RemoteTaskContinuationSink | None = None,
@@ -397,6 +416,7 @@ class MCPRemoteTaskRecoveryWorker:
         self._active_metric_sink = active_metric_sink
         self._global_metric_gap_sink = global_metric_gap_sink
         self._result_persister = result_persister
+        self._result_processor = result_processor
         self._result_committer = result_committer
         self._terminal_sealer = terminal_sealer
         self._continuation_sink = continuation_sink
@@ -687,7 +707,34 @@ class MCPRemoteTaskRecoveryWorker:
                 )
                 result_ref = None
                 result_receipt_id = None
-                if call_status == "completed":
+                if result.final_result is not None and self._result_processor is not None:
+                    if result.result_source is None:
+                        raise MCPRemoteTaskRecoveryError(
+                            "mcp_remote_task_result_source_missing"
+                        )
+                    processed = await _await_maybe(
+                        self._result_processor(
+                            authoritative_binding,
+                            result.final_result,
+                            result.result_source,
+                        )
+                    )
+                    if not isinstance(processed, MCPRemoteTaskProcessedResult):
+                        raise MCPRemoteTaskRecoveryError(
+                            "mcp_remote_task_result_processing_failed"
+                        )
+                    call_status = processed.call_status
+                    safe_error_code = processed.safe_error_code
+                    result_ref = processed.result_ref
+                    if (
+                        call_status == "completed" and not result_ref
+                    ) or (
+                        call_status != "completed" and result_ref is not None
+                    ):
+                        raise MCPRemoteTaskRecoveryError(
+                            "mcp_remote_task_result_processing_failed"
+                        )
+                elif call_status == "completed":
                     if result.final_result is None or self._result_persister is None:
                         raise MCPRemoteTaskRecoveryError(
                             "mcp_remote_task_result_persistence_unavailable"
@@ -1036,6 +1083,7 @@ __all__ = [
     "MCP2025RemoteTaskProtocolHandler",
     "MCP2026RemoteTaskProtocolHandler",
     "MCPRemoteTaskPollResult",
+    "MCPRemoteTaskProcessedResult",
     "MCPRemoteTaskProtocolHandler",
     "MCPRemoteTaskRecoveryError",
     "MCPRemoteTaskRecoveryWorker",

@@ -45,7 +45,12 @@ from src.core.models import (
     UserMCPServer,
     UserMCPToolGrant,
 )
-from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
+from src.integrations.mcp.gateway import (
+    MCPCallCallbacks,
+    MCPGateway,
+    MCPGatewayError,
+    MCPResultTerminalError,
+)
 from src.integrations.mcp.client import MCPRemoteError
 from src.integrations.mcp.attachment_materialization import (
     MCPAttachmentMaterializationError,
@@ -2336,13 +2341,25 @@ class UserMCPDispatchCoordinator:
                 await asyncio.gather(claim_task, return_exceptions=True)
             call_ref = call_ref_holder.get("value")
             if call_ref:
+                parsed_terminal_valid = (
+                    not isinstance(exc, MCPResultTerminalError)
+                    or _parsed_checkpoint_matches(
+                        exc.checkpoint,
+                        call_ref=call_ref,
+                        protocol_version=protocol_version,
+                        output_schema_sha256=output_schema_sha256,
+                        expected_source="tools_call",
+                    )
+                )
                 known_terminal_failure = isinstance(
                     exc, (MCPRemoteError, MCPResultTooLargeError, MCPJobWorkflowError)
-                )
+                ) and parsed_terminal_valid
                 terminal_status = "failed"
                 safe_error_code = (
                     "mcp_result_too_large"
                     if isinstance(exc, MCPResultTooLargeError)
+                    else exc.safe_error_code
+                    if isinstance(exc, MCPResultTerminalError)
                     else "mcp_call_failed"
                 )
                 if dispatched and not known_terminal_failure:
@@ -2382,6 +2399,26 @@ class UserMCPDispatchCoordinator:
                             safe_result_content_sha256=None,
                             safe_result_size_bytes=None,
                             safe_result_store_kind=None,
+                            result_parser_revision=(
+                                exc.checkpoint.parser_revision
+                                if isinstance(exc, MCPResultTerminalError)
+                                else None
+                            ),
+                            validated_checkpoint_sha256=(
+                                exc.checkpoint.checkpoint_sha256
+                                if isinstance(exc, MCPResultTerminalError)
+                                else None
+                            ),
+                            parsed_model_sha256=(
+                                exc.checkpoint.parsed_model_sha256
+                                if isinstance(exc, MCPResultTerminalError)
+                                else None
+                            ),
+                            terminal_result_source=(
+                                exc.checkpoint.source
+                                if isinstance(exc, MCPResultTerminalError)
+                                else None
+                            ),
                         )
                         sealed = await self._seal_terminal_candidate_or_converge(
                             request,
@@ -2504,6 +2541,26 @@ class UserMCPDispatchCoordinator:
             # the call nonterminal so the recovery worker can atomically close
             # both records when tasks/get reaches a terminal state.
             return outcome, call_ref, None
+        if (
+            outcome.kind is MCPCallOutcomeKind.COMPLETED
+            and outcome.validated_checkpoint is not None
+            and (
+                not _parsed_checkpoint_matches(
+                    outcome.validated_checkpoint,
+                    call_ref=call_ref,
+                    protocol_version=protocol_version,
+                    output_schema_sha256=output_schema_sha256,
+                    expected_source="tools_call",
+                )
+                or outcome.validated_checkpoint.outcome != "succeeded"
+                or outcome.validated_checkpoint.raw_sha256
+                != outcome.result_content_sha256
+            )
+        ):
+            await self._storage.converge_mcp_unknown_no_replay(
+                request.task_id, self._now()
+            )
+            raise _CallReservationError("mcp_result_checkpoint_authority_invalid")
         terminal_status = {
             MCPCallOutcomeKind.COMPLETED: "completed",
             MCPCallOutcomeKind.INPUT_REQUIRED: "input_required",
@@ -2573,6 +2630,22 @@ class UserMCPDispatchCoordinator:
                 safe_result_content_sha256=outcome.result_content_sha256,
                 safe_result_size_bytes=outcome.byte_size,
                 safe_result_store_kind=outcome.result_store_kind,
+                result_parser_revision=(
+                    outcome.validated_checkpoint.parser_revision
+                    if outcome.validated_checkpoint is not None
+                    else None
+                ),
+                validated_checkpoint_sha256=(
+                    outcome.validated_checkpoint.checkpoint_sha256
+                    if outcome.validated_checkpoint is not None
+                    else None
+                ),
+                parsed_model_sha256=(
+                    outcome.validated_checkpoint.parsed_model_sha256
+                    if outcome.validated_checkpoint is not None
+                    else None
+                ),
+                terminal_result_source=outcome.terminal_result_source,
             )
             sealed = await self._seal_terminal_candidate_or_converge(
                 request,
@@ -2653,6 +2726,12 @@ class UserMCPDispatchCoordinator:
             result_receipt_id = mcp_terminal_receipt_id(
                 call_ref, result_payload_sha256
             )
+            try:
+                self._gateway.finalize_result_assets(outcome)
+            except Exception:
+                # The checkpoint already authorized terminal success. Projection
+                # publication is compensatable and cannot roll back or replay it.
+                pass
             if self._result_artifact_projector is not None:
                 try:
                     await self._result_artifact_projector(outcome.result_ref)
@@ -3432,6 +3511,24 @@ def _ephemeral_rejected_call(
         terminal_at=now,
         created_at=now,
         updated_at=now,
+    )
+
+
+def _parsed_checkpoint_matches(
+    checkpoint: Any,
+    *,
+    call_ref: str,
+    protocol_version: str,
+    output_schema_sha256: str | None,
+    expected_source: str,
+) -> bool:
+    return (
+        checkpoint.call_ref == call_ref
+        and checkpoint.protocol_version == protocol_version
+        and checkpoint.output_schema_sha256 == output_schema_sha256
+        and checkpoint.source == expected_source
+        and isinstance(checkpoint.checkpoint_sha256, str)
+        and checkpoint.checkpoint_sha256.startswith("sha256:")
     )
 
 

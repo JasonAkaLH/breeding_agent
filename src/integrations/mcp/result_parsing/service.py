@@ -9,6 +9,7 @@ from collections import Counter, deque
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from multiprocessing.connection import Connection
 from typing import Any, AsyncIterator
 
@@ -17,6 +18,7 @@ from .projection_store import (
     MAX_PROJECTION_ENVELOPE_BYTES,
     MCPProjectionBinding,
     MCPProjectionStagingHandle,
+    MCPPublishedProjection,
     MCPProjectionStore,
     MCPProjectionStoreError,
 )
@@ -31,6 +33,19 @@ MAX_OWNER_JOBS = 2
 MAX_QUEUE_WAIT_SECONDS = 30.0
 MAX_WORKER_WALL_SECONDS = 10.0
 MAX_RAW_RESULT_BYTES = 64 * 1024 * 1024
+
+
+class MCPResultParserMode(StrEnum):
+    SAFE_HIDE = "safe_hide"
+    SHADOW = "shadow"
+    ENFORCE = "enforce"
+
+
+def resolve_result_parser_mode(value: object) -> MCPResultParserMode:
+    try:
+        return MCPResultParserMode(str(value or "").strip().lower())
+    except ValueError:
+        return MCPResultParserMode.SAFE_HIDE
 
 
 class MCPResultWorkerError(RuntimeError):
@@ -133,6 +148,14 @@ class MCPIsolatedResultService:
     @property
     def gate(self) -> MCPResultWorkerGate:
         return self._gate
+
+    def publish_projection(
+        self, handle: MCPProjectionStagingHandle
+    ) -> MCPPublishedProjection:
+        return self._projection_store.publish(handle)
+
+    def discard_projection(self, handle: MCPProjectionStagingHandle) -> None:
+        self._projection_store.discard(handle)
 
     async def parse(
         self,

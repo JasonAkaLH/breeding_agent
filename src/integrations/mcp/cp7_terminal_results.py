@@ -466,7 +466,7 @@ def _candidate_payload(
     checkpoint_values = (
         candidate.result_parser_revision,
         candidate.validated_checkpoint_sha256,
-        candidate.parsed_model_sha256,
+        candidate.terminal_result_source,
     )
     if any(value is not None for value in checkpoint_values):
         if not all(value is not None for value in checkpoint_values):
@@ -476,11 +476,35 @@ def _candidate_payload(
         _require_closed_string(
             candidate.result_parser_revision, "result_parser_revision"
         )
-        for name in ("validated_checkpoint_sha256", "parsed_model_sha256"):
+        if candidate.terminal_result_source not in {
+            "tools_call",
+            "tasks_result",
+            "tasks_get",
+        }:
+            raise CP7TerminalResultCorruptionError(
+                "terminal-result source is invalid"
+            )
+        for name in ("validated_checkpoint_sha256",):
             if _SHA256_RE.fullmatch(str(getattr(candidate, name))) is None:
                 raise CP7TerminalResultCorruptionError(
                     f"terminal-result {name} is invalid"
                 )
+        if candidate.parsed_model_sha256 is None:
+            if not (
+                terminal_state is MCPTerminalState.FAILED
+                and candidate.safe_error_code == "mcp_result_malformed"
+            ):
+                raise CP7TerminalResultCorruptionError(
+                    "terminal-result parsed model digest is missing"
+                )
+        elif _SHA256_RE.fullmatch(candidate.parsed_model_sha256) is None:
+            raise CP7TerminalResultCorruptionError(
+                "terminal-result parsed model digest is invalid"
+            )
+    elif candidate.parsed_model_sha256 is not None:
+        raise CP7TerminalResultCorruptionError(
+            "terminal-result parser checkpoint authority is partial"
+        )
     return {
         "candidate_id": candidate.candidate_id,
         "owner_user_id": candidate.owner_user_id,
@@ -503,6 +527,7 @@ def _candidate_payload(
         "result_parser_revision": candidate.result_parser_revision,
         "validated_checkpoint_sha256": candidate.validated_checkpoint_sha256,
         "parsed_model_sha256": candidate.parsed_model_sha256,
+        "terminal_result_source": candidate.terminal_result_source,
         "sealed_at": _format_utc_second(candidate.sealed_at),
     }
 
@@ -544,6 +569,7 @@ def _candidate_from_payload(
                 "result_parser_revision",
                 "validated_checkpoint_sha256",
                 "parsed_model_sha256",
+                "terminal_result_source",
             }
         )
     elif schema not in {TERMINAL_CANDIDATE_SCHEMA_V1, TERMINAL_CANDIDATE_SCHEMA_V2}:
@@ -586,6 +612,7 @@ def _candidate_from_payload(
             result_parser_revision=payload.get("result_parser_revision"),
             validated_checkpoint_sha256=payload.get("validated_checkpoint_sha256"),
             parsed_model_sha256=payload.get("parsed_model_sha256"),
+            terminal_result_source=payload.get("terminal_result_source"),
         )
     except (TypeError, ValueError) as exc:
         raise CP7TerminalResultCorruptionError(
@@ -640,6 +667,7 @@ def _candidate_payload_v1(
         "result_parser_revision",
         "validated_checkpoint_sha256",
         "parsed_model_sha256",
+        "terminal_result_source",
     ):
         payload.pop(field)
     return payload

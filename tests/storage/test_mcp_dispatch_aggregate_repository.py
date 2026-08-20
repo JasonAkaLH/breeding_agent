@@ -711,6 +711,7 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         terminal_state: MCPTerminalState = MCPTerminalState.COMPLETED,
         call_ref: str = "call-1",
         result_ref: str = "mcp-result-1",
+        checkpointed: bool = False,
     ):
         result_payload_sha = canonical_sha256(
             {
@@ -747,10 +748,24 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             safe_result_store_kind=(
                 "durable_content_addressed" if completed else None
             ),
+            result_parser_revision=(
+                "mcp-result-parser.v1" if checkpointed else None
+            ),
+            validated_checkpoint_sha256=(
+                "sha256:" + "6" * 64 if checkpointed else None
+            ),
+            parsed_model_sha256=(
+                "sha256:" + "7" * 64 if checkpointed else None
+            ),
+            terminal_result_source=("tools_call" if checkpointed else None),
         )
         candidate_snapshot = MCPTerminalCandidateSnapshot(
             candidate=candidate,
-            candidate_schema="maf.user_mcp.cp7.terminal_result_candidate.v2",
+            candidate_schema=(
+                "maf.user_mcp.cp7.terminal_result_candidate.v3"
+                if checkpointed
+                else "maf.user_mcp.cp7.terminal_result_candidate.v2"
+            ),
             active_candidate_filename=f"candidate-{call_ref}.json",
             active_task_index_filename=f"task-index-{call_ref}.json",
             active_call_index_filename=f"call-index-{call_ref}.json",
@@ -785,6 +800,38 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             else None
         )
         return candidate_snapshot, result_snapshot
+
+    async def test_checkpointed_terminal_commit_persists_call_source_and_receipt_authority(self) -> None:
+        active = await self._admit()
+        candidate_snapshot, result_snapshot = self._terminal_snapshots(
+            checkpointed=True
+        )
+
+        committed = await self.storage.commit_mcp_call_terminal(
+            "call-1",
+            candidate_snapshot.candidate.candidate_id,
+            self.outbox_id,
+            active.revision,
+            "worker",
+            "token",
+            candidate_snapshot,
+            result_snapshot,
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(str(committed), "committed_normal")
+        call = await self.storage.get_mcp_call_record(
+            "alice", self.task.task_id, "call-1"
+        )
+        receipt = await self.storage.get_mcp_terminal_result_receipt_for_call(
+            "call-1"
+        )
+        self.assertEqual(call.terminal_result_source, "tools_call")
+        self.assertEqual(receipt.result_parser_revision, "mcp-result-parser.v1")
+        self.assertEqual(
+            receipt.validated_checkpoint_sha256, "sha256:" + "6" * 64
+        )
+        self.assertEqual(receipt.parsed_model_sha256, "sha256:" + "7" * 64)
 
     async def test_claim_renew_and_competing_claim_are_revision_guarded(self) -> None:
         claimed = await self._claim()
