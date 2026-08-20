@@ -56,6 +56,7 @@ from src.storage.sqlite import (
     create_sqlite_session_factory,
 )
 from src.storage.sqlite.models import (
+    MCPCallRecordRow,
     MCPDispatchResumeOutboxRow,
     MCPDurableResultLifecycleRow,
     MCPPendingToolActionRow,
@@ -827,11 +828,32 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             "call-1"
         )
         self.assertEqual(call.terminal_result_source, "tools_call")
+        self.assertEqual(call.output_size_bytes, 2)
         self.assertEqual(receipt.result_parser_revision, "mcp-result-parser.v1")
         self.assertEqual(
             receipt.validated_checkpoint_sha256, "sha256:" + "6" * 64
         )
         self.assertEqual(receipt.parsed_model_sha256, "sha256:" + "7" * 64)
+        with self.sessions() as session:
+            row = session.get(MCPCallRecordRow, "call-1")
+            row.output_size_bytes = None
+            session.commit()
+        repaired = await self.storage.commit_mcp_call_terminal(
+            "call-1",
+            candidate_snapshot.candidate.candidate_id,
+            self.outbox_id,
+            active.revision,
+            "worker",
+            "token",
+            candidate_snapshot,
+            result_snapshot,
+            NOW + timedelta(seconds=2),
+        )
+        self.assertEqual(str(repaired), "already_committed")
+        repaired_call = await self.storage.get_mcp_call_record(
+            "alice", self.task.task_id, "call-1"
+        )
+        self.assertEqual(repaired_call.output_size_bytes, 2)
         page = await self.storage.list_completed_mcp_calls_for_result_reprojection(
             limit=1
         )

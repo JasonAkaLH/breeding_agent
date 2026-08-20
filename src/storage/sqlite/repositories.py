@@ -7753,13 +7753,21 @@ class SQLiteStateRepository:
             retry_values = dict(receipt_values)
             retry_values["committed_at"] = existing.committed_at
             _require_exact_row(existing, retry_values, "mcp_terminal_receipt_conflict")
-            return MCPTerminalResultCommitResult.ALREADY_COMMITTED
         if call.terminal_result_source not in {
             None,
             candidate.terminal_result_source,
         }:
             return MCPTerminalResultCommitResult.CONFLICT
+        if call.output_size_bytes not in {
+            None,
+            candidate.safe_result_size_bytes,
+        }:
+            return MCPTerminalResultCommitResult.CONFLICT
         call.terminal_result_source = candidate.terminal_result_source
+        call.output_size_bytes = candidate.safe_result_size_bytes
+        if existing is not None:
+            self._session.flush()
+            return MCPTerminalResultCommitResult.ALREADY_COMMITTED
         if late:
             if (
                 projection is None

@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- MCP always-on结果展示修复：authoritative terminal commit现在把candidate中的`safe_result_size_bytes`同步固化到`MCPCallRecord.output_size_bytes`，并在幂等重试时安全补齐NULL值；避免新Call虽然已有parser checkpoint、receipt和published projection，却被历史重投影authority校验误判为`historical_authority_invalid`并与live projection attach发生CAS竞争。License Requirement：复用现有terminal candidate/receipt与Repository能力，无新增依赖或许可变更。
+
 - MCP Result Parser运行路径收敛为always-on：废弃独立`MAF_USER_MCP_RESULT_PARSER_MODE`及`safe_hide|shadow|enforce`分支；启用用户级MCP时ordinary、approval、workflow和remote task结果始终在terminal前经过现有五版本Decoder，成功展示typed business projection，`isError`与malformed结果按闭合失败语义处理。历史`safe_hide`仅保留为缺少parser authority的不可用原因，公共raw JSON仍永久禁止展示。License Requirement：复用现有Result Service、Gateway、Artifact与前端能力，无新增依赖或许可变更。
 
 - MCP五版本Result解析检查点8仓库实现完成：新增completed Call ref每页1000条keyset历史扫描与`MCPRawResultAuthorityResolver`，优先held durable raw，源回收后仅使用owner/Task/Node/Call/size/SHA复验的internal managed-file copy，source-deleted回归证明零网络重投影；authority缺失与projection缺失/损坏写入closed unavailable reason，绝不猜payload或raw fallback。新增`mcp_result_parser_outcomes_total`与`mcp_result_parser_duration_seconds`，沿用closed protocol/result/error/call-kind标签，shadow日志只含outcome、block kind、structured presence、projection digest与truncated；SQLite保行业务行重建metric check，PostgreSQL v8 reconciler用`NOT VALID→VALIDATE`替换单一metric-name约束。缺projection continuation在24小时后收敛failed/no-replay；OCR start/poll/ack逐次进入隔离Result Service并即时消费staged projection，最终poll仍是唯一外层业务结果；legacy executor在正式runtime wiring中也使用spawn worker而不在父进程解码。License Requirement：复用现有Python、SQLAlchemy、Pydantic与projection store能力，无新增依赖或许可变更。
