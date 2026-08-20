@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- MCP五版本Result解析检查点2完成：catalog freeze对output schema采用默认2020-12/显式Draft 7、document-local `$ref`与canonical UTF-8 256 KiB门禁，无效schema只排除当前Tool；descriptor和Call原子保存schema snapshot/`sha256:`，Call新增terminal source；terminal candidate升级v3并与receipt新增parser/checkpoint/model digest，同时保留v1/v2只读。SQLite在aggregate drift检查前只增nullable列并保留已有业务行，PostgreSQL fresh runtime schema升至v7且manifest/reconciler识别JSONB/Text列。License Requirement：复用现有jsonschema、SQLAlchemy与标准库，无新增依赖或许可变更。
+
 - MCP五版本Result解析实施进入检查点1：新增经97/100自主审查的八阶段implementation plan，并先关闭公共raw回滚缺口。Task Artifact与Conversation history对内部`source_kind=mcp_result`不再读取managed raw正文或返回`text`，统一返回response-only `artifact_type=mcp_result`、空`storage_ref`和`availability=unavailable / safe_hide` typed view；direct download继续404。该检查点不改变Tool terminal或raw内部authority，为后续Decoder/worker/enforce提供不可逆的安全底线。License Requirement：复用既有Pydantic、Artifact与API能力，无新增依赖或许可变更。
 
 - MCP五版本Result解析与业务投影设计完成六轮自主`document-perfectization`，以98/100、0 Blocking、0 Major通过信心门：版本化Decoder Registry分别覆盖`2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 / 2026-07-28`的普通Call、structuredContent、2025 Tasks和2026 resultType/MRTR/Tasks，并锁定Call级output schema/source快照、64 KiB Mapping/64 MiB raw分流、容量1可终止隔离worker、validated checkpoint先于terminal、projection失败只safe-hide/本地补偿、typed用户DTO、Main Agent有界投影、历史零网络重投影和永久禁止raw fallback。设计仍未实施；Linux 512 MiB address-space gate及source-deleted history测试是记录在案的两个Minor实施门禁。License Requirement：仅设计、索引与变更记录，无新增依赖或许可变更。

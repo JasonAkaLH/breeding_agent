@@ -42,12 +42,15 @@ class MCPToolDescriptor:
     input_schema: Mapping[str, Any]
     input_schema_sha256: str
     output_schema: Mapping[str, Any] | None = None
+    output_schema_sha256: str | None = None
     annotations: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_schema", _deep_freeze_mapping(self.input_schema))
         if self.output_schema is not None:
             object.__setattr__(self, "output_schema", _deep_freeze_mapping(self.output_schema))
+        if (self.output_schema is None) != (self.output_schema_sha256 is None):
+            raise ValueError("MCP output schema snapshot and digest must be present together")
         object.__setattr__(self, "annotations", _deep_freeze_mapping(self.annotations))
 
 

@@ -17,7 +17,12 @@ from src.integrations.mcp.endpoint_policy import (
     EndpointPolicyError,
     EndpointPolicyProvenance,
 )
-from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
+from src.integrations.mcp.gateway import (
+    MCPCallCallbacks,
+    MCPGateway,
+    MCPGatewayError,
+    _freeze_catalog,
+)
 from src.integrations.mcp.invalidation import (
     MCPInvalidationAction,
     MCPServerInvalidated,
@@ -239,6 +244,58 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             ),
             now_fn=lambda: self.now,
         )
+
+    async def test_catalog_freezes_bounded_output_schema_and_excludes_only_invalid_tool(self) -> None:
+        server = await self.storage.get_user_mcp_server("alice", "server-1")
+        catalog = _freeze_catalog(
+            server,
+            _Adapter(),
+            [
+                {
+                    "name": "valid-default",
+                    "inputSchema": {"type": "object"},
+                    "outputSchema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                    },
+                },
+                {
+                    "name": "invalid-external-ref",
+                    "inputSchema": {"type": "object"},
+                    "outputSchema": {"$ref": "https://example.com/schema.json"},
+                },
+                {
+                    "name": "invalid-dialect",
+                    "inputSchema": {"type": "object"},
+                    "outputSchema": {
+                        "$schema": "https://json-schema.org/draft/2019-09/schema",
+                        "type": "object",
+                    },
+                },
+                {
+                    "name": "invalid-oversized",
+                    "inputSchema": {"type": "object"},
+                    "outputSchema": {"description": "x" * (256 * 1024)},
+                },
+                {
+                    "name": "valid-draft7",
+                    "inputSchema": {"type": "object"},
+                    "outputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "$ref": "#/definitions/value",
+                        "definitions": {"value": {"type": "number"}},
+                    },
+                },
+            ],
+        )
+
+        self.assertEqual(
+            [tool.name for tool in catalog.tools],
+            ["valid-default", "valid-draft7"],
+        )
+        for descriptor in catalog.tools:
+            self.assertIsNotNone(descriptor.output_schema)
+            self.assertRegex(descriptor.output_schema_sha256, r"^sha256:[0-9a-f]{64}$")
 
     async def asyncTearDown(self) -> None:
         await self.gateway.aclose()

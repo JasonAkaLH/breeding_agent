@@ -41,6 +41,9 @@ _CP7_CHECK_TABLES = frozenset(
 _MCP_AGGREGATE_CONTROLLED_CUTOVER_TABLES = frozenset(
     {"mcp_call_record", "mcp_dispatch_resume_outbox"}
 )
+_MCP_CALL_ADDITIVE_RESULT_AUTHORITY_COLUMNS = frozenset(
+    {"output_schema", "output_schema_sha256", "terminal_result_source"}
+)
 
 
 class ForbiddenPostgresSchemaActionError(ValueError):
@@ -132,8 +135,18 @@ def plan_postgres_schema_reconciliation(
         actual_columns = inspection.tables.get(table_name)
         if actual_columns is None:
             continue
+        missing_columns = set(expected_columns) - set(actual_columns)
+        additive_result_authority_drift = (
+            table_name == "mcp_call_record"
+            and bool(missing_columns)
+            and missing_columns.issubset(_MCP_CALL_ADDITIVE_RESULT_AUTHORITY_COLUMNS)
+            and not (set(actual_columns) - set(expected_columns))
+        )
         if table_name in _MCP_AGGREGATE_CONTROLLED_CUTOVER_TABLES and (
-            set(expected_columns) != set(actual_columns)
+            (
+                set(expected_columns) != set(actual_columns)
+                and not additive_result_authority_drift
+            )
             or not _checks_match_exactly(
                 manifest.check_constraints.get(table_name, {}),
                 inspection.check_constraints.get(table_name, {}),

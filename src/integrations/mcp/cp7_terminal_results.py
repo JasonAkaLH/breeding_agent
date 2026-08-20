@@ -33,7 +33,8 @@ from src.integrations.mcp.temporary_results import MAX_DURABLE_MCP_RESULT_BYTES
 
 TERMINAL_CANDIDATE_SCHEMA_V1 = "maf.user_mcp.cp7.terminal_result_candidate.v1"
 TERMINAL_CANDIDATE_SCHEMA_V2 = "maf.user_mcp.cp7.terminal_result_candidate.v2"
-TERMINAL_CANDIDATE_SCHEMA = TERMINAL_CANDIDATE_SCHEMA_V2
+TERMINAL_CANDIDATE_SCHEMA_V3 = "maf.user_mcp.cp7.terminal_result_candidate.v3"
+TERMINAL_CANDIDATE_SCHEMA = TERMINAL_CANDIDATE_SCHEMA_V3
 TERMINAL_TASK_INDEX_SCHEMA = "maf.user_mcp.cp7.terminal_result_task_index.v1"
 TERMINAL_CALL_INDEX_SCHEMA = "maf.user_mcp.cp7.terminal_result_call_index.v1"
 DEFAULT_MAXIMUM_TERMINAL_CANDIDATES = 10_000
@@ -462,6 +463,24 @@ def _candidate_payload(
             raise CP7TerminalResultCorruptionError(
                 "failed or cancelled terminal result cannot contain durable result metadata"
             )
+    checkpoint_values = (
+        candidate.result_parser_revision,
+        candidate.validated_checkpoint_sha256,
+        candidate.parsed_model_sha256,
+    )
+    if any(value is not None for value in checkpoint_values):
+        if not all(value is not None for value in checkpoint_values):
+            raise CP7TerminalResultCorruptionError(
+                "terminal-result parser checkpoint authority is partial"
+            )
+        _require_closed_string(
+            candidate.result_parser_revision, "result_parser_revision"
+        )
+        for name in ("validated_checkpoint_sha256", "parsed_model_sha256"):
+            if _SHA256_RE.fullmatch(str(getattr(candidate, name))) is None:
+                raise CP7TerminalResultCorruptionError(
+                    f"terminal-result {name} is invalid"
+                )
     return {
         "candidate_id": candidate.candidate_id,
         "owner_user_id": candidate.owner_user_id,
@@ -481,6 +500,9 @@ def _candidate_payload(
         "safe_result_content_sha256": candidate.safe_result_content_sha256,
         "safe_result_size_bytes": candidate.safe_result_size_bytes,
         "safe_result_store_kind": candidate.safe_result_store_kind,
+        "result_parser_revision": candidate.result_parser_revision,
+        "validated_checkpoint_sha256": candidate.validated_checkpoint_sha256,
+        "parsed_model_sha256": candidate.parsed_model_sha256,
         "sealed_at": _format_utc_second(candidate.sealed_at),
     }
 
@@ -508,7 +530,7 @@ def _candidate_from_payload(
         "safe_error_code",
         "sealed_at",
     }
-    if schema == TERMINAL_CANDIDATE_SCHEMA_V2:
+    if schema in {TERMINAL_CANDIDATE_SCHEMA_V2, TERMINAL_CANDIDATE_SCHEMA_V3}:
         expected_fields.update(
             {
                 "safe_result_content_sha256",
@@ -516,7 +538,15 @@ def _candidate_from_payload(
                 "safe_result_store_kind",
             }
         )
-    elif schema != TERMINAL_CANDIDATE_SCHEMA_V1:
+    if schema == TERMINAL_CANDIDATE_SCHEMA_V3:
+        expected_fields.update(
+            {
+                "result_parser_revision",
+                "validated_checkpoint_sha256",
+                "parsed_model_sha256",
+            }
+        )
+    elif schema not in {TERMINAL_CANDIDATE_SCHEMA_V1, TERMINAL_CANDIDATE_SCHEMA_V2}:
         raise CP7TerminalResultCorruptionError(
             "terminal-result candidate schema is unsupported"
         )
@@ -553,12 +583,15 @@ def _candidate_from_payload(
             safe_result_content_sha256=payload.get("safe_result_content_sha256"),
             safe_result_size_bytes=payload.get("safe_result_size_bytes"),
             safe_result_store_kind=payload.get("safe_result_store_kind"),
+            result_parser_revision=payload.get("result_parser_revision"),
+            validated_checkpoint_sha256=payload.get("validated_checkpoint_sha256"),
+            parsed_model_sha256=payload.get("parsed_model_sha256"),
         )
     except (TypeError, ValueError) as exc:
         raise CP7TerminalResultCorruptionError(
             "terminal-result candidate payload types are invalid"
         ) from exc
-    if schema == TERMINAL_CANDIDATE_SCHEMA_V2:
+    if schema in {TERMINAL_CANDIDATE_SCHEMA_V2, TERMINAL_CANDIDATE_SCHEMA_V3}:
         _candidate_payload(candidate)
     else:
         _candidate_payload_v1(candidate)
@@ -604,6 +637,9 @@ def _candidate_payload_v1(
         "safe_result_content_sha256",
         "safe_result_size_bytes",
         "safe_result_store_kind",
+        "result_parser_revision",
+        "validated_checkpoint_sha256",
+        "parsed_model_sha256",
     ):
         payload.pop(field)
     return payload
@@ -643,7 +679,11 @@ def _read_candidate_envelope(path: Path) -> CanonicalEnvelopeArtifact:
         if not isinstance(envelope, Mapping):
             raise CP7ArtifactValidationError("terminal-result envelope is invalid")
         schema = envelope.get("schema")
-        if schema not in {TERMINAL_CANDIDATE_SCHEMA_V1, TERMINAL_CANDIDATE_SCHEMA_V2}:
+        if schema not in {
+            TERMINAL_CANDIDATE_SCHEMA_V1,
+            TERMINAL_CANDIDATE_SCHEMA_V2,
+            TERMINAL_CANDIDATE_SCHEMA_V3,
+        }:
             raise CP7ArtifactValidationError("terminal-result candidate schema is unsupported")
         payload = parse_canonical_envelope_bytes(
             artifact.content, expected_schema=str(schema)
@@ -799,6 +839,7 @@ __all__ = [
     "TERMINAL_CANDIDATE_SCHEMA",
     "TERMINAL_CANDIDATE_SCHEMA_V1",
     "TERMINAL_CANDIDATE_SCHEMA_V2",
+    "TERMINAL_CANDIDATE_SCHEMA_V3",
     "TERMINAL_TASK_INDEX_SCHEMA",
     "TerminalResultSealOutcome",
     "compare_terminal_result_candidate",

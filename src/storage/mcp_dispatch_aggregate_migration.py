@@ -53,6 +53,9 @@ _AGGREGATE_ADDITIVE_COLUMN_DEFAULTS: dict[str, dict[str, str]] = {
     "mcp_call_record": {
         "pending_action_id": "NULL",
         "continuation_of_call_ref": "NULL",
+        "output_schema": "NULL",
+        "output_schema_sha256": "NULL",
+        "terminal_result_source": "NULL",
     },
     "mcp_dispatch_resume_outbox": {
         "resume_reason": "'initial'",

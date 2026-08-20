@@ -221,6 +221,43 @@ class PostgresSchemaReconcilerTest(unittest.TestCase):
             plan.sql_script(),
         )
 
+    def test_result_authority_columns_are_safe_additive_reconciliation(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        tables = {
+            name: dict(columns) for name, columns in inspection.tables.items()
+        }
+        for column in (
+            "output_schema",
+            "output_schema_sha256",
+            "terminal_result_source",
+        ):
+            tables["mcp_call_record"].pop(column)
+        for column in (
+            "result_parser_revision",
+            "validated_checkpoint_sha256",
+            "parsed_model_sha256",
+        ):
+            tables["mcp_terminal_result_receipt"].pop(column)
+        legacy = SchemaInspection(
+            tables=tables,
+            enum_types=inspection.enum_types,
+            check_constraints=inspection.check_constraints,
+            triggers=inspection.triggers,
+        )
+
+        plan = plan_postgres_schema_reconciliation(manifest, legacy)
+        sql = plan.sql_script()
+
+        self.assertFalse(plan.operator_only_actions)
+        self.assertIn(
+            "ALTER TABLE mcp_call_record ADD COLUMN output_schema jsonb", sql
+        )
+        self.assertIn(
+            "ALTER TABLE mcp_terminal_result_receipt ADD COLUMN result_parser_revision text",
+            sql,
+        )
+
     def test_postgres_bootstrap_rejects_operator_cutover_before_schema_mutation(
         self,
     ) -> None:

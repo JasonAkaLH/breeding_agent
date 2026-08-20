@@ -316,6 +316,8 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             server_config_version=self.server.config_version,
             input_schema_sha256="sha256:schema",
             protocol_version="2026-07-28",
+            output_schema={"type": "object", "properties": {"value": {"type": "string"}}},
+            output_schema_sha256="sha256:f0ed10c74df9a127bf15130f04ff3984782993db64f9c1fa459ae3909c98d2da",
             pending_action_id=action_id,
             created_at=NOW,
             updated_at=NOW,
@@ -424,6 +426,20 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             created_at=NOW + timedelta(seconds=1),
             accepted_at=NOW + timedelta(seconds=1),
         )
+
+    async def test_call_reserve_persists_output_schema_authority_atomically(self) -> None:
+        await self._admit()
+
+        saved = await self.storage.get_mcp_call_record(
+            "alice", self.task.task_id, "call-1"
+        )
+
+        self.assertEqual(saved.output_schema, self._call().output_schema)
+        self.assertEqual(
+            saved.output_schema_sha256,
+            "sha256:f0ed10c74df9a127bf15130f04ff3984782993db64f9c1fa459ae3909c98d2da",
+        )
+        self.assertIsNone(saved.terminal_result_source)
 
     async def test_latest_approved_action_read_is_closed_to_task_node_owner(self) -> None:
         action = await self.storage.get_latest_approved_mcp_tool_action(

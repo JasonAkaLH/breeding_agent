@@ -21,6 +21,8 @@ from src.integrations.mcp.cp7_terminal_results import (
     MCPTerminalCandidateSnapshotAuthority,
     TERMINAL_CANDIDATE_SCHEMA,
     TERMINAL_CANDIDATE_SCHEMA_V1,
+    TERMINAL_CANDIDATE_SCHEMA_V2,
+    TERMINAL_CANDIDATE_SCHEMA_V3,
     compare_terminal_result_candidate,
     enumerate_unconsumed_terminal_result_candidates,
     normalize_terminal_utc_second,
@@ -111,7 +113,7 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             )
             self.assertEqual(
                 outcome.sealed.candidate_payload_sha256,
-                "sha256:7989f008fe383a659d78f75da4ff8224626f1c34e63cb0af03c11b8c50d9bbe2",
+                "sha256:9295eef2299e2ec284a8b4ff2f5c066b9339157efd985142be3a7d974eacc274",
             )
             raw = terminal_candidate_path(root, candidate.candidate_id).read_bytes()
             self.assertEqual(
@@ -137,6 +139,9 @@ class CP7TerminalResultSealTests(unittest.TestCase):
                         "safe_result_content_sha256": _RESULT_CONTENT_DIGEST,
                         "safe_result_size_bytes": 123,
                         "safe_result_store_kind": "durable_content_addressed",
+                        "result_parser_revision": None,
+                        "validated_checkpoint_sha256": None,
+                        "parsed_model_sha256": None,
                         "sealed_at": "2026-08-13T12:34:56Z",
                     },
                 ),
@@ -239,6 +244,82 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             terminal_call_index_path(root, candidate.call_id).unlink()
             with self.assertRaises(CP7TerminalResultCorruptionError):
                 authority.revalidate(snapshot)
+
+    def test_v2_candidate_remains_readable_and_v3_binds_parser_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            candidate = _completed_candidate()
+            payload = {
+                "candidate_id": candidate.candidate_id,
+                "owner_user_id": candidate.owner_user_id,
+                "conversation_id": candidate.conversation_id,
+                "task_id": candidate.task_id,
+                "node_id": candidate.node_id,
+                "intent_id": candidate.intent_id,
+                "call_id": candidate.call_id,
+                "server_id": candidate.server_id,
+                "server_config_version": candidate.server_config_version,
+                "server_security_version": candidate.server_security_version,
+                "terminal_state": "completed",
+                "result_payload_sha256": candidate.result_payload_sha256,
+                "safe_result_ref": candidate.safe_result_ref,
+                "safe_result_ref_sha256": candidate.safe_result_ref_sha256,
+                "safe_error_code": None,
+                "safe_result_content_sha256": candidate.safe_result_content_sha256,
+                "safe_result_size_bytes": candidate.safe_result_size_bytes,
+                "safe_result_store_kind": candidate.safe_result_store_kind,
+                "sealed_at": "2026-08-13T12:34:56Z",
+            }
+            candidate_artifact = publish_immutable(
+                terminal_candidate_path(root, candidate.candidate_id),
+                canonical_envelope_bytes(TERMINAL_CANDIDATE_SCHEMA_V2, payload),
+            )
+            index_payload = {
+                "candidate_id": candidate.candidate_id,
+                "owner_user_id": candidate.owner_user_id,
+                "task_id": candidate.task_id,
+                "call_id": candidate.call_id,
+                "candidate_file_sha256": candidate_artifact.file_sha256,
+                "candidate_payload_sha256": canonical_sha256(payload),
+            }
+            publish_immutable(
+                terminal_task_index_path(root, candidate.task_id, candidate.candidate_id),
+                canonical_envelope_bytes(
+                    "maf.user_mcp.cp7.terminal_result_task_index.v1", index_payload
+                ),
+            )
+            publish_immutable(
+                terminal_call_index_path(root, candidate.call_id),
+                canonical_envelope_bytes(
+                    "maf.user_mcp.cp7.terminal_result_call_index.v1", index_payload
+                ),
+            )
+            restored = secure_read_terminal_result_candidate(
+                root, candidate.candidate_id
+            )
+            self.assertEqual(restored.candidate_schema, TERMINAL_CANDIDATE_SCHEMA_V2)
+            self.assertIsNone(restored.candidate.result_parser_revision)
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpointed = replace(
+                _completed_candidate(),
+                result_parser_revision="mcp-result-parser.v1",
+                validated_checkpoint_sha256="sha256:" + "c" * 64,
+                parsed_model_sha256="sha256:" + "d" * 64,
+            )
+            restored = seal_terminal_result_candidate(directory, checkpointed).sealed
+            self.assertEqual(restored.candidate_schema, TERMINAL_CANDIDATE_SCHEMA_V3)
+            self.assertEqual(restored.candidate, checkpointed)
+
+        with tempfile.TemporaryDirectory() as directory:
+            partial = replace(
+                _completed_candidate(),
+                result_parser_revision="mcp-result-parser.v1",
+            )
+            with self.assertRaisesRegex(
+                CP7TerminalResultCorruptionError, "checkpoint authority is partial"
+            ):
+                seal_terminal_result_candidate(directory, partial)
 
     def test_unknown_candidate_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

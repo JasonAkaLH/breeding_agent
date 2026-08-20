@@ -148,3 +148,11 @@ class PostgresRuntimeSchemaManifestTest(unittest.TestCase):
             "task_owner_mismatch",
             safety_ddl["ck_mcp_cp7_safety_ledger_mcp_cp7_safety_violation_reason"],
         )
+        call_columns = manifest.table_columns["mcp_call_record"]
+        self.assertEqual(call_columns["output_schema"], "jsonb")
+        self.assertEqual(call_columns["output_schema_sha256"], "text")
+        self.assertEqual(call_columns["terminal_result_source"], "text")
+        receipt_columns = manifest.table_columns["mcp_terminal_result_receipt"]
+        self.assertEqual(receipt_columns["result_parser_revision"], "text")
+        self.assertEqual(receipt_columns["validated_checkpoint_sha256"], "text")
+        self.assertEqual(receipt_columns["parsed_model_sha256"], "text")

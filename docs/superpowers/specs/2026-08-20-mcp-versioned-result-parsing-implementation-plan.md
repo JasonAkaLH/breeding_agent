@@ -16,6 +16,11 @@
 - user/agent projection 使用同一 parsed model，分别执行预算、脱敏和 URI/media policy。
 - rollout 只允许 `safe_hide | shadow | enforce`；缺失或未知配置按 `safe_hide`，回滚不得恢复 raw 展示。
 
+## 执行记录
+
+- Checkpoint 1 已完成：`09f8559 fix(api): safe-hide MCP raw result artifacts`。
+- Checkpoint 2 已完成实现与聚焦回归：output schema/source/checkpoint authority、candidate v3以及SQLite/PostgreSQL additive schema已落地，等待本检查点提交。
+
 ## 开发检查点
 
 1. **Safe-hide floor**：公共 MCP Artifact 改为 typed unavailable view，`storage_ref=""`，下载保持 404。

@@ -16,6 +16,7 @@ LEGACY_AUTH_TABLES = (
 
 
 def bootstrap_sqlite_database(engine: Engine) -> None:
+    _migrate_mcp_result_authority_columns(engine)
     _prepare_empty_mcp_dispatch_aggregate_cutover(engine)
     _migrate_username_owner_columns(engine)
     _migrate_message_public_columns(engine)
@@ -83,6 +84,41 @@ def _prepare_empty_mcp_dispatch_aggregate_cutover(engine: Engine) -> None:
 
 def _normalize_sqlite_check(value: str) -> str:
     return re.sub(r'[()\s"]+', "", value.lower())
+
+
+def _migrate_mcp_result_authority_columns(engine: Engine) -> None:
+    """Add nullable Result Parser authority before aggregate drift checks."""
+
+    additions = {
+        "mcp_call_record": {
+            "output_schema": "TEXT",
+            "output_schema_sha256": "TEXT",
+            "terminal_result_source": "TEXT",
+        },
+        "mcp_terminal_result_receipt": {
+            "result_parser_revision": "TEXT",
+            "validated_checkpoint_sha256": "TEXT",
+            "parsed_model_sha256": "TEXT",
+        },
+    }
+    with engine.begin() as connection:
+        tables = set(inspect(connection).get_table_names())
+        for table_name, columns_to_add in additions.items():
+            if table_name not in tables:
+                continue
+            existing = {
+                column["name"]
+                for column in inspect(connection).get_columns(table_name)
+            }
+            for column_name, column_type in columns_to_add.items():
+                if column_name in existing:
+                    continue
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {_quote(connection, table_name)} ADD COLUMN "
+                        f"{_quote(connection, column_name)} {column_type}"
+                    )
+                )
 
 
 def _drop_legacy_auth_tables(engine: Engine) -> None:

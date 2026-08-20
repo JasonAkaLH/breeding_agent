@@ -1909,15 +1909,21 @@ def _freeze_catalog(server: UserMCPServer, adapter: Any, tools: list[Mapping[str
         _validate_schema(schema)
         canonical = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
         output_schema = raw.get("outputSchema")
-        if output_schema is not None and not isinstance(output_schema, Mapping):
-            raise MCPProtocolError("MCP tool outputSchema must be an object.")
+        try:
+            frozen_output_schema, output_schema_sha256 = _freeze_output_schema(
+                output_schema
+            )
+        except MCPProtocolError:
+            # An invalid output contract excludes only this Tool; valid siblings remain usable.
+            continue
         descriptors.append(
             MCPToolDescriptor(
                 name=name,
                 description=str(raw.get("description") or ""),
                 input_schema=dict(schema),
                 input_schema_sha256=hashlib.sha256(canonical).hexdigest(),
-                output_schema=dict(output_schema) if isinstance(output_schema, Mapping) else None,
+                output_schema=frozen_output_schema,
+                output_schema_sha256=output_schema_sha256,
                 annotations=dict(raw.get("annotations") or {})
                 if isinstance(raw.get("annotations"), Mapping)
                 else {},
@@ -1938,6 +1944,58 @@ def _validate_schema(schema: Mapping[str, Any]) -> None:
         validator.check_schema(dict(schema))
     except SchemaError as exc:
         raise MCPProtocolError("MCP tool inputSchema is invalid.") from exc
+
+
+def _freeze_output_schema(
+    schema: object,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if schema is None:
+        return None, None
+    if not isinstance(schema, Mapping):
+        raise MCPProtocolError("MCP tool outputSchema must be an object.")
+    snapshot = dict(schema)
+    dialect = snapshot.get("$schema")
+    if dialect is None:
+        validator = Draft202012Validator
+    elif dialect == "http://json-schema.org/draft-07/schema#":
+        validator = Draft7Validator
+    elif dialect in {
+        "https://json-schema.org/draft/2020-12/schema",
+        "https://json-schema.org/draft/2020-12/schema#",
+    }:
+        validator = Draft202012Validator
+    else:
+        raise MCPProtocolError("MCP tool outputSchema dialect is unsupported.")
+    try:
+        validator.check_schema(snapshot)
+        canonical = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (SchemaError, TypeError, ValueError) as exc:
+        raise MCPProtocolError("MCP tool outputSchema is invalid.") from exc
+    if len(canonical) > 256 * 1024:
+        raise MCPProtocolError("MCP tool outputSchema is too large.")
+
+    def reject_external_refs(value: object) -> None:
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                if key == "$ref" and (
+                    not isinstance(nested, str) or not nested.startswith("#")
+                ):
+                    raise MCPProtocolError(
+                        "MCP tool outputSchema contains an external reference."
+                    )
+                reject_external_refs(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                reject_external_refs(nested)
+
+    reject_external_refs(snapshot)
+    return snapshot, "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
 def _validate_arguments(schema: Mapping[str, Any], arguments: Mapping[str, Any]) -> None:

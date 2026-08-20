@@ -19,6 +19,56 @@ from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteBootstrapTest(SQLiteStorageTestCase):
+    def test_result_authority_columns_are_added_without_rebuilding_business_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "result-authority.sqlite3")
+            self.addCleanup(engine.dispose)
+            SQLiteBase.metadata.tables["mcp_call_record"].create(engine)
+            with engine.begin() as connection:
+                for column in (
+                    "output_schema",
+                    "output_schema_sha256",
+                    "terminal_result_source",
+                ):
+                    connection.execute(
+                        text(f'ALTER TABLE mcp_call_record DROP COLUMN "{column}"')
+                    )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_call_record ("
+                        "call_ref, branch_id, owner_user_id, task_id, node_id, "
+                        "server_id, tool_name, status, call_sequence, arguments_sha256, "
+                        "server_security_version, input_schema_sha256, may_have_dispatched"
+                        ") VALUES ("
+                        "'call-existing', 'branch-1', 'alice', 'task-1', 'node-1', "
+                        "'server-1', 'lookup', 'reserved', 1, 'sha256:arguments', "
+                        "1, 'sha256:input', 0)"
+                    )
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("mcp_call_record")
+            }
+            self.assertTrue(
+                {
+                    "output_schema",
+                    "output_schema_sha256",
+                    "terminal_result_source",
+                }.issubset(columns)
+            )
+            with engine.connect() as connection:
+                row = connection.execute(
+                    text(
+                        "SELECT call_ref, output_schema, output_schema_sha256, "
+                        "terminal_result_source FROM mcp_call_record"
+                    )
+                ).one()
+            self.assertEqual(row[0], "call-existing")
+            self.assertEqual(tuple(row[1:]), (None, None, None))
+
     def test_legacy_dispatch_outbox_with_business_row_requires_operator_migration(
         self,
     ) -> None:

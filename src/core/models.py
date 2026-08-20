@@ -128,6 +128,9 @@ class MCPCallRecord:
     input_schema_sha256: str
     server_config_version: int | None = None
     protocol_version: str | None = None
+    output_schema: Mapping[str, Any] | None = None
+    output_schema_sha256: str | None = None
+    terminal_result_source: str | None = None
     input_field_names: tuple[str, ...] = ()
     may_have_dispatched: bool = False
     result_ref: str | None = None
@@ -604,6 +607,9 @@ class MCPValidatedTerminalResultCandidate:
     safe_result_content_sha256: str | None = None
     safe_result_size_bytes: int | None = None
     safe_result_store_kind: str | None = None
+    result_parser_revision: str | None = None
+    validated_checkpoint_sha256: str | None = None
+    parsed_model_sha256: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -629,6 +635,9 @@ class MCPTerminalResultReceipt:
     safe_result_content_sha256: str | None = None
     safe_result_size_bytes: int | None = None
     safe_result_store_kind: str | None = None
+    result_parser_revision: str | None = None
+    validated_checkpoint_sha256: str | None = None
+    parsed_model_sha256: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

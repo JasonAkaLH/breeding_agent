@@ -472,6 +472,9 @@ def _row_to_mcp_call(row: MCPCallRecordRow) -> MCPCallRecord:
         else int(row.server_config_version),
         input_schema_sha256=row.input_schema_sha256,
         protocol_version=row.protocol_version,
+        output_schema=None if row.output_schema is None else dict(row.output_schema),
+        output_schema_sha256=row.output_schema_sha256,
+        terminal_result_source=row.terminal_result_source,
         input_field_names=tuple(row.input_field_names or ()),
         may_have_dispatched=bool(row.may_have_dispatched),
         result_ref=row.result_ref,
@@ -673,6 +676,9 @@ def _row_to_mcp_terminal_receipt(
         safe_result_content_sha256=row.safe_result_content_sha256,
         safe_result_size_bytes=row.safe_result_size_bytes,
         safe_result_store_kind=row.safe_result_store_kind,
+        result_parser_revision=row.result_parser_revision,
+        validated_checkpoint_sha256=row.validated_checkpoint_sha256,
+        parsed_model_sha256=row.parsed_model_sha256,
     )
 
 
@@ -1493,6 +1499,7 @@ def _terminal_candidate_snapshot_is_closed(
         in {
             "maf.user_mcp.cp7.terminal_result_candidate.v1",
             "maf.user_mcp.cp7.terminal_result_candidate.v2",
+            "maf.user_mcp.cp7.terminal_result_candidate.v3",
         }
         and len(set(filenames)) == 3
         and all(
@@ -1552,6 +1559,42 @@ def _is_prefixed_sha256(value: object) -> bool:
         and value.startswith("sha256:")
         and all(character in "0123456789abcdef" for character in value[7:])
     )
+
+
+def _validate_mcp_call_result_authority(record: MCPCallRecord) -> None:
+    if (record.output_schema is None) != (record.output_schema_sha256 is None):
+        raise ValueError("mcp_call_output_schema_authority_invalid")
+    if record.output_schema_sha256 is not None and not _is_prefixed_sha256(
+        record.output_schema_sha256
+    ):
+        raise ValueError("mcp_call_output_schema_digest_invalid")
+    if record.output_schema is not None:
+        try:
+            canonical = json.dumps(
+                dict(record.output_schema),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("mcp_call_output_schema_snapshot_invalid") from exc
+        if len(canonical) > 256 * 1024:
+            raise ValueError("mcp_call_output_schema_snapshot_too_large")
+        expected = "sha256:" + hashlib.sha256(canonical).hexdigest()
+        if record.output_schema_sha256 != expected:
+            raise ValueError("mcp_call_output_schema_digest_mismatch")
+    if record.terminal_result_source not in {
+        None,
+        "tools_call",
+        "tasks_result",
+        "tasks_get",
+    }:
+        raise ValueError("mcp_call_terminal_result_source_invalid")
+    if record.status not in {"completed", "failed", "cancelled"} and (
+        record.terminal_result_source is not None
+    ):
+        raise ValueError("mcp_call_nonterminal_result_source_invalid")
 
 
 def _validated_mcp_task_assignment(
@@ -4600,6 +4643,7 @@ class SQLiteStateRepository:
         return [_row_to_mcp_branch(row) for row in rows]
 
     def reserve_mcp_call(self, record: MCPCallRecord) -> bool:
+        _validate_mcp_call_result_authority(record)
         branch = self._session.scalar(
             select(MCPBranchRecordRow).where(
                 MCPBranchRecordRow.branch_id == record.branch_id,
@@ -4649,6 +4693,11 @@ class SQLiteStateRepository:
                 server_config_version=record.server_config_version,
                 input_schema_sha256=record.input_schema_sha256,
                 protocol_version=record.protocol_version,
+                output_schema=None
+                if record.output_schema is None
+                else dict(record.output_schema),
+                output_schema_sha256=record.output_schema_sha256,
+                terminal_result_source=record.terminal_result_source,
                 input_field_names=list(record.input_field_names),
                 may_have_dispatched=record.may_have_dispatched,
                 result_ref=record.result_ref,
@@ -7672,6 +7721,9 @@ class SQLiteStateRepository:
             "safe_result_content_sha256": candidate.safe_result_content_sha256,
             "safe_result_size_bytes": candidate.safe_result_size_bytes,
             "safe_result_store_kind": candidate.safe_result_store_kind,
+            "result_parser_revision": candidate.result_parser_revision,
+            "validated_checkpoint_sha256": candidate.validated_checkpoint_sha256,
+            "parsed_model_sha256": candidate.parsed_model_sha256,
             "completion_mode": mode,
             "committed_at": occurred_at,
         }

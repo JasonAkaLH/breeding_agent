@@ -18,7 +18,7 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
         manifest = build_postgres_fresh_cutover_schema_manifest()
         self.assertEqual(
             POSTGRES_RUNTIME_SCHEMA_VERSION,
-            "maf.postgresql_fresh_runtime_schema.v6",
+            "maf.postgresql_fresh_runtime_schema.v7",
         )
         self.assertEqual(manifest.schema_version, POSTGRES_RUNTIME_SCHEMA_VERSION)
         expected = {
@@ -123,9 +123,11 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
                 "safe_result_store_kind": "text",
             },
         )
-        forbidden = {"tool_list", "input_schema", "output_schema", "session_id", "remote_task_id", "result"}
+        forbidden = {"tool_list", "input_schema", "session_id", "remote_task_id", "result"}
         for table_name in expected:
             self.assertFalse(forbidden.intersection(manifest.table_columns[table_name]))
+            if table_name != "mcp_call_record":
+                self.assertNotIn("output_schema", manifest.table_columns[table_name])
         ddl = build_runtime_index_schema_ddl()
         self.assertIn("idx_user_mcp_server_owner_server", ddl)
         self.assertIn("idx_user_mcp_health_attempt_lease", ddl)
