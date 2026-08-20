@@ -19,7 +19,8 @@
 ## 执行记录
 
 - Checkpoint 1 已完成：`09f8559 fix(api): safe-hide MCP raw result artifacts`。
-- Checkpoint 2 已完成实现与聚焦回归：output schema/source/checkpoint authority、candidate v3以及SQLite/PostgreSQL additive schema已落地，等待本检查点提交。
+- Checkpoint 2 已完成：`38fc16c feat(mcp): persist result parser authority`。
+- Checkpoint 3 已完成实现与聚焦回归：五版本静态Registry、独立Decoder、strict JSON/ContentBlock/schema辅助和有界user/agent projector已落地，等待本检查点提交。
 
 ## 开发检查点
 
