@@ -20,6 +20,10 @@
 - `tests/`：后端分层回归测试，目录大体对应 `src/` 的模块边界。
 - `docs/`：PRD、API 文档、runbook、设计记录与 checkpoint 文档；未完成的 Future work 参考 `docs/AGENTS.md`。
 - `scripts/`、`docker/`：本地验证、维护脚本、Docker 与部署辅助入口。
+
+Rust 质量门禁统一从 `scripts/run_rust_quality_gates.py` 进入，并遵守
+`native/deny.toml` 的依赖策略。Skill Runtime PyO3 wheel 本地 smoke 面向
+Ubuntu 22.04 / `manylinux_2_35`，属于非默认回归，不应进入服务启动或请求路径。
 - `runtime/`：本地运行产物、日志、artifact 与调试 prompt；通常不作为业务源码入口。
 
 
