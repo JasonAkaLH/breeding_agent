@@ -22,7 +22,7 @@
 
 ## [Unreleased]
 
-- 新增MCP五版本Result解析与业务投影设计：采用版本化Decoder Registry分别覆盖`2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 / 2026-07-28`的普通Call、structuredContent、2025 Tasks与2026 resultType/MRTR/Tasks差异，统一输出不含raw/meta/control字段的业务结果模型，并分别生成用户typed view与Main Agent 20,000字符有界投影；完整raw result继续作为内部durable authority，但公共API、前端和prompt永久禁止raw fallback。设计同时锁定streamed `_mcpResultRef`提交前解析、hidden `isError=true`修复、历史无网络重投影与五版本测试矩阵。License Requirement：仅设计、索引与变更记录，无新增依赖或许可变更。
+- MCP五版本Result解析与业务投影设计完成六轮自主`document-perfectization`，以98/100、0 Blocking、0 Major通过信心门：版本化Decoder Registry分别覆盖`2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 / 2026-07-28`的普通Call、structuredContent、2025 Tasks和2026 resultType/MRTR/Tasks，并锁定Call级output schema/source快照、64 KiB Mapping/64 MiB raw分流、容量1可终止隔离worker、validated checkpoint先于terminal、projection失败只safe-hide/本地补偿、typed用户DTO、Main Agent有界投影、历史零网络重投影和永久禁止raw fallback。设计仍未实施；Linux 512 MiB address-space gate及source-deleted history测试是记录在案的两个Minor实施门禁。License Requirement：仅设计、索引与变更记录，无新增依赖或许可变更。
 
 - MCP Tool JSON原始返回改为公共`text` artifact：内部继续复用受校验managed file副本、SHA和lifecycle CAS，不迁移数据库；Task与Conversation history API在读取新旧`source_kind=mcp_result`产物时逐字节校验size/SHA、按UTF-8内联原始正文，并返回`artifact_type=text`且不返回文件名或`download_url`。MCP artifact直接下载现在返回404，Skill output文件下载保持不变；前端新增可展开的“MCP Tool原始返回”文本卡片，并显式阻止该文本被选作assistant回答。License Requirement：复用现有Python、Artifact存储、React与Ant Design能力，无新增依赖或许可变更。
 
