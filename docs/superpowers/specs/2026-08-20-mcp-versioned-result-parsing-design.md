@@ -4,7 +4,7 @@
 
 - 日期：2026-08-20
 - 分支：`main`
-- 状态：经 document-perfectization 循环加固；八检查点仓库实现完成，生产 rollout 未执行
+- 状态：经 document-perfectization 循环加固；八检查点仓库实现完成；Result Parser 已确认收敛为 always-on，生产 rollout 未执行
 - 决策：采用“版本化 Result Decoder Registry + 统一业务结果模型”
 - 范围：Python Client/Gateway 已支持的 `2024-11-05`、`2025-03-26`、
   `2025-06-18`、`2025-11-25`、`2026-07-28` 五版本 Tool Result；覆盖普通调用、
@@ -60,7 +60,7 @@
 | Gateway / Adapter / recovery worker | 在 terminal commit 前完成版本分流、Task 解包、结果解析和 `isError` 判定，并保持 no-replay |
 | Storage / lifecycle / Artifact | raw result 继续承担 identity/recovery；新增结果来源和 output schema 快照权威；公共读取只返回业务视图 |
 | API / frontend | 消费闭合 typed DTO，不再识别 MCP wire 字段或把 `storage_ref` 当 raw result 解析 |
-| 运维与发布 | 通过 shadow、历史本地重投影和 safe-hide rollback 放量；任何回滚均不得重新公开 raw JSON |
+| 运维与发布 | Result Parser 不再提供运行模式开关；启用用户级 MCP 时始终强制解析，任何故障处置均不得重新公开 raw JSON |
 
 ### 2.4 当前状态与代码证据
 
@@ -860,33 +860,27 @@ outcome/reason，不允许Server、Tool、用户或Call标识。
 | result Artifact projector | raw复制、CAS、历史reconciler已存在 | raw副本转internal-only；private metadata绑定typed projection ref |
 | API `ArtifactResponse` | MCP raw作为text写入`storage_ref` | 新增strict `MCPBusinessResultView`和可选`mcp_business_result`字段；MCP response `storage_ref=""` |
 | frontend Artifact display | ID前缀识别`mcp_result_text` | 改为DTO discriminator和四种primary view，删除raw card |
-| rollout/observability | 已有用户级MCP rollout与低基数指标 | 增加独立result parser closed mode/metric，不改变Server路由authority |
+| rollout/observability | 已有用户级MCP rollout与低基数指标 | Result Parser 固定为always-on并复用闭合metric，不改变Server路由authority |
 
-实现不需要新第三方依赖。Call nullable schema migration、API additive字段和前端新union可以按切片部署；safe-hide
-先行保证旧前端遇到新 `artifact_type=mcp_result` 时只是不展示，不会回退显示 raw。
+实现不需要新第三方依赖。Call nullable schema migration、API additive字段和前端新union已按切片部署；既有
+safe-hide边界继续保证旧前端遇到新 `artifact_type=mcp_result` 时不会回退显示 raw，但它不再是运行模式。
 
-## 18. Rollout 与回滚
+## 18. Always-on 运行与故障处置
 
-独立配置 `MAF_USER_MCP_RESULT_PARSER_MODE` 的闭合模式为 `safe_hide | shadow | enforce`，缺失或未知值必须
-按 `safe_hide` 处理，不得存在 `legacy_raw`：
+`MAF_USER_MCP_RESULT_PARSER_MODE`、`MCPResultParserMode`及其`safe_hide | shadow | enforce`运行分支废弃。
+启用用户级MCP时，ordinary、approval、workflow和remote task结果始终在terminal commit前进入版本化Decoder：
 
-| 模式 | Terminal行为 | 公共行为 |
-|---|---|---|
-| `safe_hide` | 沿用旧terminal语义，不以新Decoder阻断 | MCP result只显示安全不可用状态，不返回raw |
-| `shadow` | 新Decoder旁路运行，不改变terminal；记录闭合分类差异 | 仍safe-hide，不返回新旧正文 |
-| `enforce` | 新Decoder在terminal commit前强制执行 | 返回typed business view；失败safe-hide |
+- `succeeded`提交validated checkpoint并发布typed business projection；
+- `isError=true`收敛为Tool失败；
+- `malformed`收敛为确定性非重试协议失败；
+- checkpoint前worker、容量或IPC失败保持unknown/no-replay；
+- checkpoint后projection失败不回滚已完成Tool，公共API仅返回`projection_missing`，绝不读取raw补偿。
 
-固定顺序：
+`safe_hide`只保留为pre-parser历史Artifact的闭合不可用原因，不再控制live调用。authority完整的历史结果由本地
+reconciler零网络补投；authority不完整时继续安全不可用，不猜测payload形状。
 
-1. 部署 safe-hide rollback floor、nullable schema和观测；
-2. 五版本fixtures、历史副本dry-run、streamed error、API泄漏与64 MiB资源门禁全部通过；
-3. 内部实例进入shadow，只比较 outcome、block kind、structured presence、projection digest和truncated，不记录正文；
-4. 已配置的真实Server逐协议执行ordinary smoke；只有实际启用2025/2026 Tasks的Server才执行对应remote smoke；
-5. shadow差异必须全部归入闭合allowlist：`legacy_streamed_error_would_fail`或
-   `legacy_raw_projection_replaced`；其他outcome/source/structured-presence/projection-digest差异必须为0，
-   raw泄漏与unknown parser version必须为0，才可由operator切enforce；本设计不自动修改生产路由；
-6. enforce后运行历史reconciler，按每页1,000条既有keyset/CAS节奏补投，不阻塞Ready；
-7. 出现parser crash、资源门禁或API兼容问题时切回safe-hide；不得回滚到公开raw的旧backend版本。
+出现parser crash、资源门禁或API兼容问题时，故障处置只能修复/回滚到仍保持公共raw隐藏的版本，或关闭用户级
+MCP路由；不得通过Parser旁路把未验证结果提交completed，也不得恢复公开raw的旧backend版本。
 
 `prod`部署、外部观察窗和operator批准仍受现有 MCP rollout runbook约束；本设计文档和仓库测试不构成
 production evidence。
@@ -899,14 +893,14 @@ production evidence。
 | 风险 | 旧Call没有output schema和result source | 只对authority完整历史启用closed compatibility并标记`unavailable_legacy`；否则safe unavailable |
 | 风险 | `tests/fixtures/mcp/messages/create_task_result.json`为top-level task字段，而官方2025-11-25 `CreateTaskResult`为`result.task` | 明确不以本Result PRD宣称修复或通过2025 Task控制面conformance；单独登记债务 |
 | 风险 | structured result清洗后不再符合原output schema | schema只验证清洗前Server结果；公共DTO不声明清洗后schema conformance |
-| 风险 | typed DTO cutover导致旧前端不识别 | safe-hide先行；backend先返回新type且无raw，旧前端安全忽略，随后发布新前端 |
+| 风险 | typed DTO cutover导致旧前端不识别 | backend返回新type且无raw，旧前端安全忽略；当前前后端typed DTO已同步发布 |
 | 风险 | `RLIMIT_AS`等hard cap在非Linux开发机的语义与生产容器不同 | production gate只在Linux容器判定通过；非Linux测试仍验证deadline/terminate/restart和父进程RSS，不以本地软模拟替代生产证据 |
 | 决策 | inline业务预览上限20,000字符/80,000 bytes，不提供完整大结果下载 | 防止重新公开64 MiB raw；完整业务文件属于后续独立授权范围 |
 | 决策 | 首个slice不公开media/blob和resource URI正文 | 只展示MIME/size/SHA/scheme metadata；后续访问必须独立授权和policy |
-| 决策 | rollback只允许safe-hide | 安全性优先于结果可见性，禁止恢复raw公共展示 |
+| 决策 | Result Parser固定always-on | 删除独立模式参数，live terminal不得绕过Decoder；故障处置仍禁止恢复raw公共展示 |
 | 已验证假设 | 现有internal managed-file copy可在raw durable源回收后继续作为重投影输入 | source-deleted history测试已按size/SHA/owner/Task/Node/Call复验并以网络调用计数0通过 |
 
-没有未决业务问题。source-deleted测试已通过；后续任何回归失败仍必须停在safe-hide并修复internal resolver，不能降低authority校验或恢复raw展示。
+没有未决业务问题。source-deleted测试已通过；后续任何回归失败必须修复internal resolver或关闭用户级MCP路由，不能降低authority校验、绕过Decoder或恢复raw展示。
 
 ## 20. AGENTS、CHANGELOG 与依赖影响
 
