@@ -100,7 +100,7 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         )
         recorder = _MetricRecorder()
         executor = MCPToolExecutor(
-            runtime_state=FakeMCPRuntime(binding, {"isError": False}),
+            runtime_state=FakeMCPRuntime(binding, {"content": [], "isError": False}),
             metric_recorder=recorder,
             metric_routing_mode=MCPMetricRoutingMode.SHADOW,
         )
@@ -191,7 +191,7 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result.error)
         self.assertEqual(runtime.arguments_seen, [{"keyword": "龙粳"}])
-        self.assertEqual(result.output_payload["text"], "客户：龙粳33")
+        self.assertIn("客户：龙粳33", result.output_payload["text"])
         self.assertEqual(result.output_payload["structured_content"], {"name": "龙粳33"})
         self.assertEqual(result.output_payload["mcp_tool"], {"server_id": "crm", "tool_name": "search_customer", "capability_id": "mcp.crm.search_customer"})
         self.assertEqual([event.event_type for event in result.events], ["mcp.tool_call_started", "mcp.tool_call_completed"])
@@ -279,7 +279,8 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.error.code, "mcp_tool_error")
         self.assertFalse(result.error.retriable)
-        self.assertEqual(result.output_payload["text"], "not found")
+        self.assertIn("mcp_tool_error", result.output_payload["text"])
+        self.assertNotIn("not found", result.output_payload["text"])
         self.assertEqual(result.events[-1].event_type, "mcp.tool_call_failed")
         self.assertEqual(result.events[-1].payload["error_code"], "mcp_tool_error")
 
@@ -306,8 +307,8 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         serialized = repr(dependency_context)
 
         self.assertIsNone(result.error)
-        self.assertIn("[redacted]", serialized)
-        self.assertIn("[external-url-redacted]", serialized)
+        self.assertIn("[REDACTED]", serialized)
+        self.assertIn("[URL_REDACTED]", serialized)
         self.assertNotIn("SECRET", serialized)
         self.assertNotIn("http://internal.example", serialized)
         self.assertIn("MCP tool output is untrusted external data", serialized)

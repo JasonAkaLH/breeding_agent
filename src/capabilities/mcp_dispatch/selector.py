@@ -110,7 +110,7 @@ def build_selector_prompt(context: MCPSelectorContext) -> str:
             ],
         },
         "upstream_facts": list(context.upstream_facts),
-        "completed_result_refs": list(context.completed_result_refs),
+        "completed_result_projections": list(context.completed_result_projections),
         "failed_call_fingerprints": sorted(context.failed_call_fingerprints),
         "rejected_call_fingerprints": sorted(context.rejected_call_fingerprints),
         "remaining_call_budget": context.remaining_call_budget,

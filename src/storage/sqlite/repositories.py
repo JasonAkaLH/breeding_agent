@@ -3594,6 +3594,26 @@ class SQLiteStateRepository:
         self._session.flush()
         return _row_to_artifact(merged)
 
+    def compare_and_set_artifact_storage_ref(
+        self,
+        artifact_id: str,
+        expected_storage_ref: str,
+        replacement_storage_ref: str,
+    ) -> bool:
+        _ensure_runtime_store_write_allowed_by_rust_contract("artifact_save")
+        if not expected_storage_ref or not replacement_storage_ref:
+            raise ValueError("artifact_storage_ref_cas_value_invalid")
+        updated = self._session.execute(
+            update(ArtifactRow)
+            .where(
+                ArtifactRow.artifact_id == artifact_id,
+                ArtifactRow.storage_ref == expected_storage_ref,
+            )
+            .values(storage_ref=replacement_storage_ref)
+        )
+        self._session.flush()
+        return bool(updated.rowcount)
+
     def get_artifact(self, artifact_id: str) -> Artifact | None:
         row = self._session.get(ArtifactRow, artifact_id)
         return None if row is None else _row_to_artifact(row)
@@ -16649,6 +16669,25 @@ class SQLiteStorage(StoragePort):
             rust_output=lambda envelope: _artifact_shadow_payload_from_record(envelope["artifact"]),
         )
         return saved
+
+    async def compare_and_set_artifact_storage_ref(
+        self,
+        artifact_id: str,
+        expected_storage_ref: str,
+        replacement_storage_ref: str,
+    ) -> bool:
+        if (
+            runtime_mode_for_component("runtime_store") == "enforce"
+            and self._runtime_sidecar_client is not None
+        ):
+            return False
+        return await self._run(
+            lambda state, collab: state.compare_and_set_artifact_storage_ref(
+                artifact_id,
+                expected_storage_ref,
+                replacement_storage_ref,
+            )
+        )
 
     async def get_artifact(self, artifact_id: str) -> Artifact | None:
         if runtime_mode_for_component("runtime_store") == "enforce" and self._runtime_sidecar_client is not None:

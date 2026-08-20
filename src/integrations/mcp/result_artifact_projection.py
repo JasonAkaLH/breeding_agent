@@ -15,7 +15,17 @@ from typing import Any
 from src.core.enums import EventVisibility
 from src.core.models import Artifact, EventRecord, MCPDurableResultLifecycle
 from src.integrations.mcp.cp7_artifacts import mcp_durable_result_artifact_id
-from src.storage.artifact_files import LocalArtifactFileStore, sanitize_download_filename
+from src.integrations.mcp.result_parsing.projection_store import (
+    MCPProjectionStagingHandle,
+    MCPPublishedProjection,
+    PROJECTION_SCHEMA,
+)
+from src.storage.artifact_files import (
+    LocalArtifactFileStore,
+    build_file_storage_ref,
+    parse_file_storage_ref,
+    sanitize_download_filename,
+)
 
 
 MCP_RESULT_ARTIFACT_PROJECTION_EVENT = "mcp.result_artifact_projection"
@@ -336,6 +346,56 @@ class MCPResultArtifactProjector:
         await self._emit(lifecycle, receipt, result, artifact_id)
         await self._observe(result, source, started)
         return result
+
+    async def attach_published_projection(
+        self,
+        artifact: Artifact,
+        *,
+        published: MCPPublishedProjection,
+        staging_handle: MCPProjectionStagingHandle,
+    ) -> Artifact:
+        metadata = parse_file_storage_ref(artifact.storage_ref) or {}
+        binding = staging_handle.binding
+        if (
+            metadata.get("source_kind") != "mcp_result"
+            or artifact.task_id != binding.task_id
+            or artifact.producer_node_id != binding.node_id
+            or str(metadata.get("result_ref") or "") == ""
+            or str(metadata.get("sha256") or "")
+            != binding.raw_sha256.removeprefix("sha256:")
+        ):
+            raise ValueError("mcp_result_projection_artifact_authority_invalid")
+        replacement_metadata = {
+            **metadata,
+            "visibility": "internal_raw",
+            "protocol_version": (
+                await self._storage.get_mcp_call_record(
+                    binding.owner_user_id, binding.task_id, binding.call_ref
+                )
+            ).protocol_version,
+            "terminal_result_source": binding.source,
+            "output_schema_sha256": binding.output_schema_sha256,
+            "parser_revision": binding.parser_revision,
+            "projection_schema": PROJECTION_SCHEMA,
+            "projection_ref": published.projection_ref,
+            "projection_sha256": published.projection_sha256,
+            "owner_user_id": binding.owner_user_id,
+            "call_ref": binding.call_ref,
+        }
+        replacement_ref = build_file_storage_ref(replacement_metadata)
+        if len(replacement_ref.encode("utf-8")) > 16 * 1024:
+            raise ValueError("mcp_result_projection_artifact_metadata_too_large")
+        updated = await self._storage.compare_and_set_artifact_storage_ref(
+            artifact.artifact_id,
+            artifact.storage_ref,
+            replacement_ref,
+        )
+        current = await self._storage.get_artifact(artifact.artifact_id)
+        if current is None or (
+            not updated and current.storage_ref != replacement_ref
+        ):
+            raise ValueError("mcp_result_projection_artifact_cas_conflict")
+        return current
 
     def _failure_result(
         self,

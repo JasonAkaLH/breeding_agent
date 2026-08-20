@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
 from datetime import datetime
 from types import SimpleNamespace
+from pathlib import Path
 
 from src.capabilities.mcp_dispatch.models import MCPBindingMode, MCPToolProfile
 from src.core.enums import (
@@ -29,14 +32,22 @@ from src.core.models import (
     UserMCPServer,
 )
 from src.integrations.mcp.cp7_artifacts import (
+    mcp_durable_result_artifact_id,
     mcp_dispatch_resume_outbox_id,
     mcp_no_server_intent_id,
 )
 from src.integrations.mcp.resume_envelope import build_mcp_dispatch_resume_envelope_v2
 from src.integrations.mcp.selector_context import (
     MCPDurableSelectorContextBuilder,
+    MCPPublishedAgentProjectionAuthority,
     MCPSelectorContextAuthorityError,
+    _budget_agent_projections,
 )
+from src.integrations.mcp.result_parsing.projection_store import (
+    MCPProjectionBinding,
+    MCPProjectionStore,
+)
+from src.storage.artifact_files import build_file_storage_ref
 
 
 NOW = datetime(2026, 8, 18, 12, 0, 0)
@@ -47,9 +58,11 @@ class _ResultAuthority:
         self.calls: list[str] = []
         self.replacement: str | None = None
 
-    async def verify_completed_result(self, *, call, receipt) -> str:
+    async def load_agent_projection(self, *, call, receipt) -> str:
         self.calls.append(call.call_ref)
-        return self.replacement or str(receipt.safe_result_ref)
+        if self.replacement is not None:
+            raise RuntimeError("projection authority drift")
+        return f"projection:{call.call_ref}"
 
 
 class _ProjectionStorage:
@@ -188,6 +201,8 @@ class _ProjectionStorage:
             server_security_version=4,
             input_schema_sha256="schema-a",
             server_config_version=3,
+            protocol_version="2025-11-25",
+            terminal_result_source="tools_call",
             may_have_dispatched=True,
             result_ref=f"mcp-result-{sequence}",
         )
@@ -217,6 +232,9 @@ class _ProjectionStorage:
             safe_result_content_sha256="sha256:" + str(call.call_sequence) * 64,
             safe_result_size_bytes=100 + call.call_sequence,
             safe_result_store_kind="durable_content_addressed",
+            result_parser_revision="mcp-result-parser.v1",
+            validated_checkpoint_sha256="sha256:" + "a" * 64,
+            parsed_model_sha256="sha256:" + "b" * 64,
         )
 
     async def get_task(self, task_id):
@@ -267,6 +285,85 @@ class _ProjectionStorage:
 
 
 class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
+    def test_multi_call_projection_budget_is_latest_first_then_restored_to_sequence(self) -> None:
+        projected = _budget_agent_projections(
+            ((1, "old" * 10_000), (2, "middle" * 5_000), (3, "new" * 5_000))
+        )
+        self.assertEqual(len("".join(projected)), 20_000)
+        self.assertTrue(projected[-1].startswith("new"))
+        self.assertFalse(any(value.startswith("old") for value in projected))
+
+    async def test_published_projection_authority_loads_agent_text_without_raw_ref(self) -> None:
+        storage = _ProjectionStorage()
+        call = storage._call(1)
+        receipt = storage._receipt(call)
+        binding = MCPProjectionBinding(
+            owner_user_id=call.owner_user_id,
+            task_id=call.task_id,
+            node_id=call.node_id,
+            call_ref=call.call_ref,
+            raw_sha256=receipt.safe_result_content_sha256,
+            output_schema_sha256=call.output_schema_sha256,
+            source=call.terminal_result_source,
+            parser_revision=receipt.result_parser_revision,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            projection_store = MCPProjectionStore(Path(directory) / "projections")
+            envelope = json.dumps(
+                {
+                    "schema": "maf.mcp.parsed_result_projection.v1",
+                    "parsed_model_sha256": receipt.parsed_model_sha256,
+                    "user_view": {},
+                    "agent_projection": "untrusted projected business result",
+                    "workflow_control": None,
+                },
+                separators=(",", ":"),
+            ).encode()
+            handle = projection_store.stage(envelope, binding=binding)
+            published = projection_store.publish(handle)
+            artifact = Artifact(
+                artifact_id=mcp_durable_result_artifact_id(call.result_ref),
+                task_id=call.task_id,
+                producer_node_id=call.node_id,
+                artifact_type=ArtifactType.FILE,
+                storage_ref=build_file_storage_ref(
+                    {
+                        "version": 1,
+                        "source_kind": "mcp_result",
+                        "visibility": "internal_raw",
+                        "storage_key": "private",
+                        "filename": "result.json",
+                        "mime_type": "application/json",
+                        "size_bytes": receipt.safe_result_size_bytes,
+                        "sha256": receipt.safe_result_content_sha256.removeprefix("sha256:"),
+                        "summary": "result",
+                        "result_ref": call.result_ref,
+                        "retention_status": "active",
+                        "protocol_version": call.protocol_version,
+                        "terminal_result_source": call.terminal_result_source,
+                        "output_schema_sha256": call.output_schema_sha256,
+                        "parser_revision": receipt.result_parser_revision,
+                        "projection_schema": "maf.mcp.parsed_result_projection.v1",
+                        "projection_ref": published.projection_ref,
+                        "projection_sha256": published.projection_sha256,
+                        "owner_user_id": call.owner_user_id,
+                        "call_ref": call.call_ref,
+                    }
+                ),
+                is_complete=True,
+            )
+
+            class ArtifactStorage:
+                async def get_artifact(self, artifact_id):
+                    return artifact if artifact_id == artifact.artifact_id else None
+
+            projection = await MCPPublishedAgentProjectionAuthority(
+                ArtifactStorage(), projection_store
+            ).load_agent_projection(call=call, receipt=receipt)
+
+        self.assertEqual(projection, "untrusted projected business result")
+        self.assertNotIn(call.result_ref, projection)
+
     async def test_restart_rebuilds_identical_context_from_durable_authority(self) -> None:
         storage = _ProjectionStorage()
         first_authority = _ResultAuthority()
@@ -297,8 +394,8 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_authority.calls, ["call-1", "call-2"])
         self.assertEqual(before_restart.binding_mode, MCPBindingMode.EXPLICIT_COMMAND)
         self.assertEqual(
-            before_restart.completed_result_refs,
-            ("mcp-result-1", "mcp-result-2"),
+            before_restart.completed_result_projections,
+            ("projection:call-1", "projection:call-2"),
         )
         self.assertEqual(
             before_restart.upstream_facts,

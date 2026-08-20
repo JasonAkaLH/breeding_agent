@@ -40,6 +40,8 @@ class MCPToolBinding:
     planner_allowed_fields: tuple[str, ...] = ()
     input_schema: Mapping[str, Any] = field(default_factory=dict)
     output_schema: Mapping[str, Any] | None = None
+    output_schema_sha256: str | None = None
+    protocol_version: str = "2025-11-25"
     max_output_bytes: int = 65_536
     risk_level: str = "read_only"
     task_support: str = "forbidden"
@@ -50,6 +52,21 @@ class MCPToolBinding:
     transport_security: str = ""
     header_names: tuple[str, ...] = ()
     credential_over_plaintext_http: bool = False
+
+    def __post_init__(self) -> None:
+        if self.output_schema is not None and self.output_schema_sha256 is None:
+            canonical = json.dumps(
+                self.output_schema,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            object.__setattr__(
+                self,
+                "output_schema_sha256",
+                "sha256:" + hashlib.sha256(canonical).hexdigest(),
+            )
 
 
 @dataclass(slots=True, frozen=True)
@@ -332,6 +349,16 @@ class MCPRuntimeState:
                     policies=policies,
                     bindings=bindings,
                     diagnostics=diagnostics,
+                    protocol_version=(
+                        str(
+                            getattr(
+                                getattr(client, "negotiated_session", None),
+                                "negotiated_protocol_version",
+                                "",
+                            )
+                            or server.protocol_version
+                        )
+                    ),
                 )
         except Exception as exc:
             for client in next_clients.values():
@@ -526,6 +553,7 @@ class MCPRuntimeState:
         policies: dict[str, CapabilityPayloadPolicy],
         bindings: dict[str, MCPToolBinding],
         diagnostics: list[MCPRuntimeDiagnostic],
+        protocol_version: str,
     ) -> None:
         reserved = set(self._reserved_capability_ids) | set(descriptors)
         for tool_config in server.tools:
@@ -639,6 +667,21 @@ class MCPRuntimeState:
                 planner_allowed_fields=tool_config.planner_allowed_fields,
                 input_schema=input_schema,
                 output_schema=output_schema,
+                output_schema_sha256=(
+                    "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            output_schema,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if output_schema is not None
+                    else None
+                ),
+                protocol_version=protocol_version,
                 max_output_bytes=tool_config.max_output_bytes or server.limits.max_output_bytes,
                 risk_level=tool_config.risk_level,
                 task_support=task_support,

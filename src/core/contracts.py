@@ -1499,6 +1499,13 @@ class StoragePort(Protocol):
 
     async def save_artifact(self, artifact: Artifact) -> Artifact: ...
 
+    async def compare_and_set_artifact_storage_ref(
+        self,
+        artifact_id: str,
+        expected_storage_ref: str,
+        replacement_storage_ref: str,
+    ) -> bool: ...
+
     async def get_artifact(self, artifact_id: str) -> Artifact | None: ...
 
     async def list_artifacts_for_task(self, task_id: str) -> list[Artifact]: ...

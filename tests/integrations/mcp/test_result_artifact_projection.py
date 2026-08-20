@@ -25,7 +25,16 @@ from src.integrations.mcp.result_artifact_projection import (
     mcp_result_artifact_projection_event_id,
     parse_mcp_result_artifact_projection_payload,
 )
-from src.storage.artifact_files import LocalArtifactFileStore
+from src.integrations.mcp.result_parsing.projection_store import (
+    MCPProjectionBinding,
+    MCPProjectionStagingHandle,
+    MCPPublishedProjection,
+)
+from src.storage.artifact_files import (
+    LocalArtifactFileStore,
+    build_file_storage_ref,
+    parse_file_storage_ref,
+)
 
 
 NOW = datetime(2026, 8, 19, 12, 0, 0)
@@ -70,6 +79,8 @@ def _call(*, status: str = "completed", result_ref: str | None = RESULT_REF):
         arguments_sha256="e" * 64,
         server_security_version=1,
         input_schema_sha256="f" * 64,
+        protocol_version="2025-11-25",
+        terminal_result_source="tools_call",
         result_ref=result_ref,
         output_size_bytes=11,
         terminal_at=NOW,
@@ -99,6 +110,9 @@ def _receipt(*, state: MCPTerminalState = MCPTerminalState.COMPLETED):
         safe_result_content_sha256=CONTENT_SHA,
         safe_result_size_bytes=11,
         safe_result_store_kind="durable_content_addressed",
+        result_parser_revision="mcp-result-parser.v1",
+        validated_checkpoint_sha256="sha256:" + "2" * 64,
+        parsed_model_sha256="sha256:" + "3" * 64,
     )
 
 
@@ -122,6 +136,20 @@ class _Storage:
 
     async def get_artifact(self, artifact_id):
         return self.artifact
+
+    async def compare_and_set_artifact_storage_ref(
+        self, artifact_id, expected_storage_ref, replacement_storage_ref
+    ):
+        if (
+            self.artifact is None
+            or self.artifact.artifact_id != artifact_id
+            or self.artifact.storage_ref != expected_storage_ref
+        ):
+            return False
+        self.artifact = replace(
+            self.artifact, storage_ref=replacement_storage_ref
+        )
+        return True
 
 
 class _Manager:
@@ -303,6 +331,77 @@ class ResultArtifactProjectorTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result.status, MCPResultArtifactProjectionStatus.DEFERRED)
         self.assertEqual(manager.calls, [])
+
+    async def test_published_business_projection_is_attached_with_exact_storage_ref_cas(self):
+        artifact = Artifact(
+            artifact_id="artifact-1",
+            task_id="task-1",
+            producer_node_id="node-1",
+            artifact_type=ArtifactType.FILE,
+            storage_ref=build_file_storage_ref(
+                {
+                    "version": 1,
+                    "source_kind": "mcp_result",
+                    "storage_key": "private-key",
+                    "filename": "result.json",
+                    "mime_type": "application/json",
+                    "size_bytes": 11,
+                    "sha256": "b" * 64,
+                    "summary": "result",
+                    "result_ref": RESULT_REF,
+                    "retention_status": "active",
+                }
+            ),
+            is_complete=True,
+        )
+        storage = _Storage(artifact=artifact)
+        binding = MCPProjectionBinding(
+            owner_user_id="alice",
+            task_id="task-1",
+            node_id="node-1",
+            call_ref="call-1",
+            raw_sha256=CONTENT_SHA,
+            output_schema_sha256=None,
+            source="tools_call",
+            parser_revision="mcp-result-parser.v1",
+        )
+        handle = MCPProjectionStagingHandle(
+            token="token",
+            path="/internal/staged",
+            size_bytes=100,
+            projection_sha256="sha256:" + "4" * 64,
+            device=1,
+            inode=2,
+            binding=binding,
+        )
+        published = MCPPublishedProjection(
+            "mcp-projection-" + "5" * 64,
+            handle.projection_sha256,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            projector = MCPResultArtifactProjector(
+                storage=storage,
+                lifecycle_manager=_Manager(storage),
+                artifact_file_store=LocalArtifactFileStore(Path(directory)),
+                audit_reference_signer=_Signer(),
+                artifact_disk_low_watermark_bytes=10,
+            )
+            attached = await projector.attach_published_projection(
+                artifact,
+                published=published,
+                staging_handle=handle,
+            )
+            retry = await projector.attach_published_projection(
+                artifact,
+                published=published,
+                staging_handle=handle,
+            )
+
+        metadata = parse_file_storage_ref(attached.storage_ref)
+        self.assertEqual(metadata["projection_ref"], published.projection_ref)
+        self.assertEqual(metadata["projection_sha256"], published.projection_sha256)
+        self.assertEqual(metadata["terminal_result_source"], "tools_call")
+        self.assertEqual(retry, attached)
 
 
 if __name__ == "__main__":

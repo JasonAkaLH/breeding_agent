@@ -45,7 +45,7 @@ class MCPSelectorContext:
     allow_route_another_server: bool
     attachments: tuple[MCPAttachmentSummary, ...] = ()
     upstream_facts: tuple[str, ...] = ()
-    completed_result_refs: tuple[str, ...] = ()
+    completed_result_projections: tuple[str, ...] = ()
     failed_call_fingerprints: frozenset[str] = frozenset()
     rejected_call_fingerprints: frozenset[str] = frozenset()
     remaining_call_budget: int = 20
@@ -73,7 +73,7 @@ def build_mcp_selector_context(
     binding_mode: MCPBindingMode,
     attachments: tuple[MCPAttachmentSummary, ...] = (),
     upstream_facts: tuple[str, ...] = (),
-    completed_result_refs: tuple[str, ...] = (),
+    completed_result_projections: tuple[str, ...] = (),
     failed_call_fingerprints: frozenset[str] = frozenset(),
     rejected_call_fingerprints: frozenset[str] = frozenset(),
     remaining_call_budget: int = 20,
@@ -88,7 +88,7 @@ def build_mcp_selector_context(
         allow_route_another_server=binding_mode is MCPBindingMode.AUTOMATIC,
         attachments=attachments,
         upstream_facts=upstream_facts,
-        completed_result_refs=completed_result_refs,
+        completed_result_projections=completed_result_projections,
         failed_call_fingerprints=failed_call_fingerprints,
         rejected_call_fingerprints=rejected_call_fingerprints,
         remaining_call_budget=remaining_call_budget,

@@ -15,9 +15,15 @@ from src.core.contracts import StoragePort
 from src.core.enums import UserMCPHealthStatus
 from src.core.models import MCPCallRecord, MCPTerminalResultReceipt, TaskInputAttachment
 from src.integrations.mcp.cp7_artifacts import (
+    mcp_durable_result_artifact_id,
     mcp_dispatch_resume_outbox_id,
     mcp_no_server_intent_id,
 )
+from src.integrations.mcp.result_parsing.projection_store import (
+    MCPProjectionBinding,
+    MCPProjectionStore,
+)
+from src.storage.artifact_files import parse_file_storage_ref
 from src.integrations.mcp.resume_envelope import (
     MCPDispatchResumeEnvelopeError,
     mcp_dispatch_resume_envelope_version,
@@ -29,6 +35,8 @@ from src.orchestration.models import UserMCPServerProfile
 
 MAX_MCP_SELECTOR_USER_REQUEST_CHARS = 8000
 MAX_MCP_SELECTOR_ATTACHMENTS = 20
+MAX_MCP_SELECTOR_RESULT_CODE_POINTS = 20_000
+MAX_MCP_SELECTOR_RESULT_BYTES = 80_000
 
 
 class MCPSelectorContextAuthorityError(RuntimeError):
@@ -38,15 +46,80 @@ class MCPSelectorContextAuthorityError(RuntimeError):
 
 
 @runtime_checkable
-class MCPCompletedResultAuthority(Protocol):
-    """Verify durable manifest identity/integrity and return only its opaque ref."""
+class MCPCompletedResultProjectionAuthority(Protocol):
+    """Load only an identity-bound, published agent projection."""
 
-    async def verify_completed_result(
+    async def load_agent_projection(
         self,
         *,
         call: MCPCallRecord,
         receipt: MCPTerminalResultReceipt,
     ) -> str: ...
+
+
+@dataclass(slots=True)
+class MCPPublishedAgentProjectionAuthority:
+    storage: StoragePort
+    projection_store: MCPProjectionStore
+
+    async def load_agent_projection(
+        self,
+        *,
+        call: MCPCallRecord,
+        receipt: MCPTerminalResultReceipt,
+    ) -> str:
+        if receipt.safe_result_ref is None:
+            raise MCPSelectorContextAuthorityError(
+                "mcp_selector_context_projection_authority_invalid"
+            )
+        artifact = await self.storage.get_artifact(
+            mcp_durable_result_artifact_id(receipt.safe_result_ref)
+        )
+        metadata = (
+            {} if artifact is None else parse_file_storage_ref(artifact.storage_ref) or {}
+        )
+        projection_ref = metadata.get("projection_ref")
+        projection_sha256 = metadata.get("projection_sha256")
+        if (
+            artifact is None
+            or artifact.task_id != call.task_id
+            or artifact.producer_node_id != call.node_id
+            or metadata.get("source_kind") != "mcp_result"
+            or metadata.get("visibility") != "internal_raw"
+            or metadata.get("protocol_version") != call.protocol_version
+            or metadata.get("terminal_result_source") != call.terminal_result_source
+            or metadata.get("output_schema_sha256") != call.output_schema_sha256
+            or metadata.get("parser_revision") != receipt.result_parser_revision
+            or metadata.get("call_ref") != call.call_ref
+            or metadata.get("owner_user_id") != call.owner_user_id
+            or str(metadata.get("sha256") or "")
+            != str(receipt.safe_result_content_sha256 or "").removeprefix("sha256:")
+            or not isinstance(projection_ref, str)
+            or not isinstance(projection_sha256, str)
+        ):
+            raise MCPSelectorContextAuthorityError(
+                "mcp_selector_context_projection_authority_invalid"
+            )
+        envelope = self.projection_store.load(
+            projection_ref,
+            binding=MCPProjectionBinding(
+                owner_user_id=call.owner_user_id,
+                task_id=call.task_id,
+                node_id=call.node_id,
+                call_ref=call.call_ref,
+                raw_sha256=str(receipt.safe_result_content_sha256),
+                output_schema_sha256=call.output_schema_sha256,
+                source=str(call.terminal_result_source),
+                parser_revision=str(receipt.result_parser_revision),
+            ),
+            expected_projection_sha256=projection_sha256,
+        )
+        projection = envelope.get("agent_projection")
+        if not isinstance(projection, str):
+            raise MCPSelectorContextAuthorityError(
+                "mcp_selector_context_projection_authority_invalid"
+            )
+        return projection
 
 
 @runtime_checkable
@@ -66,7 +139,7 @@ class MCPSelectorContextBuilderPort(Protocol):
 @dataclass(slots=True)
 class MCPDurableSelectorContextBuilder:
     storage: StoragePort
-    result_authority: MCPCompletedResultAuthority
+    projection_authority: MCPCompletedResultProjectionAuthority
 
     async def build(
         self,
@@ -224,10 +297,10 @@ class MCPDurableSelectorContextBuilder:
             raise MCPSelectorContextAuthorityError(
                 "mcp_selector_context_outbox_missing"
             )
-        completed_refs, last_receipt_id = await self._completed_result_refs(
+        completed_projections, last_receipt_id = await self._completed_result_projections(
             calls, intent.intent_id
         )
-        if completed_refs and (
+        if completed_projections and (
             str(outbox.status) != "active"
             or str(outbox.resume_reason)
             not in {"ordinary_terminal", "remote_terminal"}
@@ -266,7 +339,7 @@ class MCPDurableSelectorContextBuilder:
             binding_mode=binding_mode,
             attachments=attachment_summaries,
             upstream_facts=upstream_facts,
-            completed_result_refs=completed_refs,
+            completed_result_projections=completed_projections,
             failed_call_fingerprints=frozenset(
                 call.arguments_sha256 for call in calls if call.status == "failed"
             ),
@@ -280,10 +353,10 @@ class MCPDurableSelectorContextBuilder:
             approval_round_total=outbox.approval_round_total,
         )
 
-    async def _completed_result_refs(
+    async def _completed_result_projections(
         self, calls: Sequence[MCPCallRecord], intent_id: str
     ) -> tuple[tuple[str, ...], str | None]:
-        refs: list[str] = []
+        projections: list[tuple[int, str]] = []
         last_receipt_id: str | None = None
         for call in calls:
             if call.status != "completed":
@@ -308,29 +381,25 @@ class MCPDurableSelectorContextBuilder:
                 or receipt.safe_result_content_sha256 is None
                 or receipt.safe_result_size_bytes is None
                 or receipt.safe_result_store_kind != "durable_content_addressed"
+                or receipt.result_parser_revision is None
+                or receipt.validated_checkpoint_sha256 is None
+                or receipt.parsed_model_sha256 is None
+                or call.terminal_result_source is None
             ):
                 raise MCPSelectorContextAuthorityError(
                     "mcp_selector_context_receipt_conflict"
                 )
             try:
-                verified_ref = await self.result_authority.verify_completed_result(
+                projection = await self.projection_authority.load_agent_projection(
                     call=call, receipt=receipt
                 )
             except Exception as exc:
                 raise MCPSelectorContextAuthorityError(
                     "mcp_selector_context_result_authority_conflict"
                 ) from exc
-            if verified_ref != receipt.safe_result_ref:
-                raise MCPSelectorContextAuthorityError(
-                    "mcp_selector_context_result_authority_conflict"
-                )
-            refs.append(verified_ref)
+            projections.append((call.call_sequence, projection))
             last_receipt_id = receipt.result_receipt_id
-        if len(refs) != len(set(refs)):
-            raise MCPSelectorContextAuthorityError(
-                "mcp_selector_context_result_ref_conflict"
-            )
-        return tuple(refs), last_receipt_id
+        return _budget_agent_projections(projections), last_receipt_id
 
     async def _dependency_facts(
         self,
@@ -518,9 +587,29 @@ def _truncate_utf8(value: str, limit: int) -> str:
     return encoded[:limit].decode("utf-8", errors="ignore")
 
 
+def _budget_agent_projections(
+    projections: Sequence[tuple[int, str]],
+) -> tuple[str, ...]:
+    remaining_code_points = MAX_MCP_SELECTOR_RESULT_CODE_POINTS
+    remaining_bytes = MAX_MCP_SELECTOR_RESULT_BYTES
+    selected: list[tuple[int, str]] = []
+    for sequence, projection in reversed(projections):
+        if remaining_code_points <= 0 or remaining_bytes <= 0:
+            break
+        bounded = projection[:remaining_code_points]
+        bounded = _truncate_utf8(bounded, remaining_bytes)
+        if not bounded:
+            continue
+        selected.append((sequence, bounded))
+        remaining_code_points -= len(bounded)
+        remaining_bytes -= len(bounded.encode("utf-8"))
+    return tuple(value for _, value in sorted(selected))
+
+
 __all__ = [
-    "MCPCompletedResultAuthority",
+    "MCPCompletedResultProjectionAuthority",
     "MCPDurableSelectorContextBuilder",
+    "MCPPublishedAgentProjectionAuthority",
     "MCPSelectorContextAuthorityError",
     "MCPSelectorContextBuilderPort",
 ]

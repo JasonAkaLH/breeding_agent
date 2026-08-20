@@ -205,7 +205,7 @@ class _DispatchAuthority:
 
 NowFn = Callable[[], datetime]
 LiveEventRecorder = Callable[[EventRecord], Awaitable[None]]
-MCPResultArtifactProjector = Callable[[str], Awaitable[object]]
+MCPResultArtifactProjector = Callable[[str, object | None, object | None], Awaitable[object]]
 
 
 class UserMCPDispatchCoordinator:
@@ -740,11 +740,7 @@ class UserMCPDispatchCoordinator:
                             binding_mode=binding_mode,
                             attachments=attachment_summaries,
                             upstream_facts=_upstream_facts(request.dependency_outputs),
-                            completed_result_refs=tuple(
-                                call.result_ref
-                                for call in calls
-                                if call.status == "completed" and call.result_ref
-                            ),
+                            completed_result_projections=(),
                             failed_call_fingerprints=frozenset(
                                 call.arguments_sha256
                                 for call in calls
@@ -2726,15 +2722,20 @@ class UserMCPDispatchCoordinator:
             result_receipt_id = mcp_terminal_receipt_id(
                 call_ref, result_payload_sha256
             )
+            published_projection = None
             try:
-                self._gateway.finalize_result_assets(outcome)
+                published_projection = self._gateway.finalize_result_assets(outcome)
             except Exception:
                 # The checkpoint already authorized terminal success. Projection
                 # publication is compensatable and cannot roll back or replay it.
                 pass
             if self._result_artifact_projector is not None:
                 try:
-                    await self._result_artifact_projector(outcome.result_ref)
+                    await self._result_artifact_projector(
+                        outcome.result_ref,
+                        published_projection,
+                        outcome.projection_staging_handle,
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception:

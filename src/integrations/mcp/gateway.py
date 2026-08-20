@@ -1157,6 +1157,28 @@ class MCPGateway:
                 if tool_name != "start_parse_job":
                     await sink.abort()
                     raise MCPGatewayError("mcp_job_workflow_tool_invalid")
+                async def workflow_tool_invoker(
+                    internal_tool_name: str,
+                    internal_arguments: Mapping[str, Any],
+                    internal_registered_callback: Callable[[str | int], None]
+                    | None,
+                ) -> Mapping[str, Any]:
+                    kwargs: dict[str, Any] = {}
+                    if internal_registered_callback is not None:
+                        kwargs["request_registered_callback"] = (
+                            internal_registered_callback
+                        )
+                    internal_result = await state.adapter.call_tool(
+                        internal_tool_name,
+                        dict(internal_arguments),
+                        **kwargs,
+                    )
+                    if not isinstance(internal_result, Mapping):
+                        raise MCPGatewayError(
+                            "mcp_job_workflow_control_result_invalid"
+                        )
+                    return dict(internal_result)
+
                 invocation = asyncio.create_task(
                     run_ocr_async_job_workflow(
                         state.adapter,
@@ -1171,6 +1193,7 @@ class MCPGateway:
                                 result_context=result_context,
                             )
                         ),
+                        tool_invoker=workflow_tool_invoker,
                     )
                 )
             else:

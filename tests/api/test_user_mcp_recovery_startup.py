@@ -1640,9 +1640,9 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
 
             runtime._schedule_execution = capture_execution
             self.assertEqual(await runtime._run_mcp_continuation_commands_once(), 1)
-            self.assertEqual(scheduled, ["mcp-remote-terminal:call-2025"])
+            self.assertEqual(scheduled, [])
             self.assertEqual(await runtime._run_mcp_continuation_commands_once(), 0)
-            self.assertEqual(len(scheduled), 1)
+            self.assertEqual(len(scheduled), 0)
             await runtime.shutdown()
 
     async def test_runtime_starts_and_stops_continuous_zero_series_producer(

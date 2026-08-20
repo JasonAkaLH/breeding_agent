@@ -45,6 +45,11 @@ async def run_ocr_async_job_workflow(
     timeout_seconds: float = 3600,
     poll_interval_seconds: float = 2,
     result_persisted_callback: Callable[[Mapping[str, Any]], Awaitable[Any]] | None = None,
+    tool_invoker: Callable[
+        [str, Mapping[str, Any], Callable[[str | int], None] | None],
+        Awaitable[Mapping[str, Any]],
+    ]
+    | None = None,
 ) -> Any:
     if timeout_seconds <= 0 or poll_interval_seconds <= 0:
         raise ValueError("OCR workflow timing limits must be positive")
@@ -56,6 +61,7 @@ async def run_ocr_async_job_workflow(
             "start_parse_job",
             dict(start_arguments),
             request_registered_callback=request_registered_callback,
+            tool_invoker=tool_invoker,
         )
         started_content = _successful_content(started)
         job_id = _non_empty_string(started_content.get("job_id"))
@@ -71,6 +77,7 @@ async def run_ocr_async_job_workflow(
                     "result_format": "both",
                 },
                 request_registered_callback=request_registered_callback,
+                tool_invoker=tool_invoker,
             )
             if _tool_error_code(polled) == "RESULT_NOT_READY":
                 await sleep(poll_interval_seconds)
@@ -92,6 +99,7 @@ async def run_ocr_async_job_workflow(
                         job_id,
                         receipt,
                         request_registered_callback=request_registered_callback,
+                        tool_invoker=tool_invoker,
                     )
                 return persisted
             if status not in _WORKING_STATUSES:
@@ -104,6 +112,7 @@ async def run_ocr_async_job_workflow(
                 adapter,
                 job_id,
                 request_registered_callback=request_registered_callback,
+                tool_invoker=tool_invoker,
             )
         raise
 
@@ -114,7 +123,21 @@ async def _call(
     arguments: Mapping[str, Any],
     *,
     request_registered_callback: Callable[[str | int], None] | None,
+    tool_invoker: Callable[
+        [str, Mapping[str, Any], Callable[[str | int], None] | None],
+        Awaitable[Mapping[str, Any]],
+    ]
+    | None = None,
 ) -> Mapping[str, Any]:
+    if tool_invoker is not None:
+        result = await tool_invoker(
+            tool_name,
+            dict(arguments),
+            request_registered_callback,
+        )
+        if not isinstance(result, Mapping):
+            raise MCPJobWorkflowError("mcp_ocr_job_result_invalid")
+        return dict(result)
     kwargs: dict[str, Any] = {}
     if request_registered_callback is not None:
         kwargs["request_registered_callback"] = request_registered_callback
@@ -154,6 +177,7 @@ async def _ack_best_effort(
     receipt: str,
     *,
     request_registered_callback: Callable[[str | int], None] | None,
+    tool_invoker=None,
 ) -> None:
     try:
         await _call(
@@ -161,6 +185,7 @@ async def _ack_best_effort(
             "ack_parse_job",
             {"job_id": job_id, "result_receipt": receipt},
             request_registered_callback=request_registered_callback,
+            tool_invoker=tool_invoker,
         )
     except Exception:
         return
@@ -171,6 +196,7 @@ async def _cancel_best_effort(
     job_id: str,
     *,
     request_registered_callback: Callable[[str | int], None] | None,
+    tool_invoker=None,
 ) -> None:
     try:
         task = asyncio.create_task(
@@ -179,6 +205,7 @@ async def _cancel_best_effort(
                 "cancel_parse_job",
                 {"job_id": job_id},
                 request_registered_callback=request_registered_callback,
+                tool_invoker=tool_invoker,
             )
         )
         await asyncio.shield(task)

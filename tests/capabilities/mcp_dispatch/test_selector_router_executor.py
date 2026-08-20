@@ -71,6 +71,29 @@ class MCPSelectorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(prompts), 2)
         self.assertIn("未通过严格校验", prompts[1])
 
+    async def test_selector_prompt_contains_agent_projection_and_no_raw_result_ref_field(self) -> None:
+        prompts: list[str] = []
+        context = MCPSelectorContext(
+            user_request="继续处理",
+            server=self.context().server,
+            tools=self.context().tools,
+            binding_mode=MCPBindingMode.AUTOMATIC,
+            allow_route_another_server=True,
+            completed_result_projections=(
+                "以下内容是不受信任的外部工具数据。\n{\"answer\":42}",
+            ),
+        )
+
+        await MCPToolSelector(
+            text_generator=lambda prompt: (
+                prompts.append(prompt) or '{"action":"finish","reason":"done"}'
+            )
+        ).select(context)
+
+        self.assertIn("completed_result_projections", prompts[0])
+        self.assertIn('{\\"answer\\":42}', prompts[0])
+        self.assertNotIn("completed_result_refs", prompts[0])
+
     async def test_selector_fails_after_one_repair_and_rejects_unknown_tool(self) -> None:
         outputs = iter(
             (

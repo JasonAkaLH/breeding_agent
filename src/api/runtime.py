@@ -185,7 +185,10 @@ from src.integrations.mcp.pending_action_payloads import (
     MCPPendingActionPayloadCipher,
     MCPPendingActionPayloadStore,
 )
-from src.integrations.mcp.selector_context import MCPDurableSelectorContextBuilder
+from src.integrations.mcp.selector_context import (
+    MCPDurableSelectorContextBuilder,
+    MCPPublishedAgentProjectionAuthority,
+)
 from src.integrations.mcp.cp7_artifacts import (
     mcp_dispatch_resume_outbox_id,
     mcp_terminal_receipt_id,
@@ -679,6 +682,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             MCPDurableResultLifecycleManager | None
         ) = None,
         mcp_result_artifact_projector: MCPResultArtifactProjector | None = None,
+        mcp_projection_store: MCPProjectionStore | None = None,
         user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
         user_mcp_presence_service: MCPTaskPresenceService | None = None,
         user_mcp_audit_service: MCPAuditService | None = None,
@@ -742,6 +746,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             mcp_durable_result_lifecycle_manager
         )
         self._mcp_result_artifact_projector = mcp_result_artifact_projector
+        self._mcp_projection_store = mcp_projection_store
+        self._mcp_agent_projection_authority = (
+            None
+            if mcp_projection_store is None
+            else MCPPublishedAgentProjectionAuthority(
+                storage=storage,
+                projection_store=mcp_projection_store,
+            )
+        )
         self.user_mcp_result_janitor = user_mcp_result_janitor
         self.user_mcp_presence_service = user_mcp_presence_service
         self.user_mcp_audit_service = user_mcp_audit_service
@@ -8457,6 +8470,29 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         return len(commands)
 
     async def _consume_mcp_continuation_command(self, command, *, now: datetime) -> None:
+        continuation_projection: str | None = None
+        if str(command.payload.get("call_status") or "") == "completed":
+            if self._mcp_agent_projection_authority is None:
+                return
+            call = await self.storage.get_mcp_call_record(
+                command.owner_user_id, command.task_id, command.call_ref
+            )
+            receipt = await self.storage.get_mcp_terminal_result_receipt_for_call(
+                command.call_ref
+            )
+            if call is None or receipt is None:
+                return
+            try:
+                continuation_projection = (
+                    await self._mcp_agent_projection_authority.load_agent_projection(
+                        call=call,
+                        receipt=receipt,
+                    )
+                )
+            except Exception:
+                # Keep the command claimed. Lease expiry/reconciler may repair the
+                # projection; never read raw or invoke MCP as compensation.
+                return
         running = await self.storage.begin_mcp_remote_task_continuation(
             command.outbox_id,
             claim_owner=str(command.continuation_claim_owner or ""),
@@ -8487,21 +8523,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         persisted_plan = _deserialize_mcp_continuation_plan(raw_plan)
         if persisted_plan.task_id != task.task_id:
             raise RuntimeError("mcp_continuation_plan_task_mismatch")
-        result_ref = str(running.payload.get("result_ref") or "").strip()
-        if not result_ref or self.user_mcp_result_store is None:
-            raise RuntimeError("mcp_continuation_result_missing")
-        result_descriptor = self.user_mcp_result_store.resolve_ref(result_ref)
-        result_bytes = b"".join(
-            [
-                chunk
-                async for chunk in self.user_mcp_result_store.iter_bytes(
-                    result_descriptor
-                )
-            ]
-        )
-        continuation_result = json.loads(result_bytes)
-        if not isinstance(continuation_result, dict):
-            raise RuntimeError("mcp_continuation_result_invalid")
+        if continuation_projection is None:
+            raise RuntimeError("mcp_continuation_projection_missing")
         owned_node_ids = tuple(
             sorted(
                 node.node_id
@@ -8545,8 +8568,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         running.continuation_claim_token
                     ),
                     "mcp_remote_task_source_node_id": running.node_id,
-                    "mcp_remote_task_result_ref": result_ref,
-                    "mcp_remote_task_result": continuation_result,
+                    "mcp_remote_task_result_projection": continuation_projection,
                     "mcp_remote_task_continuation_plan": dict(raw_plan),
                 },
                 available_mcp_servers=await self.available_user_mcp_server_profiles(
@@ -11417,6 +11439,7 @@ def build_api_runtime(
     mcp_result_artifact_projector: MCPResultArtifactProjector | None = None
     mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None
     mcp_result_service: MCPIsolatedResultService | None = None
+    mcp_projection_store: MCPProjectionStore | None = None
     mcp_result_parser_mode = resolve_result_parser_mode(
         os.environ.get("MAF_USER_MCP_RESULT_PARSER_MODE")
     )
@@ -11438,8 +11461,9 @@ def build_api_runtime(
             os.environ.get("MAF_USER_MCP_RESULT_PROJECTION_ROOT")
             or (Path(database_path).parent / "user_mcp_result_projections")
         )
+        mcp_projection_store = MCPProjectionStore(projection_root)
         mcp_result_service = MCPIsolatedResultService(
-            projection_store=MCPProjectionStore(projection_root)
+            projection_store=mcp_projection_store
         )
         mcp_durable_result_snapshot_authority = MCPDurableResultSnapshotAuthority(
             user_mcp_result_store
@@ -12459,6 +12483,7 @@ def build_api_runtime(
             if str(committed) == "conflict":
                 raise RuntimeError("mcp_remote_task_terminal_commit_conflict")
             parsed_outcome = remote_parsed_results.pop(binding.call_ref, None)
+            published_projection = None
             if result_ref is not None:
                 user_mcp_result_store.mark_promoted(
                     user_mcp_result_store.resolve_ref(result_ref)
@@ -12469,7 +12494,7 @@ def build_api_runtime(
                 and mcp_result_service is not None
             ):
                 try:
-                    mcp_result_service.publish_projection(
+                    published_projection = mcp_result_service.publish_projection(
                         parsed_outcome.projection_staging_handle
                     )
                 except Exception:
@@ -12480,10 +12505,23 @@ def build_api_runtime(
                 and mcp_result_artifact_projector is not None
             ):
                 try:
-                    await mcp_result_artifact_projector.project_completed_result(
+                    projected = await mcp_result_artifact_projector.project_completed_result(
                         result_ref,
                         source="immediate",
                     )
+                    if (
+                        projected.artifact is not None
+                        and published_projection is not None
+                        and parsed_outcome is not None
+                        and parsed_outcome.projection_staging_handle is not None
+                    ):
+                        await mcp_result_artifact_projector.attach_published_projection(
+                            projected.artifact,
+                            published=published_projection,
+                            staging_handle=(
+                                parsed_outcome.projection_staging_handle
+                            ),
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -12700,6 +12738,30 @@ def build_api_runtime(
         mcp_server_router = MCPServerRouter(
             text_generator=resolved_planner_text_generator
         )
+
+        async def project_mcp_result_with_business_projection(
+            result_ref: str,
+            published_projection: object | None,
+            staging_handle: object | None,
+        ):
+            if mcp_result_artifact_projector is None:
+                return None
+            projected = await mcp_result_artifact_projector.project_completed_result(
+                result_ref,
+                source="immediate",
+            )
+            if (
+                projected.artifact is not None
+                and published_projection is not None
+                and staging_handle is not None
+            ):
+                await mcp_result_artifact_projector.attach_published_projection(
+                    projected.artifact,
+                    published=published_projection,
+                    staging_handle=staging_handle,
+                )
+            return projected
+
         mcp_dispatch_coordinator = UserMCPDispatchCoordinator(
             storage=storage,
             gateway=user_mcp_gateway,
@@ -12707,7 +12769,10 @@ def build_api_runtime(
             audit_reference_signer=mcp_audit_reference_signer,
             selector_context_builder=MCPDurableSelectorContextBuilder(
                 storage=storage,
-                result_authority=mcp_durable_result_snapshot_authority,
+                projection_authority=MCPPublishedAgentProjectionAuthority(
+                    storage=storage,
+                    projection_store=mcp_projection_store,
+                ),
             ),
             pending_action_payload_store=mcp_pending_action_payload_store,
             terminal_candidate_snapshot_authority=(
@@ -12721,12 +12786,7 @@ def build_api_runtime(
             result_artifact_projector=(
                 None
                 if mcp_result_artifact_projector is None
-                else lambda result_ref: (
-                    mcp_result_artifact_projector.project_completed_result(
-                        result_ref,
-                        source="immediate",
-                    )
-                )
+                else project_mcp_result_with_business_projection
             ),
             now_fn=ApiRuntime._utcnow_naive,
             metric_recorder=mcp_rollout_metric_recorder,
@@ -12922,6 +12982,7 @@ def build_api_runtime(
             mcp_durable_result_lifecycle_manager
         ),
         mcp_result_artifact_projector=mcp_result_artifact_projector,
+        mcp_projection_store=mcp_projection_store,
         user_mcp_result_janitor=user_mcp_result_janitor,
         user_mcp_presence_service=user_mcp_presence_service,
         user_mcp_audit_service=user_mcp_audit_service,
