@@ -1,5 +1,8 @@
 # MCP Result Text Artifact Design
 
+> 公共展示决定已由 `2026-08-20-mcp-versioned-result-parsing-design.md` 替代。
+> 受校验的内部 managed-file 副本和生命周期保证继续有效，但公共 API 不再公开完整 MCP raw JSON 正文。
+
 ## Decision
 
 MCP Tool JSON results are public text artifacts, not downloadable files. The public task and conversation-history APIs must return each MCP result as `artifact_type=text`, with the original UTF-8 JSON body in `storage_ref` and no `download_url`.

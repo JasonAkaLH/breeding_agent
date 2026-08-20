@@ -29,7 +29,8 @@
 - `superpowers/specs/2026-08-19-mcp-auto-explicit-route-equivalence-implementation-plan.md`：上述route-only设计的已执行开发计划；记录纯handoff红绿测试、Orchestration唯一接入点、恢复/多MCP/prompt-injection回归、完整验证和用户PNG真实auto OCR smoke证据，业务源码严格限定为两个Orchestration文件。
 - `superpowers/specs/2026-08-19-mcp-tool-result-shared-artifact-standard-design.md`：经十轮一致性复审以99%置信度通过95%信心门且已在`main`完成仓库实现和本地历史补投的MCP Tool原始返回Artifact设计；每个completed业务Call正常路径生成唯一公共Artifact，到期异常闭合permanent failure；业务result只可在本轮投影后精确CAS删除，bulk GC永久排除；覆盖ordinary/approval/remote/60秒补投、目标盘容量、精确事件幂等、Task与Message历史提醒，以及源`artifact_owned → deleted`生命周期。
 - `superpowers/specs/2026-08-19-mcp-tool-result-shared-artifact-standard-implementation-plan.md`：经九轮自主审计/修订以99%通过信心门的已执行计划；Checkpoint A `fe45624`、Checkpoint B `712d216`与restart validator修复`07bde65`已落地，前后端自动门禁和本地开发卷31条安全补投通过；真实外部OCR因缺少具体文件/目的地授权未执行，真实PostgreSQL与`prod`仍不在已完成证据内。
-- `superpowers/specs/2026-08-20-mcp-result-text-artifact-design.md`：已在`main`完成的MCP Tool JSON原始返回公共`text` artifact增量设计；内部继续复用受校验文件副本与生命周期，任务/历史API内联原始UTF-8正文且不提供下载，前端以可展开原始返回卡片展示，新旧MCP产物统一生效。
+- `superpowers/specs/2026-08-20-mcp-result-text-artifact-design.md`：已在`main`完成的历史MCP Tool JSON原始返回公共`text` artifact增量设计；其内部文件副本与生命周期继续有效，完整raw JSON公共展示决定已由同日五版本Result解析设计替代。
+- `superpowers/specs/2026-08-20-mcp-versioned-result-parsing-design.md`：替代完整raw JSON公共展示决定的五版本Result解析设计；按协议版本与结果来源使用独立Decoder，统一产出业务结果模型，再分别生成用户typed view和Main Agent有界投影，raw result仅保留为内部durable authority。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
