@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
@@ -12,7 +11,7 @@ from src.storage.artifact_files import (
     parse_file_storage_ref,
 )
 
-from .dto import ArtifactResponse
+from .dto import ArtifactResponse, MCPBusinessResultView
 
 
 _HISTORY_DATA_QUERY_ROLES = frozenset({"filtered_query_result", "query_result_preview"})
@@ -62,30 +61,21 @@ async def artifact_response(
 
     metadata = parse_file_storage_ref(artifact.storage_ref) or {}
     if metadata.get("source_kind") == "mcp_result":
-        size_bytes = _optional_int(metadata.get("size_bytes"))
-        sha256 = _optional_string(metadata.get("sha256"))
-        storage_key = _optional_string(metadata.get("storage_key"))
-        if (
-            metadata.get("retention_status") != "active"
-            or size_bytes is None
-            or sha256 is None
-            or storage_key is None
-        ):
-            raise ValueError("mcp_result_artifact_metadata_invalid")
-        body = await asyncio.to_thread(
-            artifact_file_store.read_utf8,
-            storage_key,
-            expected_size_bytes=size_bytes,
-            expected_sha256=sha256,
-        )
         return ArtifactResponse(
             artifact_id=artifact.artifact_id,
             producer_node_id=artifact.producer_node_id,
-            artifact_type=str(ArtifactType.TEXT),
-            storage_ref=body,
+            artifact_type="mcp_result",
+            storage_ref="",
             summary=str(metadata.get("summary") or artifact.summary or ""),
             is_complete=artifact.is_complete,
             created_at=artifact.created_at,
+            mcp_business_result=MCPBusinessResultView(
+                schema="maf.mcp.business_result_view.v1",
+                availability="unavailable",
+                outcome="succeeded",
+                unavailable_reason="safe_hide",
+                projection_truncated=False,
+            ),
         )
     return ArtifactResponse(
         artifact_id=artifact.artifact_id,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
@@ -348,6 +348,116 @@ class DeleteConversationRequest(StrictRequestModel):
     conversation_id: str
 
 
+class MCPStructuredResultPrimary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["structured"]
+    value: Any
+    truncated: Literal[False] = False
+
+
+class MCPStructuredPreviewResultPrimary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["structured_preview"]
+    preview: str
+    truncated: Literal[True] = True
+
+
+class MCPTextResultPrimary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["text"]
+    text: str
+    truncated: bool
+
+
+class MCPEmptyResultPrimary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["empty"]
+    message: str
+    truncated: Literal[False] = False
+
+
+MCPBusinessResultPrimary = Annotated[
+    MCPStructuredResultPrimary
+    | MCPStructuredPreviewResultPrimary
+    | MCPTextResultPrimary
+    | MCPEmptyResultPrimary,
+    Field(discriminator="kind"),
+]
+
+
+class MCPBinaryResultMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["image", "audio", "embedded_blob_resource"]
+    mime_type: str
+    byte_size: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class MCPResourceLinkResultMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["resource_link"]
+    name: str
+    title: str | None = None
+    description: str | None = None
+    mime_type: str | None = None
+    uri_scheme: str = Field(pattern=r"^[a-z][a-z0-9+.-]{0,31}$")
+
+
+class MCPEmbeddedTextResourceMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["embedded_text_resource"]
+    mime_type: str | None = None
+    uri_scheme: str = Field(pattern=r"^[a-z][a-z0-9+.-]{0,31}$")
+
+
+MCPBusinessResultContentMetadata = Annotated[
+    MCPBinaryResultMetadata
+    | MCPResourceLinkResultMetadata
+    | MCPEmbeddedTextResourceMetadata,
+    Field(discriminator="kind"),
+]
+
+
+class MCPBusinessResultView(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_: Literal["maf.mcp.business_result_view.v1"] = Field(alias="schema")
+    availability: Literal["ready", "unavailable"]
+    outcome: Literal["succeeded"] = "succeeded"
+    primary: MCPBusinessResultPrimary | None = None
+    unavailable_reason: Literal[
+        "safe_hide",
+        "projection_missing",
+        "historical_authority_invalid",
+        "projection_invalid",
+    ] | None = None
+    supplemental_texts: list[str] | None = None
+    content_metadata: list[MCPBusinessResultContentMetadata] | None = None
+    projection_truncated: bool = False
+
+    @model_validator(mode="after")
+    def validate_availability_shape(self) -> "MCPBusinessResultView":
+        if self.availability == "ready":
+            if self.primary is None or self.unavailable_reason is not None:
+                raise ValueError("ready MCP result must contain exactly one primary")
+        elif (
+            self.primary is not None
+            or self.unavailable_reason is None
+            or self.supplemental_texts is not None
+            or self.content_metadata is not None
+            or self.projection_truncated
+        ):
+            raise ValueError("unavailable MCP result contains display content")
+        return self
+
+
 class ArtifactResponse(BaseModel):
     artifact_id: str
     producer_node_id: str
@@ -364,6 +474,7 @@ class ArtifactResponse(BaseModel):
     source_file_count: int | None = None
     archive_format: str | None = None
     retention_status: str | None = None
+    mcp_business_result: MCPBusinessResultView | None = None
 
 
 class MessageResponse(BaseModel):

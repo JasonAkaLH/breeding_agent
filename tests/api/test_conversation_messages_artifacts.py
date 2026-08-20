@@ -268,7 +268,7 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
         self.assertEqual(artifact["mime_type"], "text/plain")
         self.assertEqual(artifact["download_url"], f"/api/v1/artifacts/{conversation_id}:file-active/download")
 
-    async def test_mcp_result_file_is_public_text_and_cannot_be_downloaded(self) -> None:
+    async def test_mcp_result_file_is_safe_hidden_and_cannot_be_downloaded(self) -> None:
         conversation_id = "conv-history-mcp-result-text"
         await self._save_conversation_with_messages(conversation_id)
         task_id = f"{conversation_id}:task-1"
@@ -320,8 +320,21 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
             for item in task_response.json()["artifacts"]
             if item["artifact_id"] == artifact_id
         )
-        self.assertEqual(task_artifact["artifact_type"], "text")
-        self.assertEqual(task_artifact["storage_ref"], original_text)
+        self.assertEqual(task_artifact["artifact_type"], "mcp_result")
+        self.assertEqual(task_artifact["storage_ref"], "")
+        self.assertEqual(
+            task_artifact["mcp_business_result"],
+            {
+                "schema": "maf.mcp.business_result_view.v1",
+                "availability": "unavailable",
+                "outcome": "succeeded",
+                "primary": None,
+                "unavailable_reason": "safe_hide",
+                "supplemental_texts": None,
+                "content_metadata": None,
+                "projection_truncated": False,
+            },
+        )
         self.assertIsNone(task_artifact["download_url"])
         self.assertIsNone(task_artifact["filename"])
 
@@ -331,13 +344,16 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
             for message in history_response.json()["messages"]
             if message["role"] == "assistant"
         )
+        history_artifact = next(
+            item
+            for item in assistant_message["artifacts"]
+            if item["artifact_id"] == artifact_id
+        )
+        self.assertEqual(history_artifact["artifact_type"], "mcp_result")
+        self.assertEqual(history_artifact["storage_ref"], "")
         self.assertEqual(
-            next(
-                item
-                for item in assistant_message["artifacts"]
-                if item["artifact_id"] == artifact_id
-            )["storage_ref"],
-            original_text,
+            history_artifact["mcp_business_result"]["unavailable_reason"],
+            "safe_hide",
         )
         self.assertEqual(download_response.status_code, 404)
 

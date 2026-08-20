@@ -8,9 +8,13 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
-## 2026-08-20 增量：MCP Tool原始返回改为Text Artifact
+## 2026-08-20 增量：MCP Result公共读取进入safe-hide
 
-MCP结果仍复用既有公共Artifact列表，不新增endpoint。对于内部metadata为`source_kind=mcp_result`的artifact，`GET /api/v1/tasks/{task_id}/artifacts`及Conversation history中的`artifacts`现在返回`artifact_type=text`，`storage_ref`为经过size、SHA-256和UTF-8校验的原始JSON文本；`filename`与`download_url`为空。历史已生成的MCP结果在读取时使用相同投影，无需迁移或重放Tool调用。
+`GET /api/v1/tasks/{task_id}/artifacts`和Conversation history中的MCP Result Artifact不再返回原始JSON正文。响应固定使用`artifact_type=mcp_result`、`storage_ref=""`，并新增`mcp_business_result`；Result Parser尚未发布业务投影时返回`availability=unavailable`与`unavailable_reason=safe_hide`。direct download继续404，客户端不得从`storage_ref`、Artifact ID或其他字段恢复raw正文。
+
+## 2026-08-20 历史增量：MCP Tool原始返回改为Text Artifact（已被safe-hide替代）
+
+该历史行为曾把内部`source_kind=mcp_result`投影为公共`text`和原始JSON正文，现已由上方safe-hide合同替代；内部文件与生命周期仍保留，公共读取不再返回正文。
 
 `GET /api/v1/artifacts/{artifact_id}/download`不再允许MCP结果artifact，直接请求返回404；该下载接口继续服务active Skill output文件。
 

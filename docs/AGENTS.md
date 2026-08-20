@@ -31,6 +31,7 @@
 - `superpowers/specs/2026-08-19-mcp-tool-result-shared-artifact-standard-implementation-plan.md`：经九轮自主审计/修订以99%通过信心门的已执行计划；Checkpoint A `fe45624`、Checkpoint B `712d216`与restart validator修复`07bde65`已落地，前后端自动门禁和本地开发卷31条安全补投通过；真实外部OCR因缺少具体文件/目的地授权未执行，真实PostgreSQL与`prod`仍不在已完成证据内。
 - `superpowers/specs/2026-08-20-mcp-result-text-artifact-design.md`：已在`main`完成的历史MCP Tool JSON原始返回公共`text` artifact增量设计；其内部文件副本与生命周期继续有效，完整raw JSON公共展示决定已由同日五版本Result解析设计替代。
 - `superpowers/specs/2026-08-20-mcp-versioned-result-parsing-design.md`：经六轮自主审查/修订以98%通过信心门、尚未实施的五版本Result解析设计；以版本/来源独立Decoder、Call级output schema/source authority、隔离worker validated checkpoint和typed user/agent projection替代完整raw JSON公共展示，raw result仅保留为内部durable authority，rollback永久safe-hide。
+- `superpowers/specs/2026-08-20-mcp-versioned-result-parsing-implementation-plan.md`：上述设计的八检查点实施计划；按safe-hide、authority/migration、五版本Decoder、隔离worker、terminal gate、projection consumer、typed API/frontend和历史rollout顺序执行，每阶段独立测试与提交。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
@@ -51,4 +52,4 @@
 | `superpowers/specs/2026-08-19-ocr-mcp-trusted-attachment-workflow-design.md` | 主仓实现、外部ocr_mcp严格source schema、自动回归和用户报纸PNG本地真实smoke已完成 | 大于10 MiB companion upload和远端OCR严格schema源码部署保持独立后续工作；不得把本地源码测试记为远端发布。 |
 | `superpowers/specs/2026-08-19-mcp-tool-result-shared-artifact-standard-design.md` | 99%通过信心门；仓库实现与本地补投已完成 | 复用现有promotion与公共Artifact链；按Call ready/permanent闭合、业务result精确删除CAS、bulk排除、四路径projector、Task/Message history提醒和无网络重放已验证；真实外部OCR授权和PostgreSQL仍是缺口。 |
 | `superpowers/specs/2026-08-19-mcp-tool-result-shared-artifact-standard-implementation-plan.md` | Checkpoint A/B已完成 | `fe45624`、`712d216`与`07bde65`形成可回滚检查点；31/50历史结果按authority安全补投，19条缺Call保留；真实OCR、PG和`prod`不计为通过。 |
-| `superpowers/specs/2026-08-20-mcp-versioned-result-parsing-design.md` | 六轮审查后98%通过信心门；尚未实施 | 按safe-hide floor、schema/source authority、五版本Decoder与隔离checkpoint、terminal gate、shared projection、typed API/frontend、历史本地重投影和shadow/enforce顺序实施；Linux 512 MiB hard-cap gate与source-deleted history重投影测试是实施门禁，不能恢复raw fallback。 |
+| `superpowers/specs/2026-08-20-mcp-versioned-result-parsing-design.md`及implementation plan | 六轮设计审查后98%通过；实施检查点1执行中 | safe-hide公共边界已开始落地；后续依次完成schema/source authority、五版本Decoder与隔离checkpoint、terminal gate、shared projection、typed API/frontend、历史本地重投影和shadow/enforce。Linux 512 MiB、真实PostgreSQL与source-deleted history测试是实施门禁。 |
