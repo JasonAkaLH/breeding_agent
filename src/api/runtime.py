@@ -177,11 +177,9 @@ from src.integrations.mcp.result_parsing import (
     MCPIsolatedResultService,
     MCPProjectionStore,
     MCPResultDecodeRequest,
-    MCPResultParserMode,
     MCPResultParserObservation,
     MCPResultSource,
     MCPRawResultAuthorityResolver,
-    resolve_result_parser_mode,
 )
 from src.integrations.mcp.pending_action_payloads import (
     MAX_PENDING_ACTION_ARGUMENT_BYTES,
@@ -11443,9 +11441,6 @@ def build_api_runtime(
     mcp_pending_action_payload_store: MCPPendingActionPayloadStore | None = None
     mcp_result_service: MCPIsolatedResultService | None = None
     mcp_projection_store: MCPProjectionStore | None = None
-    mcp_result_parser_mode = resolve_result_parser_mode(
-        os.environ.get("MAF_USER_MCP_RESULT_PARSER_MODE")
-    )
     result_root: Path | None = None
     if user_mcp_enabled:
         assert user_mcp_capacity_values is not None
@@ -11734,7 +11729,6 @@ def build_api_runtime(
             now_fn=ApiRuntime._utcnow_naive,
             endpoint_security_observer=record_endpoint_security,
             result_service=mcp_result_service,
-            result_parser_mode=mcp_result_parser_mode,
         )
 
         async def cancel_offline_user_mcp(
@@ -11941,24 +11935,21 @@ def build_api_runtime(
         assert mcp_result_service is not None
         assert mcp_projection_store is not None
         assert mcp_durable_result_snapshot_authority is not None
-        if mcp_result_parser_mode is MCPResultParserMode.ENFORCE:
-            mcp_durable_result_lifecycle_manager.configure_business_reprojector(
-                MCPHistoricalResultReprojector(
+        mcp_durable_result_lifecycle_manager.configure_business_reprojector(
+            MCPHistoricalResultReprojector(
+                storage=storage,
+                authority_resolver=MCPRawResultAuthorityResolver(
                     storage=storage,
-                    authority_resolver=MCPRawResultAuthorityResolver(
-                        storage=storage,
-                        snapshot_authority=(
-                            mcp_durable_result_snapshot_authority
-                        ),
-                        artifact_file_store=artifact_file_store,
-                    ),
-                    result_service=mcp_result_service,
-                    projection_store=mcp_projection_store,
-                    projection_attacher=(
-                        mcp_result_artifact_projector.attach_published_projection
-                    ),
-                )
+                    snapshot_authority=mcp_durable_result_snapshot_authority,
+                    artifact_file_store=artifact_file_store,
+                ),
+                result_service=mcp_result_service,
+                projection_store=mcp_projection_store,
+                projection_attacher=(
+                    mcp_result_artifact_projector.attach_published_projection
+                ),
             )
+        )
 
     async def publish_transient_event(event: EventRecord) -> None:
         event = _ensure_event_created_at(event)
@@ -12227,11 +12218,7 @@ def build_api_runtime(
                 started_at = observed_at.replace(second=0, microsecond=0)
                 labels = MCPMetricLabels(
                     execution_path=MCPMetricExecutionPath.USER_SCOPED,
-                    routing_mode=(
-                        MCPMetricRoutingMode.SHADOW
-                        if mcp_result_parser_mode is MCPResultParserMode.SHADOW
-                        else MCPMetricRoutingMode.ENFORCE
-                    ),
+                    routing_mode=MCPMetricRoutingMode.ENFORCE,
                     transport=MCPMetricTransport.NOT_APPLICABLE,
                     protocol_version=metric_protocol,
                     adapter=(
@@ -12260,25 +12247,6 @@ def build_api_runtime(
                     )
                 except Exception:
                     logger.error("mcp_result_parser_metric_record_failed")
-            if mcp_result_parser_mode is MCPResultParserMode.SHADOW:
-                try:
-                    await audit_sink.record(
-                        "mcp.result_parser_shadow_observed",
-                        {
-                            "outcome": observation.outcome,
-                            "reason": observation.reason,
-                            "call_kind": call_kind.value,
-                            "protocol_version": observation.protocol_version,
-                            "primary_kind": observation.primary_kind,
-                            "metadata_kinds": list(observation.metadata_kinds),
-                            "structured_present": observation.structured_present,
-                            "projection_sha256": observation.projection_sha256,
-                            "truncated": observation.truncated,
-                        },
-                    )
-                except Exception:
-                    logger.error("mcp_result_parser_shadow_observation_failed")
-
         mcp_result_service.configure_observer(observe_mcp_result_parser)
     if user_mcp_enabled:
         mcp_runtime_holder: dict[str, ApiRuntime] = {}
@@ -12346,20 +12314,6 @@ def build_api_runtime(
             except BaseException:
                 await user_mcp_result_store.discard(descriptor)
                 raise
-            if mcp_result_parser_mode is MCPResultParserMode.SHADOW:
-                if parsed.projection_staging_handle is not None:
-                    mcp_result_service.discard_projection(
-                        parsed.projection_staging_handle
-                    )
-                is_error = result.get("isError", False)
-                if is_error is True:
-                    await user_mcp_result_store.discard(descriptor)
-                    return MCPRemoteTaskProcessedResult(
-                        "failed", "mcp_tool_error", None
-                    )
-                return MCPRemoteTaskProcessedResult(
-                    "completed", None, result_ref
-                )
             checkpoint = parsed.checkpoint
             remote_parsed_results[binding.call_ref] = parsed
             if checkpoint.outcome == "succeeded":
@@ -12819,11 +12773,7 @@ def build_api_runtime(
             active_metric_sink=record_remote_tasks_active_metric,
             global_metric_gap_sink=record_remote_task_global_metric_gap,
             result_persister=persist_remote_task_result,
-            result_processor=(
-                None
-                if mcp_result_parser_mode is MCPResultParserMode.SAFE_HIDE
-                else process_remote_task_result
-            ),
+            result_processor=process_remote_task_result,
             result_committer=commit_remote_task_result,
             terminal_sealer=seal_remote_task_terminal,
             continuation_sink=continue_remote_task,

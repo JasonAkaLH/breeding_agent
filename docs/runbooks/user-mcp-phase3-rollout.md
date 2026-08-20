@@ -16,7 +16,6 @@
 |---|---|
 | `MCP_USER_SCOPED_GATEWAY_ENABLED` | 只允许 `true|false`。`off` 必须为 `false`；`shadow|enforce` 必须为 `true`。 |
 | `MCP_ROUTING_MODE` | 只允许 `off|shadow|enforce`；默认 `off`。 |
-| `MAF_USER_MCP_RESULT_PARSER_MODE` | 独立只允许`safe_hide|shadow|enforce`；缺失/未知均`safe_hide`。parser enforce必须晚于schema migration、shadow差异清零、真实协议smoke及Linux/真实PostgreSQL门禁。 |
 | `MCP_LEGACY_GLOBAL_RUNTIME_ENABLED` | 只允许 `true|false`；`shadow` 必须为 `true`。 |
 | `MCP_ENFORCE_COHORTS` | canonical 逗号分隔 cohort ID；不允许空项、重复项或空白。非空时必须配置 cohort 文件。 |
 | `MCP_ENFORCE_PERCENT` | ASCII 十进制 `0..100`；空值按 `0`处理。 |
@@ -24,6 +23,8 @@
 | `MCP_ENFORCE_COHORT_CONFIG_FILE` | cohort 映射的只读 JSON 文件。 |
 
 旧 `MAF_USER_MCP_ENABLED` 和 `MAF_USER_MCP_ROUTING_ENABLED` 只是兼容边界。它们与 canonical 值冲突时 fail closed；旧 routing flag 不能单独推导 `enforce`。
+
+Result Parser固定always-on，不属于阶段三路由配置。只要用户级MCP执行真实Tool调用，ordinary、approval、workflow和remote task结果就必须在terminal前完成版本化解析；不存在独立safe-hide/shadow/enforce参数。历史authority不完整的Artifact仍可显示`safe_hide`不可用原因，但不能据此绕过live Parser。
 
 ### 模式组合
 

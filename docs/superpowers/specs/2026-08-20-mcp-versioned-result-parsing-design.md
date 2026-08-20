@@ -4,7 +4,7 @@
 
 - 日期：2026-08-20
 - 分支：`main`
-- 状态：经 document-perfectization 循环加固；八检查点仓库实现完成；Result Parser 已确认收敛为 always-on，生产 rollout 未执行
+- 状态：经 document-perfectization 循环加固；九检查点仓库实现完成；Result Parser 已收敛为 always-on，生产 rollout 未执行
 - 决策：采用“版本化 Result Decoder Registry + 统一业务结果模型”
 - 范围：Python Client/Gateway 已支持的 `2024-11-05`、`2025-03-26`、
   `2025-06-18`、`2025-11-25`、`2026-07-28` 五版本 Tool Result；覆盖普通调用、
@@ -181,7 +181,7 @@ staged raw 的 finalize 只表示字节与 manifest 可复验，不表示 Tool �
 
 Mapping 只允许用于 Transport 已按原始 response bytes 测量为不超过64 KiB的小结果；超过64 KiB时，Transport
 必须在构造大 Python Mapping 前把 result 写入受64 MiB上限保护的 result sink并只交付 descriptor。没有原始长度
-证据的 SDK Mapping 不得进入 live enforce 路径。这样父进程fair queue最多只保留8个小 Mapping/descriptor handle，
+证据的 SDK Mapping 不得进入live解析路径。这样父进程fair queue最多只保留8个小 Mapping/descriptor handle，
 不会因“解析已隔离”而暗中排队多个64 MiB Python对象。
 
 materializer 与 parser 共用容量为1、按现有owner/request公平队列语义调度的隔离worker gate；所有输入形态都在
@@ -840,7 +840,7 @@ outcome/reason，不允许Server、Tool、用户或Call标识。
 | AC-09 | image/audio/resource metadata合同通过，Base64/raw URI在API/prompt/event泄漏扫描为0 | FR-13, NFR-01 |
 | AC-10 | 64 MiB隔离parser测试满足event-loop、512 MiB、10秒terminate/restart、8/2/30 queue门禁及no-replay分流；user/agent/API metadata预算边界通过 | NFR-02, NFR-03, NFR-04 |
 | AC-11 | 历史补投在协议/来源/schema缺失时按closed规则处理，MCP网络调用计数为0，CAS竞态幂等 | FR-10, FR-11, FR-16 |
-| AC-12 | safe-hide、shadow、enforce、rollback测试证明任何模式均不返回raw JSON | NFR-12 |
+| AC-12 | live always-on、历史不可用与故障处置测试证明任何路径均不返回raw JSON | NFR-12 |
 | AC-13 | 相关后端套件、前端test/typecheck/build、API文档和最终diff gate通过 | NFR-07, NFR-08, NFR-10 |
 | AC-14 | 无新增外部依赖；`docker_cmd.md`、`prod`和部署状态未改变 | 非目标/依赖边界 |
 | AC-15 | OCR job workflow内部start/get/ack全部走版本Decoder，内部staged raw被清理，错误语义正确且最终仍只有一个业务Call/Artifact | FR-17 |
@@ -854,7 +854,7 @@ outcome/reason，不允许Server、Tool、用户或Call标识。
 | MCP catalog/Gateway | `MCPToolDescriptor.output_schema` 仅内存存在 | 增加 canonical digest和256 KiB限制，并写入 Call snapshot |
 | SQLite/PostgreSQL Call schema | 有 protocol version，无 output schema/result source | 三个nullable additive列、双后端migration/Repository映射/约束测试 |
 | temporary/durable result store | 64 MiB、content-addressed、iter_bytes、data+manifest | 增强exact discard同时删除data+manifest；向隔离parser提供identity-bound只读输入 |
-| MCP result-producing transports | streamed路径已有result sink，普通小结果返回Mapping | 先按raw response bytes分流：≤64 KiB可返回Mapping，更大result直接写sink并返回descriptor；live enforce拒绝无长度证据的SDK Mapping |
+| MCP result-producing transports | streamed路径已有result sink，普通小结果返回Mapping | 先按raw response bytes分流：≤64 KiB可返回Mapping，更大result直接写sink并返回descriptor；live Parser拒绝无长度证据的SDK Mapping |
 | Python multiprocessing/resource | stdlib可启动spawn子进程、terminate并在Linux设置address-space limit | 新增容量1公平gate、materializer/parser worker、10秒deadline、512 MiB cap、closed IPC envelope；无第三方依赖 |
 | terminal candidate/receipt | raw result identity和no-replay已存在 | raw identity不变；terminal事务额外固化result source及parser/checkpoint/model digests；projection ref/digest在commit后写入派生Artifact/outbox metadata，缺失可补偿 |
 | result Artifact projector | raw复制、CAS、历史reconciler已存在 | raw副本转internal-only；private metadata绑定typed projection ref |

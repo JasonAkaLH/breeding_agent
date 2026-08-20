@@ -72,9 +72,7 @@ from .result_parsing.projection_store import (
 )
 from .result_parsing.service import (
     MCPIsolatedResultService,
-    MCPResultParserMode,
     MCPResultWorkerError,
-    resolve_result_parser_mode,
 )
 from .result_parsing.worker import MCPValidatedResultCheckpoint
 
@@ -369,7 +367,6 @@ class MCPGateway:
         lease_renew_interval_seconds: float = SCOPE_LEASE_RENEW_INTERVAL_SECONDS,
         heartbeat_interval_seconds: float = CALL_HEARTBEAT_INTERVAL_SECONDS,
         result_service: MCPIsolatedResultService | None = None,
-        result_parser_mode: MCPResultParserMode | str | None = None,
         discovery_timeout_seconds: float = SCOPE_DISCOVERY_TIMEOUT_SECONDS,
         discovery_retry_delay_seconds: float = SCOPE_DISCOVERY_RETRY_DELAY_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -395,7 +392,6 @@ class MCPGateway:
         self._readonly_shadow_client_factory = readonly_shadow_client_factory
         self._result_store = result_store
         self._result_service = result_service
-        self._result_parser_mode = resolve_result_parser_mode(result_parser_mode)
         self._capacity = capacity
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
         self._lease_ttl_seconds = lease_ttl_seconds
@@ -1216,85 +1212,69 @@ class MCPGateway:
                             "mcp_job_workflow_control_result_invalid"
                         )
                     normalized_result = dict(internal_result)
-                    if (
-                        self._result_parser_mode
-                        is not MCPResultParserMode.SAFE_HIDE
-                        and self._result_service is not None
-                    ):
-                        descriptor = state.catalog.get(internal_tool_name)
-                        try:
-                            encoded = json.dumps(
-                                normalized_result,
-                                ensure_ascii=False,
-                                allow_nan=False,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ).encode("utf-8")
-                            parser_payload: Mapping[str, Any] = normalized_result
-                            output_schema = (
-                                None
-                                if descriptor is None
-                                else descriptor.output_schema
-                            )
-                            output_schema_sha256 = (
-                                None
-                                if descriptor is None
-                                else descriptor.output_schema_sha256
-                            )
-                            if len(encoded) > 64 * 1024:
-                                parser_payload = _workflow_control_result(
-                                    normalized_result
-                                )
-                                encoded = json.dumps(
-                                    parser_payload,
-                                    ensure_ascii=False,
-                                    allow_nan=False,
-                                    sort_keys=True,
-                                    separators=(",", ":"),
-                                ).encode("utf-8")
-                                output_schema = None
-                                output_schema_sha256 = None
-                            checked = await self._result_service.parse(
-                                owner_user_id=state.public.owner_user_id,
-                                task_id=state.public.platform_task_id,
-                                node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
-                                call_ref=(
-                                    f"{call_state.call_ref}:workflow:"
-                                    f"{workflow_call_sequence}"
-                                ),
-                                request=MCPResultDecodeRequest(
-                                    protocol_version=(
-                                        state.catalog.effective_protocol_version
-                                    ),
-                                    source=MCPResultSource.TOOLS_CALL,
-                                    payload=parser_payload,
-                                    output_schema=output_schema,
-                                    output_schema_sha256=(
-                                        output_schema_sha256
-                                    ),
-                                ),
-                                measured_mapping_bytes=len(encoded),
-                            )
-                            if checked.checkpoint.outcome == "malformed":
-                                raise MCPProtocolError(
-                                    "MCP workflow control result is malformed."
-                                )
-                            if checked.projection_staging_handle is not None:
-                                self._result_service.consume_projection(
-                                    checked.projection_staging_handle
-                                )
-                            elif checked.checkpoint.outcome == "succeeded":
-                                raise MCPProtocolError(
-                                    "MCP workflow control projection is unavailable."
-                                )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception:
-                            if (
-                                self._result_parser_mode
-                                is MCPResultParserMode.ENFORCE
-                            ):
-                                raise
+                    if self._result_service is None:
+                        raise MCPResultWorkerError(
+                            "mcp_result_parser_service_unavailable"
+                        )
+                    descriptor = state.catalog.get(internal_tool_name)
+                    encoded = json.dumps(
+                        normalized_result,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    parser_payload: Mapping[str, Any] = normalized_result
+                    output_schema = (
+                        None if descriptor is None else descriptor.output_schema
+                    )
+                    output_schema_sha256 = (
+                        None
+                        if descriptor is None
+                        else descriptor.output_schema_sha256
+                    )
+                    if len(encoded) > 64 * 1024:
+                        parser_payload = _workflow_control_result(normalized_result)
+                        encoded = json.dumps(
+                            parser_payload,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        output_schema = None
+                        output_schema_sha256 = None
+                    checked = await self._result_service.parse(
+                        owner_user_id=state.public.owner_user_id,
+                        task_id=state.public.platform_task_id,
+                        node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
+                        call_ref=(
+                            f"{call_state.call_ref}:workflow:"
+                            f"{workflow_call_sequence}"
+                        ),
+                        request=MCPResultDecodeRequest(
+                            protocol_version=(
+                                state.catalog.effective_protocol_version
+                            ),
+                            source=MCPResultSource.TOOLS_CALL,
+                            payload=parser_payload,
+                            output_schema=output_schema,
+                            output_schema_sha256=output_schema_sha256,
+                        ),
+                        measured_mapping_bytes=len(encoded),
+                    )
+                    if checked.checkpoint.outcome == "malformed":
+                        raise MCPProtocolError(
+                            "MCP workflow control result is malformed."
+                        )
+                    if checked.projection_staging_handle is not None:
+                        self._result_service.consume_projection(
+                            checked.projection_staging_handle
+                        )
+                    elif checked.checkpoint.outcome == "succeeded":
+                        raise MCPProtocolError(
+                            "MCP workflow control projection is unavailable."
+                        )
                     return normalized_result
 
                 async def persist_workflow_result(
@@ -1370,7 +1350,7 @@ class MCPGateway:
         sink: Any,
         *,
         external_text: str | None = None,
-        result_context: _ResultParseContext | None = None,
+        result_context: _ResultParseContext,
     ) -> MCPCallOutcome:
         if isinstance(raw, MCPInputRequiredOutcome):
             await sink.abort()
@@ -1386,95 +1366,40 @@ class MCPGateway:
         if not isinstance(result, Mapping):
             await sink.abort()
             raise MCPProtocolError("MCP Tool result must be a JSON object.")
-        if (
-            self._result_parser_mode is not MCPResultParserMode.SAFE_HIDE
-            and self._result_service is not None
-            and result_context is not None
-        ):
-            try:
-                parsed = await self._parse_completed_result(
-                    result,
-                    result_context=result_context,
-                )
-            except BaseException:
-                if self._result_parser_mode is MCPResultParserMode.SHADOW:
-                    parsed = None
-                else:
-                    try:
-                        await sink.abort()
-                    except RuntimeError:
-                        pass
-                    raise
-            if parsed is not None:
-                if (
-                    self._result_parser_mode is MCPResultParserMode.SHADOW
-                    and parsed.projection_staging_handle is not None
-                ):
-                    self._result_service.discard_projection(
-                        parsed.projection_staging_handle
-                    )
-                if self._result_parser_mode is MCPResultParserMode.ENFORCE:
-                    if parsed.checkpoint.outcome != "succeeded":
-                        await self._result_store.discard(parsed.raw_result_ref)
-                        raise MCPResultTerminalError(
-                            safe_error_code=(
-                                "mcp_tool_error"
-                                if parsed.checkpoint.outcome == "tool_error"
-                                else "mcp_result_malformed"
-                            ),
-                            checkpoint=parsed.checkpoint,
-                        )
-                    return MCPCallOutcome.completed(
-                        parsed.raw_result_ref.ref,
-                        content_type="application/json",
-                        byte_size=parsed.raw_result_ref.size_bytes,
-                        result_content_sha256=parsed.checkpoint.raw_sha256,
-                        result_store_kind="durable_content_addressed",
-                        external_text=external_text,
-                        terminal_result_source=parsed.checkpoint.source,
-                        validated_checkpoint=parsed.checkpoint,
-                        projection_staging_handle=parsed.projection_staging_handle,
-                    )
-                # Shadow mode deliberately preserves the legacy terminal result below.
-        if result.get("isError") is True:
+        if self._result_service is None:
             await sink.abort()
-            structured = result.get("structuredContent")
-            error = structured.get("error") if isinstance(structured, Mapping) else None
-            remote_code = error.get("code") if isinstance(error, Mapping) else None
-            raise MCPRemoteError(
-                "MCP tool returned isError=true.",
-                remote_code=remote_code,
+            raise MCPResultWorkerError("mcp_result_parser_service_unavailable")
+        try:
+            parsed = await self._parse_completed_result(
+                result,
+                result_context=result_context,
             )
-        embedded = result.get("_mcpResultRef")
-        if isinstance(embedded, Mapping):
-            size = embedded.get("sizeBytes")
-            return MCPCallOutcome.completed(
-                str(embedded["ref"]),
-                content_type=str(embedded.get("contentType") or "application/json"),
-                byte_size=(
-                    size
-                    if isinstance(size, int) and not isinstance(size, bool)
-                    else None
+        except BaseException:
+            try:
+                await sink.abort()
+            except RuntimeError:
+                pass
+            raise
+        if parsed.checkpoint.outcome != "succeeded":
+            await self._result_store.discard(parsed.raw_result_ref)
+            raise MCPResultTerminalError(
+                safe_error_code=(
+                    "mcp_tool_error"
+                    if parsed.checkpoint.outcome == "tool_error"
+                    else "mcp_result_malformed"
                 ),
-                result_content_sha256=(
-                    f"sha256:{embedded['sha256']}"
-                    if isinstance(embedded.get("sha256"), str)
-                    and len(str(embedded["sha256"])) == 64
-                    else None
-                ),
-                result_store_kind="durable_content_addressed",
-                external_text=external_text,
+                checkpoint=parsed.checkpoint,
             )
-        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
-        await sink.write(encoded)
-        ref = await sink.finalize()
         return MCPCallOutcome.completed(
-            ref.ref,
+            parsed.raw_result_ref.ref,
             content_type="application/json",
-            byte_size=ref.size_bytes,
-            result_content_sha256=f"sha256:{ref.sha256}",
+            byte_size=parsed.raw_result_ref.size_bytes,
+            result_content_sha256=parsed.checkpoint.raw_sha256,
             result_store_kind="durable_content_addressed",
             external_text=external_text,
+            terminal_result_source=parsed.checkpoint.source,
+            validated_checkpoint=parsed.checkpoint,
+            projection_staging_handle=parsed.projection_staging_handle,
         )
 
     async def _parse_completed_result(
@@ -1482,14 +1407,12 @@ class MCPGateway:
         result: Mapping[str, Any],
         *,
         result_context: _ResultParseContext,
-    ) -> _GatewayParsedResult | None:
+    ) -> _GatewayParsedResult:
         embedded = result.get("_mcpResultRef")
         if not isinstance(embedded, Mapping):
-            if self._result_parser_mode is MCPResultParserMode.ENFORCE:
-                raise MCPResultWorkerError(
-                    "mcp_result_live_payload_descriptor_required"
-                )
-            return None
+            raise MCPResultWorkerError(
+                "mcp_result_live_payload_descriptor_required"
+            )
         ref_value = embedded.get("ref")
         size_value = embedded.get("sizeBytes")
         sha_value = embedded.get("sha256")

@@ -4,7 +4,7 @@
 
 用户级 MCP 默认关闭。新部署使用阶段三 canonical 开关，不再使用旧布尔路由开关推导 `enforce`：
 
-Result Parser另有独立闭合开关`MAF_USER_MCP_RESULT_PARSER_MODE=safe_hide|shadow|enforce`。缺失或未知值永远按`safe_hide`，不存在`legacy_raw`；切换该开关不改变MCP路由归属。发布顺序固定为safe-hide公共边界→schema migration→parser shadow→真实Server按实际协议smoke与差异清零→operator切parser enforce→历史本地补投。回滚只能切`safe_hide`，不得恢复raw backend或raw Artifact下载。
+Result Parser没有独立运行参数。启用用户级MCP后，所有live Tool Result始终在terminal前经过版本化Decoder并生成typed business projection；`isError`和malformed结果按闭合失败语义处理。历史`safe_hide`只表示记录缺少parser authority，不能用于live旁路。故障处置可关闭用户级MCP路由，但不得绕过Parser、恢复raw backend或raw Artifact下载。
 
 - `MCP_USER_SCOPED_GATEWAY_ENABLED=true`
 - `MCP_ROUTING_MODE=shadow|enforce`

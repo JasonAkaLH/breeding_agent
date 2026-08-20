@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Conversation, Task, UserMCPServer, UserMCPToolGrant
-from src.integrations.mcp.client import MCPClientError, MCPRemoteError
+from src.integrations.mcp.client import MCPClientError
 from src.integrations.mcp.attachment_materialization import MCPJobWorkflowKind
 from src.integrations.mcp.endpoint_policy import (
     EndpointPolicy,
@@ -77,7 +77,21 @@ class _Adapter:
         callback = kwargs.get("request_registered_callback")
         if callback:
             callback(self.call_count)
-        return {"content": [{"type": "text", "text": arguments.get("text", "")}]}
+        sink = kwargs["result_sink"]
+        await sink.write(
+            json.dumps(
+                {
+                    "content": [
+                        {"type": "text", "text": arguments.get("text", "")}
+                    ]
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        result_ref = await sink.finalize()
+        return {"_mcpResultRef": result_ref.as_payload()}
 
     async def close(self):
         self.closed = True
@@ -183,7 +197,20 @@ class _SequencedBlockingCallAdapter(_Adapter):
             callback(f"remote-call-{ordinal + 1}")
         self.started[ordinal].set()
         await self.release[ordinal].wait()
-        return {"ordinal": ordinal + 1}
+        sink = kwargs["result_sink"]
+        await sink.write(
+            json.dumps(
+                {
+                    "content": [
+                        {"type": "text", "text": f"call {ordinal + 1}"}
+                    ]
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        result_ref = await sink.finalize()
+        return {"_mcpResultRef": result_ref.as_payload()}
 
 
 class _ManualHeartbeatWaiter:
@@ -261,6 +288,9 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             return adapter
 
         self.result_store = MCPTemporaryResultStore(root / "results", memory_threshold_bytes=8)
+        self.result_service = MCPIsolatedResultService(
+            projection_store=MCPProjectionStore(root / "projections")
+        )
         self.gateway = MCPGateway(
             storage=self.storage,
             gateway_instance_id="gateway-1",
@@ -274,10 +304,11 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                 free_bytes=lambda path: 10_000_000,
             ),
             now_fn=lambda: self.now,
+            result_service=self.result_service,
         )
 
-    async def _streamed_parser_gateway(self, payload, *, mode: str):
-        root = Path(self.temp_dir.name) / f"parser-{mode}-{len(self.adapters)}"
+    async def _streamed_parser_gateway(self, payload):
+        root = Path(self.temp_dir.name) / f"parser-{len(self.adapters)}"
         result_store = MCPTemporaryResultStore(root / "raw", memory_threshold_bytes=1)
         adapter = _StreamingResultAdapter(payload)
 
@@ -287,7 +318,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
 
         gateway = MCPGateway(
             storage=self.storage,
-            gateway_instance_id=f"gateway-parser-{mode}-{len(self.adapters)}",
+            gateway_instance_id=f"gateway-parser-{len(self.adapters)}",
             credential_loader=lambda server: {},
             client_factory=client_factory,
             endpoint_revalidator=_validated_endpoint,
@@ -300,7 +331,6 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             result_service=MCPIsolatedResultService(
                 projection_store=MCPProjectionStore(root / "projections")
             ),
-            result_parser_mode=mode,
             now_fn=lambda: self.now,
         )
         return gateway, result_store
@@ -357,10 +387,9 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(descriptor.output_schema)
             self.assertRegex(descriptor.output_schema_sha256, r"^sha256:[0-9a-f]{64}$")
 
-    async def test_enforce_streamed_result_classifies_is_error_before_terminal(self) -> None:
+    async def test_streamed_result_classifies_is_error_before_terminal(self) -> None:
         gateway, result_store = await self._streamed_parser_gateway(
             {"content": [{"type": "text", "text": "failed"}], "isError": True},
-            mode="enforce",
         )
         try:
             scope = await gateway.open_scope(
@@ -384,31 +413,9 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.aclose()
 
-    async def test_safe_hide_and_shadow_preserve_legacy_terminal_semantics(self) -> None:
-        for mode in ("safe_hide", "shadow", "unknown-value"):
-            with self.subTest(mode=mode):
-                gateway, _result_store = await self._streamed_parser_gateway(
-                    {"content": [], "isError": True}, mode=mode
-                )
-                try:
-                    scope = await gateway.open_scope(
-                        SimpleNamespace(username="alice"), "task-1", "server-1"
-                    )
-                    outcome = await gateway.call_tool(
-                        scope,
-                        "echo",
-                        {},
-                        node_id="node-1",
-                        authorization_verified=True,
-                    )
-                    self.assertEqual(str(outcome.kind), "completed")
-                    self.assertIsNone(outcome.validated_checkpoint)
-                finally:
-                    await gateway.aclose()
-
-    async def test_enforce_malformed_streamed_result_is_deterministic_non_retry_failure(self) -> None:
+    async def test_malformed_streamed_result_is_deterministic_non_retry_failure(self) -> None:
         gateway, result_store = await self._streamed_parser_gateway(
-            {"content": "invalid"}, mode="enforce"
+            {"content": "invalid"}
         )
         try:
             scope = await gateway.open_scope(
@@ -431,10 +438,9 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.aclose()
 
-    async def test_enforce_streamed_success_returns_checkpoint_and_publishes_assets_after_terminal(self) -> None:
+    async def test_streamed_success_returns_checkpoint_and_publishes_assets_after_terminal(self) -> None:
         gateway, result_store = await self._streamed_parser_gateway(
             {"content": [], "structuredContent": {"answer": 42}},
-            mode="enforce",
         )
         try:
             scope = await gateway.open_scope(
@@ -1063,8 +1069,9 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             callback = kwargs.get("request_registered_callback")
             if callback:
                 callback("remote-error-1")
-            return {
+            result = {
                 "isError": True,
+                "content": [{"type": "text", "text": "invalid source"}],
                 "structuredContent": {
                     "error": {
                         "code": "INVALID_ARGUMENT",
@@ -1072,10 +1079,17 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                     }
                 },
             }
+            sink = kwargs["result_sink"]
+            await sink.write(
+                json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+            )
+            result_ref = await sink.finalize()
+            return {"_mcpResultRef": result_ref.as_payload()}
 
         self.adapters[0].call_tool = rejected
-        with self.assertRaisesRegex(MCPRemoteError, "isError=true"):
+        with self.assertRaises(MCPResultTerminalError) as raised:
             await self.gateway.call_tool(scope, "echo", {"text": "bad"})
+        self.assertEqual(raised.exception.safe_error_code, "mcp_tool_error")
 
     async def test_ocr_job_workflow_is_one_gateway_call_with_final_result(self) -> None:
         class OCRAdapter(_Adapter):
@@ -1142,7 +1156,6 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             now_fn=lambda: self.now,
             sleep=lambda _seconds: asyncio.sleep(0),
             result_service=result_service,
-            result_parser_mode="enforce",
         )
         try:
             scope = await gateway.open_scope(
@@ -1825,6 +1838,11 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                 free_bytes=lambda path: 10_000_000,
             ),
             now_fn=lambda: self.now,
+            result_service=MCPIsolatedResultService(
+                projection_store=MCPProjectionStore(
+                    Path(self.temp_dir.name) / "serial-projections"
+                )
+            ),
         )
         scope = await gateway.open_scope(
             SimpleNamespace(username="alice"), "task-1", "server-1"

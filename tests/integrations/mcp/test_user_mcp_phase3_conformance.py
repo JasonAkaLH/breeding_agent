@@ -22,6 +22,10 @@ from src.integrations.mcp.adapter_2026 import (
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway
 from src.integrations.mcp.protocol import SUPPORTED_MCP_PROTOCOL_VERSION_ORDER
+from src.integrations.mcp.result_parsing import (
+    MCPIsolatedResultService,
+    MCPProjectionStore,
+)
 from src.integrations.mcp.temporary_results import (
     MCPTemporaryResultCapacity,
     MCPTemporaryResultCapacityConfig,
@@ -105,7 +109,27 @@ class _FixtureGatewayAdapter:
         if self.block_next_call:
             self.call_started.set()
             await asyncio.Event().wait()
-        return {"protocolVersion": self.version, "arguments": dict(arguments)}
+        result = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"{self.version}:{arguments.get('tenant', '')}",
+                }
+            ]
+        }
+        if self.version == "2026-07-28":
+            result["resultType"] = "complete"
+        sink = kwargs["result_sink"]
+        await sink.write(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        result_ref = await sink.finalize()
+        return {"_mcpResultRef": result_ref.as_payload()}
 
     async def cancel_request(self, request_id: str, *, reason: str = "") -> bool:
         del request_id, reason
@@ -171,6 +195,9 @@ class UserMCPPhase3ConformanceTests(unittest.IsolatedAsyncioTestCase):
             ),
             result_store=self.result_store,
             capacity=self.capacity,
+            result_service=MCPIsolatedResultService(
+                projection_store=MCPProjectionStore(root / "projections")
+            ),
         )
 
     async def asyncTearDown(self) -> None:

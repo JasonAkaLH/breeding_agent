@@ -5,7 +5,7 @@
 - 日期：2026-08-20
 - 分支：`main`
 - 设计依据：`2026-08-20-mcp-versioned-result-parsing-design.md`
-- 状态：八检查点仓库实现完成；正在执行always-on收敛检查点；真实PostgreSQL与production rollout待外部执行
+- 状态：九检查点仓库实现完成；真实PostgreSQL与production rollout待外部执行
 - 策略：保留既有安全解析和typed projection合同，删除独立Parser模式参数及旁路分支
 
 ## 固定合同
@@ -26,7 +26,7 @@
 - Checkpoint 6 已完成：`1a879cf feat(mcp): publish bounded result projections`；published projection经Artifact expected-storage-ref CAS绑定，Selector删除raw refs并按最新优先/Call顺序消费有界agent projection，Remote continuation在begin前加载投影且metadata不含raw，OCR改为窄invoker注入，legacy executor改用统一Decoder/projector。
 - Checkpoint 7 已完成：`5f5e16d feat(frontend): render typed MCP business results`；API只从复验后的published projection返回strict typed业务视图，前端删除Artifact ID/raw识别并展示structured/preview/text/empty/unavailable闭合卡片，可访问展开控件和显式截断提示已覆盖。
 - Checkpoint 8 已完成实现与最终验证：completed Call按ref每页1000条keyset本地扫描，raw resolver优先held durable、回收后读取identity-bound managed copy，source-deleted零网络补投通过；新增闭合Parser count/latency指标与shadow安全摘要，24小时缺projection continuation收敛failed/no-replay，SQLite/PostgreSQL metric constraint执行additive替换；OCR内部start/poll/ack与legacy executor均进入隔离Result Service。独立检查点提交主题为`feat(mcp): reconcile parsed results and finalize rollout gates`。
-- Checkpoint 9 实施中：删除`MAF_USER_MCP_RESULT_PARSER_MODE`、`MCPResultParserMode`和Gateway/runtime分支；ordinary、approval、workflow与remote task统一使用现有enforce语义，历史`safe_hide`仅作为不可用原因保留。
+- Checkpoint 9 已完成：删除`MAF_USER_MCP_RESULT_PARSER_MODE`、`MCPResultParserMode`和Gateway/runtime分支；ordinary、approval、workflow与remote task统一使用强制解析语义，历史`safe_hide`仅作为不可用原因保留。聚焦后端83项、完整MCP 528项中的527项通过（唯一失败为既有shadow manifest错误文案断言）、前端143项/typecheck/build通过。
 
 ## 开发检查点
 

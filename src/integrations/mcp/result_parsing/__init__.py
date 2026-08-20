@@ -19,9 +19,7 @@ from .registry import decode_result
 from .service import (
     MCPIsolatedResultService,
     MCPResultParserObservation,
-    MCPResultParserMode,
     MCPResultServiceOutcome,
-    resolve_result_parser_mode,
 )
 from .worker import MCPValidatedResultCheckpoint
 
@@ -34,7 +32,6 @@ __all__ = [
     "MCPResultParseError",
     "MCPResultSource",
     "MCPResultServiceOutcome",
-    "MCPResultParserMode",
     "MCPResultParserObservation",
     "MCPIsolatedResultService",
     "MCPHistoricalResultReprojector",
@@ -46,5 +43,4 @@ __all__ = [
     "build_agent_projection",
     "build_user_view",
     "decode_result",
-    "resolve_result_parser_mode",
 ]

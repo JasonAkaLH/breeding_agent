@@ -1262,7 +1262,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                         safe_remote_task_ref=safe_ref,
                         status="completed",
                         terminal=True,
-                        result={"content": [{"type": "text", "text": "done"}]},
+                        result={
+                            "resultType": "complete",
+                            "content": [{"type": "text", "text": "done"}],
+                        },
                     )
 
                 async def aclose(self):

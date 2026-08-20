@@ -702,6 +702,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 "MCP_ENFORCE_PERCENT": "100",
                 "MCP_ENFORCE_HASH_SALT": "stable-test-salt",
                 "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+                "MAF_USER_MCP_RESULT_PARSER_MODE": "safe_hide",
             },
             clear=False,
         ):
@@ -736,6 +737,13 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(runtime._mcp_runtime_state)
                 self.assertEqual(calls, [])
                 self.assertIsNotNone(runtime.capability_registry.get("mcp.dispatch"))
+                self.assertIsNotNone(runtime.user_mcp_gateway._result_service)
+                self.assertIsNotNone(
+                    runtime.mcp_remote_task_recovery_worker._result_processor
+                )
+                self.assertIsNotNone(
+                    runtime._mcp_durable_result_lifecycle_manager._business_reprojector
+                )
                 self.assertFalse(
                     any(
                         descriptor.kind == "mcp_tool"

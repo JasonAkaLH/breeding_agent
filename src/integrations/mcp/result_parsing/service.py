@@ -10,7 +10,6 @@ from collections import Counter, deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from enum import StrEnum
 from multiprocessing.connection import Connection
 from typing import Any, AsyncIterator
 
@@ -34,19 +33,6 @@ MAX_OWNER_JOBS = 2
 MAX_QUEUE_WAIT_SECONDS = 30.0
 MAX_WORKER_WALL_SECONDS = 10.0
 MAX_RAW_RESULT_BYTES = 64 * 1024 * 1024
-
-
-class MCPResultParserMode(StrEnum):
-    SAFE_HIDE = "safe_hide"
-    SHADOW = "shadow"
-    ENFORCE = "enforce"
-
-
-def resolve_result_parser_mode(value: object) -> MCPResultParserMode:
-    try:
-        return MCPResultParserMode(str(value or "").strip().lower())
-    except ValueError:
-        return MCPResultParserMode.SAFE_HIDE
 
 
 class MCPResultWorkerError(RuntimeError):
