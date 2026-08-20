@@ -151,14 +151,20 @@ class MCPDurableResultSnapshotAuthority:
                     entries.remove(held)
                 if not entries:
                     self._held.pop(str(result_ref), None)
+            self._store._release_held_result(str(result_ref))
             os.close(held.data_descriptor)
             os.close(held.manifest_descriptor)
 
     def _open_and_register(self, **kwargs) -> _HeldDurableResult:
         result_ref = str(kwargs["result_ref"])
         with self._lock:
-            stored = self._store._results.get(result_ref)
-            held = _open_durable_result_snapshot(stored, **kwargs)
+            self._store._hold_result(result_ref)
+            try:
+                stored = self._store._results.get(result_ref)
+                held = _open_durable_result_snapshot(stored, **kwargs)
+            except BaseException:
+                self._store._release_held_result(result_ref)
+                raise
             self._held.setdefault(result_ref, []).append(held)
             return held
 
@@ -643,6 +649,10 @@ class MCPTemporaryResultStore:
         self._memory_threshold_bytes = memory_threshold_bytes
         self._tasks: dict[str, str] = {}
         self._results: dict[str, _StoredResult] = {}
+        self._terminal_published_refs: set[str] = set()
+        self._held_result_counts: dict[str, int] = {}
+        self._discarding_result_refs: set[str] = set()
+        self._result_state_lock = threading.Lock()
         self._spill_observer: Callable[[str | None, int], Awaitable[None]] | None = None
         self._cleanup_failure_observer: Callable[[str | None], Awaitable[None]] | None = None
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -735,6 +745,33 @@ class MCPTemporaryResultStore:
             size_bytes=stored.size_bytes,
             sha256=stored.sha256,
             storage="memory" if stored.memory is not None else "file",
+        )
+
+    def result_parser_descriptor(self, result_ref: MCPTemporaryResultRef):
+        """Return an identity-bound read-only descriptor for the isolated parser."""
+
+        from src.integrations.mcp.result_parsing.models import MCPRawResultDescriptor
+
+        stored = self._results.get(result_ref.ref)
+        if stored is None or stored.path is None or stored.memory is not None:
+            raise MCPTemporaryResultError(
+                "MCP result is not available as a parser file descriptor."
+            )
+        metadata = os.stat(stored.path, follow_symlinks=False)
+        if (
+            not _file_matches_result(stored.path, stored.size_bytes, stored.sha256)
+            or metadata.st_nlink != 1
+        ):
+            raise MCPTemporaryResultError(
+                "MCP parser result descriptor identity verification failed."
+            )
+        return MCPRawResultDescriptor(
+            path=str(stored.path),
+            size_bytes=stored.size_bytes,
+            sha256="sha256:" + stored.sha256,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            owner_uid=metadata.st_uid,
         )
 
     async def verify_durable_ref(
@@ -830,19 +867,31 @@ class MCPTemporaryResultStore:
         stored = self._results.get(result_ref.ref)
         if stored is None:
             raise KeyError("Unknown or expired MCP temporary result reference.")
-        stored.promoted = True
+        with self._result_state_lock:
+            if result_ref.ref in self._discarding_result_refs:
+                raise MCPTemporaryResultError(
+                    "MCP result is already being discarded."
+                )
+            stored.promoted = True
+            self._terminal_published_refs.add(result_ref.ref)
 
     async def discard(self, result_ref: MCPTemporaryResultRef) -> None:
-        stored = self._results.pop(result_ref.ref, None)
-        if stored is None or stored.promoted:
+        stored = self._results.get(result_ref.ref)
+        if stored is None or not self._begin_staged_discard(result_ref.ref):
             return
-        if stored.path is not None:
-            try:
-                await _unlink(stored.path)
-            except BaseException:
-                await self._observe_cleanup_failure(stored.scope_id)
-                raise
-            await self._observe_spill_bytes(stored.scope_id)
+        try:
+            if stored.path is not None:
+                await asyncio.to_thread(_discard_staged_result_files, stored.path)
+                await self._observe_spill_bytes(stored.scope_id)
+            self._results.pop(result_ref.ref, None)
+            if not any(item.task_key == stored.task_key for item in self._results.values()):
+                self._tasks.pop(stored.task_id, None)
+                await self._remove_empty_task_dir(stored.task_key)
+        except BaseException:
+            await self._observe_cleanup_failure(stored.scope_id)
+            raise
+        finally:
+            self._finish_staged_discard(result_ref.ref)
 
     async def cleanup_scope(self, scope_id: str) -> None:
         normalized = str(scope_id)
@@ -884,6 +933,40 @@ class MCPTemporaryResultStore:
         task_dir = self._root / task_key
         if task_dir.exists() and not any(stored.task_key == task_key for stored in self._results.values()):
             await asyncio.to_thread(shutil.rmtree, task_dir, True)
+
+    async def cleanup_staged_orphans(
+        self,
+        *,
+        safe_age_seconds: float = 24 * 60 * 60,
+        now_seconds: float | None = None,
+        limit: int = 1000,
+    ) -> tuple[str, ...]:
+        """Retry exact deletion of old staged durable results without touching authority."""
+
+        if isinstance(limit, bool) or not 1 <= limit <= 1000:
+            raise ValueError("mcp_staged_result_janitor_limit_invalid")
+        current = time.time() if now_seconds is None else float(now_seconds)
+        removed: list[str] = []
+        for ref, stored in sorted(self._results.items()):
+            if len(removed) >= limit:
+                break
+            if (
+                ref in self._terminal_published_refs
+                or self._held_result_counts.get(ref, 0) > 0
+                or stored.path is None
+            ):
+                continue
+            try:
+                metadata = os.stat(stored.path, follow_symlinks=False)
+                if current - metadata.st_mtime < safe_age_seconds:
+                    continue
+                await self.discard(self.resolve_ref(ref))
+                if ref not in self._results:
+                    removed.append(ref)
+            except BaseException:
+                await self._observe_cleanup_failure(stored.scope_id)
+                continue
+        return tuple(removed)
 
     def active_task_keys(self) -> frozenset[str]:
         return frozenset(self._tasks.values())
@@ -927,6 +1010,35 @@ class MCPTemporaryResultStore:
         os.chmod(task_dir, 0o700)
         self._tasks[normalized] = task_key
         return task_key
+
+    def _hold_result(self, result_ref: str) -> None:
+        with self._result_state_lock:
+            if result_ref in self._discarding_result_refs:
+                raise MCPTemporaryResultError("MCP result is being discarded.")
+            self._held_result_counts[result_ref] = self._held_result_counts.get(result_ref, 0) + 1
+
+    def _release_held_result(self, result_ref: str) -> None:
+        with self._result_state_lock:
+            count = self._held_result_counts.get(result_ref, 0)
+            if count <= 1:
+                self._held_result_counts.pop(result_ref, None)
+            else:
+                self._held_result_counts[result_ref] = count - 1
+
+    def _begin_staged_discard(self, result_ref: str) -> bool:
+        with self._result_state_lock:
+            if (
+                result_ref in self._terminal_published_refs
+                or self._held_result_counts.get(result_ref, 0) > 0
+                or result_ref in self._discarding_result_refs
+            ):
+                return False
+            self._discarding_result_refs.add(result_ref)
+            return True
+
+    def _finish_staged_discard(self, result_ref: str) -> None:
+        with self._result_state_lock:
+            self._discarding_result_refs.discard(result_ref)
 
     def _register(self, result: MCPTemporaryResultRef, stored: _StoredResult) -> None:
         self._results[result.ref] = stored
@@ -986,6 +1098,9 @@ class MCPTemporaryResultStore:
                 path=data_path,
                 promoted=True,
             )
+            # Pre-revision manifests have no staged/published bit. Treat them as
+            # published authority so a restart can never make historical data deletable.
+            self._terminal_published_refs.add(ref)
             self._tasks[task_id] = task_key
 
     async def _remove_empty_task_dir(self, task_key: str) -> None:
@@ -1369,6 +1484,27 @@ async def _unlink(path: Path) -> None:
         await asyncio.to_thread(path.unlink)
     except FileNotFoundError:
         pass
+
+
+def _discard_staged_result_files(data_path: Path) -> None:
+    paths = [data_path]
+    manifest_path = data_path.with_suffix(".manifest.json")
+    if manifest_path.exists() or manifest_path.is_symlink():
+        paths.insert(0, manifest_path)
+    for path in paths:
+        try:
+            metadata = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise MCPTemporaryResultError("Staged MCP result file identity is unsafe.")
+        path.unlink()
+    _fsync_directory(data_path.parent)
 
 
 def _publish_durable_data(

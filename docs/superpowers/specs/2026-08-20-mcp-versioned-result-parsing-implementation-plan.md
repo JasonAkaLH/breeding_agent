@@ -20,7 +20,8 @@
 
 - Checkpoint 1 已完成：`09f8559 fix(api): safe-hide MCP raw result artifacts`。
 - Checkpoint 2 已完成：`38fc16c feat(mcp): persist result parser authority`。
-- Checkpoint 3 已完成实现与聚焦回归：五版本静态Registry、独立Decoder、strict JSON/ContentBlock/schema辅助和有界user/agent projector已落地，等待本检查点提交。
+- Checkpoint 3 已完成：`2cd2a41 feat(mcp): add versioned result decoders`。
+- Checkpoint 4 已完成实现与聚焦回归：一次性spawn worker、1/8/2/30公平gate、4 KiB checkpoint、192 KiB projection envelope、task-private projection store及raw exact discard/janitor已落地；本地43项通过（Linux-only 2项skip），backend Linux容器43项全通过，含512 MiB `RLIMIT_AS`、64 MiB raw边界和恶意regex终止，等待本检查点提交。
 
 ## 开发检查点
 

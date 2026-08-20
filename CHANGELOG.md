@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- MCP五版本Result解析检查点4完成：每个解析job使用一次性`multiprocessing spawn`子进程，公平gate固定active=1、queued=8、per-owner=2、queue wait=30秒、wall=10秒；父进程只接收4 KiB validated checkpoint和最多192 KiB projection envelope，checkpoint后projection生成/存储失败不再改变succeeded结论。新增0700/0600、O_EXCL/O_NOFOLLOW、inode/owner/nlink复验的task-private projection staged/publish/load/janitor，temporary-result exact discard同步删除data+manifest且禁止held/terminal-published删除、失败保留索引供24小时orphan janitor重试。backend Linux容器验证512 MiB `RLIMIT_AS`、64 MiB raw边界及恶意regex可终止。License Requirement：仅使用Python标准库multiprocessing/resource与现有存储能力，无新增依赖或许可变更。
+
 - MCP五版本Result解析检查点3完成：新增`result_parsing`闭合包与五个独立版本Decoder，严格拒绝duplicate key、NaN/Infinity、lone surrogate、非JSON值、越界深度/节点/key/block，按版本解析text/image/audio/resource/resource_link与structuredContent；2025-06+使用Call冻结schema且禁止外部`$ref`，2026区分缺失与显式null并将缺`resultType`历史例外限制为pre-enforce `tasks_get`。统一模型不含raw/meta/control identity，user/agent projector执行exact JSON去重、secret/URL脱敏、binary metadata化和20,000 code points/80,000 bytes预算。License Requirement：复用现有jsonschema与标准库，无新增依赖或许可变更。
 
 - MCP五版本Result解析检查点2完成：catalog freeze对output schema采用默认2020-12/显式Draft 7、document-local `$ref`与canonical UTF-8 256 KiB门禁，无效schema只排除当前Tool；descriptor和Call原子保存schema snapshot/`sha256:`，Call新增terminal source；terminal candidate升级v3并与receipt新增parser/checkpoint/model digest，同时保留v1/v2只读。SQLite在aggregate drift检查前只增nullable列并保留已有业务行，PostgreSQL fresh runtime schema升至v7且manifest/reconciler识别JSONB/Text列。License Requirement：复用现有jsonschema、SQLAlchemy与标准库，无新增依赖或许可变更。

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from src.integrations.mcp.temporary_results import (
     MCPAdmissionCancelledError,
+    MCPDurableResultSnapshotAuthority,
     MCPCapacityUnavailableError,
     MCPResultTooLargeError,
     MCPTemporaryResultError,
@@ -197,6 +198,113 @@ class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
             await store.cleanup_task("task-1")
 
             self.assertEqual(b"".join([chunk async for chunk in store.iter_bytes(result)]), b"promote-me")
+
+    async def test_exact_discard_removes_staged_data_and_manifest_but_never_promoted_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=1)
+            staged_sink = store.create_sink(
+                "task-staged",
+                durable=True,
+                owner_user_id="owner",
+                node_id="node",
+                call_ref="call-staged",
+            )
+            await staged_sink.write(b'{"content":[]}')
+            staged = await staged_sink.finalize()
+            self.assertEqual(len(list(root.rglob("*.*"))), 2)
+
+            await store.discard(staged)
+
+            self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
+            with self.assertRaises(KeyError):
+                store.resolve_ref(staged.ref)
+
+            published_sink = store.create_sink(
+                "task-published",
+                durable=True,
+                owner_user_id="owner",
+                node_id="node",
+                call_ref="call-published",
+            )
+            await published_sink.write(b'{"content":[]}')
+            published = await published_sink.finalize()
+            store.mark_promoted(published)
+
+            await store.discard(published)
+
+            self.assertEqual(store.resolve_ref(published.ref), published)
+            self.assertEqual(
+                b"".join([chunk async for chunk in store.iter_bytes(published)]),
+                b'{"content":[]}',
+            )
+
+    async def test_staged_orphan_janitor_uses_age_and_skips_published_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=1)
+
+            async def make(call_ref: str):
+                sink = store.create_sink(
+                    f"task-{call_ref}",
+                    durable=True,
+                    owner_user_id="owner",
+                    node_id="node",
+                    call_ref=call_ref,
+                )
+                await sink.write(b'{"content":[]}')
+                return await sink.finalize()
+
+            old_staged = await make("old")
+            fresh_staged = await make("fresh")
+            published = await make("published")
+            store.mark_promoted(published)
+            for path in root.rglob(f"{old_staged.ref}*"):
+                os.utime(path, (0, 0), follow_symlinks=False)
+            for path in root.rglob(f"{published.ref}*"):
+                os.utime(path, (0, 0), follow_symlinks=False)
+
+            removed = await store.cleanup_staged_orphans(
+                safe_age_seconds=10, now_seconds=100
+            )
+
+            self.assertEqual(removed, (old_staged.ref,))
+            with self.assertRaises(KeyError):
+                store.resolve_ref(old_staged.ref)
+            self.assertEqual(store.resolve_ref(fresh_staged.ref), fresh_staged)
+            self.assertEqual(store.resolve_ref(published.ref), published)
+
+    async def test_exact_discard_never_unlinks_a_held_result_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=1)
+            sink = store.create_sink(
+                "task-held",
+                durable=True,
+                owner_user_id="owner",
+                node_id="node",
+                call_ref="call-held",
+            )
+            payload = b'{"content":[]}'
+            await sink.write(payload)
+            result = await sink.finalize()
+            authority = MCPDurableResultSnapshotAuthority(store)
+
+            async with authority.open_snapshot(
+                result_ref=result.ref,
+                owner_user_id="owner",
+                task_id="task-held",
+                node_id="node",
+                call_id="call-held",
+                expected_size_bytes=len(payload),
+                expected_content_sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
+                expected_store_kind="durable_content_addressed",
+            ):
+                await store.discard(result)
+                self.assertEqual(store.resolve_ref(result.ref), result)
+
+            await store.discard(result)
+            with self.assertRaises(KeyError):
+                store.resolve_ref(result.ref)
 
     async def test_scope_cleanup_does_not_remove_another_server_result_in_same_task(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

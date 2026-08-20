@@ -121,7 +121,17 @@ class MCPParsedToolResult:
 class MCPResultDecodeRequest:
     protocol_version: str
     source: MCPResultSource | str
-    payload: Mapping[str, Any] | bytes | str
+    payload: Mapping[str, Any] | bytes | str | "MCPRawResultDescriptor"
     output_schema: Mapping[str, Any] | None = None
     output_schema_sha256: str | None = None
     historical_compatibility: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class MCPRawResultDescriptor:
+    path: str
+    size_bytes: int
+    sha256: str
+    device: int
+    inode: int
+    owner_uid: int

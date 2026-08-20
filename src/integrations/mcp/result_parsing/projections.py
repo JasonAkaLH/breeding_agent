@@ -128,11 +128,13 @@ def build_agent_projection(result: MCPParsedToolResult) -> str:
             if isinstance(block, (MCPTextResultBlock, MCPEmbeddedTextResourceBlock))
         ]
         body = "\n\n".join(texts) or _EMPTY_MESSAGE
-    return _truncate_utf8(
-        _EXTERNAL_NOTICE + "\n" + body,
-        MAX_PROJECTION_CODE_POINTS,
-        MAX_PROJECTION_UTF8_BYTES,
+    prefix = _EXTERNAL_NOTICE + "\n"
+    bounded_body = _truncate_utf8(
+        body,
+        MAX_PROJECTION_CODE_POINTS - len(prefix),
+        MAX_PROJECTION_UTF8_BYTES - len(prefix.encode("utf-8")),
     )
+    return prefix + bounded_body
 
 
 def parsed_result_payload(result: MCPParsedToolResult) -> dict[str, Any]:
@@ -214,7 +216,13 @@ def _sanitize_value(value: Any, key: str = "") -> Any:
 
 
 def _sanitize_text(value: str) -> str:
-    return _URL_RE.sub("[URL_REDACTED]", _SECRET_ASSIGNMENT_RE.sub("[REDACTED]", value))
+    lowered = value.lower()
+    sanitized = value
+    if any(marker in lowered for marker in ("token", "secret", "password", "api_key", "api-key", "authorization")):
+        sanitized = _SECRET_ASSIGNMENT_RE.sub("[REDACTED]", sanitized)
+    if "://" in sanitized:
+        sanitized = _URL_RE.sub("[URL_REDACTED]", sanitized)
+    return sanitized
 
 
 def _within_budget(value: object, *, reserve: int = 0) -> bool:
