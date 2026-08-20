@@ -4,13 +4,13 @@
 
 - 日期：2026-08-20
 - 分支：`main`
-- 状态：经 document-perfectization 循环加固，尚未实施
+- 状态：经 document-perfectization 循环加固；八检查点仓库实现完成，生产 rollout 未执行
 - 决策：采用“版本化 Result Decoder Registry + 统一业务结果模型”
 - 范围：Python Client/Gateway 已支持的 `2024-11-05`、`2025-03-26`、
   `2025-06-18`、`2025-11-25`、`2026-07-28` 五版本 Tool Result；覆盖普通调用、
   approval 恢复、2025 Tasks、2026 MRTR/Tasks、remote recovery、Main Agent continuation、
   Task/Conversation Artifact 展示与历史结果读取
-- 信心门：最终完整评分见第 23 节；实施、部署和 production evidence 不属于本文已完成状态
+- 信心门：最终完整评分见第 23 节；仓库实现与Linux/source-deleted门禁已完成，真实PostgreSQL和production evidence不属于已完成状态
 
 ## 1. 背景与替代关系
 
@@ -904,16 +904,13 @@ production evidence。
 | 决策 | inline业务预览上限20,000字符/80,000 bytes，不提供完整大结果下载 | 防止重新公开64 MiB raw；完整业务文件属于后续独立授权范围 |
 | 决策 | 首个slice不公开media/blob和resource URI正文 | 只展示MIME/size/SHA/scheme metadata；后续访问必须独立授权和policy |
 | 决策 | rollback只允许safe-hide | 安全性优先于结果可见性，禁止恢复raw公共展示 |
-| 残余假设 | 现有internal managed-file copy可在raw durable源回收后继续作为重投影输入 | 由既有size/SHA/owner/Call/lifecycle复验支撑；实施时用source已删除的history测试证明 |
+| 已验证假设 | 现有internal managed-file copy可在raw durable源回收后继续作为重投影输入 | source-deleted history测试已按size/SHA/owner/Task/Node/Call复验并以网络调用计数0通过 |
 
-没有未决业务问题。若残余假设的source-deleted测试失败，实施必须停在safe-hide并修复internal resolver，不能
-降低authority校验或恢复raw展示。
+没有未决业务问题。source-deleted测试已通过；后续任何回归失败仍必须停在safe-hide并修复internal resolver，不能降低authority校验或恢复raw展示。
 
 ## 20. AGENTS、CHANGELOG 与依赖影响
 
-本设计新增 Result parsing 模块边界，但尚未修改源码目录。实施时若创建
-`src/integrations/mcp/result_parsing/`，必须同步检查根 `AGENTS.md` 的模块索引；前端 Artifact contract
-变化时同步 `frontend/AGENTS.md`、API 文档与 `CHANGELOG.md`。
+本设计已新增`src/integrations/mcp/result_parsing/`模块边界，并同步更新受影响的模块索引、`frontend/AGENTS.md`、API文档与`CHANGELOG.md`。根`AGENTS.md`存在用户先前修改，本实施未覆盖或暂存该文件。
 
 本设计无新增依赖或许可变化。
 
@@ -956,5 +953,4 @@ production evidence。
 | Risks、assumptions、traceability 与 consistency | 10 | 9 | Minor：durable source回收后internal managed-file copy仍可重投影是现有架构支持但尚未由source-deleted history test证明；影响限定为历史结果safe unavailable，不会触发raw fallback或网络重放；跟进为第10、19节的实施阻断测试 |
 | **总计** | **100** | **98** | **2个有界Minor；0 Blocking、0 Major** |
 
-最终结论：**Pass with recorded assumptions**。本文达到98/100的设计信心门；“尚未实施”仍是明确边界，
-不得把该分数表述为代码、部署或production evidence已经完成。
+最终结论：**Pass with recorded assumptions**。98/100是实施前的设计信心评分；当前八检查点仓库实现已完成，但不得把仓库测试表述为真实PostgreSQL门禁、生产部署或production evidence已经完成。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import tempfile
 import unittest
@@ -1092,6 +1093,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                         "name": name,
                         "description": name,
                         "inputSchema": {"type": "object"},
+                        "outputSchema": {"type": "object", "title": name},
                     }
                     for name in names
                 ]
@@ -1119,6 +1121,12 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                 }
 
         adapter = OCRAdapter()
+        projection_root = Path(self.temp_dir.name) / "ocr-workflow-projections"
+        parser_observations = []
+        result_service = MCPIsolatedResultService(
+            projection_store=MCPProjectionStore(projection_root),
+            observer=parser_observations.append,
+        )
         gateway = MCPGateway(
             storage=self.storage,
             gateway_instance_id="gateway-ocr-workflow",
@@ -1133,6 +1141,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             ),
             now_fn=lambda: self.now,
             sleep=lambda _seconds: asyncio.sleep(0),
+            result_service=result_service,
+            result_parser_mode="enforce",
         )
         try:
             scope = await gateway.open_scope(
@@ -1155,6 +1165,33 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(adapter.call_count, 3)
             self.assertTrue(outcome.result_ref.startswith("mcp-result-"))
             self.assertEqual(outcome.external_text, "识别成功")
+            self.assertEqual(len(parser_observations), 4)
+            self.assertTrue(
+                all(item.outcome == "succeeded" for item in parser_observations)
+            )
+            self.assertEqual(
+                len(tuple(projection_root.glob(".staged-*.json"))), 1
+            )
+            self.assertIsNotNone(outcome.projection_staging_handle)
+            final_schema = {
+                "type": "object",
+                "title": "get_parse_job",
+            }
+            self.assertEqual(
+                outcome.validated_checkpoint.output_schema_sha256,
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        final_schema,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            )
+            result_service.discard_projection(
+                outcome.projection_staging_handle
+            )
         finally:
             await gateway.aclose()
 

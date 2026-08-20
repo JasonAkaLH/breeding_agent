@@ -72,6 +72,8 @@ class MCPMetricName(StrEnum):
     MRTR_ROUNDS_TOTAL = "mcp_mrtr_rounds_total"
     REMOTE_TASKS_ACTIVE = "mcp_remote_tasks_active"
     SAFETY_RED_LINE_TOTAL = "mcp_safety_red_line_total"
+    RESULT_PARSER_OUTCOMES_TOTAL = "mcp_result_parser_outcomes_total"
+    RESULT_PARSER_DURATION_SECONDS = "mcp_result_parser_duration_seconds"
 
 
 class MCPMetricExecutionPath(StrEnum):

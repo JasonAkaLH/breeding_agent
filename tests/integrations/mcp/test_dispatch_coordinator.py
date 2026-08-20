@@ -823,6 +823,8 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                         else {"type": "object"}
                     ),
                     input_schema_sha256=f"schema-{name}",
+                    output_schema={"type": "object", "title": name},
+                    output_schema_sha256=f"output-schema-{name}",
                 )
                 for name in (
                     "get_ocr_capabilities",
@@ -872,6 +874,15 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             content,
         )
         self.assertEqual(kwargs["workflow_kind"].value, "ocr_async_job_v1")
+        saved_call = next(iter(storage.calls.values()))
+        self.assertEqual(
+            saved_call.output_schema,
+            {"type": "object", "title": "get_parse_job"},
+        )
+        self.assertEqual(
+            saved_call.output_schema_sha256,
+            "output-schema-get_parse_job",
+        )
         self.assertEqual(len(selector.contexts), 1)
         self.assertEqual(outcome.output_payload["mcp_status"], "completed")
         self.assertIn("助力双方交往", outcome.output_payload["content"])

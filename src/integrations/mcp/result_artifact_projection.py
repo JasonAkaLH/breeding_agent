@@ -365,14 +365,15 @@ class MCPResultArtifactProjector:
             != binding.raw_sha256.removeprefix("sha256:")
         ):
             raise ValueError("mcp_result_projection_artifact_authority_invalid")
+        call = await self._storage.get_mcp_call_record(
+            binding.owner_user_id, binding.task_id, binding.call_ref
+        )
+        if call is None:
+            raise ValueError("mcp_result_projection_call_authority_missing")
         replacement_metadata = {
             **metadata,
             "visibility": "internal_raw",
-            "protocol_version": (
-                await self._storage.get_mcp_call_record(
-                    binding.owner_user_id, binding.task_id, binding.call_ref
-                )
-            ).protocol_version,
+            "protocol_version": call.protocol_version,
             "terminal_result_source": binding.source,
             "output_schema_sha256": binding.output_schema_sha256,
             "parser_revision": binding.parser_revision,
@@ -382,6 +383,7 @@ class MCPResultArtifactProjector:
             "owner_user_id": binding.owner_user_id,
             "call_ref": binding.call_ref,
         }
+        replacement_metadata.pop("mcp_projection_unavailable_reason", None)
         replacement_ref = build_file_storage_ref(replacement_metadata)
         if len(replacement_ref.encode("utf-8")) > 16 * 1024:
             raise ValueError("mcp_result_projection_artifact_metadata_too_large")

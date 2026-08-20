@@ -55,6 +55,16 @@ _TRUSTED_ATTESTATION_KEYS = {_ATTESTATION_KEY_ID: _ATTESTATION_KEY}
 
 
 class UserMCPRolloutMetricTests(unittest.TestCase):
+    def test_result_parser_metric_names_are_closed(self) -> None:
+        self.assertEqual(
+            MCPMetricName.RESULT_PARSER_OUTCOMES_TOTAL.value,
+            "mcp_result_parser_outcomes_total",
+        )
+        self.assertEqual(
+            MCPMetricName.RESULT_PARSER_DURATION_SECONDS.value,
+            "mcp_result_parser_duration_seconds",
+        )
+
     def setUp(self) -> None:
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)

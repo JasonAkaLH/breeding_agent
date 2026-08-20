@@ -4,9 +4,10 @@ import asyncio
 import hashlib
 import json
 import multiprocessing
+import inspect
 from time import monotonic
 from collections import Counter, deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
@@ -61,6 +62,20 @@ class MCPResultServiceOutcome:
     checkpoint: MCPValidatedResultCheckpoint
     projection_staging_handle: MCPProjectionStagingHandle | None
     projection_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MCPResultParserObservation:
+    protocol_version: str
+    source: str
+    outcome: str
+    reason: str
+    primary_kind: str
+    metadata_kinds: tuple[str, ...]
+    structured_present: bool
+    projection_sha256: str
+    truncated: bool
+    duration_seconds: float
 
 
 @dataclass(slots=True)
@@ -139,15 +154,30 @@ class MCPIsolatedResultService:
         projection_store: MCPProjectionStore,
         gate: MCPResultWorkerGate | None = None,
         worker_timeout_seconds: float = MAX_WORKER_WALL_SECONDS,
+        observer: Callable[
+            [MCPResultParserObservation], None | Awaitable[None]
+        ]
+        | None = None,
     ) -> None:
         self._projection_store = projection_store
         self._gate = gate or MCPResultWorkerGate()
         self._worker_timeout_seconds = worker_timeout_seconds
         self._context = multiprocessing.get_context("spawn")
+        self._observer = observer
 
     @property
     def gate(self) -> MCPResultWorkerGate:
         return self._gate
+
+    def configure_observer(
+        self,
+        observer: Callable[
+            [MCPResultParserObservation], None | Awaitable[None]
+        ],
+    ) -> None:
+        if not callable(observer):
+            raise ValueError("mcp_result_parser_observer_invalid")
+        self._observer = observer
 
     def publish_projection(
         self, handle: MCPProjectionStagingHandle
@@ -156,6 +186,11 @@ class MCPIsolatedResultService:
 
     def discard_projection(self, handle: MCPProjectionStagingHandle) -> None:
         self._projection_store.discard(handle)
+
+    def consume_projection(
+        self, handle: MCPProjectionStagingHandle
+    ) -> Mapping[str, Any]:
+        return self._projection_store.consume_staged(handle)
 
     async def parse(
         self,
@@ -167,6 +202,7 @@ class MCPIsolatedResultService:
         request: MCPResultDecodeRequest,
         measured_mapping_bytes: int | None = None,
     ) -> MCPResultServiceOutcome:
+        started_at = monotonic()
         if not call_ref:
             raise ValueError("MCP result parser call_ref is required")
         if isinstance(request.payload, Mapping):
@@ -230,7 +266,7 @@ class MCPIsolatedResultService:
             except (MCPResultWorkerError, MCPProjectionStoreError, OSError):
                 handle = None
                 projection_error = "projection_failed"
-        return MCPResultServiceOutcome(
+        outcome = MCPResultServiceOutcome(
             raw_sha256=checkpoint.raw_sha256,
             checkpoint=checkpoint,
             projection_staging_handle=handle,
@@ -238,6 +274,26 @@ class MCPIsolatedResultService:
                 "projection_failed" if projection_error is not None else None
             ),
         )
+        await self._observe(
+            _build_observation(
+                request=request,
+                checkpoint=checkpoint,
+                projection=projection,
+                projection_error=outcome.projection_error,
+                duration_seconds=max(0.0, monotonic() - started_at),
+            )
+        )
+        return outcome
+
+    async def _observe(self, observation: MCPResultParserObservation) -> None:
+        if self._observer is None:
+            return
+        try:
+            pending = self._observer(observation)
+            if inspect.isawaitable(pending):
+                await pending
+        except Exception:
+            return
 
     async def _run_worker(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
         receive, send = self._context.Pipe(duplex=False)
@@ -446,4 +502,65 @@ def _is_sha256(value: object) -> bool:
         and len(value) == 71
         and value.startswith("sha256:")
         and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def _build_observation(
+    *,
+    request: MCPResultDecodeRequest,
+    checkpoint: MCPValidatedResultCheckpoint,
+    projection: object,
+    projection_error: str | None,
+    duration_seconds: float,
+) -> MCPResultParserObservation:
+    primary_kind = "none"
+    metadata_kinds: tuple[str, ...] = ()
+    structured_present = False
+    truncated = False
+    projection_sha256 = "none"
+    if isinstance(projection, bytes):
+        projection_sha256 = "sha256:" + hashlib.sha256(projection).hexdigest()
+        try:
+            envelope = json.loads(projection)
+            user_view = envelope.get("user_view", {})
+            primary = user_view.get("primary", {})
+            candidate_kind = primary.get("kind")
+            if candidate_kind in {
+                "structured", "structured_preview", "text", "empty"
+            }:
+                primary_kind = candidate_kind
+            structured_present = primary_kind in {
+                "structured", "structured_preview"
+            }
+            kinds = {
+                str(item.get("kind"))
+                for item in user_view.get("content_metadata") or ()
+                if isinstance(item, Mapping)
+                and item.get("kind")
+                in {
+                    "image",
+                    "audio",
+                    "embedded_blob_resource",
+                    "resource_link",
+                    "embedded_text_resource",
+                }
+            }
+            metadata_kinds = tuple(sorted(kinds))
+            truncated = bool(user_view.get("projection_truncated"))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            primary_kind = "none"
+            metadata_kinds = ()
+            structured_present = False
+            truncated = False
+    return MCPResultParserObservation(
+        protocol_version=request.protocol_version,
+        source=str(request.source),
+        outcome=checkpoint.outcome,
+        reason=checkpoint.reason or projection_error or "none",
+        primary_kind=primary_kind,
+        metadata_kinds=metadata_kinds,
+        structured_present=structured_present,
+        projection_sha256=projection_sha256,
+        truncated=truncated,
+        duration_seconds=duration_seconds,
     )

@@ -271,6 +271,8 @@ MCP_ROLLOUT_METRIC_NAMES = frozenset(
         "mcp_mrtr_rounds_total",
         "mcp_remote_tasks_active",
         "mcp_safety_red_line_total",
+        "mcp_result_parser_outcomes_total",
+        "mcp_result_parser_duration_seconds",
     }
 )
 MCP_ROLLOUT_LABEL_VALUES = {
@@ -9633,6 +9635,27 @@ class SQLiteStateRepository:
         ).all()
         return [_row_to_mcp_call(row) for row in rows]
 
+    def list_completed_mcp_calls_for_result_reprojection(
+        self, *, after_call_ref: str | None = None, limit: int = 1000
+    ) -> list[MCPCallRecord]:
+        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValueError("mcp_result_reprojection_limit_invalid")
+        conditions = [
+            MCPCallRecordRow.status == "completed",
+            MCPCallRecordRow.result_ref.is_not(None),
+        ]
+        if after_call_ref is not None:
+            if not str(after_call_ref).strip():
+                raise ValueError("mcp_result_reprojection_cursor_invalid")
+            conditions.append(MCPCallRecordRow.call_ref > after_call_ref)
+        rows = self._session.scalars(
+            select(MCPCallRecordRow)
+            .where(*conditions)
+            .order_by(MCPCallRecordRow.call_ref)
+            .limit(limit)
+        ).all()
+        return [_row_to_mcp_call(row) for row in rows]
+
     def finish_mcp_call(
         self,
         owner_user_id: str,
@@ -11087,15 +11110,27 @@ class SQLiteStateRepository:
     def abandon_expired_mcp_remote_task_continuations(
         self, *, now: datetime, limit: int = 100
     ) -> list[MCPRemoteTaskOutbox]:
+        projection_deadline = now - timedelta(hours=24)
         candidates = self._session.scalars(
             select(MCPRemoteTaskOutboxRow)
             .where(
                 MCPRemoteTaskOutboxRow.kind == "terminal_continuation",
-                MCPRemoteTaskOutboxRow.continuation_status.in_(["running", "abandoning"]),
+                MCPRemoteTaskOutboxRow.continuation_status.in_(
+                    ["claimed", "running", "abandoning"]
+                ),
                 MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
                 or_(
                     MCPRemoteTaskOutboxRow.continuation_status == "abandoning",
-                    MCPRemoteTaskOutboxRow.continuation_lease_expires_at <= now,
+                    and_(
+                        MCPRemoteTaskOutboxRow.continuation_status == "running",
+                        MCPRemoteTaskOutboxRow.continuation_lease_expires_at <= now,
+                    ),
+                    and_(
+                        MCPRemoteTaskOutboxRow.continuation_status == "claimed",
+                        MCPRemoteTaskOutboxRow.continuation_lease_expires_at <= now,
+                        MCPRemoteTaskOutboxRow.continuation_admitted_at
+                        <= projection_deadline,
+                    ),
                 ),
             )
             .order_by(MCPRemoteTaskOutboxRow.created_at, MCPRemoteTaskOutboxRow.outbox_id)
@@ -11108,13 +11143,19 @@ class SQLiteStateRepository:
                 update(MCPRemoteTaskOutboxRow)
                 .where(
                     MCPRemoteTaskOutboxRow.outbox_id == candidate.outbox_id,
-                    MCPRemoteTaskOutboxRow.continuation_status.in_(["running", "abandoning"]),
+                    MCPRemoteTaskOutboxRow.continuation_status.in_(
+                        ["claimed", "running", "abandoning"]
+                    ),
                     MCPRemoteTaskOutboxRow.continuation_revision == command_revision,
                     MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
                 )
                 .values(
                     continuation_status="abandoning",
-                    continuation_safe_error_code="mcp_continuation_execution_unknown",
+                    continuation_safe_error_code=(
+                        "mcp_continuation_projection_unavailable"
+                        if candidate.continuation_status == "claimed"
+                        else "mcp_continuation_execution_unknown"
+                    ),
                     continuation_revision=command_revision + 1,
                     updated_at=now,
                 )
@@ -14253,6 +14294,18 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.list_mcp_call_records(
                 owner_user_id, task_id, branch_id=branch_id
+            )
+        )
+
+    async def list_completed_mcp_calls_for_result_reprojection(
+        self, *, after_call_ref: str | None = None, limit: int = 1000
+    ) -> list[MCPCallRecord]:
+        return await self._run(
+            lambda state, collab: (
+                state.list_completed_mcp_calls_for_result_reprojection(
+                    after_call_ref=after_call_ref,
+                    limit=limit,
+                )
             )
         )
 

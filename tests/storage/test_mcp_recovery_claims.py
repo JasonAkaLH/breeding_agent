@@ -356,6 +356,14 @@ class MCPRecoveryClaimsTest(SQLiteStorageTestCase):
                 lease_expires_at=self.now + timedelta(seconds=3),
             )
         )[0]
+        self.assertEqual(
+            asyncio.run(
+                self.storage.abandon_expired_mcp_remote_task_continuations(
+                    now=self.now + timedelta(hours=23)
+                )
+            ),
+            [],
+        )
         running = asyncio.run(
             self.storage.begin_mcp_remote_task_continuation(
                 admitted.outbox_id,
@@ -388,6 +396,121 @@ class MCPRecoveryClaimsTest(SQLiteStorageTestCase):
         )
         self.assertEqual(completed.continuation_status, "failed")
         self.assertIsNotNone(completed.continuation_dispatched_at)
+
+    def test_claimed_continuation_without_projection_fails_no_replay_after_24_hours(self) -> None:
+        call = self._reserve_dispatched_call("continuation-projection-missing")
+        binding = replace(
+            self._binding(
+                "remote-continuation-projection-missing",
+                call_ref=call.call_ref,
+            ),
+            task_id=call.task_id,
+            node_id=call.node_id,
+        )
+        asyncio.run(self.storage.save_mcp_remote_task_binding(binding))
+        binding_claim = asyncio.run(
+            self.storage.claim_due_mcp_remote_task_bindings(
+                claim_owner="poller",
+                claim_token="poll-token",
+                now=self.now,
+                lease_expires_at=self.now + timedelta(seconds=30),
+            )
+        )[0]
+        asyncio.run(
+            self.storage.finish_mcp_remote_task_binding(
+                binding.owner_user_id,
+                binding.task_id,
+                binding.safe_remote_task_ref,
+                claim_owner="poller",
+                claim_token="poll-token",
+                expected_revision=binding_claim.revision,
+                remote_status="completed",
+                call_status="completed",
+                terminal_at=self.now + timedelta(seconds=1),
+                result_ref="result-ref",
+            )
+        )
+        delivery = asyncio.run(
+            self.storage.claim_mcp_remote_task_outbox(
+                claim_owner="recovery",
+                claim_token="delivery-token",
+                now=self.now + timedelta(seconds=1),
+                lease_expires_at=self.now + timedelta(seconds=31),
+            )
+        )[0]
+        asyncio.run(
+            self.storage.save_conversation(
+                Conversation(f"conv-{call.task_id}", call.owner_user_id)
+            )
+        )
+        asyncio.run(
+            self.storage.save_task(
+                Task(
+                    call.task_id,
+                    f"conv-{call.task_id}",
+                    f"message-{call.task_id}",
+                    status=TaskStatus.RUNNING,
+                )
+            )
+        )
+        asyncio.run(
+            self.storage.save_task_node(
+                TaskNode(
+                    call.node_id,
+                    call.task_id,
+                    "mcp.dispatch",
+                    status=NodeStatus.WAITING_FOR_DEPENDENCY,
+                )
+            )
+        )
+        applied = asyncio.run(
+            self.storage.apply_mcp_remote_task_continuation(
+                delivery.outbox_id,
+                claim_owner="recovery",
+                claim_token="delivery-token",
+                expected_revision=delivery.revision,
+                updated_at=self.now + timedelta(seconds=1),
+            )
+        )
+        admitted = asyncio.run(
+            self.storage.admit_mcp_remote_task_continuation(
+                applied.outbox_id,
+                claim_owner="recovery",
+                claim_token="delivery-token",
+                expected_revision=applied.revision,
+                admitted_at=self.now + timedelta(seconds=2),
+            )
+        )
+        claimed = asyncio.run(
+            self.storage.claim_mcp_remote_task_continuations(
+                claim_owner="runtime",
+                claim_token="projection-missing",
+                now=self.now + timedelta(seconds=2),
+                lease_expires_at=self.now + timedelta(seconds=3),
+            )
+        )[0]
+
+        abandoned = asyncio.run(
+            self.storage.abandon_expired_mcp_remote_task_continuations(
+                now=self.now + timedelta(hours=24, seconds=3)
+            )
+        )[0]
+
+        self.assertEqual(abandoned.outbox_id, admitted.outbox_id)
+        self.assertEqual(abandoned.continuation_status, "abandoning")
+        self.assertEqual(
+            abandoned.continuation_safe_error_code,
+            "mcp_continuation_projection_unavailable",
+        )
+        completed = asyncio.run(
+            self.storage.complete_abandoned_mcp_remote_task_continuation(
+                abandoned.outbox_id,
+                expected_revision=abandoned.continuation_revision,
+                completed_at=self.now + timedelta(hours=24, seconds=3),
+            )
+        )
+        self.assertEqual(completed.continuation_status, "failed")
+        self.assertEqual(claimed.continuation_status, "claimed")
 
     def test_initial_terminal_create_is_due_only_after_waiting_publication(self) -> None:
         recovery = MCPRecoveryService(

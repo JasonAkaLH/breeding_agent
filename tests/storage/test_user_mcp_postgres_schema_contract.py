@@ -18,7 +18,7 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
         manifest = build_postgres_fresh_cutover_schema_manifest()
         self.assertEqual(
             POSTGRES_RUNTIME_SCHEMA_VERSION,
-            "maf.postgresql_fresh_runtime_schema.v7",
+            "maf.postgresql_fresh_runtime_schema.v8",
         )
         self.assertEqual(manifest.schema_version, POSTGRES_RUNTIME_SCHEMA_VERSION)
         expected = {

@@ -206,6 +206,39 @@ def plan_postgres_schema_reconciliation(
                         table_name, constraint_name, expected_definition
                     )
                 )
+        elif table_name == "mcp_rollout_metric_bucket":
+            expected_checks = manifest.check_constraints.get(table_name, {})
+            constraint_name = next(
+                name
+                for name in expected_checks
+                if name.endswith("mcp_rollout_metric_name")
+            )
+            expected_definition = expected_checks[constraint_name]
+            actual_definition = inspection.check_constraints.get(
+                table_name, {}
+            ).get(constraint_name)
+            if actual_definition is None:
+                actions.extend(
+                    _add_check_constraint_actions(
+                        table_name, constraint_name, expected_definition
+                    )
+                )
+            elif _normalize_check(actual_definition) != _normalize_check(
+                expected_definition
+            ):
+                actions.append(
+                    SchemaAction(
+                        "replace_mcp_rollout_metric_name_constraint",
+                        f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS "
+                        f"{constraint_name};",
+                        table_name,
+                    )
+                )
+                actions.extend(
+                    _add_check_constraint_actions(
+                        table_name, constraint_name, expected_definition
+                    )
+                )
         elif table_name in _CP7_CHECK_TABLES:
             actions.extend(
                 _plan_cp7_check_reconciliation(

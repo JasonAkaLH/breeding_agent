@@ -890,6 +890,14 @@ class UserMCPDispatchCoordinator:
                         tool_name=tool_name,
                         arguments=action.arguments,
                     )
+                business_result_descriptor = descriptor
+                if workflow_kind is MCPJobWorkflowKind.OCR_ASYNC_JOB_V1:
+                    final_descriptor = catalog.get("get_parse_job")
+                    if final_descriptor is None:
+                        raise MCPSelectorContextAuthorityError(
+                            "mcp_job_workflow_final_tool_missing"
+                        )
+                    business_result_descriptor = final_descriptor
                 fingerprint = build_mcp_call_fingerprint(
                     server_id=current_server.server_id,
                     tool_name=tool_name,
@@ -1178,8 +1186,10 @@ class UserMCPDispatchCoordinator:
                     tool_display_name=tool_display_name,
                     arguments=action.arguments,
                     input_schema_sha256=descriptor.input_schema_sha256,
-                    output_schema=descriptor.output_schema,
-                    output_schema_sha256=descriptor.output_schema_sha256,
+                    output_schema=business_result_descriptor.output_schema,
+                    output_schema_sha256=(
+                        business_result_descriptor.output_schema_sha256
+                    ),
                     protocol_version=catalog.effective_protocol_version,
                     fingerprint=fingerprint,
                     mrtr_continuation=mrtr_continuation,

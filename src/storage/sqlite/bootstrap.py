@@ -324,7 +324,7 @@ def _migrate_mcp_continuation_command_columns(engine: Engine) -> None:
 
 
 def _migrate_mcp_rollout_metric_red_line(engine: Engine) -> None:
-    """Add the closed red-line label and update the metric-series identity."""
+    """Keep the additive closed metric labels/names and series identity current."""
 
     table_name = "mcp_rollout_metric_bucket"
     constraint_name = "uq_mcp_rollout_metric_series_bucket"
@@ -341,10 +341,29 @@ def _migrate_mcp_rollout_metric_red_line(engine: Engine) -> None:
             and "red_line" in (constraint.get("column_names") or ())
             for constraint in unique_constraints
         )
-        if "red_line" in existing_columns and identity_has_red_line:
+        target_table = SQLiteBase.metadata.tables[table_name]
+        target_metric_check = next(
+            constraint
+            for constraint in target_table.constraints
+            if str(constraint.name).endswith("mcp_rollout_metric_name")
+        )
+        actual_metric_checks = {
+            str(item.get("name") or ""): _normalize_sqlite_check(
+                str(item.get("sqltext") or "")
+            )
+            for item in inspector.get_check_constraints(table_name)
+        }
+        metric_names_are_current = (
+            actual_metric_checks.get(str(target_metric_check.name))
+            == _normalize_sqlite_check(str(target_metric_check.sqltext))
+        )
+        if (
+            "red_line" in existing_columns
+            and identity_has_red_line
+            and metric_names_are_current
+        ):
             return
 
-        target_table = SQLiteBase.metadata.tables[table_name]
         missing_required = [
             column.name
             for column in target_table.columns

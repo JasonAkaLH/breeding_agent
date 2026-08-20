@@ -10,10 +10,15 @@ from .models import (
     MCPStructuredSchemaStatus,
 )
 from .projections import build_agent_projection, build_user_view
+from .historical_reprojection import (
+    MCPHistoricalResultReprojector,
+    MCPRawResultAuthorityResolver,
+)
 from .projection_store import MCPProjectionStore
 from .registry import decode_result
 from .service import (
     MCPIsolatedResultService,
+    MCPResultParserObservation,
     MCPResultParserMode,
     MCPResultServiceOutcome,
     resolve_result_parser_mode,
@@ -30,8 +35,11 @@ __all__ = [
     "MCPResultSource",
     "MCPResultServiceOutcome",
     "MCPResultParserMode",
+    "MCPResultParserObservation",
     "MCPIsolatedResultService",
+    "MCPHistoricalResultReprojector",
     "MCPProjectionStore",
+    "MCPRawResultAuthorityResolver",
     "MCPStructuredContent",
     "MCPStructuredSchemaStatus",
     "MCPValidatedResultCheckpoint",

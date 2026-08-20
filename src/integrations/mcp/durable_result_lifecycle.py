@@ -37,6 +37,11 @@ class MCPDurableResultReconcileSummary:
     permanent_failure: int = 0
     exact_deleted: int = 0
     bulk_deleted: int = 0
+    business_ready: int = 0
+    business_already_ready: int = 0
+    business_projection_missing: int = 0
+    business_historical_authority_invalid: int = 0
+    business_projection_invalid: int = 0
 
 
 class MCPDurableResultLifecycleManager:
@@ -57,6 +62,7 @@ class MCPDurableResultLifecycleManager:
         )
         self._fault_hook = fault_hook
         self._result_projector: Any | None = None
+        self._business_reprojector: Any | None = None
 
     def configure_result_projector(self, projector: Any) -> None:
         if projector is None or not callable(
@@ -64,6 +70,13 @@ class MCPDurableResultLifecycleManager:
         ):
             raise ValueError("mcp_result_artifact_projector_invalid")
         self._result_projector = projector
+
+    def configure_business_reprojector(self, reprojector: Any) -> None:
+        if reprojector is None or not callable(
+            getattr(reprojector, "run_once", None)
+        ):
+            raise ValueError("mcp_result_business_reprojector_invalid")
+        self._business_reprojector = reprojector
 
     async def repair_incomplete(self, *, limit: int = 1000) -> int:
         rows = await self._storage.list_incomplete_mcp_durable_result_lifecycles(
@@ -144,6 +157,11 @@ class MCPDurableResultLifecycleManager:
                 break
             after_updated_at = rows[-1].updated_at
             after_result_ref = rows[-1].result_ref
+        business_summary = None
+        if self._business_reprojector is not None:
+            business_summary = await self._business_reprojector.run_once(
+                limit=limit
+            )
         bulk_deleted = 0
         while True:
             deleting = await self._storage.claim_mcp_durable_result_deletions(
@@ -163,6 +181,29 @@ class MCPDurableResultLifecycleManager:
             permanent_failure=permanent_failure,
             exact_deleted=exact_deleted,
             bulk_deleted=bulk_deleted,
+            business_ready=(
+                0 if business_summary is None else business_summary.ready
+            ),
+            business_already_ready=(
+                0
+                if business_summary is None
+                else business_summary.already_ready
+            ),
+            business_projection_missing=(
+                0
+                if business_summary is None
+                else business_summary.projection_missing
+            ),
+            business_historical_authority_invalid=(
+                0
+                if business_summary is None
+                else business_summary.historical_authority_invalid
+            ),
+            business_projection_invalid=(
+                0
+                if business_summary is None
+                else business_summary.projection_invalid
+            ),
         )
 
     async def reconcile_untracked(

@@ -389,6 +389,10 @@ class CP7ClosedContractTests(unittest.TestCase):
                 "safe_result_content_sha256",
                 "safe_result_size_bytes",
                 "safe_result_store_kind",
+                "result_parser_revision",
+                "validated_checkpoint_sha256",
+                "parsed_model_sha256",
+                "terminal_result_source",
             ),
             MCPTerminalResultReceipt: (
                 "result_receipt_id",
@@ -412,6 +416,9 @@ class CP7ClosedContractTests(unittest.TestCase):
                 "safe_result_content_sha256",
                 "safe_result_size_bytes",
                 "safe_result_store_kind",
+                "result_parser_revision",
+                "validated_checkpoint_sha256",
+                "parsed_model_sha256",
             ),
             MCPCP7SafetyLedgerRecord: (
                 "record_id",

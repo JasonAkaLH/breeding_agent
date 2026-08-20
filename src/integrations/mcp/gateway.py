@@ -34,6 +34,7 @@ from .gateway_models import (
     CancelOutcome,
     ContinueOutcome,
     MCPCallOutcome,
+    MCPCallOutcomeKind,
     MCPCancelStatus,
     MCPContinueStatus,
     MCPTaskServerScope,
@@ -84,6 +85,28 @@ CALL_HEARTBEAT_INTERVAL_SECONDS = 120.0
 SCOPE_DISCOVERY_TIMEOUT_SECONDS = 60.0
 SCOPE_DISCOVERY_RETRY_DELAY_SECONDS = 0.25
 _GATEWAY_RECOVERY_NODE_ID = "mcp-gateway"
+
+
+def _workflow_control_result(
+    result: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    structured = result.get("structuredContent")
+    control: dict[str, Any] = {}
+    if isinstance(structured, Mapping):
+        for key in ("job_id", "status", "result_receipt"):
+            value = structured.get(key)
+            if isinstance(value, str):
+                control[key] = value[:4_096]
+        error = structured.get("error")
+        if isinstance(error, Mapping):
+            code = error.get("code")
+            if isinstance(code, str):
+                control["error"] = {"code": code[:256]}
+    return {
+        "content": [],
+        "structuredContent": control,
+        "isError": result.get("isError") is True,
+    }
 
 
 class MCPGatewayError(RuntimeError):
@@ -1108,14 +1131,25 @@ class MCPGateway:
             if tool_descriptor is None:
                 await sink.abort()
                 raise MCPGatewayError("mcp_tool_not_found")
+            business_result_descriptor = tool_descriptor
+            if workflow_kind is MCPJobWorkflowKind.OCR_ASYNC_JOB_V1:
+                final_descriptor = state.catalog.get("get_parse_job")
+                if final_descriptor is None:
+                    await sink.abort()
+                    raise MCPGatewayError(
+                        "mcp_job_workflow_final_tool_missing"
+                    )
+                business_result_descriptor = final_descriptor
             result_context = _ResultParseContext(
                 owner_user_id=state.public.owner_user_id,
                 task_id=state.public.platform_task_id,
                 node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
                 call_ref=call_state.call_ref,
                 protocol_version=state.catalog.effective_protocol_version,
-                output_schema=tool_descriptor.output_schema,
-                output_schema_sha256=tool_descriptor.output_schema_sha256,
+                output_schema=business_result_descriptor.output_schema,
+                output_schema_sha256=(
+                    business_result_descriptor.output_schema_sha256
+                ),
             )
 
             def registered(request_id: str | int) -> None:
@@ -1157,12 +1191,16 @@ class MCPGateway:
                 if tool_name != "start_parse_job":
                     await sink.abort()
                     raise MCPGatewayError("mcp_job_workflow_tool_invalid")
+                workflow_call_sequence = 0
+
                 async def workflow_tool_invoker(
                     internal_tool_name: str,
                     internal_arguments: Mapping[str, Any],
                     internal_registered_callback: Callable[[str | int], None]
                     | None,
                 ) -> Mapping[str, Any]:
+                    nonlocal workflow_call_sequence
+                    workflow_call_sequence += 1
                     kwargs: dict[str, Any] = {}
                     if internal_registered_callback is not None:
                         kwargs["request_registered_callback"] = (
@@ -1177,7 +1215,117 @@ class MCPGateway:
                         raise MCPGatewayError(
                             "mcp_job_workflow_control_result_invalid"
                         )
-                    return dict(internal_result)
+                    normalized_result = dict(internal_result)
+                    if (
+                        self._result_parser_mode
+                        is not MCPResultParserMode.SAFE_HIDE
+                        and self._result_service is not None
+                    ):
+                        descriptor = state.catalog.get(internal_tool_name)
+                        try:
+                            encoded = json.dumps(
+                                normalized_result,
+                                ensure_ascii=False,
+                                allow_nan=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                            parser_payload: Mapping[str, Any] = normalized_result
+                            output_schema = (
+                                None
+                                if descriptor is None
+                                else descriptor.output_schema
+                            )
+                            output_schema_sha256 = (
+                                None
+                                if descriptor is None
+                                else descriptor.output_schema_sha256
+                            )
+                            if len(encoded) > 64 * 1024:
+                                parser_payload = _workflow_control_result(
+                                    normalized_result
+                                )
+                                encoded = json.dumps(
+                                    parser_payload,
+                                    ensure_ascii=False,
+                                    allow_nan=False,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                                output_schema = None
+                                output_schema_sha256 = None
+                            checked = await self._result_service.parse(
+                                owner_user_id=state.public.owner_user_id,
+                                task_id=state.public.platform_task_id,
+                                node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
+                                call_ref=(
+                                    f"{call_state.call_ref}:workflow:"
+                                    f"{workflow_call_sequence}"
+                                ),
+                                request=MCPResultDecodeRequest(
+                                    protocol_version=(
+                                        state.catalog.effective_protocol_version
+                                    ),
+                                    source=MCPResultSource.TOOLS_CALL,
+                                    payload=parser_payload,
+                                    output_schema=output_schema,
+                                    output_schema_sha256=(
+                                        output_schema_sha256
+                                    ),
+                                ),
+                                measured_mapping_bytes=len(encoded),
+                            )
+                            if checked.checkpoint.outcome == "malformed":
+                                raise MCPProtocolError(
+                                    "MCP workflow control result is malformed."
+                                )
+                            if checked.projection_staging_handle is not None:
+                                self._result_service.consume_projection(
+                                    checked.projection_staging_handle
+                                )
+                            elif checked.checkpoint.outcome == "succeeded":
+                                raise MCPProtocolError(
+                                    "MCP workflow control projection is unavailable."
+                                )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            if (
+                                self._result_parser_mode
+                                is MCPResultParserMode.ENFORCE
+                            ):
+                                raise
+                    return normalized_result
+
+                async def persist_workflow_result(
+                    workflow_result: Mapping[str, Any],
+                ) -> MCPCallOutcome:
+                    encoded = json.dumps(
+                        dict(workflow_result),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    await sink.write(encoded)
+                    persisted = await sink.finalize()
+                    result_with_descriptor = {
+                        **dict(workflow_result),
+                        "_mcpResultRef": persisted.as_payload(),
+                    }
+                    normalized = await self._normalize_outcome(
+                        result_with_descriptor,
+                        sink,
+                        external_text=extract_ocr_text_projection(
+                            workflow_result
+                        ),
+                        result_context=result_context,
+                    )
+                    if normalized.kind is not MCPCallOutcomeKind.COMPLETED:
+                        raise MCPProtocolError(
+                            "MCP workflow final result is not completed."
+                        )
+                    return normalized
 
                 invocation = asyncio.create_task(
                     run_ocr_async_job_workflow(
@@ -1185,14 +1333,7 @@ class MCPGateway:
                         arguments,
                         request_registered_callback=registered,
                         sleep=self._sleep,
-                        result_persisted_callback=(
-                            lambda result: self._normalize_outcome(
-                                result,
-                                sink,
-                                external_text=extract_ocr_text_projection(result),
-                                result_context=result_context,
-                            )
-                        ),
+                        result_persisted_callback=persist_workflow_result,
                         tool_invoker=workflow_tool_invoker,
                     )
                 )

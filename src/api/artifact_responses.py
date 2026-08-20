@@ -66,7 +66,16 @@ async def artifact_response(
 
     metadata = parse_file_storage_ref(artifact.storage_ref) or {}
     if metadata.get("source_kind") == "mcp_result":
-        business_result = _unavailable_mcp_result("safe_hide")
+        recorded_reason = metadata.get("mcp_projection_unavailable_reason")
+        business_result = _unavailable_mcp_result(
+            recorded_reason
+            if recorded_reason in {
+                "projection_missing",
+                "historical_authority_invalid",
+                "projection_invalid",
+            }
+            else "safe_hide"
+        )
         projection_ref = _optional_string(metadata.get("projection_ref"))
         projection_sha256 = _optional_string(metadata.get("projection_sha256"))
         if projection_ref is not None and projection_sha256 is not None:

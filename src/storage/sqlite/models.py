@@ -431,7 +431,8 @@ class MCPRolloutMetricBucketRow(SQLiteBase):
             "'mcp_temp_spill_bytes', 'mcp_resource_cleanup_failures_total', "
             "'mcp_protocol_negotiation_total', 'mcp_server_discover_duration_seconds', "
             "'mcp_mrtr_rounds_total', 'mcp_remote_tasks_active', "
-            "'mcp_safety_red_line_total')",
+            "'mcp_safety_red_line_total', 'mcp_result_parser_outcomes_total', "
+            "'mcp_result_parser_duration_seconds')",
             name="mcp_rollout_metric_name",
         ),
         CheckConstraint(

@@ -173,11 +173,14 @@ from src.integrations.mcp.result_artifact_projection import (
     fold_mcp_result_artifact_projection_payloads,
 )
 from src.integrations.mcp.result_parsing import (
+    MCPHistoricalResultReprojector,
     MCPIsolatedResultService,
     MCPProjectionStore,
     MCPResultDecodeRequest,
     MCPResultParserMode,
+    MCPResultParserObservation,
     MCPResultSource,
+    MCPRawResultAuthorityResolver,
     resolve_result_parser_mode,
 )
 from src.integrations.mcp.pending_action_payloads import (
@@ -11866,6 +11869,15 @@ def build_api_runtime(
             resolved_mcp_runtime_state,
             mcp_refresh_result,
         )
+    if resolved_mcp_runtime_state is not None and mcp_result_service is None:
+        legacy_projection_root = Path(
+            os.environ.get("MAF_USER_MCP_RESULT_PROJECTION_ROOT")
+            or (Path(database_path).parent / "user_mcp_result_projections")
+        )
+        mcp_projection_store = MCPProjectionStore(legacy_projection_root)
+        mcp_result_service = MCPIsolatedResultService(
+            projection_store=mcp_projection_store
+        )
     if user_mcp_routing_enabled:
         _register_capability_descriptors(
             capability_registry,
@@ -11926,6 +11938,27 @@ def build_api_runtime(
         mcp_durable_result_lifecycle_manager.configure_result_projector(
             mcp_result_artifact_projector
         )
+        assert mcp_result_service is not None
+        assert mcp_projection_store is not None
+        assert mcp_durable_result_snapshot_authority is not None
+        if mcp_result_parser_mode is MCPResultParserMode.ENFORCE:
+            mcp_durable_result_lifecycle_manager.configure_business_reprojector(
+                MCPHistoricalResultReprojector(
+                    storage=storage,
+                    authority_resolver=MCPRawResultAuthorityResolver(
+                        storage=storage,
+                        snapshot_authority=(
+                            mcp_durable_result_snapshot_authority
+                        ),
+                        artifact_file_store=artifact_file_store,
+                    ),
+                    result_service=mcp_result_service,
+                    projection_store=mcp_projection_store,
+                    projection_attacher=(
+                        mcp_result_artifact_projector.attach_published_projection
+                    ),
+                )
+            )
 
     async def publish_transient_event(event: EventRecord) -> None:
         event = _ensure_event_created_at(event)
@@ -12162,6 +12195,91 @@ def build_api_runtime(
             user_mcp_presence_service.configure_lease_expired_observer(
                 record_disconnect_lease_expired_metric
             )
+    if mcp_result_service is not None:
+        async def observe_mcp_result_parser(
+            observation: MCPResultParserObservation,
+        ) -> None:
+            call_kind = (
+                MCPCallKind.ORDINARY
+                if observation.source == MCPResultSource.TOOLS_CALL.value
+                else MCPCallKind.REMOTE_TASK
+            )
+            if observation.outcome == "succeeded" and observation.reason == "none":
+                result_category = MCPMetricResultCategory.SUCCEEDED
+                error_category = MCPMetricErrorCategory.NONE
+            elif observation.outcome == "malformed":
+                result_category = MCPMetricResultCategory.FAILED
+                error_category = MCPMetricErrorCategory.VALIDATION
+            elif observation.outcome == "tool_error":
+                result_category = MCPMetricResultCategory.FAILED
+                error_category = MCPMetricErrorCategory.SERVER
+            else:
+                result_category = MCPMetricResultCategory.FAILED
+                error_category = MCPMetricErrorCategory.CLEANUP
+            try:
+                metric_protocol = MCPMetricProtocolVersion(
+                    observation.protocol_version
+                )
+            except ValueError:
+                metric_protocol = MCPMetricProtocolVersion.NOT_APPLICABLE
+            if mcp_rollout_metric_recorder is not None:
+                observed_at = datetime.now(timezone.utc)
+                started_at = observed_at.replace(second=0, microsecond=0)
+                labels = MCPMetricLabels(
+                    execution_path=MCPMetricExecutionPath.USER_SCOPED,
+                    routing_mode=(
+                        MCPMetricRoutingMode.SHADOW
+                        if mcp_result_parser_mode is MCPResultParserMode.SHADOW
+                        else MCPMetricRoutingMode.ENFORCE
+                    ),
+                    transport=MCPMetricTransport.NOT_APPLICABLE,
+                    protocol_version=metric_protocol,
+                    adapter=(
+                        MCPMetricAdapter.PYTHON_2026
+                        if metric_protocol
+                        is MCPMetricProtocolVersion.V2026_07_28
+                        else MCPMetricAdapter.PYTHON_LEGACY
+                    ),
+                    result_category=result_category,
+                    error_category=error_category,
+                    call_kind=call_kind,
+                )
+                try:
+                    await mcp_rollout_metric_recorder.record_count(
+                        MCPMetricName.RESULT_PARSER_OUTCOMES_TOTAL,
+                        labels=labels,
+                        bucket_started_at=started_at,
+                        bucket_ended_at=started_at + timedelta(minutes=1),
+                    )
+                    await mcp_rollout_metric_recorder.record_latency(
+                        MCPMetricName.RESULT_PARSER_DURATION_SECONDS,
+                        duration_seconds=observation.duration_seconds,
+                        labels=labels,
+                        bucket_started_at=started_at,
+                        bucket_ended_at=started_at + timedelta(minutes=1),
+                    )
+                except Exception:
+                    logger.error("mcp_result_parser_metric_record_failed")
+            if mcp_result_parser_mode is MCPResultParserMode.SHADOW:
+                try:
+                    await audit_sink.record(
+                        "mcp.result_parser_shadow_observed",
+                        {
+                            "outcome": observation.outcome,
+                            "reason": observation.reason,
+                            "call_kind": call_kind.value,
+                            "protocol_version": observation.protocol_version,
+                            "primary_kind": observation.primary_kind,
+                            "metadata_kinds": list(observation.metadata_kinds),
+                            "structured_present": observation.structured_present,
+                            "projection_sha256": observation.projection_sha256,
+                            "truncated": observation.truncated,
+                        },
+                    )
+                except Exception:
+                    logger.error("mcp_result_parser_shadow_observation_failed")
+
+        mcp_result_service.configure_observer(observe_mcp_result_parser)
     if user_mcp_enabled:
         mcp_runtime_holder: dict[str, ApiRuntime] = {}
         remote_parsed_results: dict[str, Any] = {}
@@ -12902,6 +13020,7 @@ def build_api_runtime(
                     [
                         MCPToolExecutor(
                             runtime_state=resolved_mcp_runtime_state,
+                            result_service=mcp_result_service,
                             live_event_recorder=record_live_event,
                             metric_recorder=mcp_rollout_metric_recorder,
                             metric_routing_mode=(

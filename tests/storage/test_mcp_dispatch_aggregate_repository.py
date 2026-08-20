@@ -832,6 +832,17 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             receipt.validated_checkpoint_sha256, "sha256:" + "6" * 64
         )
         self.assertEqual(receipt.parsed_model_sha256, "sha256:" + "7" * 64)
+        page = await self.storage.list_completed_mcp_calls_for_result_reprojection(
+            limit=1
+        )
+        self.assertEqual([item.call_ref for item in page], ["call-1"])
+        self.assertEqual(
+            await self.storage.list_completed_mcp_calls_for_result_reprojection(
+                after_call_ref="call-1",
+                limit=1,
+            ),
+            [],
+        )
 
     async def test_claim_renew_and_competing_claim_are_revision_guarded(self) -> None:
         claimed = await self._claim()

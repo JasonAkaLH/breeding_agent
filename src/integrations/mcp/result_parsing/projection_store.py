@@ -152,6 +152,23 @@ class MCPProjectionStore:
         except FileNotFoundError:
             return
 
+    def consume_staged(
+        self, handle: MCPProjectionStagingHandle
+    ) -> Mapping[str, Any]:
+        path = self._staged_path(handle)
+        data = _read_bound_file(
+            path,
+            expected_size=handle.size_bytes,
+            expected_sha256=handle.projection_sha256,
+            expected_device=handle.device,
+            expected_inode=handle.inode,
+        )
+        _validate_envelope(data)
+        value = json.loads(data)
+        path.unlink()
+        _fsync_directory(self._root)
+        return value
+
     def load(
         self,
         projection_ref: str,

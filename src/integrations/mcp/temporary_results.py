@@ -155,6 +155,57 @@ class MCPDurableResultSnapshotAuthority:
             os.close(held.data_descriptor)
             os.close(held.manifest_descriptor)
 
+    @asynccontextmanager
+    async def open_result_parser_descriptor(
+        self,
+        *,
+        result_ref: str,
+        owner_user_id: str,
+        task_id: str,
+        node_id: str,
+        call_id: str,
+        expected_size_bytes: int,
+        expected_content_sha256: str,
+        expected_store_kind: str,
+    ):
+        from src.integrations.mcp.result_parsing.models import (
+            MCPRawResultDescriptor,
+        )
+
+        held = await asyncio.to_thread(
+            self._open_and_register,
+            result_ref=str(result_ref),
+            owner_user_id=str(owner_user_id),
+            task_id=str(task_id),
+            node_id=str(node_id),
+            call_id=str(call_id),
+            expected_size_bytes=expected_size_bytes,
+            expected_content_sha256=expected_content_sha256,
+            expected_store_kind=expected_store_kind,
+        )
+        try:
+            self.revalidate(held.snapshot)
+            metadata = os.stat(held.data_path, follow_symlinks=False)
+            yield MCPRawResultDescriptor(
+                path=str(held.data_path),
+                size_bytes=held.snapshot.size_bytes,
+                sha256=held.snapshot.content_sha256,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+                owner_uid=metadata.st_uid,
+            )
+            self.revalidate(held.snapshot)
+        finally:
+            with self._lock:
+                entries = self._held.get(str(result_ref), [])
+                if held in entries:
+                    entries.remove(held)
+                if not entries:
+                    self._held.pop(str(result_ref), None)
+            self._store._release_held_result(str(result_ref))
+            os.close(held.data_descriptor)
+            os.close(held.manifest_descriptor)
+
     def _open_and_register(self, **kwargs) -> _HeldDurableResult:
         result_ref = str(kwargs["result_ref"])
         with self._lock:

@@ -258,6 +258,41 @@ class PostgresSchemaReconcilerTest(unittest.TestCase):
             sql,
         )
 
+    def test_result_parser_metric_names_replace_only_the_metric_name_constraint(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        checks = {
+            table: dict(constraints)
+            for table, constraints in inspection.check_constraints.items()
+        }
+        constraint_name = next(
+            name
+            for name in checks["mcp_rollout_metric_bucket"]
+            if name.endswith("mcp_rollout_metric_name")
+        )
+        checks["mcp_rollout_metric_bucket"][constraint_name] = (
+            checks["mcp_rollout_metric_bucket"][constraint_name]
+            .replace(", 'mcp_result_parser_outcomes_total'", "")
+            .replace(", 'mcp_result_parser_duration_seconds'", "")
+        )
+        legacy = SchemaInspection(
+            tables=inspection.tables,
+            enum_types=inspection.enum_types,
+            check_constraints=checks,
+            triggers=inspection.triggers,
+        )
+
+        plan = plan_postgres_schema_reconciliation(manifest, legacy)
+        sql = plan.sql_script()
+
+        self.assertFalse(plan.operator_only_actions)
+        self.assertIn(
+            f"DROP CONSTRAINT IF EXISTS {constraint_name}", sql
+        )
+        self.assertIn("mcp_result_parser_outcomes_total", sql)
+        self.assertIn("mcp_result_parser_duration_seconds", sql)
+        self.assertIn(f"VALIDATE CONSTRAINT {constraint_name}", sql)
+
     def test_postgres_bootstrap_rejects_operator_cutover_before_schema_mutation(
         self,
     ) -> None:

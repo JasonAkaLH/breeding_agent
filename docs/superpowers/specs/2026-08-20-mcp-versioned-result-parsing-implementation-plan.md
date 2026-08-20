@@ -5,7 +5,7 @@
 - 日期：2026-08-20
 - 分支：`main`
 - 设计依据：`2026-08-20-mcp-versioned-result-parsing-design.md`
-- 状态：执行中
+- 状态：八检查点仓库实现完成；真实PostgreSQL与production rollout待外部执行
 - 策略：safe-hide 先行，随后依次落地 authority、Decoder、隔离 worker、terminal gate、typed projection、历史补投和 rollout
 
 ## 固定合同
@@ -24,7 +24,8 @@
 - Checkpoint 4 已完成：`7f7ca1e feat(mcp): isolate result parsing workers`；backend Linux容器43项全通过，含512 MiB `RLIMIT_AS`、64 MiB raw边界和恶意regex终止。
 - Checkpoint 5 已完成：`b98ca52 feat(mcp): enforce parsed result terminal gate`；199项terminal/recovery/runtime聚焦回归通过。
 - Checkpoint 6 已完成：`1a879cf feat(mcp): publish bounded result projections`；published projection经Artifact expected-storage-ref CAS绑定，Selector删除raw refs并按最新优先/Call顺序消费有界agent projection，Remote continuation在begin前加载投影且metadata不含raw，OCR改为窄invoker注入，legacy executor改用统一Decoder/projector。
-- Checkpoint 7 已完成实现与聚焦回归：API只从复验后的published projection返回strict typed业务视图，前端删除Artifact ID/raw识别并展示structured/preview/text/empty/unavailable闭合卡片，可访问展开控件和显式截断提示已覆盖；31项API与143项前端测试、typecheck通过，等待本检查点提交。
+- Checkpoint 7 已完成：`5f5e16d feat(frontend): render typed MCP business results`；API只从复验后的published projection返回strict typed业务视图，前端删除Artifact ID/raw识别并展示structured/preview/text/empty/unavailable闭合卡片，可访问展开控件和显式截断提示已覆盖。
+- Checkpoint 8 已完成实现与最终验证：completed Call按ref每页1000条keyset本地扫描，raw resolver优先held durable、回收后读取identity-bound managed copy，source-deleted零网络补投通过；新增闭合Parser count/latency指标与shadow安全摘要，24小时缺projection continuation收敛failed/no-replay，SQLite/PostgreSQL metric constraint执行additive替换；OCR内部start/poll/ack与legacy executor均进入隔离Result Service。独立检查点提交主题为`feat(mcp): reconcile parsed results and finalize rollout gates`。
 
 ## 开发检查点
 
@@ -50,4 +51,13 @@
 
 ## 自主审查结论
 
-本计划经三轮 `document-perfectization`，最终97/100、0 Blocking、0 Major，结论为 **Pass with recorded assumptions**。剩余三项实施期门禁是Linux `RLIMIT_AS`、真实PostgreSQL和source-deleted历史重投影证据。
+本计划经三轮 `document-perfectization`，最终97/100、0 Blocking、0 Major，结论为 **Pass with recorded assumptions**。Linux `RLIMIT_AS`与source-deleted历史零网络重投影已取得仓库证据；真实PostgreSQL DSN仍是唯一未取得的外部门禁，skip不得记作通过。
+
+## 最终验证记录
+
+- Linux backend容器Result Parser/worker/store 43项通过，覆盖64 KiB/64 MiB边界、512 MiB `RLIMIT_AS`与恶意regex终止。
+- 最终方案聚焦联测93项通过；新增历史补投、OCR逐步解析、legacy隔离解析、continuation 24小时收敛、SQLite/PostgreSQL schema plan和typed API均通过。
+- 前端`artifacts/App` 143项、typecheck与production build通过。
+- 分层回归：core 46、storage 370（6项外部skip）、lifecycle 25、orchestration 181、main-agent capability 65、MCP capability 15、observability 35均通过；skill-tool目录当前无可发现unittest。
+- integrations 682项中681项通过、2项外部skip，唯一失败是实施前已存在的shadow manifest错误文案断言差异；API 481项中的7个既有Skill/任务时序失败和e2e 2项中的1个late-result audit超时均不经过本Result方案路径，已作为基线缺口保留，未在本任务中修改。
+- `MAF_POSTGRES_TEST_DSN`、`CP7_POSTGRES_VALIDATION_DSN`、`MAF_POSTGRES_ROLLOUT_INTEGRATION_TEST_DSN`与`MAF_POSTGRES_ROLLOUT_PERMISSIONS_TEST_DSN`均未配置；真实PostgreSQL migration/transaction gate未运行，不记为通过，也因此不允许进入production parser enforce。

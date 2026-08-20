@@ -16,6 +16,7 @@
 |---|---|
 | `MCP_USER_SCOPED_GATEWAY_ENABLED` | 只允许 `true|false`。`off` 必须为 `false`；`shadow|enforce` 必须为 `true`。 |
 | `MCP_ROUTING_MODE` | 只允许 `off|shadow|enforce`；默认 `off`。 |
+| `MAF_USER_MCP_RESULT_PARSER_MODE` | 独立只允许`safe_hide|shadow|enforce`；缺失/未知均`safe_hide`。parser enforce必须晚于schema migration、shadow差异清零、真实协议smoke及Linux/真实PostgreSQL门禁。 |
 | `MCP_LEGACY_GLOBAL_RUNTIME_ENABLED` | 只允许 `true|false`；`shadow` 必须为 `true`。 |
 | `MCP_ENFORCE_COHORTS` | canonical 逗号分隔 cohort ID；不允许空项、重复项或空白。非空时必须配置 cohort 文件。 |
 | `MCP_ENFORCE_PERCENT` | ASCII 十进制 `0..100`；空值按 `0`处理。 |

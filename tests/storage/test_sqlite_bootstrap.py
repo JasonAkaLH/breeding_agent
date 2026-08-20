@@ -845,6 +845,16 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                     if constraint["name"] == "uq_mcp_rollout_metric_series_bucket"
                 )
                 self.assertIn("red_line", identity["column_names"])
+                metric_checks = " ".join(
+                    str(item.get("sqltext") or "")
+                    for item in inspect(engine).get_check_constraints(
+                        "mcp_rollout_metric_bucket"
+                    )
+                )
+                self.assertIn("mcp_result_parser_outcomes_total", metric_checks)
+                self.assertIn(
+                    "mcp_result_parser_duration_seconds", metric_checks
+                )
                 with engine.connect() as connection:
                     preserved = connection.execute(
                         text(

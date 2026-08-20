@@ -318,6 +318,10 @@ class StoragePort(Protocol):
         self, owner_user_id: str, task_id: str, *, branch_id: str | None = None
     ) -> list[MCPCallRecord]: ...
 
+    async def list_completed_mcp_calls_for_result_reprojection(
+        self, *, after_call_ref: str | None = None, limit: int = 1000
+    ) -> list[MCPCallRecord]: ...
+
     async def finish_mcp_call(
         self,
         owner_user_id: str,

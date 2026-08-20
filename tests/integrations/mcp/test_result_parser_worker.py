@@ -122,6 +122,41 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("business result", envelope["agent_projection"])
         self.assertNotIn("protocol_version", json.dumps(envelope))
 
+    async def test_parser_observation_is_closed_and_contains_no_business_text_or_identity(self) -> None:
+        observations = []
+        self.service.configure_observer(observations.append)
+
+        await self.service.parse(
+            owner_user_id="sensitive-owner",
+            task_id="sensitive-task",
+            node_id="sensitive-node",
+            call_ref="sensitive-call",
+            request=MCPResultDecodeRequest(
+                protocol_version="2025-11-25",
+                source=MCPResultSource.TOOLS_CALL,
+                payload={
+                    "content": [{"type": "text", "text": "secret body"}],
+                    "structuredContent": {"answer": 42},
+                },
+            ),
+            measured_mapping_bytes=128,
+        )
+
+        self.assertEqual(len(observations), 1)
+        observation = observations[0]
+        self.assertEqual(observation.outcome, "succeeded")
+        self.assertEqual(observation.primary_kind, "structured")
+        self.assertTrue(observation.structured_present)
+        rendered = repr(observation)
+        for forbidden in (
+            "secret body",
+            "sensitive-owner",
+            "sensitive-task",
+            "sensitive-node",
+            "sensitive-call",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     async def test_malformed_and_tool_error_checkpoints_do_not_stage_success_projection(self) -> None:
         malformed = await self.service.parse(
             owner_user_id="alice",

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 from src.capabilities.mcp_tool.executor import MCPToolExecutor
 from src.capabilities.main_agent.prompt_builder import build_dependency_context
 from src.core.contracts import CapabilityExecutionRequest
 from src.integrations.mcp.client import MCPAuthRequiredError, MCPClientError
 from src.integrations.mcp.runtime_state import MCPToolBinding
+from src.integrations.mcp.result_parsing import (
+    MCPIsolatedResultService,
+    MCPProjectionStore,
+)
 from src.integrations.mcp.rollout_evidence import (
     MCPMetricAdapter,
     MCPMetricExecutionPath,
@@ -73,6 +80,41 @@ def request(payload):
 
 
 class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_result_uses_isolated_decoder_and_consumes_staging_projection(self) -> None:
+        binding = MCPToolBinding(
+            capability_id="mcp.crm.search_customer",
+            server_id="crm",
+            tool_name="search_customer",
+            input_schema={"type": "object"},
+        )
+        runtime = FakeMCPRuntime(
+            binding,
+            {
+                "content": [{"type": "text", "text": "business"}],
+                "structuredContent": {"answer": 42},
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "projections"
+            executor = MCPToolExecutor(
+                runtime_state=runtime,
+                result_service=MCPIsolatedResultService(
+                    projection_store=MCPProjectionStore(root)
+                ),
+            )
+            with patch(
+                "src.capabilities.mcp_tool.executor.decode_result",
+                side_effect=AssertionError("parent decoder must not run"),
+            ):
+                result = await executor.execute(request({}))
+
+            self.assertIsNone(result.error)
+            self.assertEqual(
+                result.output_payload["structured_content"], {"answer": 42}
+            )
+            self.assertFalse(tuple(root.glob(".staged-*.json")))
+            self.assertFalse(tuple(root.glob("mcp-projection-*.json")))
+
     async def test_executor_does_not_repeat_call_after_runtime_type_error(self) -> None:
         binding = MCPToolBinding(
             capability_id="mcp.crm.search_customer",
