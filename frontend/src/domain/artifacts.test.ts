@@ -236,8 +236,8 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(summarizeCapabilityArtifactDisplays(displays)).toBe('OCR 回传原文：scan.png');
   });
 
-  it('renders MCP result text as a supplemental artifact without replacing the assistant answer', () => {
-    const mcpText = '{"result":{"content":[{"type":"text","text":"原始返回"}]}}';
+  it('uses the typed MCP business view without reading raw storage or replacing the assistant answer', () => {
+    const rawBody = '{"result":{"content":[{"type":"text","text":"不得展示的原始返回"}]}}';
     const artifacts = [
       artifact({
         artifact_id: 'main_agent_text:1',
@@ -246,10 +246,17 @@ describe('parseCapabilityArtifactDisplays', () => {
         summary: 'final',
       }),
       artifact({
-        artifact_id: `mcp-result-artifact:v1:${'a'.repeat(64)}`,
-        artifact_type: 'text',
-        storage_ref: mcpText,
-        summary: 'MCP Tool原始返回：tool',
+        artifact_id: 'opaque-artifact-2',
+        artifact_type: 'mcp_result',
+        storage_ref: rawBody,
+        summary: 'MCP 工具结果',
+        mcp_business_result: {
+          schema: 'maf.mcp.business_result_view.v1',
+          availability: 'ready',
+          outcome: 'succeeded',
+          primary: { kind: 'structured', value: { answer: 42 }, truncated: false },
+          projection_truncated: false,
+        },
       }),
     ];
 
@@ -257,14 +264,50 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(parseAssistantTextArtifact([artifacts[1]])).toBeNull();
     expect(parseCapabilityArtifactDisplays(artifacts)).toEqual([
       {
-        kind: 'mcp_result_text',
+        kind: 'mcp_business_result',
         result: {
-          artifactId: `mcp-result-artifact:v1:${'a'.repeat(64)}`,
-          title: 'MCP Tool原始返回：tool',
-          text: mcpText,
+          artifactId: 'opaque-artifact-2',
+          title: 'MCP 工具结果',
+          result: {
+            schema: 'maf.mcp.business_result_view.v1',
+            availability: 'ready',
+            outcome: 'succeeded',
+            primary: { kind: 'structured', value: { answer: 42 }, truncated: false },
+            projection_truncated: false,
+          },
         },
       },
     ]);
+    expect(JSON.stringify(parseCapabilityArtifactDisplays(artifacts))).not.toContain('不得展示的原始返回');
+  });
+
+  it('does not infer MCP semantics from an artifact id prefix and safely closes invalid DTOs', () => {
+    const prefixedText = artifact({
+      artifact_id: `mcp-result-artifact:v1:${'a'.repeat(64)}`,
+      artifact_type: 'text',
+      storage_ref: '普通文本',
+    });
+    expect(parseAssistantTextArtifact([prefixedText])).toBe('普通文本');
+    expect(parseCapabilityArtifactDisplays([prefixedText])).toEqual([]);
+
+    const invalid = artifact({
+      artifact_type: 'mcp_result',
+      storage_ref: 'raw-secret',
+      mcp_business_result: {
+        schema: 'maf.mcp.business_result_view.v1',
+        availability: 'ready',
+        outcome: 'succeeded',
+        primary: { kind: 'text', text: 'business text', truncated: false },
+        projection_truncated: false,
+        unexpected: 'not allowed',
+      } as never,
+    });
+    const displays = parseCapabilityArtifactDisplays([invalid]);
+    expect(displays[0]).toMatchObject({
+      kind: 'mcp_business_result',
+      result: { result: { availability: 'unavailable', unavailable_reason: 'projection_invalid' } },
+    });
+    expect(JSON.stringify(displays)).not.toContain('raw-secret');
   });
 
   it('does not turn unrelated capability summaries into data-query cards', () => {

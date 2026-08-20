@@ -7,6 +7,10 @@ from functools import wraps
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import Artifact, Conversation, EventRecord, Interrupt, Message, Task
 from src.storage.artifact_files import build_file_storage_ref
+from src.integrations.mcp.result_parsing.projection_store import (
+    MCPProjectionBinding,
+    MCPProjectionStore,
+)
 from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, file_upload_message_id
 from tests.api.support import APITestCase
 
@@ -356,6 +360,107 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
             "safe_hide",
         )
         self.assertEqual(download_response.status_code, 404)
+
+    async def test_mcp_result_published_projection_is_ready_for_task_and_history(self) -> None:
+        conversation_id = "conv-history-mcp-ready"
+        await self._save_conversation_with_messages(conversation_id)
+        task_id = f"{conversation_id}:task-1"
+        node_id = f"{conversation_id}:mcp-tool"
+        call_ref = "call-ready"
+        artifact_id = "mcp-result-artifact:v1:" + "c" * 64
+        source_path = self.workspace / "mcp-ready-source.json"
+        source_path.write_text('{"content":[]}', encoding="utf-8")
+        stored = self.runtime.artifact_file_store.save_file(
+            artifact_id=artifact_id,
+            filename="result.json",
+            source_path=source_path,
+        )
+        projection_store = MCPProjectionStore(self.workspace / "mcp-projections")
+        self.runtime._mcp_projection_store = projection_store
+        binding = MCPProjectionBinding(
+            owner_user_id="acc-1",
+            task_id=task_id,
+            node_id=node_id,
+            call_ref=call_ref,
+            raw_sha256="sha256:" + stored.sha256,
+            output_schema_sha256=None,
+            source="tools_call",
+            parser_revision="mcp-result-parser.v1",
+        )
+        envelope = json.dumps(
+            {
+                "schema": "maf.mcp.parsed_result_projection.v1",
+                "parsed_model_sha256": "sha256:" + "d" * 64,
+                "user_view": {
+                    "schema": "maf.mcp.business_result_view.v1",
+                    "availability": "ready",
+                    "outcome": "succeeded",
+                    "primary": {
+                        "kind": "text",
+                        "text": "安全业务结果",
+                        "truncated": False,
+                    },
+                    "projection_truncated": False,
+                },
+                "agent_projection": "untrusted business result",
+                "workflow_control": None,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        handle = projection_store.stage(envelope, binding=binding)
+        published = projection_store.publish(handle)
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                artifact_id,
+                task_id,
+                node_id,
+                ArtifactType.FILE,
+                build_file_storage_ref(
+                    {
+                        "version": 1,
+                        "source_kind": "mcp_result",
+                        "visibility": "internal_raw",
+                        "storage_key": stored.storage_key,
+                        "filename": stored.filename,
+                        "mime_type": "application/json",
+                        "size_bytes": stored.size_bytes,
+                        "sha256": stored.sha256,
+                        "summary": "MCP result",
+                        "result_ref": "internal-result-ref",
+                        "retention_status": "active",
+                        "protocol_version": "2025-11-25",
+                        "terminal_result_source": "tools_call",
+                        "output_schema_sha256": None,
+                        "parser_revision": "mcp-result-parser.v1",
+                        "projection_schema": "maf.mcp.parsed_result_projection.v1",
+                        "projection_ref": published.projection_ref,
+                        "projection_sha256": published.projection_sha256,
+                        "owner_user_id": "acc-1",
+                        "call_ref": call_ref,
+                    }
+                ),
+                is_complete=True,
+            )
+        )
+
+        task_response = await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")
+        history_response = await self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages"
+        )
+
+        task_artifact = task_response.json()["artifacts"][0]
+        history_artifact = next(
+            message for message in history_response.json()["messages"]
+            if message["role"] == "assistant"
+        )["artifacts"][0]
+        for projected in (task_artifact, history_artifact):
+            self.assertEqual(projected["artifact_type"], "mcp_result")
+            self.assertEqual(projected["storage_ref"], "")
+            self.assertEqual(
+                projected["mcp_business_result"]["primary"]["text"],
+                "安全业务结果",
+            )
 
     async def test_conversation_messages_include_ocr_raw_text_artifact_when_text_is_present(self) -> None:
         conversation_id = "conv-history-ocr"

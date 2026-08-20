@@ -5,7 +5,7 @@ import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPBusinessResultContentMetadata, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { pickComposerPlaceholder } from './domain/composerPlaceholders';
 import { deriveMCPServerCommands, isMCPServerInput, mcpServerMenuCandidates, mcpServerSubmitIntent, parseDirectMCPServerCommand, type MCPServerCommand } from './domain/mcpServerCommands';
@@ -2097,7 +2097,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       const artifactDisplays = parseCapabilityArtifactDisplays(response.artifacts);
       const fallbackText = parseAssistantTextArtifact(response.artifacts);
       const nonMCPArtifactSummary = summarizeCapabilityArtifactDisplays(
-        artifactDisplays.filter((display) => display.kind !== 'mcp_result_text'),
+        artifactDisplays.filter((display) => display.kind !== 'mcp_business_result'),
       );
       const fallbackContent = fallbackText || nonMCPArtifactSummary;
       if (fallbackContent || artifactDisplays.length > 0) {
@@ -3463,8 +3463,8 @@ function CapabilityArtifactPanel({
   if (display.kind === 'ocr_raw_text') {
     return <OcrRawTextCard result={display.result} />;
   }
-  if (display.kind === 'mcp_result_text') {
-    return <MCPResultTextCard result={display.result} />;
+  if (display.kind === 'mcp_business_result') {
+    return <MCPBusinessResultCard result={display.result} />;
   }
   if (display.kind === 'file') {
     return <FileArtifactCard result={display.result} onDownloadArtifact={onDownloadArtifact} />;
@@ -3482,28 +3482,90 @@ function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): strin
   if (display.kind === 'ocr_raw_text') {
     return `${display.kind}:${display.result.artifactId}`;
   }
-  if (display.kind === 'mcp_result_text') {
+  if (display.kind === 'mcp_business_result') {
     return `${display.kind}:${display.result.artifactId}`;
   }
   return 'capability-artifact';
 }
 
-function MCPResultTextCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'mcp_result_text' }>['result'] }) {
+function MCPBusinessResultCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'mcp_business_result' }>['result'] }) {
   const [expanded, setExpanded] = useState(false);
+  const contentId = `mcp-business-result-${result.artifactId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  if (result.result.availability === 'unavailable') {
+    const messages = {
+      safe_hide: '该工具结果来自旧的安全隐藏路径，暂不可展示。',
+      projection_missing: '工具已完成，但业务结果投影暂不可用。',
+      historical_authority_invalid: '历史结果缺少完整校验依据，无法安全展示。',
+      projection_invalid: '业务结果投影未通过完整性校验，已停止展示。',
+    };
+    return (
+      <Card size="small" className="capability-card mcp-business-result-card" title={result.title}>
+        <Alert type="warning" showIcon message="MCP 业务结果不可用" description={messages[result.result.unavailable_reason]} />
+      </Card>
+    );
+  }
+  const primary = result.result.primary;
+  const primaryText = primary.kind === 'structured'
+    ? JSON.stringify(primary.value, null, 2)
+    : primary.kind === 'structured_preview'
+      ? primary.preview
+      : primary.kind === 'text'
+        ? primary.text
+        : primary.message;
+  const canExpand = primary.kind !== 'empty' && primaryText.length > 240;
   return (
     <Card
       size="small"
-      className="capability-card mcp-result-text-card"
+      className="capability-card mcp-business-result-card"
       title={result.title}
-      extra={(
-        <Button type="link" size="small" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? '收起原文' : '展开原文'}
+      extra={canExpand ? (
+        <Button
+          type="link"
+          size="small"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? '收起业务结果' : '展开业务结果'}
         </Button>
-      )}
+      ) : null}
     >
-      <pre className={`ocr-raw-text-content mcp-result-text-content ${expanded ? 'ocr-raw-text-content-expanded' : ''}`}>{result.text}</pre>
+      <Space direction="vertical" size="small" className="ocr-raw-text-stack">
+        <pre
+          id={contentId}
+          className={`ocr-raw-text-content mcp-business-result-content ${expanded || !canExpand ? 'ocr-raw-text-content-expanded' : ''}`}
+        >
+          {primaryText}
+        </pre>
+        {result.result.supplemental_texts?.map((text, index) => (
+          <pre className="ocr-raw-text-content mcp-business-result-supplement" key={`${result.artifactId}:text:${index}`}>{text}</pre>
+        ))}
+        {result.result.content_metadata?.length ? (
+          <Space wrap size="small" aria-label="MCP 结果内容元数据">
+            {result.result.content_metadata.map((metadata, index) => (
+              <Tag key={`${result.artifactId}:metadata:${index}`}>
+                {formatMCPContentMetadata(metadata)}
+              </Tag>
+            ))}
+          </Space>
+        ) : null}
+        {(result.result.projection_truncated || primary.truncated) ? (
+          <Typography.Text type="secondary">结果已按安全展示预算截断。</Typography.Text>
+        ) : null}
+      </Space>
     </Card>
   );
+}
+
+function formatMCPContentMetadata(metadata: MCPBusinessResultContentMetadata): string {
+  if (metadata.kind === 'resource_link') {
+    return `资源链接 · ${metadata.name} · ${metadata.uri_scheme}`;
+  }
+  if (metadata.kind === 'embedded_text_resource') {
+    return `文本资源 · ${metadata.mime_type || '未知类型'} · ${metadata.uri_scheme}`;
+  }
+  const labels = { image: '图片', audio: '音频', embedded_blob_resource: '二进制资源' };
+  return `${labels[metadata.kind]} · ${metadata.mime_type} · ${metadata.byte_size} bytes`;
 }
 
 function OcrRawTextCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'ocr_raw_text' }>['result'] }) {

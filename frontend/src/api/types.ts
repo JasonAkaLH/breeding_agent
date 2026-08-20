@@ -244,6 +244,39 @@ export interface TaskGraphResponse {
   edges: TaskEdgeResponse[];
 }
 
+export type MCPBusinessResultPrimary =
+  | { kind: 'structured'; value: unknown; truncated: false }
+  | { kind: 'structured_preview'; preview: string; truncated: true }
+  | { kind: 'text'; text: string; truncated: boolean }
+  | { kind: 'empty'; message: string; truncated: false };
+
+export type MCPBusinessResultContentMetadata =
+  | { kind: 'image' | 'audio' | 'embedded_blob_resource'; mime_type: string; byte_size: number; sha256: string }
+  | { kind: 'resource_link'; name: string; title?: string | null; description?: string | null; mime_type?: string | null; uri_scheme: string }
+  | { kind: 'embedded_text_resource'; mime_type?: string | null; uri_scheme: string };
+
+export type MCPBusinessResultView =
+  | {
+      schema: 'maf.mcp.business_result_view.v1';
+      availability: 'ready';
+      outcome: 'succeeded';
+      primary: MCPBusinessResultPrimary;
+      unavailable_reason?: null;
+      supplemental_texts?: string[] | null;
+      content_metadata?: MCPBusinessResultContentMetadata[] | null;
+      projection_truncated: boolean;
+    }
+  | {
+      schema: 'maf.mcp.business_result_view.v1';
+      availability: 'unavailable';
+      outcome: 'succeeded';
+      primary?: null;
+      unavailable_reason: 'safe_hide' | 'projection_missing' | 'historical_authority_invalid' | 'projection_invalid';
+      supplemental_texts?: null;
+      content_metadata?: null;
+      projection_truncated: false;
+    };
+
 export interface ArtifactResponse {
   artifact_id: string;
   producer_node_id: string;
@@ -260,6 +293,7 @@ export interface ArtifactResponse {
   source_file_count?: number | null;
   archive_format?: string | null;
   retention_status?: string | null;
+  mcp_business_result?: MCPBusinessResultView | null;
 }
 
 export interface TaskArtifactsResponse {

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from src.api.dto import (
     CreateUserMCPServerRequest,
+    MCPBusinessResultView,
     PatchUserMCPServerRequest,
     SubmitMessageRequest,
     UserMCPCredentialInput,
@@ -13,6 +14,22 @@ from src.api.dto import (
 
 
 class UserMCPDTOTest(unittest.TestCase):
+    def test_mcp_business_result_view_rejects_non_json_and_budget_overflow(self) -> None:
+        base = {
+            "schema": "maf.mcp.business_result_view.v1",
+            "availability": "ready",
+            "outcome": "succeeded",
+            "projection_truncated": False,
+        }
+        with self.assertRaises(ValidationError):
+            MCPBusinessResultView.model_validate(
+                {**base, "primary": {"kind": "structured", "value": float("nan"), "truncated": False}}
+            )
+        with self.assertRaisesRegex(ValidationError, "public projection budget"):
+            MCPBusinessResultView.model_validate(
+                {**base, "primary": {"kind": "text", "text": "x" * 20_001, "truncated": False}}
+            )
+
     def test_create_rejects_owner_fields_and_requires_auth_credential(self) -> None:
         with self.assertRaises(ValidationError):
             CreateUserMCPServerRequest.model_validate(

@@ -10,6 +10,10 @@ from src.storage.artifact_files import (
     is_active_managed_output_file,
     parse_file_storage_ref,
 )
+from src.integrations.mcp.result_parsing.projection_store import (
+    MCPProjectionBinding,
+    MCPProjectionStore,
+)
 
 from .dto import ArtifactResponse, MCPBusinessResultView
 
@@ -47,6 +51,7 @@ async def artifact_response(
     artifact: Artifact,
     *,
     artifact_file_store: LocalArtifactFileStore,
+    projection_store: MCPProjectionStore | None = None,
 ) -> ArtifactResponse:
     if artifact.artifact_type != ArtifactType.FILE:
         return ArtifactResponse(
@@ -61,6 +66,43 @@ async def artifact_response(
 
     metadata = parse_file_storage_ref(artifact.storage_ref) or {}
     if metadata.get("source_kind") == "mcp_result":
+        business_result = _unavailable_mcp_result("safe_hide")
+        projection_ref = _optional_string(metadata.get("projection_ref"))
+        projection_sha256 = _optional_string(metadata.get("projection_sha256"))
+        if projection_ref is not None and projection_sha256 is not None:
+            if projection_store is None:
+                business_result = _unavailable_mcp_result(
+                    "projection_missing"
+                )
+            else:
+                try:
+                    envelope = projection_store.load(
+                        projection_ref,
+                        binding=MCPProjectionBinding(
+                            owner_user_id=str(metadata["owner_user_id"]),
+                            task_id=artifact.task_id,
+                            node_id=artifact.producer_node_id,
+                            call_ref=str(metadata["call_ref"]),
+                            raw_sha256=(
+                                "sha256:" + str(metadata["sha256"])
+                            ),
+                            output_schema_sha256=(
+                                _optional_string(
+                                    metadata.get("output_schema_sha256")
+                                )
+                            ),
+                            source=str(metadata["terminal_result_source"]),
+                            parser_revision=str(metadata["parser_revision"]),
+                        ),
+                        expected_projection_sha256=projection_sha256,
+                    )
+                    business_result = MCPBusinessResultView.model_validate(
+                        envelope["user_view"]
+                    )
+                except Exception:
+                    business_result = _unavailable_mcp_result(
+                        "projection_invalid"
+                    )
         return ArtifactResponse(
             artifact_id=artifact.artifact_id,
             producer_node_id=artifact.producer_node_id,
@@ -69,13 +111,7 @@ async def artifact_response(
             summary=str(metadata.get("summary") or artifact.summary or ""),
             is_complete=artifact.is_complete,
             created_at=artifact.created_at,
-            mcp_business_result=MCPBusinessResultView(
-                schema="maf.mcp.business_result_view.v1",
-                availability="unavailable",
-                outcome="succeeded",
-                unavailable_reason="safe_hide",
-                projection_truncated=False,
-            ),
+            mcp_business_result=business_result,
         )
     return ArtifactResponse(
         artifact_id=artifact.artifact_id,
@@ -127,6 +163,16 @@ def _optional_string(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _unavailable_mcp_result(reason: str) -> MCPBusinessResultView:
+    return MCPBusinessResultView(
+        schema="maf.mcp.business_result_view.v1",
+        availability="unavailable",
+        outcome="succeeded",
+        unavailable_reason=reason,
+        projection_truncated=False,
+    )
 
 
 def _optional_int(value: object) -> int | None:

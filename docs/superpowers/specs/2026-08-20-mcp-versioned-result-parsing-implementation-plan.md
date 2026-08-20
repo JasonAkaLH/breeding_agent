@@ -23,7 +23,8 @@
 - Checkpoint 3 已完成：`2cd2a41 feat(mcp): add versioned result decoders`。
 - Checkpoint 4 已完成：`7f7ca1e feat(mcp): isolate result parsing workers`；backend Linux容器43项全通过，含512 MiB `RLIMIT_AS`、64 MiB raw边界和恶意regex终止。
 - Checkpoint 5 已完成：`b98ca52 feat(mcp): enforce parsed result terminal gate`；199项terminal/recovery/runtime聚焦回归通过。
-- Checkpoint 6 已完成实现与聚焦回归：published projection经Artifact expected-storage-ref CAS绑定，Selector删除raw refs并按最新优先/Call顺序消费有界agent projection，Remote continuation在begin前加载投影且metadata不含raw，OCR改为窄invoker注入，legacy executor改用统一Decoder/projector；相关projection/selector/continuation/legacy套件通过，等待本检查点提交。
+- Checkpoint 6 已完成：`1a879cf feat(mcp): publish bounded result projections`；published projection经Artifact expected-storage-ref CAS绑定，Selector删除raw refs并按最新优先/Call顺序消费有界agent projection，Remote continuation在begin前加载投影且metadata不含raw，OCR改为窄invoker注入，legacy executor改用统一Decoder/projector。
+- Checkpoint 7 已完成实现与聚焦回归：API只从复验后的published projection返回strict typed业务视图，前端删除Artifact ID/raw识别并展示structured/preview/text/empty/unavailable闭合卡片，可访问展开控件和显式截断提示已覆盖；31项API与143项前端测试、typecheck通过，等待本检查点提交。
 
 ## 开发检查点
 

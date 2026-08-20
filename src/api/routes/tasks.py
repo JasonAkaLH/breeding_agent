@@ -417,6 +417,7 @@ async def get_task_artifacts(task_id: str, request: Request) -> TaskArtifactsRes
                 await artifact_response(
                     artifact,
                     artifact_file_store=runtime.artifact_file_store,
+                    projection_store=runtime._mcp_projection_store,
                 )
             )
     return TaskArtifactsResponse(task_id=task_id, artifacts=responses)

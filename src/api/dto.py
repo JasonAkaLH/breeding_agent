@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, field_validator, model_validator
 
 from .mcp_binding import (
     MCP_BINDING_REQUEST_ALLOWED_METADATA_KEYS,
@@ -352,8 +353,36 @@ class MCPStructuredResultPrimary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["structured"]
-    value: Any
+    value: JsonValue
     truncated: Literal[False] = False
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def validate_strict_json_value(cls, value: object) -> object:
+        pending: list[tuple[object, int]] = [(value, 0)]
+        nodes = 0
+        while pending:
+            item, depth = pending.pop()
+            nodes += 1
+            if depth > 64 or nodes > 100_000:
+                raise ValueError("structured MCP result exceeds JSON limits")
+            if item is None or isinstance(item, (str, bool)):
+                continue
+            if isinstance(item, (int, float)) and not isinstance(item, bool):
+                if isinstance(item, float) and not math.isfinite(item):
+                    raise ValueError("structured MCP result contains non-finite number")
+                continue
+            if isinstance(item, list):
+                pending.extend((child, depth + 1) for child in item)
+                continue
+            if isinstance(item, dict):
+                for key, child in item.items():
+                    if not isinstance(key, str) or len(key) > 1_024:
+                        raise ValueError("structured MCP result contains invalid key")
+                    pending.append((child, depth + 1))
+                continue
+            raise ValueError("structured MCP result contains non-JSON value")
+        return value
 
 
 class MCPStructuredPreviewResultPrimary(BaseModel):
@@ -455,6 +484,9 @@ class MCPBusinessResultView(BaseModel):
             or self.projection_truncated
         ):
             raise ValueError("unavailable MCP result contains display content")
+        encoded = self.model_dump_json(by_alias=True).encode("utf-8")
+        if len(encoded.decode("utf-8")) > 20_000 or len(encoded) > 80_000:
+            raise ValueError("MCP result view exceeds public projection budget")
         return self
 
 

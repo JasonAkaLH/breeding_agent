@@ -8,7 +8,13 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
-## 2026-08-20 增量：MCP Result公共读取进入safe-hide
+## 2026-08-20 增量：MCP Result typed业务视图
+
+`GET /api/v1/tasks/{task_id}/artifacts`与Conversation history/message Artifact现在只从已发布且通过owner/Task/Node/Call/raw/schema/source/parser/projection identity复验的task-private projection读取MCP业务结果。公共响应固定为`artifact_type=mcp_result`、`storage_ref=""`和`mcp_business_result.schema=maf.mcp.business_result_view.v1`；`availability=ready`时，`primary`严格为`structured | structured_preview | text | empty`之一，media/resource仅返回闭合metadata，整个视图不超过20,000 code points/80,000 bytes。`availability=unavailable`只允许`safe_hide | projection_missing | historical_authority_invalid | projection_invalid`。
+
+前端只按该schema与闭合variant展示清洗后的业务JSON或纯文本，不再按Artifact ID前缀识别结果，不读取raw `storage_ref`，也不提供raw展开或下载。非法、超预算或digest不匹配的projection安全降级为unavailable；direct download继续404。
+
+## 2026-08-20 历史增量：MCP Result公共读取进入safe-hide（已升级为typed业务视图）
 
 `GET /api/v1/tasks/{task_id}/artifacts`和Conversation history中的MCP Result Artifact不再返回原始JSON正文。响应固定使用`artifact_type=mcp_result`、`storage_ref=""`，并新增`mcp_business_result`；Result Parser尚未发布业务投影时返回`availability=unavailable`与`unavailable_reason=safe_hide`。direct download继续404，客户端不得从`storage_ref`、Artifact ID或其他字段恢复raw正文。
 

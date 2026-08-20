@@ -3036,13 +3036,30 @@ describe('App', () => {
     expect(api.downloadArtifact).toHaveBeenCalledWith('art-file-1', 'layout.html');
   });
 
-  it('renders MCP result text as a collapsible raw-return card without a download action', async () => {
-    const rawResult = '{"result":{"content":[{"type":"text","text":"原始返回"}]}}';
+  it('renders only the typed MCP business result with accessible expansion and no raw download', async () => {
+    const rawResult = '{"authorization":"raw-secret"}';
+    const businessText = `业务返回-${'结果'.repeat(180)}`;
     const api = makeApi({
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: `mcp-result-artifact:v1:${'a'.repeat(64)}`, producer_node_id: 'task-1:mcp-tool', artifact_type: 'text', storage_ref: rawResult, summary: 'MCP Tool原始返回：tool', is_complete: true, created_at: null },
+          {
+            artifact_id: 'opaque-result-artifact',
+            producer_node_id: 'task-1:mcp-tool',
+            artifact_type: 'mcp_result',
+            storage_ref: rawResult,
+            summary: 'MCP 工具结果',
+            is_complete: true,
+            created_at: null,
+            mcp_business_result: {
+              schema: 'maf.mcp.business_result_view.v1',
+              availability: 'ready',
+              outcome: 'succeeded',
+              primary: { kind: 'text', text: businessText, truncated: true },
+              content_metadata: [{ kind: 'image', mime_type: 'image/png', byte_size: 24, sha256: `sha256:${'a'.repeat(64)}` }],
+              projection_truncated: true,
+            },
+          },
         ],
       })),
     });
@@ -3051,11 +3068,18 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '调用 MCP' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    const title = await screen.findByText('MCP Tool原始返回：tool');
+    const title = await screen.findByText('MCP 工具结果');
     const messageBody = title.closest('.message-assistant')?.querySelector('.message-body') as HTMLElement;
     expect(messageBody.querySelector('.markdown-content')).not.toBeInTheDocument();
-    expect(messageBody.querySelector('.mcp-result-text-content')?.textContent).toBe(rawResult);
-    expect(within(messageBody).getByRole('button', { name: '展开原文' })).toBeInTheDocument();
+    expect(messageBody.querySelector('.mcp-business-result-content')?.textContent).toBe(businessText);
+    const expand = within(messageBody).getByRole('button', { name: '展开业务结果' });
+    expect(expand).toHaveAttribute('aria-expanded', 'false');
+    expect(expand).toHaveAttribute('aria-controls', expect.stringContaining('mcp-business-result-'));
+    fireEvent.click(expand);
+    expect(expand).toHaveAttribute('aria-expanded', 'true');
+    expect(within(messageBody).getByText('图片 · image/png · 24 bytes')).toBeInTheDocument();
+    expect(within(messageBody).getByText('结果已按安全展示预算截断。')).toBeInTheDocument();
+    expect(messageBody).not.toHaveTextContent('raw-secret');
     expect(within(messageBody).queryByRole('button', { name: /下\s*载/ })).not.toBeInTheDocument();
     expect(api.downloadArtifact).not.toHaveBeenCalled();
   });

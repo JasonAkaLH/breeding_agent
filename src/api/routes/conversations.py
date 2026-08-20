@@ -249,6 +249,7 @@ async def _history_display_artifacts_by_task_id(
                 await artifact_response(
                     artifact,
                     artifact_file_store=runtime.artifact_file_store,
+                    projection_store=runtime._mcp_projection_store,
                 )
             )
     return grouped
