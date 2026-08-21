@@ -1,0 +1,123 @@
+# 统一同模型 Agent Loop 分阶段 PRD 索引
+
+- **日期**：2026-08-22
+- **状态**：PRD组已生成；待整组复核，实现待开始
+- **适用分支**：`main`
+- **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
+- **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
+- **总目标**：以同一模型持续完成规划、Tool选择、结果观察、纠错、上下文压缩和最终回答；全部执行与恢复入口最终统一进入同一AgentRun，不保留DAG runtime或旧任务兼容恢复。
+
+## 目录权威
+
+本文档组描述已批准但尚未实施的未来架构。Phase 6完成前，当前运行时事实仍以源码和
+`docs/prd/backend/00-主代理框架PRD.md`中的已实现DAG基线为准；Phase 6完成后，本目录成为任务编排的当前PRD
+入口，旧DAG文档必须按总纲处置矩阵更新为rewrite、superseded或historical。
+
+权威顺序：
+
+1. 用户最新明确确认；
+2. 统一Agent Loop架构设计；
+3. PRD拆分设计；
+4. 本目录总纲；
+5. 各阶段PRD；
+6. 后续实施计划。
+
+阶段PRD不得改变同模型、无`maxTurns`、不恢复旧DAG Task、保留当前MCP discovery以及单一控制面等产品决策。
+
+## 阶段文件
+
+| 阶段 | PRD | 主责 | 初始状态 |
+|---|---|---|---|
+| 总纲 | `00-统一同模型AgentLoop总纲PRD.md` | 全局不变量、FR/NFR追踪、阶段门禁、文档处置 | approved |
+| Phase 0 | `01-阶段零-现状基线与AgentModelContractPRD.md` | Agent Model Contract、provider门禁、现状/PRD inventory | pending |
+| Phase 1 | `02-阶段一-AgentRunAgentItem与TaskLease存储PRD.md` | Agent durable state、原子操作、单一Task lease、三backend parity | pending |
+| Phase 2 | `03-阶段二-InvocationKernel与SkillMCP适配PRD.md` | Invocation Kernel、Tool Catalog/Policy、Skill/MCP适配 | pending |
+| Phase 3 | `04-阶段三-核心AgentLoop与FinalOutputPRD.md` | 核心Loop、multi-call、compaction、唯一final output | pending |
+| Phase 4 | `05-阶段四-WaitingContinuation与RecoveryPRD.md` | Waiting、Continuation、Crash Recovery、Cancel | pending |
+| Phase 5 | `06-阶段五-APISSEFrontend与Observability适配PRD.md` | API/SSE/history/graph、Frontend、事件指标、可访问性 | pending |
+| Phase 6 | `07-阶段六-全入口CleanCutover与DAGRuntime删除PRD.md` | 全入口切换、DAG runtime/wiring删除、单控制面 | pending |
+| Phase 7 | `08-阶段七-破坏性Schema删除与最终门禁PRD.md` | DAG storage/proto物理删除、恢复演练、最终证明 | pending |
+
+## 严格依赖
+
+```text
+Phase 0 Model Contract
+  -> Phase 1 Agent Storage / Lease
+  -> Phase 2 Invocation / Skill / MCP
+  -> Phase 3 Core Loop / Final
+  -> Phase 4 Waiting / Recovery
+  -> Phase 5 API / Frontend / Observability
+  -> Phase 6 Clean Cutover + DAG Runtime Delete
+  -> Phase 7 Destructive Schema Delete + Final Proof
+```
+
+上游未满足退出门禁时，下游不得标记`in_progress`或`proof_complete`。允许在同一开发窗口顺序实施相邻阶段，但不得
+合并门禁、跳过检查点或用后续测试替代当前阶段失败证据。
+
+## 阶段状态
+
+| 状态 | 含义 |
+|---|---|
+| `pending` | 上游未完成或尚未开始 |
+| `blocked` | 必需代码、环境、权限或外部证据缺失；必须记录原因和解除条件 |
+| `in_progress` | 当前阶段测试/实现正在受审检查点进行 |
+| `proof_complete` | 当前阶段全部退出门禁通过，但尚未完成控制面切换 |
+| `cutover_complete` | Phase 6全部入口切换且旧DAG runtime/wiring已删除 |
+| `complete` | Phase 7全部自动、真实环境、备份恢复和文档门禁通过 |
+
+文档生成、测试fixture存在、单backend通过、skip或not-run都不构成阶段完成。
+
+## 全局不变量
+
+- Agent controller、Tool选择、compaction、MCP Router/Selector和最终回答固定同一model edition；
+- Agent Loop没有`maxTurns`、`max_replans`或`max_dynamic_nodes`终止条件；
+- Tool-call sample和result slots在副作用前持久化，outcome按claim/revision原子提交；
+- 不确定副作用不自动重放，late result不能覆盖新owner状态；
+- delegated Skill只使用安全`PublicSkillProfile`投影，不读取manifest/resource正文；
+- Outer Agent只看到每个public Skill和一个`mcp.dispatch`，不展开Server内完整Tool list；
+- MCP discovery、授权、MRTR/Tasks、Result Parser和内部call budget保持现有安全设计；
+- hidden reasoning、raw MCP result、上传正文和敏感内部信息不进入durable Agent上下文；
+- Phase 6后只存在Agent Loop控制面；Phase 7后不存在DAG storage/proto运行合同；
+- 不迁移、不恢复旧DAG Task，不部署`prod`；
+- `docker_cmd.md`不得读取、移动、跟踪或删除。
+
+## 验证口径
+
+阶段PRD必须给出精确命令，统一使用仓库现有入口：
+
+```bash
+conda run -n multi_agent python -m compileall -q src tests
+conda run -n multi_agent python -m unittest <target modules>
+
+cd frontend
+npm test -- --run
+npm run typecheck
+npm run build
+
+conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only <required gate>
+```
+
+Phase 1和Phase 7要求真实测试PostgreSQL DSN；Phase 5～7要求Frontend完整三门禁；受影响的Rust contract必须从统一
+Rust gate脚本验证。`--skip-unavailable`只用于诊断，不能作为required gate通过证据。Phase 7还要求仓库外备份恢复
+演练和受控真实MCP smoke；缺失时保持`blocked`，除非用户对MCP smoke明确批准书面waiver。
+
+## Git与回滚
+
+- 每阶段至少一个范围清晰的Git检查点；
+- Phase 0～5属于pre-cutover proof：Phase 1 schema为additive，Phase 2允许旧DAG调用公共Kernel的行为保持重构，
+  其余新Agent能力只允许test-only assembly；
+- Phase 6在同一受审commit序列完成所有入口切换和DAG runtime/wiring删除，不保留feature flag或fallback；
+- Phase 7前必须在仓库外生成并验证SQLite/PostgreSQL/Sidecar备份；
+- Phase 7后只能成对恢复代码和数据，或继续forward fix。
+
+## 文档维护
+
+每个阶段状态变化时必须同步：
+
+1. 本README状态；
+2. 对应阶段PRD的证据与未验证项；
+3. `docs/prd/README.md`、`docs/prd/backend/00-主代理框架PRD.md`和`docs/AGENTS.md`；
+4. 受影响模块的`AGENTS.md`；
+5. `CHANGELOG.md`。
+
+整组PRD批准后才能生成详细实施计划；实施计划批准前不得修改业务代码。

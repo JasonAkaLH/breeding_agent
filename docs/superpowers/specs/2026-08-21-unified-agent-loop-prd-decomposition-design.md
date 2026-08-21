@@ -1,11 +1,11 @@
 # 统一同模型 Agent Loop PRD 拆分设计
 
 - **日期**：2026-08-21
-- **状态**：document-perfectization 第四次全量审计100/100通过；可生成阶段PRD，尚未实施
+- **状态**：document-perfectization 第四次全量审计100/100通过；PRD组已生成、待整组复核，尚未实施
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **目标产物**：`docs/prd/backend/unified-agent-loop/` 下的 README、总纲 PRD 与 8 份阶段 PRD
-- **实施状态**：尚未生成阶段 PRD，尚未修改业务代码
+- **实施状态**：README、总纲与8份阶段PRD已生成；尚未修改业务代码
 
 ## 1. 结论
 
