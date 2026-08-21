@@ -1,7 +1,7 @@
 # 统一同模型 Agent Loop 总纲 PRD
 
 - **日期**：2026-08-22
-- **状态**：已批准未来架构；PRD组待整组复核，实现待开始
+- **状态**：已批准未来架构；document-perfectization第二次全量审计100/100通过，实现待开始
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
@@ -176,6 +176,31 @@ Phase 6随源码删除，但每组删除都必须关联替代测试或证明其�
 - Phase 7后只能同时恢复Phase 7前代码和数据库/Sidecar备份，或forward fix；
 - 任何操作不得读取、移动、跟踪或删除`docker_cmd.md`。
 
-## 12. 开放问题
+## 12. 风险、假设与开放问题
 
-无。发现需要改变产品方向、风险容忍度、API支持义务或真实环境waiver时，必须回到用户确认。
+| 风险 | 影响 | 缓解/阻断条件 |
+|---|---|---|
+| Provider表面兼容但native tool wire不闭合 | Run中途无法解析或误调用 | Phase 0逐edition启动门禁和wire golden；不合格edition不公开 |
+| 三backend事务/lease语义分叉 | 本地通过但PG/Sidecar恢复失败 | Phase 1 conformance vectors，Phase 4/7重复fault tests；缺真实环境即blocked |
+| Pre-cutover代码与旧路径漂移 | Phase 6切换时集中爆发回归 | Test-only assembly、Phase 2行为保持Kernel抽取和Phase 5 readiness报告 |
+| 无`maxTurns`造成成本/等待增长 | Task长时间占用资源 | backpressure、cancel、compaction和分布指标；不得暗中新增轮次终止 |
+| Phase 6半切换或遗漏入口 | 双控制面产生不一致终态 | fixed入口inventory、单一commit序列、全入口E2E和runtime删除报告 |
+| Phase 7 schema删除不可恢复 | 开发数据丢失或binary/schema不匹配 | 仓库外备份、实际restore、三backend migration和成对回滚 |
+| 旧PRD/测试继续指导DAG实现 | 后续重新引入Planner/Replanner | active PRD inventory、replacement tests和Phase 6文档零漂移 |
+| 真实PG/Rust/MCP证据缺失 | 自动mock不能证明真实边界 | 状态保持blocked；只有MCP smoke可由用户明确书面waiver |
+
+已确认假设：
+
+- 架构设计和拆分设计继续是产品/安全权威；
+- 当前Capability、Skill、MCP、Lifecycle、Artifact、Event和Prompt安全合同可以通过公共接口复用；
+- Phase 1 additive schema可被Phase 6前旧binary忽略；
+- 用户接受不迁移、不恢复旧DAG Task；
+- 所有实现只面向`main`开发仓库，不代表`prod`部署；
+- 不新增第三方Agent、图执行或异步锁框架，依赖/许可变化另行审查。
+
+固定handoff证据使用README定义的`active-prd-inventory.md`、`cutover-readiness.md`、
+`dag-runtime-deletion-report.md`和`destructive-migration-evidence.md`。缺失或与当前commit不一致时不得进入下游。
+
+开放问题：无。
+
+发现需要改变产品方向、风险容忍度、API支持义务或真实环境waiver时，必须回到用户确认。

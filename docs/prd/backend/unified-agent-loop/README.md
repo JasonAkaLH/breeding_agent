@@ -1,7 +1,7 @@
 # 统一同模型 Agent Loop 分阶段 PRD 索引
 
 - **日期**：2026-08-22
-- **状态**：PRD组已生成；待整组复核，实现待开始
+- **状态**：PRD组逐篇document-perfectization审阅100/100通过；实现待开始
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
@@ -83,11 +83,25 @@ Phase 0 Model Contract
 
 ## 验证口径
 
-阶段PRD必须给出精确命令，统一使用仓库现有入口：
+阶段PRD必须给出精确命令，统一使用仓库现有入口。Phase 6/7完整后端证明使用以下canonical命令集合；阶段PRD可在
+当前阶段先跑其子集，但不得用聚焦子集替代最终门禁：
 
 ```bash
 conda run -n multi_agent python -m compileall -q src tests
-conda run -n multi_agent python -m unittest <target modules>
+conda run -n multi_agent python -m unittest discover -s tests/core -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/integrations/agent_skills -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/capabilities/mcp_dispatch -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/capabilities/mcp_tool -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/scripts -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/deployment -p 'test_*.py'
 
 cd frontend
 npm test -- --run
@@ -100,6 +114,24 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only <
 Phase 1和Phase 7要求真实测试PostgreSQL DSN；Phase 5～7要求Frontend完整三门禁；受影响的Rust contract必须从统一
 Rust gate脚本验证。`--skip-unavailable`只用于诊断，不能作为required gate通过证据。Phase 7还要求仓库外备份恢复
 演练和受控真实MCP smoke；缺失时保持`blocked`，除非用户对MCP smoke明确批准书面waiver。
+
+任何`unittest discover`门禁必须实际发现至少一个测试；`Ran 0 tests`、命令不存在或non-zero exit均为失败，不得记为
+通过。
+
+## 固定证据产物
+
+以下文件在对应阶段实施时创建并由后续阶段消费；路径和closed字段是阶段handoff合同，不得改成进程内状态或临时
+聊天记录：
+
+| 产物 | 生成阶段 | 必需字段 |
+|---|---|---|
+| `active-prd-inventory.md` | Phase 0 | document path、matched legacy terms、`preserve/rewrite/supersede_at_phase6/historical`、replacement authority、owner phase、status、evidence command |
+| `cutover-readiness.md` | Phase 5 | commit、Phase 0～5状态、start/resume/cancel/recovery入口清单、test evidence、active-doc状态、remaining blockers、DAG physical schema inventory |
+| `dag-runtime-deletion-report.md` | Phase 6 | deleted runtime/wiring/config/events/tests、replacement tests、zero-runtime-reference scans、remaining Phase 7 schema/proto inventory、rollback checkpoint |
+| `destructive-migration-evidence.md` | Phase 7 | code/schema versions、脱敏backup refs/digests、restore evidence、SQLite/PG/Sidecar migrations、full gates、static scans、MCP smoke或waiver、remaining gaps |
+
+证据文件不得写credential、DSN、raw result、用户正文、绝对敏感路径或`docker_cmd.md`内容。未生成、字段不闭合或证据与
+当前commit不匹配时，下游阶段保持`blocked`。
 
 ## Git与回滚
 

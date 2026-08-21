@@ -2,10 +2,12 @@
 
 - **日期**：2026-08-22
 - **状态**：pending
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～2必须`proof_complete`
 - **主责需求**：FR-4、FR-5、FR-6、FR-7、FR-10、FR-11、FR-12、FR-23
 - **主责NFR**：上下文正确性、性能与资源、最终输出唯一性
+- **直接参与者**：Agent Runtime维护者、最终用户、Prompt/Memory维护者、Skill/MCP调用方、Artifact/History与发布审查者
 - **目标结果**：实现test-only的同模型Agent循环、multi-call、compaction和原子final publication；不切真实入口，不交付完整waiting resume。
 
 ## 1. 目标与价值
@@ -102,12 +104,16 @@ facts和final guard。Raw MCP result、上传正文、hidden reasoning和未净�
 
 达到输入预算时：
 
+- 先消费Phase 2 Catalog Preflight；仅`history_compaction_required`允许进入compaction；
 - 使用同一model edition生成结构化summary；
 - summary绑定covered sequence range和源items digest；
 - append `context_summary`并CAS更新covered boundary；
 - 原始items不删除；
 - 下一轮使用summary+suffix；
 - compaction不能调用业务Capability或改变Tool决策；
+- compaction后必须重新运行完整Catalog Preflight；仍不适配或必保segments超限时fatal；
+- 每次compaction必须推进`compacted_through_sequence`并产生新的covered digest；若没有推进或相同decision在无新eligible
+  range时重复，必须fatal，不能busy-loop；
 - retry耗尽fatal，不静默丢历史。
 
 ## 8. Final Output
@@ -133,7 +139,7 @@ facts和final guard。Raw MCP result、上传正文、hidden reasoning和未净�
 | AL-P3-04 | Loop没有固定轮次/节点上限。 | 超过旧max_replans/max_dynamic_nodes数值仍完成。 |
 | AL-P3-05 | Multi-call waves与结果顺序确定。 | Parallel/exclusive交错和乱序完成tests。 |
 | AL-P3-06 | 显式约束只作用首轮。 | 首轮forced，result后普通catalog恢复。 |
-| AL-P3-07 | Compaction同模型、可恢复且不删items。 | Digest、suffix、crash/CAS和retry failure tests。 |
+| AL-P3-07 | Compaction只响应typed Preflight、使用同模型、可恢复且不删items。 | Decision、digest、suffix、re-preflight、crash/CAS和retry failure tests。 |
 | AL-P3-08 | Final只调用一次模型并只发布一份。 | Fake无第二call；Artifact/Message/event/receipt唯一。 |
 | AL-P3-09 | Final crash可幂等重放。 | Delta前/后、commit前/后fault injection无重复history。 |
 | AL-P3-10 | waiting authority不会提前采样。 | Test runner返回suspended，后续model calls为0。 |
@@ -146,6 +152,16 @@ facts和final guard。Raw MCP result、上传正文、hidden reasoning和未净�
 - late result：旧owner提交失败，不覆盖cancel/new owner；
 - waiting：不是terminal；本阶段只证明持久化停止点，Phase 4交付resume；
 - 正常停止只由final candidate触发。
+
+### 10.1 跨阶段NFR协作
+
+| NFR | 本阶段责任 | 后续复验 |
+|---|---|---|
+| 上下文正确性 | 主责：ContextBuilder、summary/digest/suffix和Preflight重试 | Phase 4恢复后、Phase 6/7全入口复验 |
+| 性能与资源 | 主责：deterministic waves、no busy polling、backpressure | Phase 4 waiting资源释放、Phase 5 metrics复验 |
+| 最终输出唯一性 | 主责：无第二LLM、atomic final和crash replay | Phase 5 history/SSE、Phase 6/7E2E复验 |
+| Provider/一致性/安全/catalog | 消费Phase 0～2 binding、atomic APIs和safe projections | Fake binding、fault injection和leak scan必须随Loop测试运行 |
+| 可观测性 | 产生Phase 5定义所需sample/call/compaction/final facts | Phase 5负责closed event/metric projection |
 
 ## 11. 测试计划
 
@@ -162,14 +178,39 @@ facts和final guard。Raw MCP result、上传正文、hidden reasoning和未净�
 
 本阶段不得通过真实API请求启用新Loop。测试assembly必须是显式fixture，不能形成runtime feature flag。
 
-## 12. Git检查点与回滚
+实施必须创建并运行以下精确目标或等价同名模块；模块不存在、`Ran 0 tests`或non-zero exit均失败：
+
+```bash
+conda run -n multi_agent python -m unittest \
+  tests.orchestration.test_agent_loop \
+  tests.orchestration.test_agent_context_builder \
+  tests.orchestration.test_agent_final_output \
+  tests.api.test_main_agent_llm \
+  tests.api.test_task_query \
+  tests.capabilities.main_agent.test_conversation_memory_prompt
+```
+
+## 12. 风险、假设与开放问题
+
+| 风险 | 缓解/阻断条件 |
+|---|---|
+| 无`maxTurns`造成长轨迹成本/等待 | 保留cancel/backpressure/compaction和分布metrics，不以隐式轮次终止 |
+| Multi-call并发产生共享副作用 | 默认全部非并发；只有显式parallel-safe contract进入并发wave |
+| Compaction遗漏关键Tool事实 | 原始items不删、covered digest、golden summary和re-preflight tests |
+| Final delta先发布后crash产生重复正文 | 确定性IDs、Frontend去重和final fault matrix |
+| Text+tool calls污染history | Tool sample text不进入assistant正文/history，adapter+history tests双重保护 |
+
+已确认假设：所选model edition可在输入预算内完成结构化compaction；现有PromptEnvelope、memory和Artifact/Event helper
+可复用。开放问题：无。
+
+## 13. Git检查点与回滚
 
 - 新Loop、ContextBuilder和Publisher只进入test assembly；
 - 不删除旧DAG/finalizer，不改变用户路由；
 - 回滚删除Agent-only orchestration并保留Phase 0～2稳定contract；
 - 若发现需要maxTurns或模型切换，状态转`blocked`并回到产品决策，不自行增加。
 
-## 13. 完成与交接
+## 14. 完成与交接
 
 AL-P3-01～10、长轨迹、multi-call、compaction和final fault tests通过；真实入口不变；没有第二Agent控制面。
 

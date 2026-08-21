@@ -2,10 +2,12 @@
 
 - **日期**：2026-08-22
 - **状态**：pending
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～3必须`proof_complete`
 - **主责需求**：FR-8、FR-9、FR-18
 - **主责NFR**：恢复与no-replay
+- **直接参与者**：最终用户、Lifecycle/Agent Runtime维护者、Skill/MCP集成方、API恢复与取消维护者、发布审查者
 - **目标结果**：让零到多个waiting calls、Interrupt、approval、MRTR、remote Task、crash和cancel都恢复或终止原AgentRun/原tool call；仍不切真实API入口。
 
 ## 1. 目标与价值
@@ -152,6 +154,16 @@ Runtime承诺no automatic replay，不承诺任意外部系统exactly-once。
 - capability continuation普通失败：提交failed tool result，batch闭合后模型可纠正；
 - storage不可用：不ack外部authority成功，按现有outbox恢复。
 
+### 10.1 跨阶段NFR协作
+
+| NFR | 本阶段责任 | 后续复验 |
+|---|---|---|
+| 恢复与no-replay | 主责：multi-waiting、locator、authority、aborted和cancel线性化 | Phase 5外部投影、Phase 6/7全入口恢复复验 |
+| Provider同模型 | Resume后继续消费同一AgentModelBinding | approval/remote/restart binding identity tests |
+| 一致性与安全 | 使用Phase 1 claim/outcome并校验owner/task/node/call/digest | Fault/permission/duplicate tests |
+| 性能与资源 | waiting release lease且不占model/capability worker | Phase 5 waiting/lease metrics复验 |
+| API兼容/可观测 | 产生稳定waiting/resume facts，不新增Task status | Phase 5负责DTO/event/frontend projection |
+
 ## 11. 测试计划
 
 最低域：
@@ -166,14 +178,36 @@ conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 实现时先跑聚焦Interrupt/MCP recovery/cancel模块；退出时必须覆盖multi-waiting、restart fault、duplicate delivery、lease
 takeover和cancel race。仍只通过test-only assembly调用Agent resume入口。
 
-## 12. Git检查点与回滚
+实现必须新增并运行以下精确Agent恢复目标；不存在、零测试或non-zero exit均失败：
+
+```bash
+conda run -n multi_agent python -m unittest \
+  tests.orchestration.test_agent_continuation \
+  tests.lifecycle.test_agent_run_recovery \
+  tests.api.test_agent_continuation
+```
+
+## 12. 风险、假设与开放问题
+
+| 风险 | 缓解/阻断条件 |
+|---|---|
+| 重复answer/wakeup/outbox产生双result | call/result唯一约束、digest和幂等outcome commit |
+| 不确定副作用被恢复worker重放 | start authority分类和executor invocation-count tests；不确定即aborted |
+| 多waiting中首个回答触发提前采样 | waiting集合remaining count与model-call spy双重断言 |
+| Lease release/reacquire竞态丢失owner | waiting事务先提交，CAS reacquire，stale token fail closed |
+| Cancel与remote completion竞争 | Run/Task revision线性化和late-result discard |
+
+已确认假设：现有Skill missing-input及MCP approval/MRTR/remote authority可按identity引用；外部Capability不保证任意
+exactly-once。开放问题：无。
+
+## 13. Git检查点与回滚
 
 - 新locator/Agent recovery为pre-cutover proof，不注册真实route；
 - 不删除旧DAG continuation代码；
 - 回滚删除Agent-only locator/coordinator，保留Phase 1 durable contract；
 - 若必须重放不确定副作用才能完成，阶段转`blocked`，不能弱化no-replay。
 
-## 13. 完成与交接
+## 14. 完成与交接
 
 AL-P4-01～10及所有Skill/MCP/cancel恢复回归通过；所有恢复回到原Run/call；无真实API切换。
 

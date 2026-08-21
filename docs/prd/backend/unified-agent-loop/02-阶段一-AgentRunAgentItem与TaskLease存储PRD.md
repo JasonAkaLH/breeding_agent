@@ -2,11 +2,13 @@
 
 - **日期**：2026-08-22
 - **状态**：pending
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0 Agent Model Contract必须`proof_complete`
 - **主责需求**：FR-17、FR-26
 - **协作需求**：为FR-23提供storage primitive，不取得端到端主责
 - **主责NFR**：一致性与原子性
+- **直接参与者**：Storage/Rust维护者、Agent Runtime维护者、数据库与权限维护者、恢复/发布审查者
 - **目标结果**：以additive方式建立Agent durable state、原子sample/outcome/final操作和单一Task lease，在SQLite、PostgreSQL、Runtime Sidecar/Rust上语义一致。
 
 ## 1. 目标与价值
@@ -136,6 +138,15 @@ Result slots在任何Capability启动前预留。并发结果可按完成顺序�
 - migration只additive，不读取或转换旧WorkflowPlan；
 - hidden reasoning不进入AgentItem。
 
+### 9.1 跨阶段NFR协作
+
+| NFR | 本阶段责任 | 后续复验 |
+|---|---|---|
+| 一致性与原子性 | 主责：三backend reservation/outcome/final/lease parity | Phase 3、4、6、7用真实Loop/recovery重复fault tests |
+| 安全与隐私 | Closed kinds、payload上限、权限和no-secret storage | Phase 2/3验证语义projection与Context不泄漏 |
+| 性能与资源 | Lease heartbeat不busy-poll，waiting可释放资源 | Phase 3/4验证长调用和waiting worker占用 |
+| Final唯一性/恢复/可观测性 | 提供atomic final、waiting和durable event primitives | Phase 3～5验证端到端语义和低敏event |
+
 ## 10. 测试与环境门禁
 
 最低测试域：`tests/core/`、`tests/storage/`、Runtime Sidecar contract、native Runtime Sidecar tests。必须新增Agent storage
@@ -144,20 +155,37 @@ conformance vectors、atomic fault injection、lease fake clock和permission tes
 ```bash
 conda run -n multi_agent python -m unittest discover -s tests/core -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'
-conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only cargo_fmt --only cargo_test
+conda run -n multi_agent python -m unittest \
+  tests.integrations.test_runtime_sidecar_grpc_client \
+  tests.storage.test_rust_runtime_sidecar_contract
+conda run -n multi_agent python scripts/run_rust_quality_gates.py --run \
+  --only cargo_fmt --only cargo_clippy --only cargo_test
 ```
 
 真实PostgreSQL schema、transaction、permission和concurrency tests必须使用测试DSN。缺DSN、skip、缺cargo或required
 Rust gate时本阶段为`blocked`，不能标记`proof_complete`。
 
-## 11. Git检查点与回滚
+## 11. 风险、假设与开放问题
+
+| 风险 | 缓解/阻断条件 |
+|---|---|
+| 三backend对sequence/digest/transaction理解不同 | 单一conformance vectors和fault matrix；任一backend不通过即blocked |
+| Caller时钟或token rotation造成双owner | Storage/Sidecar权威时钟、fencing token和fake-clock takeover tests |
+| Additive schema影响旧binary | Migration/old-binary compatibility test；Phase 6前不得删除旧字段 |
+| File staging与DB transaction留下orphan | No-clobber staging、不可见ref和可恢复cleanup tests |
+| 真实PG/Sidecar环境缺失 | 不以SQLite/mock替代，状态保持blocked |
+
+已确认假设：现有Task lease可扩展为AgentRun唯一lease authority；Agent schema可additive落地并被旧binary忽略。
+开放问题：无。
+
+## 12. Git检查点与回滚
 
 - Schema/proto/repository为additive，旧binary必须可忽略；
 - 不切换真实入口，不删除DAG字段；
 - 回滚可删除未使用Agent schema和adapter代码；如果测试数据已写入，只清理开发数据，不做旧DAG转换；
 - 任何备份/清理不得读取或移动`docker_cmd.md`。
 
-## 12. 完成与交接
+## 13. 完成与交接
 
 完成条件：AL-P1-01～10在SQLite、真实PostgreSQL和Runtime Sidecar/Rust通过；权限/migration/fault tests通过；无模型或
 Capability执行路径变化。

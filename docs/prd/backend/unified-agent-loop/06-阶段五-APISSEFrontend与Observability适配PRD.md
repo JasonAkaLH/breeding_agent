@@ -2,10 +2,12 @@
 
 - **日期**：2026-08-22
 - **状态**：pending
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～4必须`proof_complete`
 - **主责需求**：FR-21、FR-22
 - **主责NFR**：可观测性、API/Frontend兼容、可访问性
+- **直接参与者**：最终用户、API/Frontend维护者、Lifecycle/History维护者、Observability与可访问性审查者
 - **目标结果**：在不切换真实执行入口的前提下，让API、SSE、history和Frontend完整消费Agent投影，并准备可审计cutover-readiness报告。
 
 ## 1. 目标与价值
@@ -40,7 +42,7 @@ Agent Loop改变内部执行轨迹，但用户仍依赖Task、TaskNode、SSE、I
 - Frontend task reducer、progress、waiting/approval/interrupt和refresh restore；
 - 可访问性回归；
 - test-only API assembly/fake events；
-- cutover-readiness inventory/report。
+- 固定`docs/prd/backend/unified-agent-loop/cutover-readiness.md`证据产物。
 
 ### 3.2 非范围
 
@@ -134,7 +136,7 @@ Waiting Task不占model/capability worker，但仍受Task资源和MCP lease配�
 | AL-P5-07 | 多waiting逐项展示且不提前complete。 | Reducer/App integration tests。 |
 | AL-P5-08 | Frontend可访问性保持。 | Focus、keyboard、semantics tests。 |
 | AL-P5-09 | Test-only assembly不可被真实请求选择。 | Runtime config/route inventory无Agent switch。 |
-| AL-P5-10 | 生成cutover-readiness报告。 | 列出全部入口、events、docs、tests和未满足门禁。 |
+| AL-P5-10 | 生成固定cutover-readiness报告。 | `cutover-readiness.md`包含README定义的commit、阶段状态、入口、tests、docs、schema和blockers字段。 |
 
 ## 11. 失败与降级
 
@@ -145,6 +147,15 @@ Waiting Task不占model/capability worker，但仍受Task资源和MCP lease配�
 - final delta发布后commit未完成：恢复重放同ID；
 - fallback metadata缺失/非法：安全隐藏notice但不篡改assistant正文；
 - metric backend失败不得改变Run业务终态，但必须记录观测故障。
+
+### 11.1 跨阶段NFR协作
+
+| NFR | 本阶段责任 | 后续复验 |
+|---|---|---|
+| 可观测性 | 主责：closed events、transient reasoning和低基数metrics | Phase 6/7全入口及泄漏扫描复验 |
+| API/Frontend兼容 | 主责：Task/SSE/Interrupt/history/empty-edge graph | Phase 6切换、Phase 7物理删除后复验 |
+| 可访问性 | 主责：approval/interrupt/progress focus、keyboard、semantics | Phase 6/7完整Frontend门禁复验 |
+| Provider/安全/性能/final/recovery | 消费Phase 0～4事实并只做安全projection | Event/history/metric leak、waiting资源和final replay tests |
 
 ## 12. 测试与门禁
 
@@ -159,16 +170,43 @@ npm run build
 
 Agent投影只能通过test-only assembly、fake events和fixtures验证。不得增加请求级feature flag或生产route到新Loop。
 
-## 13. Git检查点与回滚
+后端必须创建/运行精确Agent投影与metrics目标，并保留现有Task/SSE/history回归：
+
+```bash
+conda run -n multi_agent python -m unittest \
+  tests.api.test_agent_task_projection \
+  tests.api.test_task_query \
+  tests.api.test_task_events_sse \
+  tests.api.test_main_agent_llm \
+  tests.observability.test_agent_metrics
+```
+
+上述新模块不存在、零测试或non-zero exit均失败。
+
+## 13. 风险、假设与开放问题
+
+| 风险 | 缓解/阻断条件 |
+|---|---|
+| `/graph`名称让客户端误以为存在未来DAG | 文档固定invocation-ledger语义、edges空和repository spy |
+| 新旧event并存造成reducer冲突 | Phase 5只test fixture；Phase 6同检查点删除旧生产/消费分支 |
+| Metric label泄漏ID/文本或基数失控 | Closed allowlist、leak scan和high-cardinality拒绝tests |
+| Waiting/refresh重复Dialog或抢焦点 | Reducer幂等、focus/keyboard/announcement tests |
+| Cutover遗漏入口或文档 | 固定`cutover-readiness.md`字段与Phase 6前双向inventory校验 |
+
+已确认假设：现有Task/SSE/history endpoint保持；旧客户端可以忽略未知Agent audit event并继续依赖Task/final合同。
+开放问题：无。
+
+## 14. Git检查点与回滚
 
 - API/Frontend兼容代码可additive落地，但真实events仍来自旧runtime直到Phase 6；
 - 不删除旧Planner/Replanner event parsing，Phase 6随旧runtime统一清理；
 - 回滚删除Agent-only DTO projection/reducer分支，不改Task持久数据；
 - 未通过Frontend三门禁或可访问性回归时保持`blocked`。
 
-## 14. 完成与交接
+## 15. 完成与交接
 
-AL-P5-01～10、后端API/observability和Frontend三门禁通过；cutover-readiness报告无未知入口；真实执行入口仍为旧DAG。
+AL-P5-01～10、后端API/observability和Frontend三门禁通过；`cutover-readiness.md`字段闭合且无未知入口；真实执行入口
+仍为旧DAG。
 
-交付Phase 6：Task/API投影、SSE/history/event/metric合同、Frontend reducer和cutover-readiness report。Phase 6不得依赖
-DAG edge或Planner/Replanner事件作为新路径事实源。
+交付Phase 6：Task/API投影、SSE/history/event/metric合同、Frontend reducer和固定`cutover-readiness.md`。Phase 6
+不得依赖DAG edge或Planner/Replanner事件作为新路径事实源。

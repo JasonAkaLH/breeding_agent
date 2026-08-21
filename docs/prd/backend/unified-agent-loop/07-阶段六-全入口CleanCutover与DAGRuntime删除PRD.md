@@ -2,10 +2,12 @@
 
 - **日期**：2026-08-22
 - **状态**：pending
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～5必须`proof_complete`，cutover-readiness无未知入口
 - **主责需求**：FR-1、FR-14
 - **主责NFR**：可维护性与单控制面
+- **直接参与者**：最终用户、API/Agent/Orchestration维护者、Skill/MCP/Lifecycle维护者、Frontend/Rust/文档与发布审查者
 - **目标结果**：在同一受审commit序列中切换全部执行/恢复入口并删除DAG runtime源码与wiring；保留但不再读取DAG physical schema到Phase 7。
 
 ## 1. 目标与价值
@@ -22,7 +24,7 @@ Phase 0～5已经证明Model、Storage、Invocation、Loop、Recovery和API/Fron
 - SQLite、真实PostgreSQL、Runtime Sidecar/Rust Agent contract证据有效；
 - Agent automatic/explicit/multi-call/final/waiting/recovery/cancel tests通过；
 - API/Frontend/observability三门禁通过；
-- cutover-readiness列出所有start/resume/cancel/recovery入口和旧runtime模块；
+- `docs/prd/backend/unified-agent-loop/cutover-readiness.md`字段闭合，列出所有start/resume/cancel/recovery入口和旧runtime模块；
 - 最后一个可回滚DAG代码检查点已提交；
 - 当前分支确认是`main`，不涉及`prod`。
 
@@ -85,7 +87,8 @@ Phase 0～5已经证明Model、Storage、Invocation、Loop、Recovery和API/Fron
 - TaskNode criticality、dependency_type、retry_policy、timeout_policy、resource_class；
 - API DTO所需固定兼容字段。
 
-必须生成明确inventory和“零生产读取”静态证明。保留schema不等于保留DAG runtime或兼容恢复。
+必须在`docs/prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`记录明确inventory和“零生产读取”静态证明。
+保留schema不等于保留DAG runtime或兼容恢复。
 
 ## 6. Assembly合同
 
@@ -106,7 +109,7 @@ Phase 0～5已经证明Model、Storage、Invocation、Loop、Recovery和API/Fron
 | AL-P6-04 | 不存在dual-runtime flag/fallback。 | Config/DTO/env/runtime搜索为零，非法旧配置不能启用旧路。 |
 | AL-P6-05 | 普通/显式/continuation/cancel用户行为通过。 | 全入口API/E2E和history/Frontend回归。 |
 | AL-P6-06 | MCP/Skill安全链保持。 | 现有ordinary/approval/MRTR/remote/result parser/slot/artifact回归。 |
-| AL-P6-07 | 旧DAG physical schema无生产读取。 | Repository/proto call spies和静态inventory通过。 |
+| AL-P6-07 | 旧DAG physical schema无生产读取。 | Repository/proto call spies和`dag-runtime-deletion-report.md`静态inventory通过。 |
 | AL-P6-08 | Active PRD不再把DAG标为当前基线。 | 文档inventory无active旧控制面口径。 |
 | AL-P6-09 | 新Agent Task不承诺旧代码恢复。 | Run metadata/docs无兼容adapter或转换器。 |
 | AL-P6-10 | Cutover可整体回滚。 | 回滚演练使用最后DAG代码检查点和pre-Phase7 schema。 |
@@ -129,21 +132,52 @@ Phase 0～5已经证明Model、Storage、Invocation、Loop、Recovery和API/Fron
 - Phase 6过程中进程崩溃：部署/运行只允许完整pre-cutover或完整post-cutover binary，不支持混合版本；
 - 文档或静态删除清单未闭合：不标记cutover_complete。
 
+### 9.1 跨阶段NFR协作
+
+| NFR | 本阶段责任 | 最终复验 |
+|---|---|---|
+| 可维护性与单控制面 | 主责：单一assembly、invocation/outcome实现、无DAG/flag/fallback | Phase 7 physical/static/docs再次证明 |
+| Provider/一致性/安全/catalog/context | 消费Phase 0～3合同并在真实入口复验 | 全入口E2E、leak scan、same-binding和catalog overflow tests |
+| 性能/final/recovery/observability/API/accessibility | 消费Phase 3～5闭环 | 完整Backend/Frontend/Rust与cutover readiness证据 |
+
 ## 10. 验证门禁
 
 必须运行：
 
-- 全部后端分层`unittest`与`compileall`；
-- 全部Frontend Vitest、typecheck、build；
+- README“验证口径”中的全部canonical后端命令，逐条要求非零测试；
+- README中的Frontend Vitest、typecheck、build；
 - 受影响Rust contract/tests；
 - start/resume/cancel/recovery全入口E2E；
 - Skill/MCP完整回归；
 - runtime/config/docs静态删除扫描；
 - pre/post cutover rollback rehearsal。
 
+Rust最低命令：
+
+```bash
+conda run -n multi_agent python scripts/run_rust_quality_gates.py --run \
+  --only cargo_fmt --only cargo_clippy --only cargo_test
+```
+
+生产runtime零引用扫描必须覆盖`src/`、`frontend/src/`和`native/`，并把命令、commit与结果写入
+`dag-runtime-deletion-report.md`。任何required命令不存在、零测试、skip或non-zero exit均失败。
+
 本阶段不执行DAG physical migration，也不把真实MCP smoke推迟的缺口误记为最终complete。
 
-## 11. Git与回滚
+## 11. 风险、假设与开放问题
+
+| 风险 | 缓解/阻断条件 |
+|---|---|
+| 遗漏start/resume/recovery入口 | `cutover-readiness.md`双向route/worker inventory和全入口spy/E2E |
+| 同一commit序列出现可运行半切换binary | 只允许完整pre/post assembly；中间检查点不得作为可运行交付物 |
+| 删除旧测试掩盖行为回归 | 每组删除关联replacement test或纯实现断言证据 |
+| 旧DAG schema被新代码继续读取 | Repository/proto spy和`dag-runtime-deletion-report.md`零读取扫描 |
+| Active PRD仍指导Planner/Replanner | Phase 0 inventory闭合和主索引authority更新 |
+
+已确认假设：Phase 0～5全部proof与真实环境门禁可在cutover前复验；Phase 7前旧physical schema仍允许完整Phase 6
+binary运行。开放问题：无。
+
+## 12. Git与回滚
 
 - 使用单一受审commit序列；中间commit可构建测试，但任何可运行检查点只能是全旧或全新控制面；
 - 最后DAG checkpoint必须可与尚未删除的schema一起启动；
@@ -151,9 +185,10 @@ Phase 0～5已经证明Model、Storage、Invocation、Loop、Recovery和API/Fron
 - 不使用feature flag保持旧runtime；
 - 不读取、移动、跟踪或删除`docker_cmd.md`。
 
-## 12. 完成与交接
+## 13. 完成与交接
 
-AL-P6-01～10、完整回归、静态删除和文档零漂移通过后，状态标记`cutover_complete`。生产源码只剩Agent Loop控制面；
-DAG physical fields存在但无生产读取。
+AL-P6-01～10、完整回归、`dag-runtime-deletion-report.md`和文档零漂移通过后，状态标记`cutover_complete`。生产源码
+只剩Agent Loop控制面；DAG physical fields存在但无生产读取。
 
-交付Phase 7：单一Agent runtime assembly、DAG runtime删除报告、待删除schema/proto inventory和最后可恢复备份边界。
+交付Phase 7：单一Agent runtime assembly、固定`dag-runtime-deletion-report.md`、待删除schema/proto inventory和最后
+可恢复备份边界。
