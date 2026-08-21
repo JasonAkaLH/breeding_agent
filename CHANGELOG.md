@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- 统一同模型Agent Loop架构设计已确认：所有普通请求、显式Skill/MCP、审批、补充输入与remote continuation最终统一进入或恢复同一AgentRun，采用原生结构化tool calls、append-only AgentItems、同模型上下文压缩、CapabilityInvocationService和唯一最终回答发布；Agent循环不设置maxTurns。设计要求clean cutover，不迁移或恢复旧DAG Task，并在SQLite/PostgreSQL/Rust Sidecar持久化合同就绪后删除WorkflowPlan、Workflow Provider/Router/Expander/Validator、Runtime Replanner、CompletionPolicy、TaskEdge调度和独立`main_agent.respond` finalizer。本条仅记录设计，业务实现尚未开始。License Requirement：仅设计、索引与变更记录，无新增依赖或许可变更。
+
 - MCP always-on结果展示修复：authoritative terminal commit现在把candidate中的`safe_result_size_bytes`同步固化到`MCPCallRecord.output_size_bytes`，并在幂等重试时安全补齐NULL值；避免新Call虽然已有parser checkpoint、receipt和published projection，却被历史重投影authority校验误判为`historical_authority_invalid`并与live projection attach发生CAS竞争。License Requirement：复用现有terminal candidate/receipt与Repository能力，无新增依赖或许可变更。
 
 - MCP Result Parser运行路径收敛为always-on：废弃独立`MAF_USER_MCP_RESULT_PARSER_MODE`及`safe_hide|shadow|enforce`分支；启用用户级MCP时ordinary、approval、workflow和remote task结果始终在terminal前经过现有五版本Decoder，成功展示typed business projection，`isError`与malformed结果按闭合失败语义处理。历史`safe_hide`仅保留为缺少parser authority的不可用原因，公共raw JSON仍永久禁止展示。License Requirement：复用现有Result Service、Gateway、Artifact与前端能力，无新增依赖或许可变更。
