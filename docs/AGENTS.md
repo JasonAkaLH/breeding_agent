@@ -32,7 +32,7 @@
 - `superpowers/specs/2026-08-20-mcp-result-text-artifact-design.md`：已在`main`完成的历史MCP Tool JSON原始返回公共`text` artifact增量设计；其内部文件副本与生命周期继续有效，完整raw JSON公共展示决定已由同日五版本Result解析设计替代。
 - `superpowers/specs/2026-08-20-mcp-versioned-result-parsing-design.md`：经六轮自主审查/修订以98%通过信心门、现已完成八检查点仓库实现的五版本Result解析设计；以版本/来源独立Decoder、Call级output schema/source authority、隔离worker validated checkpoint和typed user/agent projection替代完整raw JSON公共展示，raw result仅保留为内部durable authority，rollback永久safe-hide。真实PostgreSQL DSN与生产shadow/enforce观察窗仍是外部证据，不属于仓库完成状态。
 - `superpowers/specs/2026-08-20-mcp-versioned-result-parsing-implementation-plan.md`：上述设计的八检查点已执行计划；记录safe-hide、authority/migration、五版本Decoder、隔离worker、terminal gate、projection consumer、typed API/frontend、历史零网络补投与rollout指标的独立检查点和门禁结果。
-- `superpowers/specs/2026-08-21-unified-agent-loop-design.md`：已确认、尚未实施的统一同模型 Agent Loop clean-cutover设计；所有执行入口、显式 Skill/MCP、审批、补充输入和remote continuation统一恢复同一AgentRun，不保留DAG runtime或旧任务兼容恢复，同时保留现有Capability、MCP、Skill、安全、artifact和事件边界。
+- `superpowers/specs/2026-08-21-unified-agent-loop-design.md`：经三轮获批修订、第四次全量审计以100/100通过信心门，尚未实施的统一同模型 Agent Loop clean-cutover设计；所有执行入口、显式 Skill/MCP、审批、补充输入和remote continuation统一恢复同一AgentRun，不保留DAG runtime或旧任务兼容恢复；锁定原生multi-tool call原子账本、单一Task lease heartbeat/失租fencing、`agent.final_output`原子发布、`PublicSkillProfile`安全activation和完整Tool catalog预算门禁，同时保留现有Capability、MCP、Skill、安全、artifact和事件边界。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
@@ -44,7 +44,7 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-08-21-unified-agent-loop-design.md` | 设计已确认；实现尚未开始 | 基于已确认设计生成分阶段实施计划；最终所有执行入口统一Agent Loop，新增AgentRun/AgentItem与原生tool-call contract，完成SQLite/PostgreSQL/Rust Sidecar一致性后删除WorkflowPlan、Runtime Replanner、DAG finalizer和旧任务兼容恢复。 |
+| `superpowers/specs/2026-08-21-unified-agent-loop-design.md` | 100/100通过信心门；实现尚未开始 | 基于已确认设计生成分阶段实施计划；先完成AgentRun/AgentItem、原生tool-call、单一Task lease、delegated Skill安全activation、atomic outcome/final publication与SQLite/PostgreSQL/Rust Sidecar一致性证明，再clean cutover删除WorkflowPlan、Runtime Replanner、DAG finalizer和旧任务兼容恢复。 |
 | `个人桌面长任务Agent总体设计总纲.md` | 总纲已确认；实现尚未开始 | 基于该总纲生成分阶段实施计划；个人版以 Rust daemon 为唯一可信控制 runtime，必须支持受控子 Agent spawn 以及主 Agent 决策、Runtime 仲裁的权限/上下文/交接边界，一次性替换服务端架构，旧历史只读导入。 |
 | `prd/backend/capability-missing-fallback/README.md`（父入口：`prd/backend/23-能力缺失LLMFallback披露PRD.md`） | Phase 0 至 Phase 4 代码实现已落地 | 后续仅在新增 fallback reason、artifact 政策或能力注册语义时同步更新 PRD、sanitizer、前端 notice 与测试矩阵。 |
 | `prd/backend/conversation-file-history-selection/README.md`（父入口：`prd/backend/21-对话文件历史与智能选择PRD.md`） | 阶段零至阶段五已实施；后续仅保留 guarded multi-select 放量/观测增强 | 若后续放量 `enforce_guarded_multi` 或新增 file_upload public 字段，需同步发布指标、后端 sanitizer、memory 投影、前端安全卡片 allowlist、API 文档与 CHANGELOG。 |
