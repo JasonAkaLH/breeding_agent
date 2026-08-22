@@ -5,6 +5,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 
 from src.orchestration.models import UserMCPServerProfile
+from src.orchestration.agent_loop.mcp_binding import RunBoundMCPTextGenerator
 
 from .models import MCPServerRouteAction, MCPServerRouteActionType
 
@@ -16,8 +17,17 @@ class MCPServerRouterOutputError(ValueError):
 
 
 class MCPServerRouter:
-    def __init__(self, *, text_generator: ServerRouterTextGenerator, max_repair_attempts: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        text_generator: ServerRouterTextGenerator | None = None,
+        run_bound_generator: RunBoundMCPTextGenerator | None = None,
+        max_repair_attempts: int = 1,
+    ) -> None:
+        if (text_generator is None) == (run_bound_generator is None):
+            raise ValueError("exactly one MCP Server Router generator is required")
         self._text_generator = text_generator
+        self._run_bound_generator = run_bound_generator
         self._max_repair_attempts = max(0, max_repair_attempts)
 
     async def route(
@@ -26,6 +36,7 @@ class MCPServerRouter:
         user_request: str,
         remaining_servers: tuple[UserMCPServerProfile, ...],
         failed_server_ids: frozenset[str] = frozenset(),
+        agent_run_id: str | None = None,
     ) -> MCPServerRouteAction:
         original_prompt = build_server_router_prompt(
             user_request=user_request,
@@ -38,7 +49,7 @@ class MCPServerRouter:
         allowed_server_ids = {profile.server_id for profile in remaining_servers} - set(failed_server_ids)
         while attempts <= self._max_repair_attempts:
             attempts += 1
-            raw_output = self._text_generator(prompt)
+            raw_output = self._generate(prompt, agent_run_id=agent_run_id)
             if inspect.isawaitable(raw_output):
                 raw_output = await raw_output
             if not isinstance(raw_output, str):
@@ -57,6 +68,18 @@ class MCPServerRouter:
                 continue
             raise error
         raise MCPServerRouterOutputError("Server Router repair attempts exhausted")
+
+    def _generate(self, prompt: str, *, agent_run_id: str | None):
+        if self._run_bound_generator is not None:
+            if not agent_run_id:
+                raise MCPServerRouterOutputError("AgentRun id is required for bound Server Router")
+            return self._run_bound_generator.generate(
+                prompt,
+                run_id=agent_run_id,
+                purpose="mcp_server_router",
+            )
+        assert self._text_generator is not None
+        return self._text_generator(prompt)
 
 
 def build_server_router_prompt(

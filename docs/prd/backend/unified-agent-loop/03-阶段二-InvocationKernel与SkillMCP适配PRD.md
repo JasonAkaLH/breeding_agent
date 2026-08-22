@@ -1,8 +1,8 @@
 # Phase 2：Invocation Kernel 与 Skill/MCP 适配 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P2-A/P2-B/P2-C green；下一步P2-D）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P2-A～P2-C实现证据已闭合
+- **状态**：proof_complete（P2-A～P2-D green）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；Phase 2实现与退出证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0、Phase 1必须`proof_complete`
 - **主责需求**：FR-13、FR-15、FR-16、FR-20、FR-24
@@ -227,6 +227,18 @@ conda run -n multi_agent python -m unittest discover -s tests/integrations/mcp -
 - SkillExecutor源码与行为门禁证明三answer mode只形成Capability Tool result/Artifact，不调用AgentModelPort/LLMClient、不创建
   `main_agent.respond` finalizer；P2-C canonical 12项、Skill capability 3项、agent_skills 200项、orchestration 196项通过。
   agent_skills 43项skip均为既有可选平台/外部环境套件，不计required通过；P2-C green，进入P2-D。
+
+### 11.4 P2-D实施证据
+
+- `RunBoundMCPTextGenerator`只接AgentRun repository与Phase 0 model port；Router/Selector的Agent-only入口只传`agent_run_id`，
+  每次从Run读取完整binding，接口没有edition/reasoning/thinking覆盖参数；legacy text generator路径保持原签名兼容；
+- ordinary、approval recovery、remote recovery和包含恶意替代edition文本的四次内部采样均使用同一model edition、reasoning、
+  thinking与option digests；缺Run identity在模型调用前fail closed；
+- P2-D聚焦19项、MCP integration 528项、MCP dispatch 15项、MCP tool 15项、main-agent 65项、orchestration 198项通过。
+  MCP integration 2项skip是既有可选环境套件，不记required通过；完整回归暴露的既有shadow manifest错误消息漂移以单行
+  文案对齐关闭，closed scenario集合、fingerprint和校验行为未改；
+- AL-P2-01～09及Phase 2受影响域闭合，Phase 2为`proof_complete`。Agent adapter仍只由test fixture调用，正式请求仍走DAG；
+  下一检查点P3-A。
 
 ## 12. 风险、假设与开放问题
 

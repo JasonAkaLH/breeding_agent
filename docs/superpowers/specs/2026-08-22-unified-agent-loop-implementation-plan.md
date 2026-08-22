@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0、Phase 1均`proof_complete`；Phase 2 `in_progress`，P2-A/P2-B/P2-C green；下一检查点P2-D
+- 执行状态：Phase 0～Phase 2均`proof_complete`；P2-A～P2-D green；下一检查点P3-A
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -383,6 +383,13 @@ Green gate：AL-P2-01～09、Skill/MCP完整安全回归和旧DAG Kernel行为�
 回滚：回退Run binding注入和Agent MCP adapter，不触碰现有MCP authority数据。
 
 建议commit：`feat(agent): bind mcp routing to agent runs`。
+
+实施证据：新增`RunBoundMCPTextGenerator`，Router/Selector的Agent-only构造只接`agent_run_id`，每次从
+`AgentRunRepository`读取固定binding并调用Phase 0 `AgentModelPort`；接口不存在edition覆盖参数，ordinary、approval recovery、
+remote recovery与含恶意edition文本的四次采样均证明binding identity不变。Legacy text generator路径保持兼容。P2-D聚焦19项、
+MCP integration 528项、MCP dispatch 15项、MCP tool 15项、main-agent 65项和orchestration 198项通过；MCP integration 2项
+skip为既有可选环境套件。完整回归同时以最小文案改动关闭长期记录的shadow manifest错误消息漂移，scenario校验不变。
+AL-P2-01～09闭合，Phase 2为`proof_complete`，正式请求仍无法选择Agent assembly，下一检查点P3-A。
 
 ## 8. Phase 3：核心 Loop、Compaction 与 Final Output
 

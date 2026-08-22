@@ -4,6 +4,8 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
 
+from src.orchestration.agent_loop.mcp_binding import RunBoundMCPTextGenerator
+
 from .models import (
     MCPSelectorAction,
     MCPSelectorActionType,
@@ -19,18 +21,32 @@ class MCPSelectorOutputError(ValueError):
 
 
 class MCPToolSelector:
-    def __init__(self, *, text_generator: SelectorTextGenerator, max_repair_attempts: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        text_generator: SelectorTextGenerator | None = None,
+        run_bound_generator: RunBoundMCPTextGenerator | None = None,
+        max_repair_attempts: int = 1,
+    ) -> None:
+        if (text_generator is None) == (run_bound_generator is None):
+            raise ValueError("exactly one MCP Tool Selector generator is required")
         self._text_generator = text_generator
+        self._run_bound_generator = run_bound_generator
         self._max_repair_attempts = max(0, max_repair_attempts)
 
-    async def select(self, context: MCPSelectorContext) -> MCPSelectorAction:
+    async def select(
+        self,
+        context: MCPSelectorContext,
+        *,
+        agent_run_id: str | None = None,
+    ) -> MCPSelectorAction:
         original_prompt = build_selector_prompt(context)
         prompt = original_prompt
         previous_output = ""
         attempts = 0
         while attempts <= self._max_repair_attempts:
             attempts += 1
-            raw_output = self._text_generator(prompt)
+            raw_output = self._generate(prompt, agent_run_id=agent_run_id)
             if inspect.isawaitable(raw_output):
                 raw_output = await raw_output
             if not isinstance(raw_output, str):
@@ -52,6 +68,18 @@ class MCPToolSelector:
                 continue
             raise error
         raise MCPSelectorOutputError("Selector repair attempts exhausted")
+
+    def _generate(self, prompt: str, *, agent_run_id: str | None):
+        if self._run_bound_generator is not None:
+            if not agent_run_id:
+                raise MCPSelectorOutputError("AgentRun id is required for bound MCP Selector")
+            return self._run_bound_generator.generate(
+                prompt,
+                run_id=agent_run_id,
+                purpose="mcp_tool_selector",
+            )
+        assert self._text_generator is not None
+        return self._text_generator(prompt)
 
     @staticmethod
     def _validate_action_against_context(action: MCPSelectorAction, context: MCPSelectorContext) -> None:

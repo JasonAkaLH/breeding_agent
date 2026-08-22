@@ -1386,7 +1386,7 @@ def validate_shadow_manifest(manifest: ShadowScenarioManifest) -> None:
         raise ShadowManifestError("shadow manifest contains duplicate scenarios")
     if set(by_scenario) != set(CURRENT_SHADOW_SCENARIOS):
         raise ShadowManifestError(
-            "shadow manifest must define every current scenario exactly once"
+            "shadow manifest must define every closed scenario exactly once"
         )
 
     for scenario in CURRENT_SHADOW_SCENARIOS:

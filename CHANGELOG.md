@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 统一同模型Agent Loop P2-D及Phase 2已`proof_complete`：新增AgentRun-bound MCP内部文本生成器，Router/Selector的Agent入口只接run ID并从repository解析固定model binding，ordinary、approval和remote恢复均无法用用户payload替换edition/reasoning/thinking/options；legacy generator保持兼容。P2-D聚焦19项、MCP integration 528项、MCP dispatch/tool各15项、main-agent 65项和orchestration 198项通过；同时以单行文案关闭长期记录的shadow manifest错误消息漂移，不改scenario校验。正式请求仍走DAG，下一检查点P3-A。License Requirement：复用现有Python、AgentModelPort、MCP Router/Selector与安全回归，无新增依赖或许可变更。
+
 - 统一同模型Agent Loop P2-C完成Skill适配：delegated Skill只把PublicSkillProfile安全投影、pinned revision和canonical digest写为确定性`skill_activation` item，resource index再次限制为公开四字段，服务不接收Manifest/脚本/handler/resource正文；executable Skill继续复用SkillExecutor，可信resolved/current user message覆盖模型query，bundle revision与Artifact context保持system authority。delegated mode不执行，三answer mode只返回Tool result/Artifact且不存在第二模型或DAG finalizer。canonical 12项、Skill capability 3项、agent_skills 200项和orchestration 196项通过。License Requirement：复用现有Python、PublicSkillProfile、SkillExecutor与Agent payload codec，无新增依赖或许可变更。
 
 - 统一同模型Agent Loop P2-B完成安全Tool Catalog与完整预算preflight：新增可信visibility context、typed invocation policy和热重载Catalog；只暴露public/enabled/allowlisted且有policy的Skill与单一`mcp.dispatch`，动态Server enum来自当前安全Profiles，expanded MCP Tool、private/disabled/no-policy/source path均不进入模型面。执行payload再次做allowlist、Draft 2020-12 schema与system authority覆盖，所有能力默认非并行/不可挂起；Preflight完整计入schema和必保segments，只返回三种closed decision及低敏计数，不生成summary或裁剪schema。聚焦34项、orchestration 194项通过。License Requirement：复用现有Python、jsonschema、Registry与Agent model合同，无新增依赖或许可变更。

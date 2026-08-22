@@ -21,6 +21,7 @@ from .skill_activation import (
     DelegatedSkillActivationService,
     SkillActivationCommitPort,
 )
+from .mcp_binding import RunBoundMCPTextGenerator
 from .models import (
     AgentCancellationToken,
     AgentFinishMetadata,
@@ -98,4 +99,5 @@ __all__ = [
     "DelegatedSkillActivation",
     "DelegatedSkillActivationService",
     "SkillActivationCommitPort",
+    "RunBoundMCPTextGenerator",
 ]
