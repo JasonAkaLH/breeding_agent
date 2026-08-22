@@ -17,7 +17,7 @@ AGENTS.md
 /docker_cmd.md
 
 # External Skill compatibility checkout; canonical bundles live in the independent repository.
-/skill/
+/skill
 
 # Local report drafts
 /本周工作周报.md

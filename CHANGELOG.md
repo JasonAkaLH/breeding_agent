@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- External Project Skill Bundle Authority S3/S4已闭合：外部`vibe-breeding/dev`提交`49b3aa0`从受审`d38952c`恢复Mini BreedStat RCBD并迁移v2合同，6个算法/示例blob逐一保持完全一致；Field Design恢复Diagonal/Interval必填列数及安全追问，Field Analysis修复script-local import/UTF-8环境，Rice Genie补齐批准查询token。主仓新增Mini/Field Design路由矩阵，显式RCBD/重复/对照位置归Mini，通用/Diagonal/Interval/泛fieldbook归Field Design且无字母序tie；`/skill`忽略规则同时覆盖目录与本地符号链接。4个Skill quick validation、外部自测7项、S3/S4聚焦38项、路由/Skill执行21项及Agent Skill全量209项零skip通过。License Requirement：只恢复已有Git对象并复用既有Python/R/SQLite资产，无新增依赖、远程asset或许可变更。
+
 - External Project Skill Bundle Authority S2已闭合pre-catalog startup gate：默认public Skill root非空时必须通过`MAF_PROJECT_SKILL_BUNDLE_DIGEST`精确校验，缺失、非法、不匹配或unsafe entry均在catalog/capability注册前失败；显式测试root保留窄注入seam，但注入catalog不得绕过默认assembly门禁。成功/失败审计只写闭合结果、计数、字节、耗时和12位digest前缀；Docker Compose仅透传expected digest。API测试改用受跟踪的非敏感Agent-ready配置，不再依赖ignored本地配置，并修复因此暴露的取消终态竞态和阻塞测试时序。聚焦15项、API全量500项、observability 39项与compileall通过；全量进程仍报告3条既有SQLite析构期`ResourceWarning`，未计为零告警。License Requirement：复用Python stdlib、既有Skill/SQLite/Docker合同，无新增依赖或许可变更。
 
 - External Project Skill Bundle Authority S1已实现确定性bundle digest纯函数和operator：按`path NUL size NUL file_sha256 LF`计算`sha256:<64-lower-hex>`，只排除`.git`/`__pycache__`/`.pyc`，拒绝内部symlink、特殊文件、非UTF-8路径、读期漂移、1,000文件/256 MiB上限和2秒deadline；operator直接脚本入口可用，只输出safe JSON且不泄漏正文或绝对路径。10项聚焦测试、Agent Skill 207项（43项待外部bundle闭合的skip）、scripts 50项与compileall通过。License Requirement：只使用Python stdlib，无新增依赖或许可变更。

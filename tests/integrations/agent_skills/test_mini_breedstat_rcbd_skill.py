@@ -35,7 +35,8 @@ class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):
         matches = match_skills("帮我做一个RCBD随机区组田间设计", catalog)
 
         self.assertEqual(manifest.name, "mini-breedstat-rcbd")
-        self.assertEqual(manifest.outputs.required, ("answer",))
+        self.assertIsNotNone(manifest.contract)
+        self.assertEqual(manifest.contract.outputs["rcbd_output"].required, ("answer",))
         self.assertEqual(len(manifest.scripts), 1)
         self.assertEqual(manifest.scripts[0].runtime, "python")
         self.assertTrue(manifest.scripts[0].auto_run)
