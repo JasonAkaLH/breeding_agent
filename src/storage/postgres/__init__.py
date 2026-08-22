@@ -1,4 +1,5 @@
 from .bootstrap import bootstrap_postgres_database
+from .agent_repository import PostgreSQLAgentRepository
 from .repositories import PostgreSQLStorage
 from .session import (
     create_postgres_engine,
@@ -8,6 +9,7 @@ from .session import (
 
 __all__ = [
     "PostgreSQLStorage",
+    "PostgreSQLAgentRepository",
     "bootstrap_postgres_database",
     "create_postgres_engine",
     "create_postgres_session_factory",

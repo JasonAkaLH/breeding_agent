@@ -397,6 +397,20 @@ class AgentStorageConflict(RuntimeError):
     """Closed fail-closed CAS or durable identity conflict."""
 
 
+@dataclass(frozen=True, slots=True)
+class AgentTaskLease:
+    run_id: str
+    task_id: str
+    owner_id: str
+    token: str
+    revision: int
+    expires_at: datetime
+
+
+class AgentLeaseLost(RuntimeError):
+    """The current worker can no longer prove Task lease ownership."""
+
+
 def validate_provider_safe_tool_name(name: str) -> str:
     if not _TOOL_NAME_RE.fullmatch(name):
         raise ValueError("provider-safe tool name must match [A-Za-z0-9_-]{1,64}")

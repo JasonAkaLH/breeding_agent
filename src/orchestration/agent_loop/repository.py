@@ -10,6 +10,7 @@ from .models import (
     AgentRun,
     AgentSampleCommit,
     AgentSampleCommitResult,
+    AgentTaskLease,
 )
 
 
@@ -39,6 +40,25 @@ class AgentAtomicWriter(Protocol):
         expected_revision: int,
         expected_claim_token: str | None,
         safe_error_code: str,
+    ) -> AgentRun: ...
+
+
+class AgentTaskLeaseStore(Protocol):
+    async def acquire_task_lease(
+        self, run_id: str, *, owner_id: str, ttl_seconds: float
+    ) -> AgentTaskLease: ...
+
+    async def renew_task_lease(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        token: str,
+        ttl_seconds: float,
+    ) -> AgentTaskLease: ...
+
+    async def release_waiting_task_lease(
+        self, run_id: str, *, owner_id: str, token: str
     ) -> AgentRun: ...
 
     async def cancel_agent_run(

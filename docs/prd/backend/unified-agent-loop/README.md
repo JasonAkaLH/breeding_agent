@@ -1,7 +1,7 @@
 # 统一同模型 Agent Loop 分阶段 PRD 索引
 
 - **日期**：2026-08-22
-- **状态**：实现进行中；Phase 0 `proof_complete`；Phase 1 `in_progress`，P1-A SQLite checkpoint green
+- **状态**：实现进行中；Phase 0 `proof_complete`；Phase 1 `blocked`（P1-A green，P1-B缺真实测试PG DSN）
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
@@ -31,7 +31,7 @@
 |---|---|---|---|
 | 总纲 | `00-统一同模型AgentLoop总纲PRD.md` | 全局不变量、FR/NFR追踪、阶段门禁、文档处置 | approved |
 | Phase 0 | `01-阶段零-现状基线与AgentModelContractPRD.md` | Agent Model Contract、provider门禁、现状/PRD inventory | proof_complete |
-| Phase 1 | `02-阶段一-AgentRunAgentItem与TaskLease存储PRD.md` | Agent durable state、原子操作、单一Task lease、三backend parity | in_progress（P1-A green） |
+| Phase 1 | `02-阶段一-AgentRunAgentItem与TaskLease存储PRD.md` | Agent durable state、原子操作、单一Task lease、三backend parity | blocked（P1-A green；P1-B真实PG门禁缺DSN） |
 | Phase 2 | `03-阶段二-InvocationKernel与SkillMCP适配PRD.md` | Invocation Kernel、Tool Catalog/Policy、Skill/MCP适配 | pending |
 | Phase 3 | `04-阶段三-核心AgentLoop与FinalOutputPRD.md` | 核心Loop、multi-call、compaction、唯一final output | pending |
 | Phase 4 | `05-阶段四-WaitingContinuation与RecoveryPRD.md` | Waiting、Continuation、Crash Recovery、Cancel | pending |

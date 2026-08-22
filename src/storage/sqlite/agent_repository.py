@@ -4,10 +4,11 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -25,6 +26,7 @@ from src.orchestration.agent_loop.models import (
     AgentSampleCommit,
     AgentSampleCommitResult,
     AgentStorageConflict,
+    AgentTaskLease,
 )
 from src.storage.agent_payload import CanonicalAgentPayload, canonicalize_agent_payload
 
@@ -52,10 +54,12 @@ class SQLiteAgentRepository:
         *,
         now_fn: Callable[[], datetime] | None = None,
         fault_injector: FaultInjector | None = None,
+        token_factory: Callable[[], str] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._now = now_fn or _utcnow_naive
         self._fault_injector = fault_injector
+        self._token_factory = token_factory or (lambda: uuid4().hex)
 
     async def create_run(self, run: AgentRun) -> AgentRun:
         return await self._write(lambda session: self._create_run(session, run))
@@ -93,6 +97,42 @@ class SQLiteAgentRepository:
 
     async def reconcile_agent_run_consistency(self, run_id: str) -> AgentRun:
         return await self._write(lambda session: self._reconcile_consistency(session, run_id))
+
+    async def acquire_task_lease(
+        self, run_id: str, *, owner_id: str, ttl_seconds: float
+    ) -> AgentTaskLease:
+        return await self._write(
+            lambda session: self._acquire_lease(
+                session, run_id, owner_id=owner_id, ttl_seconds=ttl_seconds
+            )
+        )
+
+    async def renew_task_lease(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        token: str,
+        ttl_seconds: float,
+    ) -> AgentTaskLease:
+        return await self._write(
+            lambda session: self._renew_lease(
+                session,
+                run_id,
+                owner_id=owner_id,
+                token=token,
+                ttl_seconds=ttl_seconds,
+            )
+        )
+
+    async def release_waiting_task_lease(
+        self, run_id: str, *, owner_id: str, token: str
+    ) -> AgentRun:
+        return await self._write(
+            lambda session: self._release_waiting_lease(
+                session, run_id, owner_id=owner_id, token=token
+            )
+        )
 
     async def fail_agent_run(
         self,
@@ -645,6 +685,94 @@ class SQLiteAgentRepository:
         session.flush()
         return _run_from_row(run)
 
+    def _acquire_lease(
+        self,
+        session: Session,
+        run_id: str,
+        *,
+        owner_id: str,
+        ttl_seconds: float,
+    ) -> AgentTaskLease:
+        _validate_lease_inputs(owner_id, ttl_seconds)
+        run = self._locked_run(session, run_id)
+        if run.status in {
+            AgentRunStatus.COMPLETED.value,
+            AgentRunStatus.FAILED.value,
+            AgentRunStatus.CANCELLED.value,
+        }:
+            raise AgentStorageConflict("agent_task_lease_run_terminal")
+        now = self._storage_now(session)
+        if run.claim_token and run.lease_expires_at and run.lease_expires_at > now:
+            raise AgentStorageConflict("agent_task_lease_held")
+        token = self._token_factory()
+        if not token:
+            raise AgentStorageConflict("agent_task_lease_token_invalid")
+        run.claim_owner = owner_id
+        run.claim_token = token
+        run.lease_expires_at = now + timedelta(seconds=ttl_seconds)
+        run.revision = int(run.revision) + 1
+        run.updated_at = now
+        session.flush()
+        return _lease_from_row(run)
+
+    def _renew_lease(
+        self,
+        session: Session,
+        run_id: str,
+        *,
+        owner_id: str,
+        token: str,
+        ttl_seconds: float,
+    ) -> AgentTaskLease:
+        _validate_lease_inputs(owner_id, ttl_seconds)
+        run = self._locked_run(session, run_id)
+        now = self._storage_now(session)
+        if (
+            run.claim_owner != owner_id
+            or run.claim_token != token
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= now
+        ):
+            raise AgentStorageConflict("agent_task_lease_lost")
+        next_token = self._token_factory()
+        if not next_token or next_token == token:
+            raise AgentStorageConflict("agent_task_lease_token_not_rotated")
+        run.claim_token = next_token
+        run.lease_expires_at = now + timedelta(seconds=ttl_seconds)
+        run.revision = int(run.revision) + 1
+        run.updated_at = now
+        session.flush()
+        return _lease_from_row(run)
+
+    def _release_waiting_lease(
+        self,
+        session: Session,
+        run_id: str,
+        *,
+        owner_id: str,
+        token: str,
+    ) -> AgentRun:
+        run = self._locked_run(session, run_id)
+        now = self._storage_now(session)
+        if (
+            run.status not in {
+                AgentRunStatus.WAITING_FOR_INPUT.value,
+                AgentRunStatus.WAITING_FOR_DEPENDENCY.value,
+            }
+            or run.claim_owner != owner_id
+            or run.claim_token != token
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= now
+        ):
+            raise AgentStorageConflict("agent_waiting_lease_release_rejected")
+        run.claim_owner = None
+        run.claim_token = None
+        run.lease_expires_at = None
+        run.revision = int(run.revision) + 1
+        run.updated_at = now
+        session.flush()
+        return _run_from_row(run)
+
     def _final_result(
         self,
         session: Session,
@@ -747,6 +875,14 @@ class SQLiteAgentRepository:
         if self._fault_injector is not None:
             self._fault_injector(stage)
 
+    def _storage_now(self, session: Session) -> datetime:
+        if session.get_bind().dialect.name == "postgresql":
+            value = session.scalar(select(func.current_timestamp()))
+            if not isinstance(value, datetime):
+                raise AgentStorageConflict("agent_storage_clock_unavailable")
+            return value
+        return self._now()
+
 
 def _binding_from_row(row: AgentRunRow) -> AgentModelBinding:
     return AgentModelBinding(
@@ -832,4 +968,22 @@ def _final_ids(task_id: str) -> dict[str, str]:
 
 
 def _utcnow_naive() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
+
+
+def _validate_lease_inputs(owner_id: str, ttl_seconds: float) -> None:
+    if not owner_id.strip() or isinstance(ttl_seconds, bool) or ttl_seconds <= 0:
+        raise ValueError("Agent Task lease owner and positive TTL are required")
+
+
+def _lease_from_row(row: AgentRunRow) -> AgentTaskLease:
+    if not row.claim_owner or not row.claim_token or row.lease_expires_at is None:
+        raise AgentStorageConflict("agent_task_lease_row_incomplete")
+    return AgentTaskLease(
+        run_id=row.run_id,
+        task_id=row.task_id,
+        owner_id=row.claim_owner,
+        token=row.claim_token,
+        revision=int(row.revision),
+        expires_at=row.lease_expires_at,
+    )

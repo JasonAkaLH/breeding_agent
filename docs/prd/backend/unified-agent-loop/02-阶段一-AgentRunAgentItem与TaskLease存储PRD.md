@@ -1,7 +1,7 @@
 # Phase 1：AgentRun、AgentItem 与 Task Lease 存储 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P1-A SQLite checkpoint green；P1-B/P1-C待实施）
+- **状态**：blocked（P1-A green；P1-B实现已完成本地31项，但`MAF_POSTGRES_TEST_DSN`缺失，真实PG门禁0 tests/1 skip；P1-C未开始）
 - **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0 Agent Model Contract必须`proof_complete`
@@ -180,6 +180,21 @@ Rust gate时本阶段为`blocked`，不能标记`proof_complete`。
 - P1-A新合同19项与既有SQLite bootstrap/Task/Interrupt 41项合计60项通过，`compileall`和`git diff --check`通过；
   未调用模型/Capability，未切换真实route。Phase 1仍须完成真实PostgreSQL和Rust Sidecar门禁，不能标记
   `proof_complete`。
+
+### 10.2 P1-B 当前证据与阻断
+
+- PostgreSQL fresh runtime schema升级到additive v9，manifest/DDL自动包含`agent_run`、`agent_item`、
+  `agent_final_receipt`；`PostgreSQLAgentRepository`绑定与SQLite相同的窄SQLAlchemy事务合同；
+- 新增Task lease store/controller：正TTL、storage权威clock、TTL/3 heartbeat、renew token/revision旋转、stale commit
+  fencing、expiry takeover、waiting提交后release、resume reacquire、active phase失租取消；不创建第二套进程内lease状态；
+- SQLite并发acquire单赢家、renew expiry边界、waiting无heartbeat语义和repository敏感authority零引用静态门禁已覆盖；
+- `test_agent_task_lease`、Agent PostgreSQL schema contract、既有runtime manifest/reconciler合计31项通过；P1-A 60项
+  重跑通过，`compileall`/diff检查通过；
+- `MAF_POSTGRES_TEST_DSN`仅检查presence，结果为false。真实
+  `test_agent_storage_postgres_integration`运行结果为`Ran 0 tests`、`skipped=1`，固定原因
+  `postgres_test_dsn_not_configured`；根据本PRD明确不计为通过；真实transaction、permission、concurrency仍未验证；
+- 解除条件：提供明确的非生产测试PostgreSQL DSN到`MAF_POSTGRES_TEST_DSN`，运行P1-B canonical命令且零skip。
+  在此之前Phase 1保持`blocked`，不进入P1-C。
 
 ## 11. 风险、假设与开放问题
 
