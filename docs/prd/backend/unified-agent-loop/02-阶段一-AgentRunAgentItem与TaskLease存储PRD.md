@@ -1,7 +1,7 @@
 # Phase 1：AgentRun、AgentItem 与 Task Lease 存储 PRD
 
 - **日期**：2026-08-22
-- **状态**：blocked（P1-A green；P1-B实现已完成本地31项，但`MAF_POSTGRES_TEST_DSN`缺失，真实PG门禁0 tests/1 skip；P1-C未开始）
+- **状态**：in_progress（P1-A/P1-B green；P1-C待实施）
 - **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0 Agent Model Contract必须`proof_complete`
@@ -181,20 +181,23 @@ Rust gate时本阶段为`blocked`，不能标记`proof_complete`。
   未调用模型/Capability，未切换真实route。Phase 1仍须完成真实PostgreSQL和Rust Sidecar门禁，不能标记
   `proof_complete`。
 
-### 10.2 P1-B 当前证据与阻断
+### 10.2 P1-B 实施证据
 
 - PostgreSQL fresh runtime schema升级到additive v9，manifest/DDL自动包含`agent_run`、`agent_item`、
   `agent_final_receipt`；`PostgreSQLAgentRepository`绑定与SQLite相同的窄SQLAlchemy事务合同；
 - 新增Task lease store/controller：正TTL、storage权威clock、TTL/3 heartbeat、renew token/revision旋转、stale commit
   fencing、expiry takeover、waiting提交后release、resume reacquire、active phase失租取消；不创建第二套进程内lease状态；
 - SQLite并发acquire单赢家、renew expiry边界、waiting无heartbeat语义和repository敏感authority零引用静态门禁已覆盖；
-- `test_agent_task_lease`、Agent PostgreSQL schema contract、既有runtime manifest/reconciler合计31项通过；P1-A 60项
-  重跑通过，`compileall`/diff检查通过；
-- `MAF_POSTGRES_TEST_DSN`仅检查presence，结果为false。真实
-  `test_agent_storage_postgres_integration`运行结果为`Ran 0 tests`、`skipped=1`，固定原因
-  `postgres_test_dsn_not_configured`；根据本PRD明确不计为通过；真实transaction、permission、concurrency仍未验证；
-- 解除条件：提供明确的非生产测试PostgreSQL DSN到`MAF_POSTGRES_TEST_DSN`，运行P1-B canonical命令且零skip。
-  在此之前Phase 1保持`blocked`，不进入P1-C。
+- 初次环境检查未配置`MAF_POSTGRES_TEST_DSN`，真实模块为0 tests/1 skip；没有把该结果记为通过。随后复用本机已有
+  `postgres:17-bookworm`镜像启动随机本地端口、随机测试role的精确临时容器，仅注入一次性测试DSN；
+- 真实PG覆盖fresh Agent tables、sample事务/fault all-or-zero、storage clock/fencing、并发lease单赢家，以及最小
+  Agent role可读写所需表但拒读`user_mcp_server`敏感authority；P1-B canonical 32项零skip通过，额外Agent PG schema
+  contract 3项通过；P1-A 60项重跑通过，`compileall`/diff检查通过；
+- 首次完整`bootstrap_postgres_database`尝试暴露既有MCP migration CHECK重复添加；同一事务已回滚。本P1-B真实测试改用
+  同源`SQLiteBase.metadata`创建fresh runtime tables，schema manifest/reconciler仍由既有22项验证；该邻接bootstrap缺陷未在
+  Agent checkpoint内重构，后续应单独修复；
+- 精确临时容器已删除，仅含一次性测试数据且不可恢复；未删除镜像/卷，未连接现有开发或生产数据库。P1-B green，
+  Phase 1继续`in_progress`并进入P1-C。
 
 ## 11. 风险、假设与开放问题
 

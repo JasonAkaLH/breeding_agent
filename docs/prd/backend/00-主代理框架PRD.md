@@ -287,7 +287,7 @@
 - Skill 运行闭环 Workbench 分步 PRD：`docs/prd/backend/skill-workbench/README.md`。
 - 能力缺失 LLM fallback 披露兼容入口：`docs/prd/backend/23-能力缺失LLMFallback披露PRD.md`。
 - 能力缺失 LLM fallback 披露分步 PRD：`docs/prd/backend/capability-missing-fallback/README.md`。
-- 统一同模型 Agent Loop 分阶段 PRD：`docs/prd/backend/unified-agent-loop/README.md`（Phase 0已proof_complete；Phase 1因缺真实测试PG DSN blocked，P1-A SQLite green；Phase 6完成前当前DAG仍是已实现运行时基线）。
+- 统一同模型 Agent Loop 分阶段 PRD：`docs/prd/backend/unified-agent-loop/README.md`（Phase 0已proof_complete；Phase 1进行中且P1-A/P1-B green，真实隔离PG已通过；Phase 6完成前当前DAG仍是已实现运行时基线）。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`
 - MCP Runtime 联合改造 Phase PRD：`docs/prd/MCP/README.md`
