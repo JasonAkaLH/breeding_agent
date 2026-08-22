@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import re
+from dataclasses import dataclass, field
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Any, Literal, Mapping
+
+
+AgentMessageRole = Literal["system", "developer", "user", "assistant", "tool"]
+AgentToolChoiceMode = Literal["auto", "required", "none"]
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class AgentProtocolErrorCode(StrEnum):
+    MISSING_CALL_ID = "missing_call_id"
+    DUPLICATE_CALL_ID = "duplicate_call_id"
+    INVALID_TOOL_NAME = "invalid_tool_name"
+    MALFORMED_ARGUMENTS = "malformed_arguments"
+    INCOMPLETE_STREAM = "incomplete_stream"
+    REQUIRED_TOOL_MISSING = "required_tool_missing"
+    REQUIRED_TOOL_MULTIPLE = "required_tool_multiple"
+    REQUIRED_TOOL_MISMATCH = "required_tool_mismatch"
+    EMPTY_SAMPLE = "empty_sample"
+
+
+class AgentProtocolViolation(Exception):
+    def __init__(self, code: AgentProtocolErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class AgentProtocolFailure(Exception):
+    def __init__(self, code: AgentProtocolErrorCode, *, attempts: int) -> None:
+        super().__init__(f"Agent model protocol failed after {attempts} attempt(s): {code.value}")
+        self.code = code
+        self.attempts = attempts
+
+
+class AgentSamplingCancelled(Exception):
+    """Raised when Agent sampling is cancelled before a closed sample exists."""
+
+
+@dataclass(slots=True)
+class AgentCancellationToken:
+    _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
+
+@dataclass(frozen=True, slots=True)
+class AgentProtocolRetryPolicy:
+    max_retries: int = 1
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_retries, bool) or not isinstance(self.max_retries, int) or self.max_retries < 0:
+            raise ValueError("agent_protocol_max_retries must be a non-negative integer")
+
+    @property
+    def max_attempts(self) -> int:
+        return self.max_retries + 1
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(f"agent_protocol_max_retries={self.max_retries}".encode()).hexdigest()
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any] | None = None) -> AgentProtocolRetryPolicy:
+        value = (config or {}).get("agent_protocol_max_retries", 1)
+        if isinstance(value, bool):
+            raise ValueError("agent_protocol_max_retries must be a non-negative integer")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("agent_protocol_max_retries must be a non-negative integer") from exc
+        if str(value).strip() != str(parsed) and not isinstance(value, int):
+            raise ValueError("agent_protocol_max_retries must be a non-negative integer")
+        return cls(max_retries=parsed)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelBinding:
+    model_edition: str
+    reasoning_effort: str = "minimal"
+    thinking_enabled: bool = False
+    option_digests: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.model_edition.strip():
+            raise ValueError("model_edition must not be empty")
+        safe_digests = {str(key): str(value) for key, value in self.option_digests.items()}
+        object.__setattr__(self, "option_digests", MappingProxyType(safe_digests))
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "model_edition": self.model_edition,
+            "reasoning_effort": self.reasoning_effort,
+            "thinking_enabled": self.thinking_enabled,
+            "option_digests": dict(self.option_digests),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolCall:
+    call_id: str
+    provider_safe_name: str
+    arguments_json: str
+    ordinal: int
+
+    def __post_init__(self) -> None:
+        if not self.call_id.strip():
+            raise ValueError("call_id must not be empty")
+        validate_provider_safe_tool_name(self.provider_safe_name)
+        if self.ordinal < 0:
+            raise ValueError("ordinal must be non-negative")
+        try:
+            value = json.loads(self.arguments_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("arguments_json must contain valid JSON") from exc
+        object.__setattr__(self, "arguments_json", canonical_json(value))
+
+
+@dataclass(frozen=True, slots=True)
+class AgentMessage:
+    role: AgentMessageRole
+    content: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: tuple[AgentToolCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.role not in {"system", "developer", "user", "assistant", "tool"}:
+            raise ValueError(f"Unsupported Agent message role: {self.role}")
+        if self.role == "tool" and not (self.tool_call_id or "").strip():
+            raise ValueError("tool messages require tool_call_id")
+        if self.tool_calls and self.role != "assistant":
+            raise ValueError("only assistant messages may contain tool_calls")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolDescriptor:
+    provider_safe_name: str
+    capability_id: str
+    description: str
+    input_schema: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        validate_provider_safe_tool_name(self.provider_safe_name)
+        if not self.capability_id.strip():
+            raise ValueError("capability_id must not be empty")
+        canonical = json.loads(canonical_json(self.input_schema))
+        object.__setattr__(self, "input_schema", MappingProxyType(canonical))
+
+    @classmethod
+    def for_capability(
+        cls,
+        capability_id: str,
+        *,
+        description: str,
+        input_schema: Mapping[str, Any],
+    ) -> AgentToolDescriptor:
+        return cls(
+            provider_safe_name=provider_safe_tool_name(capability_id),
+            capability_id=capability_id,
+            description=description,
+            input_schema=input_schema,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolChoice:
+    mode: AgentToolChoiceMode = "auto"
+    required_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"auto", "required", "none"}:
+            raise ValueError(f"Unsupported Agent tool choice: {self.mode}")
+        if self.mode == "required":
+            validate_provider_safe_tool_name(self.required_name or "")
+        elif self.required_name is not None:
+            raise ValueError("required_name is only valid for required tool choice")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelRequest:
+    request_id: str
+    binding: AgentModelBinding
+    messages: tuple[AgentMessage, ...]
+    tools: tuple[AgentToolDescriptor, ...] = ()
+    tool_choice: AgentToolChoice = field(default_factory=AgentToolChoice)
+    cancellation: AgentCancellationToken | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.request_id.strip():
+            raise ValueError("request_id must not be empty")
+        names = [tool.provider_safe_name for tool in self.tools]
+        if len(names) != len(set(names)):
+            raise ValueError("provider_safe_name values must be unique")
+        if self.tool_choice.mode == "required" and self.tool_choice.required_name not in names:
+            raise ValueError("required tool must be present in request tools")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentUsage:
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    status: Literal["available", "usage_unavailable"] = "usage_unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentFinishMetadata:
+    finish_reason: str
+    attempts: int
+    protocol_outcome: Literal["closed"] = "closed"
+    mixed_text_and_tool_calls: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSample:
+    sample_id: str
+    binding: AgentModelBinding
+    visible_text: str
+    tool_calls: tuple[AgentToolCall, ...]
+    usage: AgentUsage
+    finish: AgentFinishMetadata
+
+    @property
+    def is_final_candidate(self) -> bool:
+        return bool(self.visible_text.strip()) and not self.tool_calls
+
+
+def validate_provider_safe_tool_name(name: str) -> str:
+    if not _TOOL_NAME_RE.fullmatch(name):
+        raise ValueError("provider-safe tool name must match [A-Za-z0-9_-]{1,64}")
+    return name
+
+
+def provider_safe_tool_name(capability_id: str) -> str:
+    source = capability_id.strip()
+    if not source:
+        raise ValueError("capability_id must not be empty")
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "_", source).strip("_-") or "tool"
+    digest = hashlib.sha256(source.encode()).hexdigest()[:12]
+    return f"{slug[:51]}_{digest}"
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)

@@ -39,6 +39,37 @@ class ModelEditionOption:
     label: str
     trim_max_tokens: int | None = None
     reasoning_efforts: ReasoningEffortConfig | None = None
+    agent_capabilities: AgentModelCapabilities | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelCapabilities:
+    supports_messages: bool
+    roles: frozenset[str]
+    supports_native_tools: bool
+    supports_required_tool_choice: bool
+    supports_streamed_tool_calls: bool
+    supports_non_stream_agent_sample: bool = False
+
+    def missing_requirements(self) -> tuple[str, ...]:
+        missing: list[str] = []
+        if not self.supports_messages:
+            missing.append("messages")
+        required_roles = {"system", "user", "assistant", "tool"}
+        absent_roles = sorted(required_roles - self.roles)
+        if absent_roles:
+            missing.append("roles=" + ",".join(absent_roles))
+        if not self.supports_native_tools:
+            missing.append("native_tools")
+        if not self.supports_required_tool_choice:
+            missing.append("required_tool_choice")
+        if not (self.supports_streamed_tool_calls or self.supports_non_stream_agent_sample):
+            missing.append("streamed_tool_calls_or_non_stream_fallback")
+        return tuple(missing)
+
+    @property
+    def agent_ready(self) -> bool:
+        return not self.missing_requirements()
 
 
 _MODEL_EDITION_CONTAINER_KEYS = (
@@ -257,11 +288,13 @@ def _parse_option(value: Any) -> ModelEditionOption | None:
             or value.get("max_context_tokens")
         )
         reasoning_efforts = _parse_reasoning_efforts(value.get("reasoning_efforts"))
+        agent_capabilities = _parse_agent_capabilities(value.get("agent_capabilities"))
         return ModelEditionOption(
             value=option_value,
             label=label,
             trim_max_tokens=trim_max_tokens,
             reasoning_efforts=reasoning_efforts,
+            agent_capabilities=agent_capabilities,
         )
     option_value = _clean_text(value)
     if not option_value:
@@ -281,6 +314,26 @@ def _parse_reasoning_efforts(value: Any) -> ReasoningEffortConfig | None:
         default=default or "",
         disabled_default=disabled_default,
         options=options,
+    )
+
+
+def _parse_agent_capabilities(value: Any) -> AgentModelCapabilities | None:
+    if not isinstance(value, Mapping):
+        return None
+    raw_roles = value.get("roles")
+    if isinstance(raw_roles, str):
+        roles = frozenset(part.strip().lower() for part in raw_roles.split(",") if part.strip())
+    elif isinstance(raw_roles, Sequence) and not isinstance(raw_roles, bytes | bytearray):
+        roles = frozenset(str(part).strip().lower() for part in raw_roles if str(part).strip())
+    else:
+        roles = frozenset()
+    return AgentModelCapabilities(
+        supports_messages=coerce_truthy(value.get("supports_messages", False)),
+        roles=roles,
+        supports_native_tools=coerce_truthy(value.get("supports_native_tools", False)),
+        supports_required_tool_choice=coerce_truthy(value.get("supports_required_tool_choice", False)),
+        supports_streamed_tool_calls=coerce_truthy(value.get("supports_streamed_tool_calls", False)),
+        supports_non_stream_agent_sample=coerce_truthy(value.get("supports_non_stream_agent_sample", False)),
     )
 
 

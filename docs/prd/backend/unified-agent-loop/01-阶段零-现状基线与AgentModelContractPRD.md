@@ -1,7 +1,7 @@
 # Phase 0：现状基线与 Agent Model Contract PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P0-A green checkpoint已完成；P0-B尚未开始）
+- **状态**：proof_complete（P0-A、P0-B green checkpoint均已完成）
 - **文档审阅**：document-perfectization第二次全量审计100/100通过；实现按批准计划推进
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **主责需求**：FR-2、FR-3、FR-19
@@ -89,6 +89,27 @@ AgentSample
   finish metadata
 ```
 
+公开edition的启动配置合同为：
+
+```yaml
+agent_protocol_max_retries: 1
+model_editions:
+  options:
+    - value: example-edition
+      agent_capabilities:
+        supports_messages: true
+        roles: [system, developer, user, assistant, tool]
+        supports_native_tools: true
+        supports_required_tool_choice: true
+        supports_streamed_tool_calls: true
+        # 仅在不支持streamed tool delta时可改为显式true：
+        supports_non_stream_agent_sample: false
+```
+
+`agent_protocol_max_retries`必须为非负整数，默认1，只控制provider contract violation重试，不覆盖transport
+`max_retries`，也不接受请求级覆盖。每个公开edition必须逐项声明closed capability profile；默认edition不合格时启动失败，
+非默认不合格edition不出现在公开API中。
+
 `AgentToolCall`至少包含稳定call ID、provider-safe name、规范化JSON arguments和ordinal。业务层不得接收OpenAI SDK
 对象、raw stream chunk、client或credential。
 
@@ -166,6 +187,20 @@ binding。运行`compileall`并记录未运行的真实Provider项；本阶段�
   全部通过，登记为既有时序观察，不改测试或Runtime；P0-B必须继续复验；
 - `conda run -n multi_agent python -m compileall -q src tests scripts`通过；
 - 未运行真实Provider smoke，符合本阶段非门禁约束；未新增Agent Model、Agent storage或真实route。
+
+### 10.2 P0-B 实施证据
+
+- 新增provider-neutral `AgentModelBinding`、message/tool/request/sample/usage/finish/closed error合同和
+  `AgentModelPort`；binding安全序列化只包含edition、thinking/reasoning选项与digest；
+- OpenAI-compatible adapter使用原生messages/tools/named required choice，闭合0/1/N calls、交错且跨chunk的
+  call ID/name/arguments、canonical JSON、usage缺失、text+calls、unknown tool、取消及stream/non-stream sample；
+- 协议违规只按独立`agent_protocol_max_retries`重试，默认总尝试2次；transport错误不进入协议重试，耗尽返回closed code；
+- API Runtime在启动时对默认edition fail closed，过滤非默认不合格edition；`SharedLLMRuntime.sample_agent()`固定使用
+  request binding edition并拒绝client改变binding；旧`generate_text()`路径保留；
+- P0-B canonical 67项回归通过，`compileall`、`git diff --check`、Phase 0 evidence validator通过；未运行外部真实
+  Provider smoke，符合本阶段门禁；未新增Agent storage、Capability执行或用户route；
+- 扩大运行六个非canonical API模块时，70项通过、3项失败：1项等待本地配置指向的真实`/tokenization`超过fixture
+  5秒，2项为既有动态Skill fixture未进入临时catalog/同类等待；P0-B未修改这些执行路径，不把该扩展运行记为green。
 
 ## 11. 风险、假设与开放问题
 

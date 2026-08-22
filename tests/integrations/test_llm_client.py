@@ -7,11 +7,20 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import yaml
 
 from src.integrations.llm_client import CONFIG_ENV_PREFIX, LLMClient, bootstrap_config_env, load_config
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, PromptSegment
+from src.orchestration.agent_loop.models import (
+    AgentFinishMetadata,
+    AgentMessage,
+    AgentModelBinding,
+    AgentModelRequest,
+    AgentSample,
+    AgentUsage,
+)
 
 
 class _FakeStream:
@@ -85,6 +94,13 @@ def _base_config(model: str = "test-model", *, model_key: str = "model", **extra
                     "value": model,
                     "label": model,
                     "reasoning_efforts": _reasoning_efforts(),
+                    "agent_capabilities": {
+                        "supports_messages": True,
+                        "roles": ["system", "developer", "user", "assistant", "tool"],
+                        "supports_native_tools": True,
+                        "supports_required_tool_choice": True,
+                        "supports_streamed_tool_calls": True,
+                    },
                 }
             ],
         },
@@ -118,6 +134,38 @@ def _isolated_config_env():
 class LLMClientTest(unittest.TestCase):
     def make_client(self) -> LLMClient:
         return LLMClient(config=_base_config())
+
+    def test_agent_sample_rejects_client_edition_fallback(self) -> None:
+        client = self.make_client()
+        request = AgentModelRequest(
+            request_id="req",
+            binding=AgentModelBinding("different-model"),
+            messages=(AgentMessage("user", "question"),),
+        )
+        with self.assertRaisesRegex(ValueError, "does not match client edition"):
+            asyncio.run(client.generate_agent_sample(request))
+
+    def test_agent_sample_applies_run_bound_thinking_and_reasoning_options(self) -> None:
+        client = self.make_client()
+        binding = AgentModelBinding("test-model", reasoning_effort="high", thinking_enabled=True)
+        request = AgentModelRequest("req", binding, (AgentMessage("user", "question"),))
+        sample = AgentSample(
+            sample_id="sample",
+            binding=binding,
+            visible_text="answer",
+            tool_calls=(),
+            usage=AgentUsage(),
+            finish=AgentFinishMetadata(finish_reason="stop", attempts=1),
+        )
+        with patch("src.integrations.llm_client.OpenAIAgentModelAdapter") as adapter_type:
+            adapter_type.return_value.sample_agent = AsyncMock(return_value=sample)
+            result = asyncio.run(client.generate_agent_sample(request))
+
+        self.assertIs(result, sample)
+        self.assertEqual(
+            adapter_type.call_args.kwargs["request_options"],
+            {"extra_body": {"thinking": {"type": "enabled"}}, "reasoning_effort": "high"},
+        )
 
     def test_load_config_requires_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

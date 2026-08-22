@@ -11,7 +11,7 @@
 - `src/core/`：共享 contract、基础模型、枚举与通用错误。
 - `src/auth/`、`src/state/`、`src/storage/`：鉴权、运行状态与持久化存储。
 - `src/lifecycle/`：任务、节点、邮箱、interrupt、cancel 与会话生命周期。
-- `src/orchestration/`：能力注册、调度、workflow plan、planner、router、validator、expander 等编排逻辑。
+- `src/orchestration/`：能力注册、当前DAG调度/plan/planner/router/validator/expander，以及统一Agent Loop的provider-neutral contract与后续控制面。
 - `src/capabilities/`：主代理与各类后端 capability 的业务实现入口。
 - `src/integrations/`：LLM、数据库、审计、Skill runtime、外部服务与适配层。
 - `skill/`：不再由本仓库跟踪；仅可作为本地、Git-ignored 的外部 Skill 兼容检出目录。开发部署从 `/data/peihai/vibe-breeding-dev/skills` 只读挂载到容器 `/app/skill`。

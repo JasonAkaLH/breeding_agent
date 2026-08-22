@@ -4,14 +4,14 @@
 
 - 日期：2026-08-22
 - 分支：`main`
-- 状态：document-perfectization三轮自主审查99/100通过；Agent业务运行时实现尚未开始
-- 执行状态：P0-A green checkpoint已完成；Phase 0保持`in_progress`，P0-B尚未开始
+- 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
+- 执行状态：P0-A/P0-B green checkpoint已完成，Phase 0为`proof_complete`；下一检查点P1-A
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - 拆分依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
 - 业务代码基线：`f707235`；计划审查起点：`7d929b8`。两者之间只有本计划、索引和CHANGELOG变更；正式运行时仍为
-  DAG，仓库中尚无`AgentRun`、`AgentItem`、`AgentModelPort`或`AgentLoopOrchestrator`
+  DAG；仓库已有Phase 0 `AgentModelPort`，尚无`AgentRun`、`AgentItem`或`AgentLoopOrchestrator`
 - 计划边界：本计划只安排`main`开发仓库实现，不部署`prod`，不迁移或恢复旧DAG Task
 
 本计划把已批准PRD转换为逐文件、逐测试、逐回滚点的green checkpoint。计划不改变同模型、无固定轮次上限、

@@ -33,9 +33,17 @@ class ModelEditionSelectionAPITest(APITestCase):
         }
 
     def _model_config(self) -> dict[str, Any]:
+        agent_capabilities = {
+            "supports_messages": True,
+            "roles": ["system", "developer", "user", "assistant", "tool"],
+            "supports_native_tools": True,
+            "supports_required_tool_choice": True,
+            "supports_streamed_tool_calls": True,
+        }
         return {
             "api_key": "test",
             "base_url": "http://example.test",
+            "tokenization": {"enabled": False},
             "model_editions": {
                 "default": "deepseek-v4-flash-260425",
                 "options": [
@@ -44,18 +52,21 @@ class ModelEditionSelectionAPITest(APITestCase):
                         "label": "DeepSeek V4 Flash",
                         "trim_max_tokens": 1024000,
                         "reasoning_efforts": self._deepseek_reasoning(),
+                        "agent_capabilities": agent_capabilities,
                     },
                     {
                         "value": "deepseek-v4-pro-260425",
                         "label": "DeepSeek V4 Pro",
                         "trim_max_tokens": 1024000,
                         "reasoning_efforts": self._deepseek_reasoning(),
+                        "agent_capabilities": agent_capabilities,
                     },
                     {
                         "value": "doubao-seed-2-1-pro-260628",
                         "label": "豆包Seed 2.1 Pro",
                         "trim_max_tokens": 256000,
                         "reasoning_efforts": self._doubao_reasoning(),
+                        "agent_capabilities": agent_capabilities,
                     },
                 ],
             },
@@ -141,6 +152,25 @@ class ModelEditionSelectionAPITest(APITestCase):
         config = self._model_config()
         config["model_editions"]["options"][0].pop("reasoning_efforts")
         with self.assertRaisesRegex(ValueError, "missing reasoning_efforts"):
+            self.build_runtime(main_agent_llm_config=config, enable_conversation_memory=False)
+
+    async def test_endpoint_filters_non_default_non_agent_ready_edition(self) -> None:
+        config = self._model_config()
+        config["model_editions"]["options"][1].pop("agent_capabilities")
+        await self.reconfigure_runtime(main_agent_llm_config=config)
+
+        response = await self.client.get("/api/v1/config/model-editions")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [option["value"] for option in response.json()["options"]],
+            ["deepseek-v4-flash-260425", "doubao-seed-2-1-pro-260628"],
+        )
+
+    async def test_runtime_fails_closed_when_default_is_not_agent_ready(self) -> None:
+        config = self._model_config()
+        config["model_editions"]["options"][0].pop("agent_capabilities")
+        with self.assertRaisesRegex(ValueError, "Default model edition is not Agent-ready"):
             self.build_runtime(main_agent_llm_config=config, enable_conversation_memory=False)
 
     async def test_selected_model_edition_reaches_planner_and_main_agent_runtime(self) -> None:

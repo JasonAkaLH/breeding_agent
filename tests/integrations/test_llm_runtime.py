@@ -3,6 +3,14 @@ from __future__ import annotations
 import unittest
 
 from src.integrations.llm_runtime import SharedLLMRuntime
+from src.orchestration.agent_loop.models import (
+    AgentFinishMetadata,
+    AgentMessage,
+    AgentModelBinding,
+    AgentModelRequest,
+    AgentSample,
+    AgentUsage,
+)
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, PromptSegment
 
 
@@ -19,6 +27,48 @@ def _reasoning_efforts() -> dict:
 
 
 class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_sample_uses_exact_binding_edition_and_rejects_binding_change(self) -> None:
+        binding = AgentModelBinding("edition-a", reasoning_effort="high", thinking_enabled=True)
+        request = AgentModelRequest("req", binding, (AgentMessage("user", "question"),))
+
+        class FakeClient:
+            instances: list["FakeClient"] = []
+
+            def __init__(self, **kwargs):
+                self.edition = kwargs["config"]["model_edition"]
+                FakeClient.instances.append(self)
+
+            async def generate_agent_sample(self, seen_request):
+                return AgentSample(
+                    sample_id="sample",
+                    binding=seen_request.binding,
+                    visible_text="answer",
+                    tool_calls=(),
+                    usage=AgentUsage(),
+                    finish=AgentFinishMetadata(finish_reason="stop", attempts=1),
+                )
+
+        runtime = SharedLLMRuntime(
+            client_factory=FakeClient,
+            config={"model_editions": {"default": "edition-a", "options": [{"value": "edition-a"}]}},
+        )
+        sample = await runtime.sample_agent(request)
+        self.assertIs(sample.binding, binding)
+        self.assertEqual(FakeClient.instances[0].edition, "edition-a")
+
+        class BadClient:
+            async def sample_agent(self, seen_request):
+                return AgentSample(
+                    sample_id="bad",
+                    binding=AgentModelBinding("edition-b"),
+                    visible_text="answer",
+                    tool_calls=(),
+                    usage=AgentUsage(),
+                    finish=AgentFinishMetadata(finish_reason="stop", attempts=1),
+                )
+
+        with self.assertRaisesRegex(ValueError, "changed the run-bound model binding"):
+            await SharedLLMRuntime(client=BadClient()).sample_agent(request)
     async def test_reuses_one_client_for_text_and_stream_calls(self) -> None:
         class FakeClient:
             instances: list["FakeClient"] = []

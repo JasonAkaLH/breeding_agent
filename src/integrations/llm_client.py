@@ -9,7 +9,10 @@ import yaml
 from openai import AsyncOpenAI
 
 from src.core.coercion import coerce_truthy
-from .model_editions import default_model_edition, validate_model_reasoning_effort_configs
+from src.orchestration.agent_loop.models import AgentModelRequest, AgentProtocolRetryPolicy, AgentSample
+
+from .model_editions import default_model_edition, model_edition_options, validate_model_reasoning_effort_configs
+from .openai_agent_model_adapter import OpenAIAgentModelAdapter
 from .provider_cache import (
     provider_cache_capabilities_metadata,
     provider_cache_hint_status,
@@ -73,6 +76,7 @@ def bootstrap_config_env(
     if not isinstance(config, dict):
         raise ValueError(f"LLM config must be a mapping: {path}")
     validate_model_reasoning_effort_configs(config)
+    AgentProtocolRetryPolicy.from_config(config)
 
     if should_clear_existing:
         _clear_config_data_env()
@@ -119,8 +123,17 @@ class LLMClient:
                 bootstrap_config_env(config_path, override=True)
             loaded_config = load_config()
         validate_model_reasoning_effort_configs(loaded_config)
+        self._agent_protocol_retry_policy = AgentProtocolRetryPolicy.from_config(loaded_config)
 
         self.model = model or _resolve_model_from_config(loaded_config)
+        self._agent_capabilities = next(
+            (
+                option.agent_capabilities
+                for option in model_edition_options(loaded_config)
+                if option.value == self.model
+            ),
+            None,
+        )
         self.temperature = temperature if temperature is not None else loaded_config.get("temperature", 0.0)
         api_key = api_key or loaded_config.get("api_key")
         base_url = base_url or loaded_config.get("base_url")
@@ -151,6 +164,30 @@ class LLMClient:
             max_retries=int(max_retries),
             timeout=float(timeout),
         )
+
+    async def generate_agent_sample(self, request: AgentModelRequest) -> AgentSample:
+        if request.binding.model_edition != self.model:
+            raise ValueError(
+                f"Agent binding edition {request.binding.model_edition!r} does not match client edition {self.model!r}"
+            )
+        if self._agent_capabilities is None or not self._agent_capabilities.agent_ready:
+            raise ValueError(f"Model edition {self.model!r} is not Agent-ready")
+        request_options, cache_hint_status = _provider_request_options(
+            thinking=request.binding.thinking_enabled,
+            reasoning_effort=request.binding.reasoning_effort,
+            feature_capabilities=self._feature_capabilities,
+            cache_capabilities=self._cache_capabilities,
+        )
+        self._last_provider_cache_hint_status = cache_hint_status
+        adapter = OpenAIAgentModelAdapter(
+            completions=self.client.chat.completions,
+            model=self.model,
+            temperature=self.temperature,
+            retry_policy=self._agent_protocol_retry_policy,
+            stream=self._agent_capabilities.supports_streamed_tool_calls,
+            request_options=request_options,
+        )
+        return await adapter.sample_agent(request)
 
     def safe_metadata(
         self,

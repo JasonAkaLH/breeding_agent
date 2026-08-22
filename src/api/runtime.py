@@ -114,6 +114,11 @@ from src.integrations.agent_skills.rust_contract import (
 )
 from src.integrations.agent_skills.skill_sandbox_client import SkillSandboxGrpcClient
 from src.integrations.agent_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
+from src.integrations.agent_model_gate import (
+    agent_ready_model_edition_options,
+    validate_agent_model_edition,
+    validate_agent_model_gate,
+)
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_request_options import (
     LLMRequestOptions,
@@ -126,9 +131,7 @@ from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.model_editions import (
     config_for_model_edition,
     default_model_edition,
-    model_edition_options,
     model_reasoning_effort_configs,
-    validate_model_edition,
     validate_model_reasoning_effort_configs,
 )
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
@@ -806,6 +809,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._runtime_sidecar_client = runtime_sidecar_client
         self._model_edition_config = dict(model_edition_config or {})
         validate_model_reasoning_effort_configs(self._model_edition_config)
+        validate_agent_model_gate(self._model_edition_config)
         self._model_reasoning_configs = model_reasoning_effort_configs(self._model_edition_config)
         self._default_model_edition = default_model_edition(self._model_edition_config)
         self._runtime_sidecar_shadow_sink = _build_runtime_sidecar_shadow_diff_sink(audit_sink)
@@ -893,7 +897,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             after_event_id = page[-1].event_id
 
     def model_editions_payload(self) -> dict[str, Any]:
-        options = model_edition_options(self._model_edition_config)
+        options = agent_ready_model_edition_options(self._model_edition_config)
         return {
             "default_model_edition": self._default_model_edition,
             "options": [
@@ -922,7 +926,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         }
 
     def _validate_requested_model_edition(self, model_edition: str | None) -> str | None:
-        return validate_model_edition(model_edition, config=self._model_edition_config)
+        return validate_agent_model_edition(model_edition, config=self._model_edition_config)
 
     def _resolve_llm_request_options(
         self,

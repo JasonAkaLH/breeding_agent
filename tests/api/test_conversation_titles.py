@@ -14,6 +14,16 @@ def _test_reasoning_efforts() -> dict:
     }
 
 
+def _agent_capabilities() -> dict:
+    return {
+        "supports_messages": True,
+        "roles": ["system", "developer", "user", "assistant", "tool"],
+        "supports_native_tools": True,
+        "supports_required_tool_choice": True,
+        "supports_streamed_tool_calls": True,
+    }
+
+
 class ConversationTitleAPITest(APITestCase):
     async def test_new_conversation_generates_title_with_minimal_non_thinking_llm(self) -> None:
         calls: list[dict[str, object]] = []
@@ -30,7 +40,7 @@ class ConversationTitleAPITest(APITestCase):
                 "model_editions": {
                     "default": "flash",
                     "options": [
-                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts()},
+                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
                     ],
                 },
             },
@@ -71,8 +81,8 @@ class ConversationTitleAPITest(APITestCase):
                 "model_editions": {
                     "default": "flash",
                     "options": [
-                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts()},
-                        {"value": "pro", "label": "Pro", "reasoning_efforts": _test_reasoning_efforts()},
+                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
+                        {"value": "pro", "label": "Pro", "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
                     ],
                 },
             },

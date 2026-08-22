@@ -26,6 +26,13 @@ class SkillOutputArtifactsAPITest(APITestCase):
                                 {"value": "minimal", "label": "Minimal", "allow_when_thinking_disabled": True},
                             ],
                         },
+                        "agent_capabilities": {
+                            "supports_messages": True,
+                            "roles": ["system", "developer", "user", "assistant", "tool"],
+                            "supports_native_tools": True,
+                            "supports_required_tool_choice": True,
+                            "supports_streamed_tool_calls": True,
+                        },
                     }
                 ],
             },

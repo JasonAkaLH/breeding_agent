@@ -26,6 +26,13 @@ def _test_model_editions(model: str) -> dict[str, Any]:
                         {"value": "high", "label": "高", "allow_when_thinking_disabled": False},
                     ],
                 },
+                "agent_capabilities": {
+                    "supports_messages": True,
+                    "roles": ["system", "developer", "user", "assistant", "tool"],
+                    "supports_native_tools": True,
+                    "supports_required_tool_choice": True,
+                    "supports_streamed_tool_calls": True,
+                },
             }
         ],
     }

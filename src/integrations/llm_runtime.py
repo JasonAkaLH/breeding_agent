@@ -4,6 +4,8 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+from src.orchestration.agent_loop.models import AgentModelRequest, AgentSample
+
 from .llm_client import LLMClient, ReasoningEffort, load_config
 from .llm_stream_events import accepted_options, coerce_stream_event, coerce_text_result, iter_stream_like
 from .model_editions import (
@@ -164,6 +166,22 @@ class SharedLLMRuntime:
         if inspect.isawaitable(result):
             result = await result
         return coerce_text_result(result)
+
+    async def sample_agent(self, request: AgentModelRequest) -> AgentSample:
+        client = self.client_for_model_edition(request.binding.model_edition)
+        sampler = getattr(client, "generate_agent_sample", None)
+        if not callable(sampler):
+            sampler = getattr(client, "sample_agent", None)
+        if not callable(sampler):
+            raise TypeError("LLM runtime client must provide generate_agent_sample(request).")
+        result = sampler(request)
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, AgentSample):
+            raise TypeError("Agent model client returned a non-AgentSample result.")
+        if result.binding != request.binding:
+            raise ValueError("Agent model client changed the run-bound model binding")
+        return result
 
     async def stream_events(
         self,
