@@ -34,7 +34,7 @@ class _RecordingModel:
         self.outputs = iter(outputs)
         self.requests = []
 
-    async def sample(self, request):
+    async def sample_agent(self, request):
         self.requests.append(request)
         return AgentSample(
             sample_id=f"sample-{len(self.requests)}",

@@ -24,7 +24,7 @@ class RunBoundMCPTextGenerator:
         if run is None:
             raise RuntimeError("agent_mcp_binding_run_missing")
         digest = hashlib.sha256(f"{purpose}\0{prompt}".encode()).hexdigest()[:24]
-        sample = await self._model.sample(
+        sample = await self._model.sample_agent(
             AgentModelRequest(
                 request_id=f"agent-mcp:{run.run_id}:{digest}",
                 binding=run.binding,
