@@ -112,6 +112,9 @@ CP7 owner guard初始化和canonical storage模块隔离修复，但不是已冻
 - 仍未通过required no-skip口径：Agent Skill discover 200项通过但43项外部bundle/平台skip。
 - 外部Skill调查：当前环境无权威部署挂载；本地其他workspace与历史Git snapshot分别只满足现行测试的部分互相冲突合同，
   未拷贝、未合成fixture、未放宽测试。
+- 第三次外部环境审计：宿主`/data/peihai/vibe-breeding-dev/skills`不存在；当前backend的`/app/skill`挂载为只读空Skill卷且无
+  `SKILL.md`；当前backend、本地`0.1.24`与已缓存开发镜像的`/app/skill`镜像层均无`SKILL.md`；Docker无其他Skill卷。
+  因此不存在可直接复验的权威bundle，且不允许用本地漂移副本或合成fixture代替required证据。
 
 ## 7. 验证命令
 

@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- P6-A第三次外部Skill环境审计确认唯一剩余阻断：宿主权威Skill路径缺失，运行backend使用只读空Skill卷，当前/本地`0.1.24`/已缓存开发backend镜像均不含`/app/skill/*/SKILL.md`，Docker也无其他Skill卷。Agent Skill canonical discover因此仍是200项通过、43项全部由external bundle缺失导致的skip；Rscript、PyO3及仓库内runtime合同已通过。未使用漂移副本、历史snapshot或合成fixture伪造required证据，P6-B继续禁止进入。License Requirement：本轮只执行只读环境审计并复用既有Docker/stdlib，无新增依赖或许可变更。
+
 - P6-A的canonical storage真实PostgreSQL门禁已消除共库污染：新增测试侧模块专用DSN优先/旧变量回退合同，分离Agent schema、conversation fresh bootstrap、MVCC、legacy migration和rollout integration，不改变生产运行时或既有P1-B单模块命令。在同一PostgreSQL 17实例上的七个隔离数据库中，`tests/storage` canonical discover实际运行441项，零skip、零失败。P6-A仍受权威外部Skill bundle/runtime缺失阻断。License Requirement：只复用Python stdlib、既有psycopg/SQLAlchemy和PostgreSQL test container，无新增依赖或许可变更。
 
 - P6-A全量预检修复两个真实PostgreSQL基线缺陷：fresh runtime manifest现在使用PostgreSQL dialect实际渲染的63字节内CHECK名称，避免长命名约定在reconciler原始ALTER中截断碰撞；CP7 authority首次接管由legacy SECURITY DEFINER函数写入的Server时，在全owner有序行锁下初始化真实server-set fingerprint并按monotonic trigger推进guard revision。同步把MVCC占位门禁改为真实双连接旧快照读取，并更新Phase 5 handoff测试。schema/reconciler 23项、scripts 48项、fresh PG Agent 4项、conversation delete 3项、legacy migration 15项、rollout 20项、permissions 15项、CP7 3项与MVCC 1项通过。P6-A因canonical storage的7项PG环境skip/共享库跨模块污染，以及缺少权威外部Skill挂载导致的43项Agent Skill skip正式标记`blocked`；尚未冻结回滚点或进入cutover。License Requirement：复用SQLAlchemy/PostgreSQL/stdlib与既有test container，无新增依赖或许可变更。
