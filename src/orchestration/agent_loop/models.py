@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
@@ -25,6 +26,30 @@ class AgentProtocolErrorCode(StrEnum):
     REQUIRED_TOOL_MULTIPLE = "required_tool_multiple"
     REQUIRED_TOOL_MISMATCH = "required_tool_mismatch"
     EMPTY_SAMPLE = "empty_sample"
+
+
+class AgentRunStatus(StrEnum):
+    RUNNING = "running"
+    WAITING_FOR_INPUT = "waiting_for_input"
+    WAITING_FOR_DEPENDENCY = "waiting_for_dependency"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AgentItemKind(StrEnum):
+    USER_MESSAGE = "user_message"
+    ASSISTANT_MESSAGE = "assistant_message"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    SKILL_ACTIVATION = "skill_activation"
+    CONTEXT_SUMMARY = "context_summary"
+    CONTINUATION = "continuation"
+
+
+class AgentItemState(StrEnum):
+    RESERVED = "reserved"
+    COMMITTED = "committed"
 
 
 class AgentProtocolViolation(Exception):
@@ -234,6 +259,142 @@ class AgentSample:
     @property
     def is_final_candidate(self) -> bool:
         return bool(self.visible_text.strip()) and not self.tool_calls
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRun:
+    run_id: str
+    task_id: str
+    conversation_id: str
+    status: AgentRunStatus
+    binding: AgentModelBinding
+    next_item_sequence: int = 1
+    compacted_through_sequence: int = 0
+    active_sample_item_id: str | None = None
+    waiting_call_item_ids: tuple[str, ...] = ()
+    next_batch_call_ordinal: int = 0
+    claim_owner: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: datetime | None = None
+    revision: int = 0
+    terminal_reason_code: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    terminal_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.run_id or not self.task_id or not self.conversation_id:
+            raise ValueError("AgentRun identity fields must not be empty")
+        if self.next_item_sequence < 1:
+            raise ValueError("next_item_sequence must be positive")
+        if self.compacted_through_sequence < 0:
+            raise ValueError("compacted_through_sequence must be non-negative")
+        if self.compacted_through_sequence >= self.next_item_sequence:
+            raise ValueError("compacted_through_sequence must precede next_item_sequence")
+        if self.next_batch_call_ordinal < 0 or self.revision < 0:
+            raise ValueError("AgentRun ordinals and revision must be non-negative")
+        if len(set(self.waiting_call_item_ids)) != len(self.waiting_call_item_ids):
+            raise ValueError("waiting_call_item_ids must be unique")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentItem:
+    item_id: str
+    run_id: str
+    task_id: str
+    sequence: int
+    kind: AgentItemKind
+    state: AgentItemState
+    payload_json: str
+    payload_sha256: str
+    parent_item_id: str | None = None
+    source_call_item_id: str | None = None
+    provider_sample_id: str | None = None
+    call_ordinal: int | None = None
+    created_at: datetime | None = None
+    committed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.item_id or not self.run_id or not self.task_id:
+            raise ValueError("AgentItem identity fields must not be empty")
+        if self.sequence < 1:
+            raise ValueError("AgentItem sequence must be positive")
+        if self.call_ordinal is not None and self.call_ordinal < 0:
+            raise ValueError("call_ordinal must be non-negative")
+        if self.kind is AgentItemKind.TOOL_RESULT and not self.source_call_item_id:
+            raise ValueError("tool_result must reference a source call")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSampleCommit:
+    run_id: str
+    expected_revision: int
+    expected_claim_token: str | None
+    sample: AgentSample
+    capability_ids_by_tool_name: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSampleCommitResult:
+    run: AgentRun
+    assistant_item: AgentItem
+    call_items: tuple[AgentItem, ...]
+    result_reservations: tuple[AgentItem, ...]
+    node_ids: tuple[str, ...]
+
+
+class AgentCallOutcomeStatus(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    WAITING_FOR_INPUT = "waiting_for_input"
+    WAITING_FOR_DEPENDENCY = "waiting_for_dependency"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentStagedArtifact:
+    artifact_id: str
+    artifact_type: str
+    storage_ref: str
+    summary: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.artifact_id or not self.artifact_type or not self.storage_ref:
+            raise ValueError("staged artifact identity and storage_ref must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCallOutcomeCommit:
+    run_id: str
+    expected_revision: int
+    expected_claim_token: str | None
+    call_item_id: str
+    safe_result_payload: Any
+    status: AgentCallOutcomeStatus
+    staged_artifacts: tuple[AgentStagedArtifact, ...] = ()
+    safe_error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentFinalOutputCommit:
+    run_id: str
+    expected_revision: int
+    expected_claim_token: str | None
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentFinalOutputResult:
+    run: AgentRun
+    assistant_item: AgentItem
+    node_id: str
+    artifact_id: str
+    message_id: str
+    event_id: str
+    receipt_id: str
+
+
+class AgentStorageConflict(RuntimeError):
+    """Closed fail-closed CAS or durable identity conflict."""
 
 
 def validate_provider_safe_tool_name(name: str) -> str:

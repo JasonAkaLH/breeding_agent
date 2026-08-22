@@ -1862,6 +1862,94 @@ class TaskRow(SQLiteBase):
     mcp_rollout_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class AgentRunRow(SQLiteBase):
+    __tablename__ = "agent_run"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_agent_run_task"),
+        Index("idx_agent_run_status_updated", "status", "updated_at"),
+        CheckConstraint(
+            "status IN ('running', 'waiting_for_input', 'waiting_for_dependency', "
+            "'completed', 'failed', 'cancelled')",
+            name="agent_run_status",
+        ),
+        CheckConstraint("next_item_sequence > 0", name="agent_run_next_sequence_positive"),
+        CheckConstraint("compacted_through_sequence >= 0", name="agent_run_compacted_non_negative"),
+        CheckConstraint("revision >= 0", name="agent_run_revision_non_negative"),
+    )
+
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    model_edition: Mapped[str] = mapped_column(Text, nullable=False)
+    reasoning_effort: Mapped[str] = mapped_column(Text, nullable=False)
+    thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    binding_option_digests: Mapped[dict] = mapped_column(JSONText(), nullable=False)
+    next_item_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    compacted_through_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    active_sample_item_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    waiting_call_item_ids: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    next_batch_call_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    claim_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    terminal_reason_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    terminal_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class AgentItemRow(SQLiteBase):
+    __tablename__ = "agent_item"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="uq_agent_item_run_sequence"),
+        UniqueConstraint("source_call_item_id", name="uq_agent_item_call_result"),
+        UniqueConstraint("run_id", "provider_sample_id", name="uq_agent_item_provider_sample"),
+        Index("idx_agent_item_task_sequence", "task_id", "sequence"),
+        CheckConstraint("sequence > 0", name="agent_item_sequence_positive"),
+        CheckConstraint(
+            "kind IN ('user_message', 'assistant_message', 'tool_call', 'tool_result', "
+            "'skill_activation', 'context_summary', 'continuation')",
+            name="agent_item_kind",
+        ),
+        CheckConstraint("state IN ('reserved', 'committed')", name="agent_item_state"),
+        CheckConstraint("payload_size_bytes <= 131072", name="agent_item_payload_size"),
+    )
+
+    item_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_item_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_call_item_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_sample_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    call_ordinal: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    committed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class AgentFinalReceiptRow(SQLiteBase):
+    __tablename__ = "agent_final_receipt"
+    __table_args__ = (UniqueConstraint("run_id", name="uq_agent_final_receipt_run"),)
+
+    receipt_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    assistant_item_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    text_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
 class PlannerReplanClaimRow(SQLiteBase):
     __tablename__ = "planner_replan_claim"
     __table_args__ = (

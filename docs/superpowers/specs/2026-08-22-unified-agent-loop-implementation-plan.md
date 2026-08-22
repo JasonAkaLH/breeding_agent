@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：P0-A/P0-B green checkpoint已完成，Phase 0为`proof_complete`；下一检查点P1-A
+- 执行状态：Phase 0为`proof_complete`；P1-A SQLite checkpoint green，Phase 1 `in_progress`；下一检查点P1-B
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`

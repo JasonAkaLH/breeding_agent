@@ -1,7 +1,7 @@
 # Phase 1：AgentRun、AgentItem 与 Task Lease 存储 PRD
 
 - **日期**：2026-08-22
-- **状态**：pending
+- **状态**：in_progress（P1-A SQLite checkpoint green；P1-B/P1-C待实施）
 - **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0 Agent Model Contract必须`proof_complete`
@@ -164,6 +164,22 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run \
 
 真实PostgreSQL schema、transaction、permission和concurrency tests必须使用测试DSN。缺DSN、skip、缺cargo或required
 Rust gate时本阶段为`blocked`，不能标记`proof_complete`。
+
+### 10.1 P1-A 实施证据
+
+- 新增closed `AgentRun`/`AgentItem`/status/kind/state、sample/outcome/final输入结果合同，以及窄
+  `AgentRunRepository`/`AgentAtomicWriter`协议；Task与Run一对一、item sequence单调唯一；
+- 新增严格canonical Agent payload codec：UTF-8、sorted keys、compact JSON、单LF、SHA-256、131072-byte硬上限，
+  131071/131072/131073边界及NaN/Infinity/非字符串key/非JSON类型拒绝已覆盖；
+- SQLite additive加入`agent_run`、`agent_item`、`agent_final_receipt`，保留旧Task/TaskNode/TaskEdge表；sample事务一次写
+  assistant/calls/result reservations/TaskNodes，result slot在任何executor调用前存在；
+- outcome事务同时闭合result、Node和staged Artifact可见性；waiting result保持reserved并维护多个waiting call集合，恢复
+  一致性漂移会fail closed为`agent_waiting_consistency_error`；
+- final事务使用确定性item/node/artifact/message/event/receipt ID，crash rollback无部分投影，相同text精确重试幂等、不同
+  text冲突；fatal/cancel清理claim并终结未闭合Node；
+- P1-A新合同19项与既有SQLite bootstrap/Task/Interrupt 41项合计60项通过，`compileall`和`git diff --check`通过；
+  未调用模型/Capability，未切换真实route。Phase 1仍须完成真实PostgreSQL和Rust Sidecar门禁，不能标记
+  `proof_complete`。
 
 ## 11. 风险、假设与开放问题
 
