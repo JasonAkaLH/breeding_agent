@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
+    AgentCompactionCommit,
+    AgentCompactionResult,
     AgentFinalOutputCommit,
     AgentFinalOutputResult,
     AgentItem,
@@ -28,7 +30,12 @@ from src.orchestration.agent_loop.models import (
     AgentStorageConflict,
     AgentTaskLease,
 )
-from src.storage.agent_payload import CanonicalAgentPayload, canonicalize_agent_payload
+from src.storage.agent_payload import (
+    CanonicalAgentPayload,
+    agent_compaction_source_digest,
+    agent_compaction_range_is_closed,
+    canonicalize_agent_payload,
+)
 
 from .models import (
     AgentFinalReceiptRow,
@@ -91,6 +98,11 @@ class SQLiteAgentRepository:
 
     async def commit_agent_call_outcome(self, commit: AgentCallOutcomeCommit) -> AgentItem:
         return await self._write(lambda session: self._commit_outcome(session, commit))
+
+    async def commit_agent_compaction(
+        self, commit: AgentCompactionCommit
+    ) -> AgentCompactionResult:
+        return await self._write(lambda session: self._commit_compaction(session, commit))
 
     async def commit_agent_final_output(self, commit: AgentFinalOutputCommit) -> AgentFinalOutputResult:
         return await self._write(lambda session: self._commit_final(session, commit))
@@ -429,6 +441,83 @@ class SQLiteAgentRepository:
         session.flush()
         self._inject("outcome_after_run_update")
         return _item_from_row(result)
+
+    def _commit_compaction(
+        self,
+        session: Session,
+        commit: AgentCompactionCommit,
+    ) -> AgentCompactionResult:
+        run = self._locked_run(session, commit.run_id)
+        self._validate_cas(run, commit.expected_revision, commit.expected_claim_token)
+        if (
+            commit.covered_start_sequence != int(run.compacted_through_sequence) + 1
+            or commit.covered_end_sequence < commit.covered_start_sequence
+            or commit.covered_end_sequence >= int(run.next_item_sequence)
+            or not commit.summary.strip()
+        ):
+            raise AgentStorageConflict("agent_compaction_range_invalid")
+        covered = session.scalars(
+            select(AgentItemRow)
+            .where(
+                AgentItemRow.run_id == run.run_id,
+                AgentItemRow.sequence >= commit.covered_start_sequence,
+                AgentItemRow.sequence <= commit.covered_end_sequence,
+            )
+            .order_by(AgentItemRow.sequence)
+        ).all()
+        expected_sequences = list(
+            range(commit.covered_start_sequence, commit.covered_end_sequence + 1)
+        )
+        if [int(item.sequence) for item in covered] != expected_sequences or any(
+            item.state != AgentItemState.COMMITTED.value for item in covered
+        ):
+            raise AgentStorageConflict("agent_compaction_source_incomplete")
+        all_items = tuple(
+            _item_from_row(item)
+            for item in session.scalars(
+                select(AgentItemRow)
+                .where(AgentItemRow.run_id == run.run_id)
+                .order_by(AgentItemRow.sequence)
+            ).all()
+        )
+        covered_items = tuple(_item_from_row(item) for item in covered)
+        if not agent_compaction_range_is_closed(covered_items, all_items):
+            raise AgentStorageConflict("agent_compaction_range_splits_sample")
+        digest = agent_compaction_source_digest(covered_items)
+        if digest != commit.source_digest:
+            raise AgentStorageConflict("agent_compaction_source_digest_mismatch")
+        now = self._now()
+        payload = canonicalize_agent_payload(
+            {
+                "covered_end_sequence": commit.covered_end_sequence,
+                "covered_start_sequence": commit.covered_start_sequence,
+                "source_digest": digest,
+                "summary": commit.summary,
+            }
+        )
+        identity = hashlib.sha256(
+            f"{run.run_id}\0{commit.covered_start_sequence}\0{commit.covered_end_sequence}\0{digest}".encode()
+        ).hexdigest()[:24]
+        summary_row = self._add_item(
+            session,
+            item_id=f"agent-item:{run.run_id}:summary:{identity}",
+            run=run,
+            sequence=int(run.next_item_sequence),
+            kind=AgentItemKind.CONTEXT_SUMMARY,
+            state=AgentItemState.COMMITTED,
+            payload=payload,
+            created_at=now,
+            committed_at=now,
+        )
+        run.compacted_through_sequence = commit.covered_end_sequence
+        run.next_item_sequence = int(run.next_item_sequence) + 1
+        run.revision = int(run.revision) + 1
+        run.updated_at = now
+        session.flush()
+        return AgentCompactionResult(
+            run=_run_from_row(run),
+            summary_item=_item_from_row(summary_row),
+        )
 
     def _reconcile_consistency(self, session: Session, run_id: str) -> AgentRun:
         run = self._locked_run(session, run_id)

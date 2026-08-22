@@ -29,6 +29,7 @@ from .runner import (
     AgentLoopRunResult,
     AgentLoopRunner,
 )
+from .compaction import AgentCompactionOutcome, AgentCompactionService
 from .models import (
     AgentCancellationToken,
     AgentFinishMetadata,
@@ -55,6 +56,8 @@ from .models import (
     AgentUsage,
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
+    AgentCompactionCommit,
+    AgentCompactionResult,
     AgentSampleCommit,
     AgentSampleCommitResult,
     AgentStagedArtifact,
@@ -88,6 +91,8 @@ __all__ = [
     "AgentUsage",
     "AgentCallOutcomeCommit",
     "AgentCallOutcomeStatus",
+    "AgentCompactionCommit",
+    "AgentCompactionResult",
     "AgentSampleCommit",
     "AgentSampleCommitResult",
     "AgentStagedArtifact",
@@ -113,4 +118,6 @@ __all__ = [
     "AgentCallInvoker",
     "AgentLoopRunResult",
     "AgentLoopRunner",
+    "AgentCompactionOutcome",
+    "AgentCompactionService",
 ]

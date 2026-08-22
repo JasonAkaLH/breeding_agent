@@ -35,7 +35,7 @@
 - `superpowers/specs/2026-08-21-unified-agent-loop-design.md`：经三轮获批修订、第四次全量审计以100/100通过信心门，尚未实施的统一同模型 Agent Loop clean-cutover设计；所有执行入口、显式 Skill/MCP、审批、补充输入和remote continuation统一恢复同一AgentRun，不保留DAG runtime或旧任务兼容恢复；锁定原生multi-tool call原子账本、单一Task lease heartbeat/失租fencing、`agent.final_output`原子发布、`PublicSkillProfile`安全activation和完整Tool catalog预算门禁，同时保留现有Capability、MCP、Skill、安全、artifact和事件边界。
 - `superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`：经三轮自动修订、第四次全量审计以100/100通过信心门的PRD拆分设计；采用README、总纲与Phase 0～7八份阶段PRD，为FR-1～FR-26及源设计12类NFR指定唯一主责阶段，并锁定代码证据/交接产物、既有PRD与旧测试处置、真实PostgreSQL/Rust/Frontend/MCP/备份门禁、Phase 2行为保持Kernel抽取及Phase 6/7控制面和物理schema删除边界。
 - `superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`：依据已批准PRD组生成、经三轮自主document-perfectization以99/100通过的统一同模型Agent Loop详细实施计划；按Phase 0～7拆成22个green checkpoint，逐项锁定权威`agent_loop/`包边界、FR/AL/NFR追踪、精确测试命令、Git检查点、回滚方式、真实环境阻断、clean-archive cutover rehearsal及带crash receipts/restore-all的Phase 7 operator；Phase 0～Phase 2已`proof_complete`，`agent_protocol_max_retries=1`与三backend storage/lease假设均由真实门禁闭合。
-- `prd/backend/unified-agent-loop/`：依据上述100/100拆分设计生成、经一轮获批修订和第二次逐篇全量审计均以100/100通过的统一同模型Agent Loop PRD组；README维护状态与canonical命令/证据产物，总纲维护FR/NFR与全局门禁，Phase 0～7依次覆盖Model Contract、Agent Storage/Lease、Invocation/Skill/MCP、核心Loop/final、Continuation、API/Frontend/Observability、Clean Cutover与DAG runtime删除、破坏性Schema删除和最终证明；Phase 0～Phase 2已`proof_complete`，Phase 3 P3-A green，下一步P3-B compaction。
+- `prd/backend/unified-agent-loop/`：依据上述100/100拆分设计生成、经一轮获批修订和第二次逐篇全量审计均以100/100通过的统一同模型Agent Loop PRD组；README维护状态与canonical命令/证据产物，总纲维护FR/NFR与全局门禁，Phase 0～7依次覆盖Model Contract、Agent Storage/Lease、Invocation/Skill/MCP、核心Loop/final、Continuation、API/Frontend/Observability、Clean Cutover与DAG runtime删除、破坏性Schema删除和最终证明；Phase 0～Phase 2已`proof_complete`，Phase 3 P3-A/P3-B green，下一步P3-C唯一final output。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
@@ -47,7 +47,7 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `prd/backend/unified-agent-loop/README.md`（来源：统一Agent Loop架构与PRD decomposition design） | Phase 0～Phase 2 `proof_complete`；Phase 3 `in_progress`，P3-A green | 进入P3-B同模型compaction；保持Phase 6前当前DAG运行时不变。 |
+| `prd/backend/unified-agent-loop/README.md`（来源：统一Agent Loop架构与PRD decomposition design） | Phase 0～Phase 2 `proof_complete`；Phase 3 `in_progress`，P3-A/P3-B green | 进入P3-C唯一final output；保持Phase 6前当前DAG运行时不变。 |
 | `个人桌面长任务Agent总体设计总纲.md` | 总纲已确认；实现尚未开始 | 基于该总纲生成分阶段实施计划；个人版以 Rust daemon 为唯一可信控制 runtime，必须支持受控子 Agent spawn 以及主 Agent 决策、Runtime 仲裁的权限/上下文/交接边界，一次性替换服务端架构，旧历史只读导入。 |
 | `prd/backend/capability-missing-fallback/README.md`（父入口：`prd/backend/23-能力缺失LLMFallback披露PRD.md`） | Phase 0 至 Phase 4 代码实现已落地 | 后续仅在新增 fallback reason、artifact 政策或能力注册语义时同步更新 PRD、sanitizer、前端 notice 与测试矩阵。 |
 | `prd/backend/conversation-file-history-selection/README.md`（父入口：`prd/backend/21-对话文件历史与智能选择PRD.md`） | 阶段零至阶段五已实施；后续仅保留 guarded multi-select 放量/观测增强 | 若后续放量 `enforce_guarded_multi` 或新增 file_upload public 字段，需同步发布指标、后端 sanitizer、memory 投影、前端安全卡片 allowlist、API 文档与 CHANGELOG。 |

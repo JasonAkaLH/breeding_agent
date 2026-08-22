@@ -41,8 +41,21 @@ class AgentContextBuilder:
             AgentMessage(role="developer", content=self._rules.safe_tool_rules),
         ]
         ordered_items = tuple(sorted(items, key=lambda value: value.sequence))
-        for item in ordered_items:
-            message = _message_from_item(item, all_items=ordered_items)
+        summary_item = _active_summary(ordered_items, run.compacted_through_sequence)
+        if summary_item is not None:
+            messages.append(
+                AgentMessage(
+                    role="developer",
+                    content=summary_item.payload_json.rstrip("\n"),
+                )
+            )
+        visible_items = tuple(
+            item
+            for item in ordered_items
+            if item.sequence > run.compacted_through_sequence and item is not summary_item
+        )
+        for item in visible_items:
+            message = _message_from_item(item, all_items=visible_items)
             if message is not None:
                 messages.append(message)
         if trusted_facts:
@@ -151,3 +164,21 @@ def _tool_call(item: AgentItem) -> AgentToolCall:
         ),
         ordinal=item.call_ordinal or 0,
     )
+
+
+def _active_summary(
+    items: tuple[AgentItem, ...],
+    compacted_through_sequence: int,
+) -> AgentItem | None:
+    if compacted_through_sequence == 0:
+        return None
+    matches = []
+    for item in items:
+        if item.kind is not AgentItemKind.CONTEXT_SUMMARY:
+            continue
+        payload = _payload(item)
+        if payload.get("covered_end_sequence") == compacted_through_sequence:
+            matches.append(item)
+    if len(matches) != 1:
+        raise ValueError("agent_context_summary_boundary_inconsistent")
+    return matches[0]

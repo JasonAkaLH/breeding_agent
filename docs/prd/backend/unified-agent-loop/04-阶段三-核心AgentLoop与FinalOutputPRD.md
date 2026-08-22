@@ -1,8 +1,8 @@
 # Phase 3：核心 Agent Loop 与 Final Output PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P3-A green；下一步P3-B）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P3-A实现证据已闭合
+- **状态**：in_progress（P3-A/P3-B green；下一步P3-C）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P3-A/P3-B实现证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～2必须`proof_complete`
 - **主责需求**：FR-4、FR-5、FR-6、FR-7、FR-10、FR-11、FR-12、FR-23
@@ -199,6 +199,16 @@ conda run -n multi_agent python -m unittest \
 - 三轮以上tool-result-to-next-sample、ordinary failed纠错、首轮required后恢复auto、waiting不提前采样且先提交authority再release、
   cancellation/model binding/revision/fencing检查通过；源码无maxTurns/迭代预算/模型切换或真实route装配；
 - P3-A canonical 3项、`tests/orchestration` 201项、compileall/diff和静态扫描通过。P3-A green，进入P3-B。
+
+### 11.2 P3-B实施证据
+
+- 新增`AgentCompactionCommit/Result`与窄atomic writer方法；SQLite、PG继承路径和Runtime Sidecar repository均验证range、
+  source digest、全committed来源及sample闭合边界，在同CAS中写context_summary并推进boundary，原items永久保留；
+- `AgentCompactionService`只响应P2 typed history decision，使用Run固定binding和no-tools request生成summary；payload包含covered
+  start/end、source digest和summary，Context只渲染active summary与boundary后的suffix；
+- 每次成功commit后重建完整Catalog/context再preflight；digest/CAS失败零推进，无eligible range、相同range无推进或required
+  segments fatal均立即收敛，不设置迭代预算也不busy-loop；multi-call assistant/calls/results不得被range切开；
+- P3-B canonical 3项、Agent storage/真实Rust Sidecar聚焦16项、orchestration 204项、compileall/diff通过。P3-B green，进入P3-C。
 
 ## 12. 风险、假设与开放问题
 

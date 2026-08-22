@@ -4,6 +4,8 @@ from typing import Protocol
 
 from .models import (
     AgentCallOutcomeCommit,
+    AgentCompactionCommit,
+    AgentCompactionResult,
     AgentFinalOutputCommit,
     AgentFinalOutputResult,
     AgentItem,
@@ -28,6 +30,10 @@ class AgentAtomicWriter(Protocol):
     async def commit_agent_sample(self, commit: AgentSampleCommit) -> AgentSampleCommitResult: ...
 
     async def commit_agent_call_outcome(self, commit: AgentCallOutcomeCommit) -> AgentItem: ...
+
+    async def commit_agent_compaction(
+        self, commit: AgentCompactionCommit
+    ) -> AgentCompactionResult: ...
 
     async def commit_agent_final_output(self, commit: AgentFinalOutputCommit) -> AgentFinalOutputResult: ...
 

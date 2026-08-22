@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 2均`proof_complete`；Phase 3 `in_progress`，P3-A green；下一检查点P3-B
+- 执行状态：Phase 0～Phase 2均`proof_complete`；Phase 3 `in_progress`，P3-A/P3-B green；下一检查点P3-C
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -436,6 +436,12 @@ Green gate：同binding、digest/suffix、crash/CAS、re-preflight、raw/hidden/
 回滚：回退compaction模块；未接流量summary测试数据可保留或精确清理。
 
 建议commit：`feat(agent): compact context with fixed model binding`。
+
+实施证据：新增窄`commit_agent_compaction` CAS并在SQLite/PostgreSQL继承路径与Runtime Sidecar repository保持同义；summary item
+绑定closed covered range/source digest，推进boundary但不删除原items，拒绝digest漂移、reserved source及切开multi-call sample。
+`AgentCompactionService`仅在typed history decision下使用Run同binding、no-tools采样，成功后重建完整context/catalog再preflight；
+no eligible/no progress/required fatal均收敛且不busy-loop。Context顺序固定为rules、active summary、uncovered suffix、trusted facts、
+final guard。P3-B canonical 3项、Agent storage/真实Sidecar聚焦16项、orchestration 204项通过。P3-B green，进入P3-C。
 
 ### P3-C：唯一`agent.final_output`
 

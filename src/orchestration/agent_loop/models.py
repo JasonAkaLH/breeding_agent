@@ -343,6 +343,23 @@ class AgentSampleCommitResult:
     node_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class AgentCompactionCommit:
+    run_id: str
+    expected_revision: int
+    expected_claim_token: str | None
+    covered_start_sequence: int
+    covered_end_sequence: int
+    source_digest: str
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCompactionResult:
+    run: AgentRun
+    summary_item: AgentItem
+
+
 class AgentCallOutcomeStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"

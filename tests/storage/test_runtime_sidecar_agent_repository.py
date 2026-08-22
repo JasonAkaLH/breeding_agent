@@ -10,6 +10,7 @@ from pathlib import Path
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
+    AgentCompactionCommit,
     AgentFinishMetadata,
     AgentFinalOutputCommit,
     AgentItemState,
@@ -23,6 +24,7 @@ from src.orchestration.agent_loop.models import (
     AgentUsage,
 )
 from src.storage.runtime_sidecar_agent_repository import RuntimeSidecarAgentRepository
+from src.storage.agent_payload import agent_compaction_source_digest
 from tests.integrations.test_runtime_sidecar_grpc_client import (
     _connect_with_retry,
     _ensure_runtime_sidecar_binary,
@@ -170,6 +172,24 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertEqual(second.state, AgentItemState.COMMITTED)
         after_second = await self.repository.get_run(run.run_id)
         self.assertEqual(after_second.status, AgentRunStatus.RUNNING)
+        covered = tuple(
+            item
+            for item in await self.repository.list_items(run.run_id)
+            if 1 <= item.sequence <= 5
+        )
+        compacted = await self.repository.commit_agent_compaction(
+            AgentCompactionCommit(
+                run.run_id,
+                after_second.revision,
+                None,
+                1,
+                5,
+                agent_compaction_source_digest(covered),
+                "safe compacted facts",
+            )
+        )
+        self.assertEqual(compacted.run.compacted_through_sequence, 5)
+        after_second = compacted.run
         final = await self.repository.commit_agent_final_output(
             AgentFinalOutputCommit(run.run_id, after_second.revision, None, "最终答案")
         )

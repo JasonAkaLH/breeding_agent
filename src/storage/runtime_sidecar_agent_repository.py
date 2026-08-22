@@ -10,6 +10,8 @@ from typing import Any, Callable, Mapping
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
+    AgentCompactionCommit,
+    AgentCompactionResult,
     AgentFinalOutputCommit,
     AgentFinalOutputResult,
     AgentItem,
@@ -22,7 +24,12 @@ from src.orchestration.agent_loop.models import (
     AgentSampleCommitResult,
     AgentStorageConflict,
 )
-from src.storage.agent_payload import CanonicalAgentPayload, canonicalize_agent_payload
+from src.storage.agent_payload import (
+    CanonicalAgentPayload,
+    agent_compaction_source_digest,
+    agent_compaction_range_is_closed,
+    canonicalize_agent_payload,
+)
 from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
 
 
@@ -306,6 +313,83 @@ class RuntimeSidecarAgentRepository:
             artifacts=artifacts,
         )
         return updated_result
+
+    async def commit_agent_compaction(
+        self, commit: AgentCompactionCommit
+    ) -> AgentCompactionResult:
+        run = await self._require_cas_run(
+            commit.run_id,
+            commit.expected_revision,
+            commit.expected_claim_token,
+        )
+        if (
+            commit.covered_start_sequence != run.compacted_through_sequence + 1
+            or commit.covered_end_sequence < commit.covered_start_sequence
+            or commit.covered_end_sequence >= run.next_item_sequence
+            or not commit.summary.strip()
+        ):
+            raise AgentStorageConflict("agent_compaction_range_invalid")
+        all_items = await self.list_items(run.run_id)
+        covered = tuple(
+            item
+            for item in all_items
+            if commit.covered_start_sequence <= item.sequence <= commit.covered_end_sequence
+        )
+        if (
+            [item.sequence for item in covered]
+            != list(range(commit.covered_start_sequence, commit.covered_end_sequence + 1))
+            or any(item.state is not AgentItemState.COMMITTED for item in covered)
+        ):
+            raise AgentStorageConflict("agent_compaction_source_incomplete")
+        if not agent_compaction_range_is_closed(covered, all_items):
+            raise AgentStorageConflict("agent_compaction_range_splits_sample")
+        digest = agent_compaction_source_digest(covered)
+        if digest != commit.source_digest:
+            raise AgentStorageConflict("agent_compaction_source_digest_mismatch")
+        now = self._now()
+        payload = canonicalize_agent_payload(
+            {
+                "covered_end_sequence": commit.covered_end_sequence,
+                "covered_start_sequence": commit.covered_start_sequence,
+                "source_digest": digest,
+                "summary": commit.summary,
+            }
+        )
+        identity = hashlib.sha256(
+            f"{run.run_id}\0{commit.covered_start_sequence}\0{commit.covered_end_sequence}\0{digest}".encode()
+        ).hexdigest()[:24]
+        summary_item = _item(
+            item_id=f"agent-item:{run.run_id}:summary:{identity}",
+            run=run,
+            sequence=run.next_item_sequence,
+            kind=AgentItemKind.CONTEXT_SUMMARY,
+            state=AgentItemState.COMMITTED,
+            payload=payload,
+            created_at=now,
+            committed_at=now,
+        )
+        updated_run = replace(
+            run,
+            compacted_through_sequence=commit.covered_end_sequence,
+            next_item_sequence=run.next_item_sequence + 1,
+            revision=run.revision + 1,
+            updated_at=now,
+        )
+        response = await self._commit(
+            operation="commit_compaction",
+            run=updated_run,
+            items=(summary_item,),
+            expected_revision=commit.expected_revision,
+            expected_claim_token=commit.expected_claim_token,
+            idempotency_key=(
+                f"agent-compaction:{run.run_id}:{commit.covered_start_sequence}:"
+                f"{commit.covered_end_sequence}:{digest}"
+            ),
+        )
+        return AgentCompactionResult(
+            run=_run_from_wire(response["run"]),
+            summary_item=summary_item,
+        )
 
     async def commit_agent_final_output(
         self, commit: AgentFinalOutputCommit

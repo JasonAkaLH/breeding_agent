@@ -44,6 +44,48 @@ def canonicalize_agent_payload(value: Any) -> CanonicalAgentPayload:
     )
 
 
+def agent_compaction_source_digest(items: tuple[Any, ...]) -> str:
+    payload = [
+        {
+            "item_id": str(item.item_id),
+            "kind": str(getattr(item.kind, "value", item.kind)),
+            "payload_sha256": str(item.payload_sha256),
+            "sequence": int(item.sequence),
+        }
+        for item in items
+    ]
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def agent_compaction_range_is_closed(
+    covered: tuple[Any, ...],
+    all_items: tuple[Any, ...],
+) -> bool:
+    covered_ids = {str(item.item_id) for item in covered}
+    for item in covered:
+        kind = str(getattr(item.kind, "value", item.kind))
+        if kind == "assistant_message" and any(
+            candidate.parent_item_id == item.item_id
+            and str(candidate.item_id) not in covered_ids
+            for candidate in all_items
+        ):
+            return False
+        if kind == "tool_call" and any(
+            candidate.source_call_item_id == item.item_id
+            and str(candidate.item_id) not in covered_ids
+            for candidate in all_items
+        ):
+            return False
+    return True
+
+
 def _validate_json_value(value: Any) -> None:
     if value is None or isinstance(value, str | bool | int):
         return
