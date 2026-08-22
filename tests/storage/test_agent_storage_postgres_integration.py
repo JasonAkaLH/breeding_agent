@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import asyncio
 import unittest
 from datetime import datetime, timezone
@@ -27,14 +26,19 @@ from src.storage.postgres import (
 )
 from src.storage.sqlite.base import SQLiteBase
 from src.storage.sqlite.models import AgentFinalReceiptRow, AgentItemRow, AgentRunRow, TaskNodeRow, TaskRow
+from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 
 
 class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.dsn = os.environ.get("MAF_POSTGRES_TEST_DSN", "")
-        if not cls.dsn:
-            raise unittest.SkipTest("postgres_test_dsn_not_configured")
+        cls.dsn, skip_reason = isolated_postgres_test_dsn_or_skip_reason(
+            "MAF_POSTGRES_AGENT_TEST_DSN",
+            fallback_env="MAF_POSTGRES_TEST_DSN",
+        )
+        if skip_reason:
+            raise unittest.SkipTest(skip_reason)
+        assert cls.dsn is not None
         cls.engine = create_postgres_engine(cls.dsn)
         SQLiteBase.metadata.create_all(cls.engine)
         cls.session_factory = create_postgres_session_factory(cls.engine)

@@ -5,7 +5,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
-import os
 from pathlib import Path
 import unittest
 from uuid import uuid4
@@ -48,9 +47,11 @@ from src.storage.postgres import (
 from src.storage.postgres.session import (
     validate_mcp_legacy_migration_connection_role,
 )
+from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 
 
 INTEGRATION_DSN_ENV = "MAF_POSTGRES_ROLLOUT_INTEGRATION_TEST_DSN"
+LEGACY_MIGRATION_DSN_ENV = "MAF_POSTGRES_LEGACY_MIGRATION_TEST_DSN"
 PERMISSIONS_SQL = (
     Path(__file__).resolve().parents[2]
     / "scripts/postgres/user_mcp_legacy_migration_permissions.sql"
@@ -80,11 +81,13 @@ class LegacyMCPMigrationPostgresIntegrationTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.dsn = os.environ.get(INTEGRATION_DSN_ENV, "")
-        if not cls.dsn:
-            raise unittest.SkipTest(
-                "postgres_rollout_integration_test_dsn_not_configured"
-            )
+        cls.dsn, skip_reason = isolated_postgres_test_dsn_or_skip_reason(
+            LEGACY_MIGRATION_DSN_ENV,
+            fallback_env=INTEGRATION_DSN_ENV,
+        )
+        if skip_reason:
+            raise unittest.SkipTest(skip_reason)
+        assert cls.dsn is not None
         sqlalchemy_dsn = (
             make_url(cls.dsn)
             .set(drivername="postgresql+psycopg")

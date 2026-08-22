@@ -5,15 +5,18 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
-from src.state.postgres.worker import postgres_test_dsn_or_skip_reason
 from src.storage.postgres import create_postgres_engine
+from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 
 
 class PostgresReadNotBlockedByWriterTest(unittest.TestCase):
     def test_real_postgres_mvcc_gate_has_explicit_skip_reason_when_not_configured(self) -> None:
-        dsn, reason = postgres_test_dsn_or_skip_reason()
+        dsn, reason = isolated_postgres_test_dsn_or_skip_reason(
+            "MAF_POSTGRES_MVCC_TEST_DSN",
+            fallback_env="MAF_POSTGRES_TEST_DSN",
+        )
         if dsn is None:
-            self.assertEqual(reason, "postgres_test_dsn_not_configured")
+            self.assertEqual(reason, "maf_postgres_mvcc_test_dsn_not_configured")
             self.skipTest(reason)
         engine = create_postgres_engine(str(dsn))
         row_id = uuid4().hex
