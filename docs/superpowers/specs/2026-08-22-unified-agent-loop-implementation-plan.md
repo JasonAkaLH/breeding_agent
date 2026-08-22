@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 5均`proof_complete`；P5-A～P5-B green；下一检查点P6-A
+- 执行状态：Phase 0～Phase 5均`proof_complete`；P5-A～P5-B green；P6-A因canonical storage/Agent Skill required skip保持`blocked`
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -141,7 +141,7 @@ Phase 0～5只允许additive schema、行为保持Kernel抽取和test-only Agent
 | 4 | P4-B | continuation、crash recovery、cancel/no-replay | `proof_complete` |
 | 5 | P5-A | API/SSE/history/graph/events/metrics投影 | `in_progress` |
 | 5 | P5-B | Frontend恢复、多waiting、可访问性与readiness报告 | `proof_complete` |
-| 6 | P6-A | 最后DAG回滚检查点与cutover预检 | `in_progress` |
+| 6 | P6-A | 最后DAG回滚检查点与cutover预检 | `blocked`：required no-skip门禁未闭合 |
 | 6 | P6-B | 全入口切换、DAG runtime/wiring/config删除 | `in_progress` |
 | 6 | P6-C | 全量证明、删除报告与文档authority切换 | `cutover_complete` |
 | 7 | P7-A | 三backend仓库外备份及隔离恢复演练 | `in_progress` |
