@@ -5,7 +5,7 @@
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
-- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（已生成，待用户批准）
+- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（三轮document-perfectization，99/100，Pass with recorded assumptions；业务实现未开始）
 - **总目标**：以同一模型持续完成规划、Tool选择、结果观察、纠错、上下文压缩和最终回答；全部执行与恢复入口最终统一进入同一AgentRun，不保留DAG runtime或旧任务兼容恢复。
 
 ## 目录权威
@@ -153,4 +153,4 @@ Rust gate脚本验证。`--skip-unavailable`只用于诊断，不能作为requir
 4. 受影响模块的`AGENTS.md`；
 5. `CHANGELOG.md`。
 
-整组PRD已批准，详细实施计划已经生成；实施计划经用户批准前不得修改业务代码。
+整组PRD已批准，详细实施计划已通过审查；本次计划审查不授权业务实现，收到明确实施指令前不得修改业务代码。
