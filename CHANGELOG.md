@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- External Project Skill Bundle Authority设计经document-perfectization四轮以100/100 `Pass`，新增双仓实施计划：按S0～S6依次闭合起点红测、bundle digest/operator、pre-catalog fail-closed与非敏感clean config、受审Mini BreedStat v2恢复、Field Design/Analysis/Rice Genie和双Skill路由对齐、工作树全量及双archive/Docker证明；仅在Agent Skill零skip、API自给、digest只读防漂移和成对回滚全部通过后解锁P6-A。License Requirement：计划只恢复已有Git对象并复用现有Python/R/SQLite/Docker依赖，禁止新第三方代码或远程asset。
+
 - 新增已批准的External Project Skill Bundle Authority设计：保持`breeding_agent` runtime与`vibe-breeding/dev:skills/`内容双仓权威，从受审历史恢复Mini BreedStat RCBD完整实现后适配v2 manifest，只定向修复Field Design/Analysis与Rice Genie合同；P6-A以两仓commit/tree、normalized bundle digest、双clean archive、Agent Skill/API零skip和Docker只读挂载证明闭合，不放宽测试、不将Skill vendoring回主仓。License Requirement：设计仅复用两仓已有Python/R/SQLite/Docker资产，无新增依赖或许可变更。
 
 - P6-A第三次外部Skill环境审计确认唯一剩余阻断：宿主权威Skill路径缺失，运行backend使用只读空Skill卷，当前/本地`0.1.24`/已缓存开发backend镜像均不含`/app/skill/*/SKILL.md`，Docker也无其他Skill卷。Agent Skill canonical discover因此仍是200项通过、43项全部由external bundle缺失导致的skip；Rscript、PyO3及仓库内runtime合同已通过。未使用漂移副本、历史snapshot或合成fixture伪造required证据，P6-B继续禁止进入。License Requirement：本轮只执行只读环境审计并复用既有Docker/stdlib，无新增依赖或许可变更。
