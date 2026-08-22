@@ -28,7 +28,7 @@ class UnifiedAgentLoopEvidenceContractTest(unittest.TestCase):
             result["handoffs"],
             {
                 "active-prd-inventory.md": "closed",
-                "cutover-readiness.md": "not_due",
+                "cutover-readiness.md": "closed",
                 "dag-runtime-deletion-report.md": "not_due",
                 "destructive-migration-evidence.md": "not_due",
             },

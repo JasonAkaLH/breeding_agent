@@ -76,10 +76,14 @@ class PostgresFreshCutoverSchemaManifest:
 def build_postgres_fresh_cutover_schema_manifest() -> PostgresFreshCutoverSchemaManifest:
     table_columns: dict[str, dict[str, str]] = {}
     check_constraints: dict[str, dict[str, str]] = {}
+    dialect = postgresql.dialect()
     for table_name, table in sorted(SQLiteBase.metadata.tables.items()):
         table_columns[table_name] = {column.name: _postgres_type_name(column.type) for column in table.columns}
         check_constraints[table_name] = {
-            str(constraint.name): str(constraint.sqltext)
+            dialect.identifier_preparer.truncate_and_render_constraint_name(
+                constraint.name,
+                _alembic_quote=False,
+            ): str(constraint.sqltext)
             for constraint in sorted(
                 (item for item in table.constraints if isinstance(item, CheckConstraint)),
                 key=lambda item: str(item.name),

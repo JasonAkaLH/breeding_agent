@@ -87,6 +87,7 @@ from src.integrations.mcp.cp7_artifacts import (
 from src.storage.sqlite.repositories import (
     SQLiteStateRepository,
     SQLiteStorage,
+    _mcp_owner_server_set_fingerprint,
     _row_to_conversation,
     _row_to_mcp_remote_task,
     _row_to_mcp_rollout_block_resolution,
@@ -169,24 +170,26 @@ class PostgreSQLStorage(SQLiteStorage):
         """Run CP7 authority under its global PostgreSQL row-lock order."""
 
         with self._session_factory() as session:
-            session.execute(
+            created_guard_owner = session.scalar(
                 text(
                     "INSERT INTO user_mcp_owner_mutation_guard "
                     "(owner_user_id, revision, server_set_fingerprint, created_at, updated_at) "
                     "VALUES (:owner, 0, :fingerprint, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
-                    "ON CONFLICT (owner_user_id) DO NOTHING"
+                    "ON CONFLICT (owner_user_id) DO NOTHING "
+                    "RETURNING owner_user_id"
                 ),
                 {
                     "owner": owner_user_id,
                     "fingerprint": canonical_sha256([]),
                 },
             )
-            session.scalar(
-                select(UserMCPOwnerMutationGuardRow.owner_user_id)
+            owner_guard = session.scalar(
+                select(UserMCPOwnerMutationGuardRow)
                 .where(UserMCPOwnerMutationGuardRow.owner_user_id == owner_user_id)
                 .with_for_update()
             )
-            if server_id is not None:
+            owner_servers: list[UserMCPServerRow] | None = None
+            if server_id is not None and created_guard_owner is None:
                 session.scalar(
                     select(UserMCPServerRow.server_id)
                     .where(
@@ -196,12 +199,23 @@ class PostgreSQLStorage(SQLiteStorage):
                     .with_for_update()
                 )
             else:
-                session.scalars(
-                    select(UserMCPServerRow.server_id)
-                    .where(UserMCPServerRow.owner_user_id == owner_user_id)
-                    .order_by(UserMCPServerRow.server_id)
-                    .with_for_update()
-                ).all()
+                owner_servers = list(
+                    session.scalars(
+                        select(UserMCPServerRow)
+                        .where(UserMCPServerRow.owner_user_id == owner_user_id)
+                        .order_by(UserMCPServerRow.server_id)
+                        .with_for_update()
+                    ).all()
+                )
+            if created_guard_owner is not None:
+                if owner_guard is None or owner_servers is None:
+                    raise RuntimeError("user_mcp_owner_guard_create_failed")
+                owner_guard.server_set_fingerprint = (
+                    _mcp_owner_server_set_fingerprint(owner_servers)
+                )
+                owner_guard.revision = int(owner_guard.revision) + 1
+                owner_guard.updated_at = datetime.now(timezone.utc)
+                session.flush()
             if intent_id is not None:
                 session.scalar(
                     select(MCPNoServerIntentRow.intent_id)

@@ -10,6 +10,9 @@ from src.storage.postgres.repositories import PostgreSQLStorage
 class UserMCPCP7PostgresContractTest(unittest.TestCase):
     def test_authority_lock_order_is_explicit_and_not_inherited(self) -> None:
         source = inspect.getsource(PostgreSQLStorage._run_cp7_authority_sync)
+        self.assertIn("RETURNING owner_user_id", source)
+        self.assertIn("_mcp_owner_server_set_fingerprint", source)
+        self.assertIn("owner_guard.revision = int(owner_guard.revision) + 1", source)
         ordered = (
             "UserMCPOwnerMutationGuardRow",
             "UserMCPServerRow",

@@ -46,6 +46,15 @@ class PostgresRuntimeSchemaManifestTest(unittest.TestCase):
         self.assertIn("idx_conversation_delete_status_updated", index_ddl)
         self.assertIn("delete_phase", index_ddl)
 
+    def test_manifest_uses_postgres_rendered_constraint_names(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        table_ddl = build_runtime_table_schema_ddl()
+
+        for constraints in manifest.check_constraints.values():
+            for constraint_name in constraints:
+                self.assertLessEqual(len(constraint_name), 63)
+                self.assertIn(f"CONSTRAINT {constraint_name} ", table_ddl)
+
     def test_task_input_attachment_is_bootstrapped_by_runtime_manifest_and_ddl(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
         self.assertIn("task_input_attachment", manifest.runtime_table_names)
