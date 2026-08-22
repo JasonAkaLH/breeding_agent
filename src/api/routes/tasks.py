@@ -88,6 +88,9 @@ def _count_failed_nodes(nodes) -> int:
 
 
 async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
+    agent_projection = getattr(runtime, "agent_task_projection", None)
+    if agent_projection is not None:
+        await agent_projection.get_agent_run(task.task_id)
     if task.status == TaskStatus.COMPLETED:
         await runtime.try_sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
     nodes = await runtime.storage.list_task_nodes_for_task(task.task_id)
@@ -375,6 +378,11 @@ async def get_task_graph(task_id: str, request: Request) -> TaskGraphResponse:
     runtime = _runtime(request)
     user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
+    agent_projection = getattr(runtime, "agent_task_projection", None)
+    if agent_projection is not None:
+        projected = await agent_projection.project_graph(task_id)
+        if projected is not None:
+            return projected
     nodes = await runtime.storage.list_task_nodes_for_task(task_id)
     edges = await runtime.storage.list_task_edges(task_id)
     return TaskGraphResponse(

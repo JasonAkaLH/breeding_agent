@@ -1,8 +1,8 @@
 # Phase 5：API、SSE、Frontend 与 Observability 适配 PRD
 
 - **日期**：2026-08-22
-- **状态**：pending
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
+- **状态**：in_progress（P5-A green；P5-B pending）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；后端投影、事件与指标检查点已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～4必须`proof_complete`
 - **主责需求**：FR-21、FR-22
@@ -210,3 +210,16 @@ AL-P5-01～10、后端API/observability和Frontend三门禁通过；`cutover-rea
 
 交付Phase 6：Task/API投影、SSE/history/event/metric合同、Frontend reducer和固定`cutover-readiness.md`。Phase 6
 不得依赖DAG edge或Planner/Replanner事件作为新路径事实源。
+
+### 15.1 当前实施证据
+
+- P5-A新增test-only Agent Task/history/graph投影，waiting继续映射Task `running`；状态漂移fail closed，Run初始化投影
+  `task.graph_created(edge_count=0)`，Agent graph固定
+  `required/hard`和empty edges，repository spy确认不读取TaskEdge。
+- Durable Agent event采用closed低敏字段；reasoning delta仅通过transient broker且不写audit/durable storage。19项源设计
+  指标名称完整闭合，label只接受closed outcome/kind/reason/phase，metric backend故障不改变业务结果。
+- Agent final在live与Sidecar-like refresh投影中保持确定性单Message、`stream_status=complete`、fallback metadata与既有
+  Artifact/download安全链；真实`build_api_runtime`未装配Agent projection或请求开关。
+- P5-A canonical 41项、API discover 493项、storage discover 398项（7项既有外部PG环境skip）、observability discover
+  39项通过。P5-B的Frontend、多waiting、可访问性三门禁和`cutover-readiness.md`尚未执行，因此Phase 5不得标记
+  `proof_complete`。

@@ -698,7 +698,7 @@ class SQLiteAgentRepository:
                     role="assistant",
                     content=commit.text,
                     task_id=run.task_id,
-                    stream_status="completed",
+                    stream_status="complete",
                     created_at=now,
                     message_type="chat",
                     message_metadata={"source": "agent_final_output"},

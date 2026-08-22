@@ -1,11 +1,11 @@
 # 统一同模型 Agent Loop 分阶段 PRD 索引
 
 - **日期**：2026-08-22
-- **状态**：实现进行中；Phase 0～Phase 4 `proof_complete`；下一步P5-A
+- **状态**：实现进行中；Phase 0～Phase 4 `proof_complete`；P5-A green，下一步P5-B
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
-- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（三轮document-perfectization，99/100；Phase 0～Phase 2已完成）
+- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（三轮document-perfectization，99/100；Phase 0～Phase 4已完成，P5-A green）
 - **总目标**：以同一模型持续完成规划、Tool选择、结果观察、纠错、上下文压缩和最终回答；全部执行与恢复入口最终统一进入同一AgentRun，不保留DAG runtime或旧任务兼容恢复。
 
 ## 目录权威
@@ -35,7 +35,7 @@
 | Phase 2 | `03-阶段二-InvocationKernel与SkillMCP适配PRD.md` | Invocation Kernel、Tool Catalog/Policy、Skill/MCP适配 | proof_complete |
 | Phase 3 | `04-阶段三-核心AgentLoop与FinalOutputPRD.md` | 核心Loop、multi-call、compaction、唯一final output | proof_complete |
 | Phase 4 | `05-阶段四-WaitingContinuation与RecoveryPRD.md` | Waiting、Continuation、Crash Recovery、Cancel | proof_complete |
-| Phase 5 | `06-阶段五-APISSEFrontend与Observability适配PRD.md` | API/SSE/history/graph、Frontend、事件指标、可访问性 | pending |
+| Phase 5 | `06-阶段五-APISSEFrontend与Observability适配PRD.md` | API/SSE/history/graph、Frontend、事件指标、可访问性 | in_progress（P5-A green） |
 | Phase 6 | `07-阶段六-全入口CleanCutover与DAGRuntime删除PRD.md` | 全入口切换、DAG runtime/wiring删除、单控制面 | pending |
 | Phase 7 | `08-阶段七-破坏性Schema删除与最终门禁PRD.md` | DAG storage/proto物理删除、恢复演练、最终证明 | pending |
 

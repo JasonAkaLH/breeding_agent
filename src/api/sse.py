@@ -129,5 +129,25 @@ def encode_sse_event(event: EventRecord) -> dict[str, str]:
     }
 
 
+async def publish_agent_reasoning_delta(
+    broker: InMemoryEventBroker,
+    event: EventRecord,
+) -> None:
+    if (
+        event.event_type != "agent.reasoning_delta"
+        or event.visibility is not EventVisibility.FRONTEND
+        or set(event.payload) != {"delta", "ordinal", "sample_id"}
+        or not isinstance(event.payload.get("delta"), str)
+        or not event.payload["delta"]
+        or isinstance(event.payload.get("ordinal"), bool)
+        or not isinstance(event.payload.get("ordinal"), int)
+        or event.payload["ordinal"] < 0
+        or not isinstance(event.payload.get("sample_id"), str)
+        or not event.payload["sample_id"]
+    ):
+        raise ValueError("agent_reasoning_delta_contract_invalid")
+    await broker.publish_transient(event)
+
+
 def _to_isoformat(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None

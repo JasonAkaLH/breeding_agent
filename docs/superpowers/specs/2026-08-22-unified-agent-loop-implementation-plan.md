@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 4均`proof_complete`；P4-A～P4-B green；下一检查点P5-A
+- 执行状态：Phase 0～Phase 4均`proof_complete`；P5-A green，Phase 5 `in_progress`；下一检查点P5-B
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -545,6 +545,13 @@ Green gate：旧DAG fixture和Agent fixture均通过；真实请求仍无法选�
 回滚：删除Agent-only投影/event/metric分支；旧API语义不变。
 
 建议commit：`feat(api): project agent runs through task contracts`。
+
+执行证据（P5-A green）：新增test-only `AgentTaskProjectionService`、closed `AgentEventProjector`和19项低基数Agent指标合同；
+Agent fixture保持waiting到Task `running`的fatal一致性校验，Run初始化投影`task.graph_created(edge_count=0)`，`/graph`固定`required/hard`、`edges=[]`且spy证明零TaskEdge读取。
+Reasoning delta只经transient broker，durable事件拒绝正文、raw result、credential和用户标识；final history在SQLite投影和
+Sidecar-like无Message行恢复下均保持唯一`complete`消息、fallback披露与既有Artifact/download安全链。真实
+`build_api_runtime`源码扫描无Agent projection装配或请求开关。P5-A canonical 41项、API全域493项、storage全域398项
+（7项既有外部PG环境skip）及observability全域39项通过；正式执行入口仍为DAG。Phase 5保持`in_progress`，进入P5-B。
 
 ### P5-B：Frontend、多waiting与cutover readiness
 

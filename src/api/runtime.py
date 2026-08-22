@@ -3703,6 +3703,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         message_id = f"{task_id}:assistant"
         if await self.storage.get_message(message_id) is not None:
             return
+        existing_messages = await self.storage.list_messages_for_conversation(
+            conversation_id
+        )
+        if any(
+            message.task_id == task_id
+            and str(message.role) == str(MessageRole.ASSISTANT)
+            and message.stream_status in {"complete", "completed"}
+            for message in existing_messages
+        ):
+            return
         artifacts = await self.storage.list_artifacts_for_task(task_id)
         events = await self._list_final_answer_events(task_id)
         fallback_metadata = await self._assistant_history_fallback_metadata(task_id)

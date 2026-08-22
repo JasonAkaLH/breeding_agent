@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -121,6 +122,13 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
     await require_conversation_owner(runtime, conversation_id, user)
     await runtime.sync_assistant_history_messages(conversation_id)
     messages = await runtime.storage.list_messages_for_conversation(conversation_id)
+    agent_projection = getattr(runtime, "agent_task_projection", None)
+    if agent_projection is not None:
+        messages = await agent_projection.project_history_messages(
+            conversation_id,
+            messages,
+        )
+        messages = await _with_agent_fallback_metadata(runtime, messages)
     public_messages = [message for message in messages if _is_public_history_message(message)]
     artifacts_by_task_id = await _history_display_artifacts_by_task_id(runtime, conversation_id, public_messages)
     projections_by_task_id = await _history_mcp_result_artifact_projections_by_task_id(
@@ -163,6 +171,33 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
             for message in public_messages
         ],
     )
+
+
+async def _with_agent_fallback_metadata(
+    runtime: ApiRuntime,
+    messages: list[Message],
+) -> list[Message]:
+    projected = []
+    for message in messages:
+        if (
+            str(message.role) == str(MessageRole.ASSISTANT)
+            and message.task_id is not None
+            and message.metadata.get("source") == "agent_final_output"
+            and CAPABILITY_MISSING_FALLBACK_KEY not in message.metadata
+        ):
+            fallback = await runtime._assistant_history_fallback_metadata(
+                message.task_id
+            )
+            if fallback is not None:
+                message = replace(
+                    message,
+                    metadata={
+                        **dict(message.metadata),
+                        CAPABILITY_MISSING_FALLBACK_KEY: fallback,
+                    },
+                )
+        projected.append(message)
+    return projected
 
 
 async def _history_mcp_result_artifact_projections_by_task_id(
