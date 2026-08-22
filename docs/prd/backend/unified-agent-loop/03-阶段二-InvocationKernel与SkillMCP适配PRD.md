@@ -1,8 +1,8 @@
 # Phase 2：Invocation Kernel 与 Skill/MCP 适配 PRD
 
 - **日期**：2026-08-22
-- **状态**：pending
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
+- **状态**：in_progress（P2-A green；下一步P2-B）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P2-A实现证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0、Phase 1必须`proof_complete`
 - **主责需求**：FR-13、FR-15、FR-16、FR-20、FR-24
@@ -193,6 +193,17 @@ conda run -n multi_agent python -m unittest discover -s tests/integrations/mcp -
 保留为Phase 7门禁，本阶段用fake/隔离integration证明协议和安全边界。
 
 每条discover命令必须发现非零测试；`Ran 0 tests`即失败。
+
+### 11.1 P2-A实施证据
+
+- 新增`CapabilityInvocationService`、`InvocationRequest/Result`和语义化`InvocationCommitPort`，不依赖
+  `WorkflowNodePlan`或`OrchestrationRequest`；Run/call/revision/claim/model binding/cancellation引用已预留为Agent输入合同；
+- route authority、instance selection、Node start、执行metadata authority、唯一`CapabilityExecutionRequest`构造、唯一executor
+  调用以及completed/failed/waiting/remote pending/late-result分类集中在Kernel；静态扫描确认Orchestration范围只有该处调用；
+- `LegacyDAGInvocationCommitPort`只实现现有TaskNode、Artifact、Event、Interrupt、slot collection、remote binding持久化投影，
+  旧`OrchestrationService._execute_node`降为DTO映射和Kernel委托；Agent fixture仅注入Phase 1 atomic writer提交outcome；
+- P2-A聚焦20项、`tests/orchestration` discover 187项、compileall和diff检查通过；旧DAG scheduler、Planner/Replanner、API入口
+  及真实route均未改变。P2-A green，Phase 2继续`in_progress`进入P2-B。
 
 ## 12. 风险、假设与开放问题
 

@@ -5,8 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0、Phase 1均`proof_complete`；P1-A/P1-B/P1-C green（真实隔离PG 32项零skip、真实Rust
-  Sidecar进程完成AgentAtomicWriter全链路）；下一检查点P2-A
+- 执行状态：Phase 0、Phase 1均`proof_complete`；Phase 2 `in_progress`，P2-A green；下一检查点P2-B
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -282,7 +281,7 @@ waiting或terminal，orphan/重复result fail closed。真实Rust Sidecar进程�
 resume outcome、唯一final、投影读取及final retry；P1-C Python canonical 57项、统一Rust fmt/clippy/test gate、Phase 1聚焦44项、
 core 46项和storage 398项通过。storage discover的7项skip均为未注入外部PostgreSQL DSN的既有真实环境套件；Agent必需PG
 证据仍引用P1-B同一代码基线上的隔离PG 32项零skip，不把本次skip记为通过。Phase 1据此`proof_complete`，正式入口仍保持DAG，
-下一检查点P2-A。
+随后进入P2-A。
 
 ## 7. Phase 2：Invocation Kernel、Catalog、Skill 与 MCP
 
@@ -305,6 +304,13 @@ Green gate：旧DAG behavior-preservation回归通过；静态/spy证明只有�
 回滚：独立回退Kernel抽取，恢复原`service.py`私有生命周期；Agent storage保留未接流量。
 
 建议commit：`refactor(orchestration): extract capability invocation kernel`。
+
+实施证据：新增不依赖`WorkflowNodePlan`/`OrchestrationRequest`的`CapabilityInvocationService`和语义化
+`InvocationCommitPort`；route authority、instance selection、Node start、唯一`CapabilityExecutionRequest`构造/executor调用及
+completed/failed/waiting/late-result分类只存在于Kernel。旧DAG仅通过临时`LegacyDAGInvocationCommitPort`保存既有
+Task/Node/Artifact/Event/Interrupt/remote binding投影，Agent fixture只把completed outcome交给Phase 1
+`AgentAtomicWriter`。P2-A聚焦20项、orchestration discover 187项、compileall和静态唯一生命周期扫描通过；正式入口、scheduler、
+Planner/Replanner均未切换。P2-A green，Phase 2保持`in_progress`并进入P2-B。
 
 ### P2-B：Tool Catalog、Policy与完整预算preflight
 

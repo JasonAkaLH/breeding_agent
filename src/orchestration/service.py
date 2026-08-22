@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from src.core.contracts import CapabilityExecutionRequest, EventSink, ExecutorPort, StoragePort
+from src.core.contracts import EventSink, ExecutorPort, StoragePort
 from src.core.enums import EventVisibility, NodeStatus, TaskStatus
 from src.core.models import EventRecord, Interrupt, Task, TaskEdge, TaskNode
 from src.integrations.mcp.cp7_artifacts import canonical_sha256
@@ -18,47 +18,27 @@ from src.integrations.mcp.resume_envelope import (
 from src.integrations.agent_skills.missing_input_interrupt import (
     SLOT_COLLECTION_V2_SCHEMA_VERSION,
     slot_collection_bootstrap_events,
-    slot_collection_event_payload,
     slot_collection_from_required_fields,
     slot_collection_model_from_carrier,
     slot_collection_required_fields_ref,
 )
 
 from .backpressure import BackpressureGuard
+from .agent_loop.invocation import (
+    CapabilityInvocationService,
+    InvocationRequest,
+    execution_metadata,
+    node_activity_payload,
+    task_authoritative_metadata,
+)
+from .agent_loop.legacy_dag_adapter import LegacyDAGInvocationCommitPort
 from .completion_policy import CompletionPolicy, CompletionStatus
-from .mcp_route_handoff import normalize_selected_mcp_route
 from .models import OrchestrationRequest, OrchestrationRunResult, WorkflowNodePlan, WorkflowPlan
 from .planner_node_identity import validate_canonical_model_node_identity
 from .registry import CapabilityRegistry, InstanceRegistry
 from .runtime_replanner import NoopRuntimeReplanner, RuntimeReplanContext, RuntimeReplanDecision, RuntimeReplanner
 from .scheduler import Scheduler
-from .visible_message_history import persist_interrupt_question_message
 from .workflow_plan_validator import WorkflowPlanValidator
-
-_SYSTEM_NODE_METADATA_KEYS = frozenset(
-    {
-        "forced_skill_capability_id",
-        "forced_skill_name",
-        "forced_skill_source",
-        "soft_skill_binding",
-        "soft_skill_binding_source",
-        "soft_skill_binding_requested_capability_id",
-        "mcp_dispatch_server_id",
-        "mcp_binding_mode",
-        "forced_by_mcp_command",
-        "mcp_command",
-    }
-)
-_TASK_AUTHORITY_METADATA_KEYS = frozenset(
-    {
-        "mcp_execution_mode",
-        "mcp_shadow_enabled",
-        "mcp_rollout_config_version",
-        "mcp_route_reason_code",
-        "mcp_rollout_mode",
-    }
-)
-
 
 def _serialize_workflow_plan(plan: WorkflowPlan) -> dict[str, Any]:
     return {
@@ -100,13 +80,23 @@ class OrchestrationService:
         self._storage = storage
         self._capability_registry = capability_registry
         self._instance_registry = instance_registry
-        self._scheduler = scheduler
-        self._executor = executor
         self._completion_policy = completion_policy
         self._backpressure = backpressure
         self._event_sink = event_sink
         self._runtime_replanner = runtime_replanner or NoopRuntimeReplanner()
         self._event_counter = 0
+        self._invocation_service = CapabilityInvocationService(
+            scheduler=scheduler,
+            executor=executor,
+            commit_port=LegacyDAGInvocationCommitPort(
+                storage=storage,
+                make_event=self._make_event,
+                record_event=self._record_event,
+                assert_execution_owned=self._assert_invocation_execution_owned,
+                persist_interrupt_authority=self._persist_invocation_interrupt_authority,
+            ),
+            now_fn=self._utcnow_naive,
+        )
 
     _TERMINAL_NODE_STATUSES = {
         NodeStatus.COMPLETED,
@@ -210,14 +200,9 @@ class OrchestrationService:
 
     @staticmethod
     def _node_activity_payload(node_plan: WorkflowNodePlan, *, instance_id: str | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] = {"capability_id": node_plan.capability_id}
+        payload = node_activity_payload(node_plan.capability_id, node_plan.metadata)
         if instance_id is not None:
             payload["instance_id"] = instance_id
-        for key in ("skill_name", "forced_skill_name"):
-            skill_name = node_plan.metadata.get(key)
-            if isinstance(skill_name, str) and skill_name.strip():
-                payload["skill_name"] = skill_name.strip()
-                break
         return payload
 
     async def _initialize_task(self, request: OrchestrationRequest, plan: WorkflowPlan) -> Task:
@@ -551,47 +536,14 @@ class OrchestrationService:
         request_metadata: Any,
         node_metadata: Any,
     ) -> dict[str, Any]:
-        request_values = dict(request_metadata or {})
-        node_values = dict(node_metadata or {})
-        for key in _TASK_AUTHORITY_METADATA_KEYS:
-            node_values.pop(key, None)
-        for key in _SYSTEM_NODE_METADATA_KEYS:
-            if key not in node_values:
-                request_values.pop(key, None)
-        request_values.update(node_values)
-        return request_values
+        return execution_metadata(request_metadata, node_metadata)
 
     @staticmethod
     def _task_authoritative_metadata(
         metadata: dict[str, Any],
         task: Task | None,
     ) -> dict[str, Any]:
-        values = dict(metadata)
-        for key in _TASK_AUTHORITY_METADATA_KEYS:
-            values.pop(key, None)
-        if task is None:
-            return values
-        assignment = (
-            task.mcp_execution_mode,
-            task.mcp_shadow_enabled,
-            task.mcp_rollout_config_version,
-            task.mcp_route_reason_code,
-            task.mcp_rollout_mode,
-        )
-        if all(value is None for value in assignment):
-            return values
-        if any(value is None for value in assignment):
-            raise ValueError("mcp_task_route_assignment_corrupt")
-        values.update(
-            {
-                "mcp_execution_mode": task.mcp_execution_mode,
-                "mcp_shadow_enabled": task.mcp_shadow_enabled,
-                "mcp_rollout_config_version": task.mcp_rollout_config_version,
-                "mcp_route_reason_code": task.mcp_route_reason_code,
-                "mcp_rollout_mode": task.mcp_rollout_mode,
-            }
-        )
-        return values
+        return task_authoritative_metadata(metadata, task)
 
     async def _build_runtime_replan_decision(
         self,
@@ -644,267 +596,36 @@ class OrchestrationService:
         *,
         dependency_outputs: dict[str, dict[str, Any]],
     ) -> tuple[TaskNode, dict[str, Any]]:
-        await self._assert_mcp_continuation_execution_owned(request)
-        route_handoff = normalize_selected_mcp_route(
-            capability_id=node_plan.capability_id,
-            input_payload=node_plan.input_payload,
-            node_metadata=node_plan.metadata,
-            pinned_server_id_present="mcp_dispatch_server_id" in request.metadata,
-            pinned_server_id=request.metadata.get("mcp_dispatch_server_id"),
-            available_server_ids=frozenset(
-                profile.server_id.strip()
-                for profile in request.available_mcp_servers
-                if profile.server_id.strip()
-            ),
-        )
-        if route_handoff.rejection_code is not None:
-            return await self._reject_mcp_selected_route(
-                request=request,
-                task_node=task_node,
-                rejection_code=route_handoff.rejection_code,
-            )
-        node_plan = replace(
-            node_plan,
-            metadata=dict(route_handoff.normalized_node_metadata),
-        )
-        instance = self._scheduler.select_instance(node_plan.capability_id)
-        running = replace(
-            task_node,
-            status=NodeStatus.RUNNING,
-            assigned_instance_id=instance.instance_id,
-            started_at=task_node.started_at or self._utcnow_naive(),
-        )
-        running = await self._storage.compare_and_set_task_node(
-            running, expected_from_status=task_node.status
-        )
-        if running is None:
-            raise RuntimeError("mcp_continuation_node_start_conflict")
-        await self._record_event(
-            self._make_event(
-                task_id=request.task_id,
-                conversation_id=request.conversation_id,
-                node_id=task_node.node_id,
-                event_type="node.started",
-                payload=self._node_activity_payload(node_plan, instance_id=instance.instance_id),
-            )
-        )
-
-        task_snapshot = await self._storage.get_task(request.task_id)
-        execution_metadata = self._task_authoritative_metadata(
-            self._execution_metadata(request.metadata, node_plan.metadata),
-            task_snapshot,
-        )
-        result = await self._executor.execute(
-            CapabilityExecutionRequest(
+        continuation_plan = request.metadata.get("mcp_remote_task_continuation_plan")
+        invocation = await self._invocation_service.invoke(
+            InvocationRequest(
                 capability_id=node_plan.capability_id,
                 conversation_id=request.conversation_id,
                 task_id=request.task_id,
                 node_id=task_node.node_id,
                 input_payload=dict(node_plan.input_payload),
-                dependency_outputs={dependency: dict(dependency_outputs.get(dependency, {})) for dependency in node_plan.depends_on},
-                metadata=execution_metadata,
-            )
-        )
-
-        await self._assert_mcp_continuation_execution_owned(request)
-
-        latest_task = await self._storage.get_task(request.task_id)
-        latest_node = await self._storage.get_task_node(task_node.node_id) or running
-        if latest_task is not None and (
-            latest_task.status != TaskStatus.RUNNING
-            or latest_task.cancel_requested_at is not None
-        ):
-            diagnostic = result.output_payload.get("stream_diagnostic") if isinstance(result.output_payload, dict) else None
-            payload = {
-                "capability_id": node_plan.capability_id,
-                "partial_output_discarded": True,
-            }
-            if isinstance(diagnostic, dict):
-                payload.update({key: value for key, value in diagnostic.items() if key != "delta"})
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    node_id=task_node.node_id,
-                    event_type="task.late_result_discarded",
-                    payload=payload,
-                    visibility=EventVisibility.AUDIT_ONLY,
-                )
-            )
-            return latest_node, {}
-
-        for artifact in result.artifacts:
-            await self._storage.save_artifact(artifact)
-        for event in result.events:
-            await self._record_event(event)
-
-        now = self._utcnow_naive()
-        if result.interrupt is not None:
-            updated = replace(latest_node, status=NodeStatus.WAITING_FOR_INPUT)
-            saved_node = await self._storage.save_task_node(updated)
-            interrupt = replace(result.interrupt, created_at=result.interrupt.created_at or now)
-            interrupt = await self._persist_v2_slot_collection_for_interrupt(interrupt, now=now)
-            saved_interrupt = await self._storage.save_interrupt(interrupt)
-            await persist_interrupt_question_message(self._storage, saved_interrupt, created_at=saved_interrupt.created_at or now)
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    node_id=task_node.node_id,
-                    event_type="node.waiting_for_input",
-                    payload={
-                        **self._node_activity_payload(node_plan),
-                        "reason": saved_interrupt.reason_code,
-                        "interrupt_id": saved_interrupt.interrupt_id,
-                        "reason_code": saved_interrupt.reason_code,
-                        **slot_collection_event_payload(saved_interrupt.required_fields),
-                    },
-                )
-            )
-            return saved_node, dict(result.output_payload)
-
-        if result.error is not None:
-            if result.error.code == "skill_input_missing":
-                waiting = replace(
-                    latest_node,
-                    status=NodeStatus.WAITING_FOR_INPUT,
-                    finished_at=now,
-                    output_refs=tuple(artifact.artifact_id for artifact in result.artifacts),
-                )
-                waiting = await self._storage.save_task_node(waiting)
-                await self._record_event(
-                    self._make_event(
-                        task_id=request.task_id,
-                        conversation_id=request.conversation_id,
-                        node_id=task_node.node_id,
-                        event_type="node.waiting_for_input",
-                        payload={**self._node_activity_payload(node_plan), "reason": "skill_input_missing"},
-                    )
-                )
-                return waiting, dict(result.output_payload)
-            failed = replace(latest_node, status=NodeStatus.FAILED, finished_at=now)
-            failed = await self._storage.save_task_node(failed)
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    node_id=task_node.node_id,
-                    event_type="node.failed",
-                    payload={"code": result.error.code, **dict(result.error.metadata)},
-                )
-            )
-            return failed, dict(result.output_payload)
-
-        if (
-            node_plan.capability_id == "mcp.dispatch"
-            and result.output_payload.get("mcp_status") == "remote_task_created"
-        ):
-            waiting = replace(latest_node, status=NodeStatus.WAITING_FOR_DEPENDENCY)
-            waiting = await self._storage.save_task_node(waiting)
-            safe_remote_task_ref = str(
-                result.output_payload.get("safe_remote_task_ref") or ""
-            ).strip()
-            if not safe_remote_task_ref:
-                raise RuntimeError("mcp_remote_task_reference_missing")
-            conversation = await self._storage.get_conversation(
-                request.conversation_id
-            )
-            if conversation is None:
-                raise RuntimeError("mcp_remote_task_conversation_missing")
-            published = await self._storage.publish_mcp_remote_task_binding(
-                conversation.username,
-                request.task_id,
-                safe_remote_task_ref,
-                published_at=now,
-                continuation_plan=(
-                    request.metadata.get("mcp_remote_task_continuation_plan")
-                    if isinstance(
-                        request.metadata.get("mcp_remote_task_continuation_plan"), dict
-                    )
+                dependency_outputs={
+                    dependency: dict(dependency_outputs.get(dependency, {}))
+                    for dependency in node_plan.depends_on
+                },
+                request_metadata=dict(request.metadata),
+                node_metadata=dict(node_plan.metadata),
+                available_server_ids=frozenset(
+                    profile.server_id.strip()
+                    for profile in request.available_mcp_servers
+                    if profile.server_id.strip()
+                ),
+                pinned_server_id_present="mcp_dispatch_server_id" in request.metadata,
+                pinned_server_id=request.metadata.get("mcp_dispatch_server_id"),
+                remote_task_continuation_plan=(
+                    dict(continuation_plan)
+                    if isinstance(continuation_plan, Mapping)
                     else None
                 ),
-            )
-            if published is None:
-                raise RuntimeError("mcp_remote_task_publication_failed")
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    node_id=task_node.node_id,
-                    event_type="node.waiting_for_dependency",
-                    payload={
-                        **self._node_activity_payload(node_plan),
-                        "reason": "mcp_remote_task_pending",
-                        "safe_call_ref": result.output_payload.get("safe_call_ref"),
-                    },
-                )
-            )
-            return waiting, dict(result.output_payload)
-
-        completed = replace(
-            latest_node,
-            status=NodeStatus.COMPLETED,
-            finished_at=now,
-            output_refs=tuple(artifact.artifact_id for artifact in result.artifacts),
-        )
-        completed = await self._storage.save_task_node(completed)
-        await self._record_event(
-            self._make_event(
-                task_id=request.task_id,
-                conversation_id=request.conversation_id,
-                node_id=task_node.node_id,
-                event_type="node.completed",
-                payload=self._node_activity_payload(node_plan),
-            )
-        )
-        return completed, dict(result.output_payload)
-
-    async def _reject_mcp_selected_route(
-        self,
-        *,
-        request: OrchestrationRequest,
-        task_node: TaskNode,
-        rejection_code: str,
-    ) -> tuple[TaskNode, dict[str, Any]]:
-        failed = replace(
+            ),
             task_node,
-            status=NodeStatus.FAILED,
-            finished_at=self._utcnow_naive(),
         )
-        failed = await self._storage.compare_and_set_task_node(
-            failed,
-            expected_from_status=task_node.status,
-        )
-        if failed is not None:
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    node_id=task_node.node_id,
-                    event_type="node.failed",
-                    payload={"code": rejection_code},
-                )
-            )
-            return failed, {}
-
-        latest_task = await self._storage.get_task(request.task_id)
-        latest_node = await self._storage.get_task_node(task_node.node_id)
-        if latest_node is None:
-            raise RuntimeError("mcp_selected_route_rejection_node_missing")
-        if (
-            latest_node.status
-            in {NodeStatus.CANCELLED, NodeStatus.BLOCKED_BY_CANCELLATION}
-            or (
-                latest_task is not None
-                and (
-                    latest_task.cancel_requested_at is not None
-                    or latest_task.status
-                    in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}
-                )
-            )
-        ):
-            return latest_node, {}
-        raise RuntimeError("mcp_selected_route_rejection_conflict")
+        return invocation.node, invocation.output_payload
 
     async def resume_persisted_mcp_dispatch_node(
         self,
@@ -1119,6 +840,41 @@ class OrchestrationService:
         task = await self._storage.get_task(request.task_id)
         if task is None or task.status != TaskStatus.RUNNING:
             raise RuntimeError("mcp_continuation_task_not_running")
+
+    async def _assert_invocation_execution_owned(
+        self, request: InvocationRequest
+    ) -> None:
+        if "mcp_remote_task_continuation_id" not in request.request_metadata:
+            return
+        outbox_id = request.request_metadata.get("mcp_remote_task_continuation_id")
+        expected_token = request.request_metadata.get(
+            "mcp_remote_task_continuation_claim_token"
+        )
+        if not isinstance(expected_token, str) or not expected_token:
+            raise RuntimeError("mcp_continuation_claim_token_missing")
+        if not isinstance(outbox_id, str):
+            raise RuntimeError("mcp_continuation_execution_lease_lost")
+        outbox = await self._storage.get_mcp_remote_task_outbox(outbox_id)
+        now = self._utcnow_naive()
+        if (
+            outbox is None
+            or outbox.continuation_status != "running"
+            or outbox.continuation_claim_token != expected_token
+            or outbox.continuation_lease_expires_at is None
+            or outbox.continuation_lease_expires_at <= now
+        ):
+            raise RuntimeError("mcp_continuation_execution_lease_lost")
+        task = await self._storage.get_task(request.task_id)
+        if task is None or task.status != TaskStatus.RUNNING:
+            raise RuntimeError("mcp_continuation_task_not_running")
+
+    async def _persist_invocation_interrupt_authority(
+        self, interrupt: Interrupt, now: datetime
+    ) -> Interrupt:
+        return await self._persist_v2_slot_collection_for_interrupt(
+            interrupt,
+            now=now,
+        )
 
     async def execute_request(self, request: OrchestrationRequest, plan: WorkflowPlan, *, active_task_count: int) -> OrchestrationRunResult:
         self._backpressure.ensure_can_accept(active_task_count=active_task_count)

@@ -1,6 +1,12 @@
 """Provider-neutral contracts for the unified Agent Loop."""
 
 from .model_port import AgentModelPort
+from .invocation import (
+    CapabilityInvocationService,
+    InvocationCommitPort,
+    InvocationRequest,
+    InvocationResult,
+)
 from .models import (
     AgentCancellationToken,
     AgentFinishMetadata,
@@ -64,4 +70,8 @@ __all__ = [
     "AgentSampleCommitResult",
     "AgentStagedArtifact",
     "AgentStorageConflict",
+    "CapabilityInvocationService",
+    "InvocationCommitPort",
+    "InvocationRequest",
+    "InvocationResult",
 ]
