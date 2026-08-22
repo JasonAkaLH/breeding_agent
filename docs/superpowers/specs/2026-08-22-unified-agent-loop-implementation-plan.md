@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 2均`proof_complete`；P2-A～P2-D green；下一检查点P3-A
+- 执行状态：Phase 0～Phase 2均`proof_complete`；Phase 3 `in_progress`，P3-A green；下一检查点P3-B
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -415,6 +415,12 @@ waiting不提前采样通过。
 回滚：删除test-only Loop assembly；Kernel和Agent storage保留。
 
 建议commit：`feat(agent): execute durable multi-call loop`。
+
+实施证据：新增固定顺序`AgentContextBuilder`与test-only `AgentLoopRunner`；Runner acquire单一Task lease后只通过P2-A
+`AgentCallInvoker`边界执行Capability wave，连续parallel-safe并发、exclusive单独wave，副作用可乱序完成但outcome按sample ordinal
+及最新revision/fencing token串行提交。Context把同一sample的多call重建为一个assistant message，用provider call ID绑定Tool结果，
+mixed text+calls的text不进入下一轮。三轮链路、ordinary error纠错、首轮required恢复auto、waiting不提前采样/先提交后release及
+同binding均通过；P3-A canonical 3项、orchestration 201项、compileall/diff与无轮次上限静态扫描通过。P3-A green，进入P3-B。
 
 ### P3-B：同模型compaction与有界上下文
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol, TypeVar
 
 from src.core.contracts import CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
 from src.core.enums import NodeStatus, TaskStatus
@@ -11,6 +11,10 @@ from src.orchestration.mcp_route_handoff import normalize_selected_mcp_route
 from src.orchestration.scheduler import Scheduler
 
 from .models import AgentCancellationToken, AgentModelBinding
+
+
+WaveItem = TypeVar("WaveItem")
+WaveResult = TypeVar("WaveResult")
 
 
 _SYSTEM_NODE_METADATA_KEYS = frozenset(
@@ -342,3 +346,38 @@ def task_authoritative_metadata(
         }
     )
     return values
+
+
+def deterministic_invocation_waves(
+    items: tuple[WaveItem, ...],
+    *,
+    is_parallel_safe: Callable[[WaveItem], bool],
+) -> tuple[tuple[WaveItem, ...], ...]:
+    waves: list[tuple[WaveItem, ...]] = []
+    pending_parallel: list[WaveItem] = []
+    for item in items:
+        if is_parallel_safe(item):
+            pending_parallel.append(item)
+            continue
+        if pending_parallel:
+            waves.append(tuple(pending_parallel))
+            pending_parallel = []
+        waves.append((item,))
+    if pending_parallel:
+        waves.append(tuple(pending_parallel))
+    return tuple(waves)
+
+
+async def execute_deterministic_waves(
+    items: tuple[WaveItem, ...],
+    *,
+    is_parallel_safe: Callable[[WaveItem], bool],
+    execute: Callable[[WaveItem], Awaitable[WaveResult]],
+) -> tuple[tuple[tuple[WaveItem, WaveResult], ...], ...]:
+    import asyncio
+
+    completed: list[tuple[tuple[WaveItem, WaveResult], ...]] = []
+    for wave in deterministic_invocation_waves(items, is_parallel_safe=is_parallel_safe):
+        results = await asyncio.gather(*(execute(item) for item in wave))
+        completed.append(tuple(zip(wave, results, strict=True)))
+    return tuple(completed)

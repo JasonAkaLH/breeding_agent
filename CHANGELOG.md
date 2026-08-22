@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 统一同模型Agent Loop P3-A完成test-only durable loop：固定Context顺序并将multi-call重建为单一assistant message/provider call关联；Runner持单一Task lease完成同binding采样、atomic sample/reservation、deterministic wave和ordinal outcome提交。连续parallel-safe并发、exclusive独占，乱序副作用不改变账本；三轮链路、ordinary error纠错、required首轮恢复auto、waiting不提前采样/先提交后release均通过，源码无轮次上限或真实route。canonical 3项、orchestration 201项通过。License Requirement：复用现有Python、AgentModelPort、Phase 1 repository/lease与P2 Invocation边界，无新增依赖或许可变更。
+
 - 统一同模型Agent Loop P2-D及Phase 2已`proof_complete`：新增AgentRun-bound MCP内部文本生成器，Router/Selector的Agent入口只接run ID并从repository解析固定model binding，ordinary、approval和remote恢复均无法用用户payload替换edition/reasoning/thinking/options；legacy generator保持兼容。P2-D聚焦19项、MCP integration 528项、MCP dispatch/tool各15项、main-agent 65项和orchestration 198项通过；同时以单行文案关闭长期记录的shadow manifest错误消息漂移，不改scenario校验。正式请求仍走DAG，下一检查点P3-A。License Requirement：复用现有Python、AgentModelPort、MCP Router/Selector与安全回归，无新增依赖或许可变更。
 
 - 统一同模型Agent Loop P2-C完成Skill适配：delegated Skill只把PublicSkillProfile安全投影、pinned revision和canonical digest写为确定性`skill_activation` item，resource index再次限制为公开四字段，服务不接收Manifest/脚本/handler/resource正文；executable Skill继续复用SkillExecutor，可信resolved/current user message覆盖模型query，bundle revision与Artifact context保持system authority。delegated mode不执行，三answer mode只返回Tool result/Artifact且不存在第二模型或DAG finalizer。canonical 12项、Skill capability 3项、agent_skills 200项和orchestration 196项通过。License Requirement：复用现有Python、PublicSkillProfile、SkillExecutor与Agent payload codec，无新增依赖或许可变更。

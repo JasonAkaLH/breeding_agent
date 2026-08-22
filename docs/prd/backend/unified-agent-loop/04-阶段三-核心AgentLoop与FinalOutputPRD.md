@@ -1,8 +1,8 @@
 # Phase 3：核心 Agent Loop 与 Final Output PRD
 
 - **日期**：2026-08-22
-- **状态**：pending
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
+- **状态**：in_progress（P3-A green；下一步P3-B）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P3-A实现证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～2必须`proof_complete`
 - **主责需求**：FR-4、FR-5、FR-6、FR-7、FR-10、FR-11、FR-12、FR-23
@@ -189,6 +189,16 @@ conda run -n multi_agent python -m unittest \
   tests.api.test_task_query \
   tests.capabilities.main_agent.test_conversation_memory_prompt
 ```
+
+### 11.1 P3-A实施证据
+
+- `AgentContextBuilder`按stable rules、safe Tool rules、durable items、trusted facts、final guard构造同binding请求；一个sample的
+  多call合并为一个assistant message，Tool结果用provider call ID关联，mixed text+calls的text不进入下一轮history；
+- test-only `AgentLoopRunner`统一acquire lease、采样、atomic sample/reservations、wave执行、ordinal outcome提交和重新采样；
+  连续parallel-safe call形成并发wave，exclusive独占，乱序完成不改变durable顺序；
+- 三轮以上tool-result-to-next-sample、ordinary failed纠错、首轮required后恢复auto、waiting不提前采样且先提交authority再release、
+  cancellation/model binding/revision/fencing检查通过；源码无maxTurns/迭代预算/模型切换或真实route装配；
+- P3-A canonical 3项、`tests/orchestration` 201项、compileall/diff和静态扫描通过。P3-A green，进入P3-B。
 
 ## 12. 风险、假设与开放问题
 
