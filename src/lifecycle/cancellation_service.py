@@ -2,16 +2,30 @@ from __future__ import annotations
 
 import inspect
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from src.core.contracts import AuditSink, EventSink, StoragePort
 from src.core.enums import EventVisibility
 from src.core.models import EventRecord
+from src.orchestration.agent_loop.models import AgentRun, AgentRunStatus
 from src.storage.rust_contract import mode_for_component
 from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
 from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write
 
 from . import task_state_machine
+
+
+class AgentCancellationStore(Protocol):
+    async def get_run_for_task(self, task_id: str) -> AgentRun | None: ...
+
+    async def cancel_agent_run(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_claim_token: str | None,
+        safe_reason_code: str,
+    ) -> AgentRun: ...
 
 
 class CancellationService:
@@ -22,11 +36,13 @@ class CancellationService:
         event_sink: EventSink | None = None,
         audit_sink: AuditSink | None = None,
         runtime_sidecar_client: Any | None = None,
+        agent_runs: AgentCancellationStore | None = None,
     ) -> None:
         self._storage = storage
         self._event_sink = event_sink
         self._audit_sink = audit_sink
         self._runtime_sidecar_client = runtime_sidecar_client
+        self._agent_runs = agent_runs
 
     @staticmethod
     def _utcnow_naive() -> datetime:
@@ -68,6 +84,40 @@ class CancellationService:
             raise ValueError(f"Unknown task: {task_id}")
         if task_state_machine.is_task_cancellation_noop(task):
             return task
+
+        if self._agent_runs is not None:
+            run = await self._agent_runs.get_run_for_task(task_id)
+            if run is not None and run.status not in {
+                AgentRunStatus.COMPLETED,
+                AgentRunStatus.FAILED,
+                AgentRunStatus.CANCELLED,
+            }:
+                await self._write_cancellation_token(
+                    task_id=task_id,
+                    requested_at=current_time,
+                )
+                cancelled_run = await self._agent_runs.cancel_agent_run(
+                    run.run_id,
+                    expected_revision=run.revision,
+                    expected_claim_token=run.claim_token,
+                    safe_reason_code="user_cancel",
+                )
+                saved_task = await self._storage.get_task(task_id)
+                if saved_task is None:
+                    raise RuntimeError("agent_cancel_task_projection_missing")
+                await self._record_event(
+                    self._make_event(
+                        task_id=saved_task.task_id,
+                        conversation_id=saved_task.conversation_id,
+                        event_type="task.cancelled",
+                        payload={
+                            "status": str(saved_task.status),
+                            "agent_run_status": cancelled_run.status.value,
+                        },
+                        now=current_time,
+                    )
+                )
+                return saved_task
 
         await self._write_cancellation_token(task_id=task_id, requested_at=current_time)
         cancelling_task = task_state_machine.begin_task_cancellation(task, now=current_time)

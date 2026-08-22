@@ -248,6 +248,14 @@ class AgentContinuationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(skill_locator.model_binding, self.binding)
         self.assertEqual(len(skill_locator.digest), 64)
+        self.assertEqual(
+            self.locators.from_safe_dict(skill_locator.to_safe_dict()),
+            skill_locator,
+        )
+        unsafe_locator = skill_locator.to_safe_dict()
+        unsafe_locator["arguments_json"] = '{"secret":true}'
+        with self.assertRaisesRegex(ValueError, "shape_invalid"):
+            self.locators.from_safe_dict(unsafe_locator)
 
         leases, handle, one_left = await self._complete_waiting(
             skill_locator.call_item_id,

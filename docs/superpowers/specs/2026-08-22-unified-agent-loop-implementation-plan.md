@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 3均`proof_complete`；P4-A green；Phase 4保持`in_progress`，下一检查点P4-B
+- 执行状态：Phase 0～Phase 4均`proof_complete`；P4-A～P4-B green；下一检查点P5-A
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -510,6 +510,17 @@ cancel vs remote completion、late result和startup recovery fault tests通过�
 回滚：回退Agent recovery coordinator；保留Phase 1 durable数据，不生成旧WorkflowPlan adapter。
 
 建议commit：`feat(agent): recover waiting runs without replay`。
+
+实施证据：新增test-only `AgentRunRecoveryCoordinator`和Interrupt/Cancel可选装配，使用同一Run lease、locator全identity/digest
+校验和Phase 1 outcome CAS；continuation item与原call result、waiting集合、revision在SQLite/PostgreSQL继承实现和Runtime Sidecar
+中同事务提交，外部answer/outbox仅在commit成功后ack。terminal authority缺Item可补写；duplicate/restart/ack response loss只返回
+原result并补ack；unknown side effect写closed `aborted`且零executor调用。MCP窄adapter只投影已有approval/elicitation/remote
+authority，非法enum/digest/receipt fail closed且从不调用`tools/call`。owner/task/node/call/binding/digest错误不改waiting，lease held保持
+authority，stale token、cancel前置与cancel/in-flight remote completion竞态均拒绝late result；cancel后不resolver、不resume、不sample。
+P4-B canonical 17项、storage聚焦35项、lifecycle 36项、orchestration 209项、API 485项、MCP 531项（2项既有可选环境skip）和
+E2E 2项通过；storage全域398项（7项既有外部PG环境skip）通过。6项既有失效API fixture经基线archive复现后迁移到v2 Skill/
+async fallback/current soft-binding合同，Task list等待条件收紧为Task与Node共同active；旧E2E按P2唯一Invocation Kernel路径迁移。
+compileall/diff通过，`src/api/runtime.py`未接Agent route；AL-P4-01～10闭合，Phase 4为`proof_complete`，进入P5-A。
 
 ## 10. Phase 5：API、Frontend 与 Observability 预适配
 

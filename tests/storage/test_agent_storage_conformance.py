@@ -4,7 +4,11 @@ import unittest
 import json
 from pathlib import Path
 
-from src.orchestration.agent_loop.models import AgentItemKind, AgentRunStatus
+from src.orchestration.agent_loop.models import (
+    AgentCallOutcomeStatus,
+    AgentItemKind,
+    AgentRunStatus,
+)
 from src.storage.agent_payload import canonicalize_agent_payload
 
 
@@ -28,4 +32,14 @@ class AgentStorageConformanceContractTest(unittest.TestCase):
         self.assertEqual(
             {item.value for item in AgentItemKind},
             {"user_message", "assistant_message", "tool_call", "tool_result", "skill_activation", "context_summary", "continuation"},
+        )
+        self.assertEqual(
+            {item.value for item in AgentCallOutcomeStatus},
+            {
+                "aborted",
+                "completed",
+                "failed",
+                "waiting_for_dependency",
+                "waiting_for_input",
+            },
         )

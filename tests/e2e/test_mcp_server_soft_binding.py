@@ -101,7 +101,10 @@ class MCPServerSoftBindingE2ETest(APITestCase):
         )
         executor = next(
             item
-            for item in self.runtime.orchestration_service._executor._executors
+            for item in (
+                self.runtime.orchestration_service
+                ._invocation_service._executor._executors
+            )
             if isinstance(item, MCPDispatchExecutor)
         )
         coordinator = executor._coordinator

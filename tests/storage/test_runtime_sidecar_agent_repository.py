@@ -167,6 +167,10 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
                 {"ok": True},
                 AgentCallOutcomeStatus.COMPLETED,
                 (AgentStagedArtifact("artifact-waiting", "json", "opaque://waiting"),),
+                continuation_payload={
+                    "authority_digest": "d" * 64,
+                    "schema": "maf.agent.continuation.v1",
+                },
             )
         )
         self.assertEqual(second.state, AgentItemState.COMMITTED)
@@ -175,20 +179,21 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
         covered = tuple(
             item
             for item in await self.repository.list_items(run.run_id)
-            if 1 <= item.sequence <= 5
+            if 1 <= item.sequence <= 6
         )
+        self.assertEqual(covered[-1].kind.value, "continuation")
         compacted = await self.repository.commit_agent_compaction(
             AgentCompactionCommit(
                 run.run_id,
                 after_second.revision,
                 None,
                 1,
-                5,
+                6,
                 agent_compaction_source_digest(covered),
                 "safe compacted facts",
             )
         )
-        self.assertEqual(compacted.run.compacted_through_sequence, 5)
+        self.assertEqual(compacted.run.compacted_through_sequence, 6)
         after_second = compacted.run
         final = await self.repository.commit_agent_final_output(
             AgentFinalOutputCommit(run.run_id, after_second.revision, None, "最终答案")

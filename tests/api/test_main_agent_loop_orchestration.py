@@ -510,29 +510,25 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
                 """\
                 ---
                 name: rcbd-answer
-                capability_id: skill.rcbd_answer
                 description: 测试用 RCBD answer-only Skill。
                 triggers:
                   - 随机区组
-                scripts:
-                  - name: answer
-                    path: scripts/answer.py
-                    runtime: python
-                    auto_run: true
-                    outputs:
-                      required:
-                        - answer
-                execution:
-                  mode: python_subprocess
-                  answer_mode: requires_finalizer
-                outputs:
-                  required:
-                    - answer
                 ---
 
                 # RCBD Answer
                 """
             ),
+            encoding="utf-8",
+        )
+        (skill_dir / "skill.contract.yaml").write_text(
+            """contract_version: '2'
+capability: {id: skill.rcbd_answer, display_name: RCBD Answer}
+runtime: {mode: python_subprocess, answer_mode: requires_finalizer}
+entrypoints:
+  run: {path: scripts/answer.py, output: answer_output}
+outputs:
+  answer_output: {required: [answer]}
+""",
             encoding="utf-8",
         )
         prompts: list[str] = []
@@ -597,29 +593,25 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
                 """\
                 ---
                 name: direct-answer
-                capability_id: skill.direct_answer
                 description: 测试用 direct answer Skill。
                 triggers:
                   - direct
-                scripts:
-                  - name: answer
-                    path: scripts/answer.py
-                    runtime: python
-                    auto_run: true
-                    outputs:
-                      required:
-                        - answer
-                execution:
-                  mode: python_subprocess
-                  answer_mode: direct
-                outputs:
-                  required:
-                    - answer
                 ---
 
                 # Direct Answer
                 """
             ),
+            encoding="utf-8",
+        )
+        (skill_dir / "skill.contract.yaml").write_text(
+            """contract_version: '2'
+capability: {id: skill.direct_answer, display_name: Direct Answer}
+runtime: {mode: python_subprocess, answer_mode: direct}
+entrypoints:
+  run: {path: scripts/answer.py, output: answer_output}
+outputs:
+  answer_output: {required: [answer]}
+""",
             encoding="utf-8",
         )
         prompts: list[str] = []

@@ -5,7 +5,7 @@ from tests.e2e.support import E2EAPITestCase
 
 
 class CancelLateResultE2ETest(E2EAPITestCase):
-    async def test_cancelled_task_discards_late_result(self) -> None:
+    async def test_cancelled_task_does_not_accept_released_result(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
 
@@ -19,9 +19,12 @@ class CancelLateResultE2ETest(E2EAPITestCase):
         self.assertEqual(cancel_response.status_code, 202)
 
         release.set()
+        await self.runtime._await_existing_execution(task_id)
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "cancelled")
 
-        late_records = await self.wait_for_audit_event("task.late_result_discarded")
-        self.assertTrue(late_records)
-        self.assertEqual(late_records[-1]["task_id"], task_id)
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_node = next(node for node in nodes if node.node_id.endswith(":skill_execute"))
+        self.assertEqual(str(skill_node.status), "cancelled")
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertNotIn("skill.execution_completed", {event.event_type for event in events})

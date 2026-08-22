@@ -1,8 +1,8 @@
 # Phase 4：Waiting、Continuation 与 Recovery PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P4-A green；P4-B pending）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P4-A实现证据已闭合
+- **状态**：proof_complete（P4-A、P4-B green；正式入口仍为DAG）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；Phase 4实现证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～3必须`proof_complete`
 - **主责需求**：FR-8、FR-9、FR-18
@@ -220,5 +220,15 @@ P4-A已完成：新增identity-bound Continuation Locator及其closed安全序�
 remote Task映射到明确waiting种类。Agent runner在采样前优先恢复active sample的reserved calls，同一parallel wave两个waiting
 可同时持久化，回答一个时仍保持waiting且模型调用数为零，全部闭合后才执行原sample的exclusive remaining wave。locator
 歧义明确拒绝，waiting release不启动heartbeat。P4-A canonical 3项、含既有Loop聚焦5项、orchestration 209项、compileall和
-diff检查通过；Phase 4尚未完成，P4-B仍须闭合Skill/MCP durable authority、crash/no-replay、duplicate、cancel/late-result及API
-continuation门禁。正式API route未切换，仍由DAG运行时提供服务。
+diff检查通过。
+
+P4-B已完成：Recovery Coordinator经Run/sample/call/Task/Node/owner/conversation/model binding/authority digest全identity校验，
+reacquire同一Run lease并在原call result提交成功后才ack外部authority；continuation item与result/waiting/revision同事务。Skill、
+MCP approval、MRTR和remote Task均恢复原Run/call/binding；durable terminal authority缺Item可补写，duplicate/restart/response-loss
+不重复authority，unknown side effect写`aborted`且零executor调用。非法locator/MCP snapshot/receipt、lease conflict和stale owner
+均fail closed；cancel前置与cancel/in-flight remote completion竞争不启动resolver/remaining wave/sample/final且late result不落账。
+
+P4-B canonical 17项、storage聚焦35项、lifecycle 36项、orchestration 209项、API 485项、MCP 531项（2项既有可选环境skip）、
+E2E 2项及storage全域398项（7项既有外部PG环境skip）通过；compileall/diff通过。旧失效API/E2E fixtures只迁移到已实现v2
+Skill、async fallback、soft-binding与P2 Invocation Kernel合同，不改变真实运行时。AL-P4-01～10闭合，Phase 4为
+`proof_complete`；正式API route仍为DAG，Phase 5继续做投影/事件/指标/Frontend预适配。

@@ -180,7 +180,7 @@ binding。运行`compileall`并记录未运行的真实Provider项；本阶段�
 ### 10.1 P0-A 实施证据
 
 - 基线：`main@f4d6425`，tree `d77458ead5d3ed2afd8ec0b781fbed91032f32e9`；正式运行时仍为DAG；
-- `active-prd-inventory.md`以closed v1合同登记26份active PRD、54个旧测试和9类start/resume/cancel/recovery入口；
+- `active-prd-inventory.md`以closed v1合同登记26份active PRD、55个旧测试和9类start/resume/cancel/recovery入口；
 - `tests.scripts.test_unified_agent_loop_evidence_contract` 3项通过；Phase 0 validator返回`status=closed`，未来三份handoff为
   `not_due`；
 - LLM/model-edition基线44项最终全量通过；首次组合运行有1项Interrupt等待超时，隔离重跑通过，随后相同44项组合重跑

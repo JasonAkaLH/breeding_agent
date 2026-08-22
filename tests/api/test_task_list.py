@@ -21,11 +21,16 @@ class TaskListAPITest(APITestCase):
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
-        async def task_running() -> bool:
+        async def task_running_with_active_node() -> bool:
             task = await self.runtime.storage.get_task(task_id)
-            return task is not None and str(task.status) == "running"
+            nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+            return (
+                task is not None
+                and str(task.status) == "running"
+                and any(str(node.status) in {"running", "ready"} for node in nodes)
+            )
 
-        await self.wait_for_condition(task_running)
+        await self.wait_for_condition(task_running_with_active_node)
 
         list_response = await self.client.get("/api/v1/conversations/conv-1/tasks?scope=unfinished")
         self.assertEqual(list_response.status_code, 200)

@@ -11,8 +11,15 @@ from src.core.models import (
     MCPRemoteTaskOutbox,
     TaskNode,
 )
+from src.orchestration.agent_loop.continuation import AgentContinuationLocator
 
 from . import task_state_machine
+from .agent_run_recovery import (
+    Acknowledger,
+    AgentRecoveryResult,
+    AgentRunRecoveryCoordinator,
+    AuthorityResolver,
+)
 
 
 class InterruptService:
@@ -22,10 +29,12 @@ class InterruptService:
         *,
         event_sink: EventSink | None = None,
         audit_sink: AuditSink | None = None,
+        agent_recovery: AgentRunRecoveryCoordinator | None = None,
     ) -> None:
         self._storage = storage
         self._event_sink = event_sink
         self._audit_sink = audit_sink
+        self._agent_recovery = agent_recovery
 
     @staticmethod
     def _utcnow_naive() -> datetime:
@@ -132,6 +141,25 @@ class InterruptService:
                 node_id=saved_interrupt.node_id,
             )
         return saved_interrupt
+
+    async def record_agent_continuation(
+        self,
+        locator: AgentContinuationLocator,
+        *,
+        owner_scope: str,
+        authority_digest: str,
+        resolve_authority: AuthorityResolver,
+        acknowledge: Acknowledger | None = None,
+    ) -> AgentRecoveryResult:
+        if self._agent_recovery is None:
+            raise RuntimeError("agent_continuation_recovery_not_configured")
+        return await self._agent_recovery.continue_waiting_call(
+            locator,
+            owner_scope=owner_scope,
+            authority_digest=authority_digest,
+            resolve_authority=resolve_authority,
+            acknowledge=acknowledge,
+        )
 
     async def record_mcp_remote_task_control(
         self,

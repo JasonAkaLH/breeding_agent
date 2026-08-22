@@ -396,6 +396,11 @@ class SQLiteAgentRepository:
                 "safe_error_code": commit.safe_error_code,
             }
         )
+        continuation = (
+            canonicalize_agent_payload(commit.continuation_payload)
+            if commit.continuation_payload is not None
+            else None
+        )
         result.payload_json = payload.json_text
         result.payload_size_bytes = payload.size_bytes
         result.payload_sha256 = payload.sha256
@@ -433,6 +438,25 @@ class SQLiteAgentRepository:
                     )
                 )
         node.output_refs = artifact_ids + [result.item_id]
+        if continuation is not None:
+            continuation_id = _continuation_item_id(call.item_id, continuation.sha256)
+            existing_continuation = session.get(AgentItemRow, continuation_id)
+            if existing_continuation is None:
+                self._add_item(
+                    session,
+                    item_id=continuation_id,
+                    run=run,
+                    sequence=int(run.next_item_sequence),
+                    kind=AgentItemKind.CONTINUATION,
+                    state=AgentItemState.COMMITTED,
+                    payload=continuation,
+                    parent_item_id=call.item_id,
+                    created_at=now,
+                    committed_at=now,
+                )
+                run.next_item_sequence = int(run.next_item_sequence) + 1
+            elif existing_continuation.payload_sha256 != continuation.sha256:
+                raise AgentStorageConflict("agent_continuation_item_conflict")
         self._inject("outcome_after_result")
         run.status = run_status
         run.waiting_call_item_ids = waiting
@@ -1038,6 +1062,11 @@ def _call_item_id(run_id: str, sample_id: str, call_id: str) -> str:
 def _result_item_id(run_id: str, sample_id: str, call_id: str) -> str:
     identity = f"{sample_id}\0{call_id}"
     return f"agent-item:{run_id}:result:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+
+
+def _continuation_item_id(call_item_id: str, payload_sha256: str) -> str:
+    identity = f"{call_item_id}\0{payload_sha256}"
+    return f"agent-item:continuation:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
 
 
 def _call_node_id(task_id: str, sample_id: str, call_id: str) -> str:

@@ -288,7 +288,7 @@ entrypoints: {run: {path: scripts/fail.py}}
 
         task = await self.runtime.storage.get_task(task_id)
         self.assertEqual(task.routing_mode, RoutingMode.FORCE_CAPABILITY)
-        self.assertEqual(task.requested_capability_id, "skill.need_variety")
+        self.assertEqual(task.requested_capability_id, "main_agent.respond")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-pending"))
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertIn("task.interrupt_answered", [event.event_type for event in events])

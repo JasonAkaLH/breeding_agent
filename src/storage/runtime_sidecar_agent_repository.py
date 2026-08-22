@@ -250,6 +250,11 @@ class RuntimeSidecarAgentRepository:
                 "safe_error_code": commit.safe_error_code,
             }
         )
+        continuation_payload = (
+            canonicalize_agent_payload(commit.continuation_payload)
+            if commit.continuation_payload is not None
+            else None
+        )
         if result.state is not AgentItemState.RESERVED:
             if result.payload_sha256 == payload.sha256:
                 return result
@@ -271,6 +276,22 @@ class RuntimeSidecarAgentRepository:
             state=AgentItemState.RESERVED if is_waiting else AgentItemState.COMMITTED,
             committed_at=None if is_waiting else now,
         )
+        continuation_item = None
+        if continuation_payload is not None:
+            identity = hashlib.sha256(
+                f"{call.item_id}\0{continuation_payload.sha256}".encode()
+            ).hexdigest()[:24]
+            continuation_item = _item(
+                item_id=f"agent-item:continuation:{identity}",
+                run=run,
+                sequence=run.next_item_sequence,
+                kind=AgentItemKind.CONTINUATION,
+                state=AgentItemState.COMMITTED,
+                payload=continuation_payload,
+                parent_item_id=call.item_id,
+                created_at=now,
+                committed_at=now,
+            )
         node = dict(node_response["node"])
         node["status"] = (
             commit.status.value
@@ -286,6 +307,11 @@ class RuntimeSidecarAgentRepository:
             run,
             status=_waiting_status(waiting, items, updated_result),
             waiting_call_item_ids=tuple(waiting),
+            next_item_sequence=(
+                run.next_item_sequence + 1
+                if continuation_item is not None
+                else run.next_item_sequence
+            ),
             revision=run.revision + 1,
             updated_at=now,
         )
@@ -305,10 +331,15 @@ class RuntimeSidecarAgentRepository:
         await self._commit(
             operation="commit_outcome",
             run=updated_run,
-            items=(updated_result,),
+            items=(updated_result,)
+            if continuation_item is None
+            else (updated_result, continuation_item),
             expected_revision=commit.expected_revision,
             expected_claim_token=commit.expected_claim_token,
-            idempotency_key=f"agent-outcome:{run.run_id}:{result.item_id}:{payload.sha256}",
+            idempotency_key=(
+                f"agent-outcome:{run.run_id}:{result.item_id}:{payload.sha256}:"
+                f"{continuation_payload.sha256 if continuation_payload is not None else 'none'}"
+            ),
             task_nodes=(node,),
             artifacts=artifacts,
         )

@@ -309,11 +309,16 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                     {"answer": "hidden"},
                     AgentCallOutcomeStatus.COMPLETED,
                     staged_artifacts=(AgentStagedArtifact("artifact-hidden", "json", "staged://hidden"),),
+                    continuation_payload={
+                        "authority_digest": "d" * 64,
+                        "schema": "maf.agent.continuation.v1",
+                    },
                 )
             )
         items = await self.repository.list_items("run-1")
         result = next(item for item in items if item.source_call_item_id == committed.call_items[0].item_id)
         self.assertEqual(result.state, AgentItemState.RESERVED)
+        self.assertFalse(any(item.kind is AgentItemKind.CONTINUATION for item in items))
         with self.session_factory() as session:
             node = session.get(TaskNodeRow, committed.node_ids[0])
             self.assertEqual(node.status, "pending")

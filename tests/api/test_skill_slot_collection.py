@@ -55,16 +55,22 @@ class LegacyProjectSkillCompatibilityAPITest(APITestCase):
             encoding="utf-8",
         )
 
-    async def test_no_contract_project_skill_fails_closed_in_agent_runtime(self) -> None:
+    async def test_no_contract_project_skill_uses_disclosed_fallback_without_execution(self) -> None:
         response = await self.submit_message(
             conversation_id="conv-legacy-fail-closed",
             content="请执行旧参数 Skill",
             capability_id="skill.legacy_slot",
         )
 
-        self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("Unsupported soft_skill_binding capability_id", response.text)
-        self.assertEqual(await self.runtime.storage.list_interrupts_for_task("task-legacy-fail-closed"), [])
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(await self.runtime.storage.list_interrupts_for_task(task_id), [])
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertIn("capability.missing_fallback", {event.event_type for event in events})
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        self.assertNotIn("skill.legacy_slot", {node.capability_id for node in nodes})
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-legacy-fail-closed"))
 
     async def test_no_contract_project_skill_does_not_create_legacy_slot_collection(self) -> None:
@@ -74,7 +80,9 @@ class LegacyProjectSkillCompatibilityAPITest(APITestCase):
             capability_id="skill.legacy_slot",
         )
 
-        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.status_code, 202, response.text)
+        terminal = await self.wait_for_terminal_task(response.json()["task_id"])
+        self.assertEqual(terminal["status"], "completed")
         tasks = await self.runtime.storage.list_tasks_for_conversation("conv-legacy-no-slot-state")
         for task in tasks:
             collections = await self.runtime.storage.list_slot_collections_for_task(task.task_id)

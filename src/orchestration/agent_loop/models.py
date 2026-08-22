@@ -363,6 +363,7 @@ class AgentCompactionResult:
 class AgentCallOutcomeStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
+    ABORTED = "aborted"
     WAITING_FOR_INPUT = "waiting_for_input"
     WAITING_FOR_DEPENDENCY = "waiting_for_dependency"
 
@@ -389,6 +390,7 @@ class AgentCallOutcomeCommit:
     status: AgentCallOutcomeStatus
     staged_artifacts: tuple[AgentStagedArtifact, ...] = ()
     safe_error_code: str | None = None
+    continuation_payload: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)
