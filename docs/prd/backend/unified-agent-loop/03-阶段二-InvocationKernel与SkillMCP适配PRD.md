@@ -1,8 +1,8 @@
 # Phase 2：Invocation Kernel 与 Skill/MCP 适配 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P2-A/P2-B green；下一步P2-C）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P2-A/P2-B实现证据已闭合
+- **状态**：in_progress（P2-A/P2-B/P2-C green；下一步P2-D）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P2-A～P2-C实现证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0、Phase 1必须`proof_complete`
 - **主责需求**：FR-13、FR-15、FR-16、FR-20、FR-24
@@ -216,6 +216,17 @@ conda run -n multi_agent python -m unittest discover -s tests/integrations/mcp -
 - Preflight完整计入stable rules、safe Tool rules、catalog、当前用户输入、最小suffix及history，只返回三种closed decision和
   tool/schema/token计数；无eligible range或required segments超限直接fatal，不生成summary、不裁剪schema；
 - P2-B聚焦34项、`tests/orchestration` discover 194项、compileall/diff检查通过。P2-B green，Phase 2继续`in_progress`进入P2-C。
+
+### 11.3 P2-C实施证据
+
+- `DelegatedSkillActivationService`只消费`PublicSkillProfile.to_dict()`、AgentRun identity和相等的pinned/resolved revision；
+  resource index再次投影为`resource_id/title/description/audience`，canonical profile digest与deterministic activation item通过窄
+  commit port写入，不接收Manifest、脚本runner、handler或resource正文；
+- executable `python_subprocess/platform_service`继续走现有SkillExecutor；可信metadata中的resolved/current user message覆盖模型
+  query，bundle revision和Artifact context仍来自system metadata，delegated mode保持明确不可执行；
+- SkillExecutor源码与行为门禁证明三answer mode只形成Capability Tool result/Artifact，不调用AgentModelPort/LLMClient、不创建
+  `main_agent.respond` finalizer；P2-C canonical 12项、Skill capability 3项、agent_skills 200项、orchestration 196项通过。
+  agent_skills 43项skip均为既有可选平台/外部环境套件，不计required通过；P2-C green，进入P2-D。
 
 ## 12. 风险、假设与开放问题
 

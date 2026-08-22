@@ -1,7 +1,7 @@
 # 统一同模型 Agent Loop 分阶段 PRD 索引
 
 - **日期**：2026-08-22
-- **状态**：实现进行中；Phase 0、Phase 1 `proof_complete`；Phase 2 `in_progress`（P2-A/P2-B green，下一步P2-C）
+- **状态**：实现进行中；Phase 0、Phase 1 `proof_complete`；Phase 2 `in_progress`（P2-A/P2-B/P2-C green，下一步P2-D）
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
@@ -32,7 +32,7 @@
 | 总纲 | `00-统一同模型AgentLoop总纲PRD.md` | 全局不变量、FR/NFR追踪、阶段门禁、文档处置 | approved |
 | Phase 0 | `01-阶段零-现状基线与AgentModelContractPRD.md` | Agent Model Contract、provider门禁、现状/PRD inventory | proof_complete |
 | Phase 1 | `02-阶段一-AgentRunAgentItem与TaskLease存储PRD.md` | Agent durable state、原子操作、单一Task lease、三backend parity | proof_complete |
-| Phase 2 | `03-阶段二-InvocationKernel与SkillMCP适配PRD.md` | Invocation Kernel、Tool Catalog/Policy、Skill/MCP适配 | in_progress（P2-A/P2-B green） |
+| Phase 2 | `03-阶段二-InvocationKernel与SkillMCP适配PRD.md` | Invocation Kernel、Tool Catalog/Policy、Skill/MCP适配 | in_progress（P2-A/P2-B/P2-C green） |
 | Phase 3 | `04-阶段三-核心AgentLoop与FinalOutputPRD.md` | 核心Loop、multi-call、compaction、唯一final output | pending |
 | Phase 4 | `05-阶段四-WaitingContinuation与RecoveryPRD.md` | Waiting、Continuation、Crash Recovery、Cancel | pending |
 | Phase 5 | `06-阶段五-APISSEFrontend与Observability适配PRD.md` | API/SSE/history/graph、Frontend、事件指标、可访问性 | pending |

@@ -908,6 +908,13 @@ class SkillExecutor(ExecutorPort):
 
     @staticmethod
     def _resolve_user_message(request: CapabilityExecutionRequest) -> str:
+        trusted = str(
+            request.metadata.get("resolved_user_message")
+            or request.metadata.get("current_user_message")
+            or ""
+        ).strip()
+        if trusted:
+            return trusted
         user_message = str(request.input_payload.get("user_message") or request.input_payload.get("query") or "").strip()
         return user_message
 

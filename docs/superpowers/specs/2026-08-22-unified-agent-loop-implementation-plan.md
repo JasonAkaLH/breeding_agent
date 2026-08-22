@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0、Phase 1均`proof_complete`；Phase 2 `in_progress`，P2-A/P2-B green；下一检查点P2-C
+- 执行状态：Phase 0、Phase 1均`proof_complete`；Phase 2 `in_progress`，P2-A/P2-B/P2-C green；下一检查点P2-D
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -360,6 +360,13 @@ Green gate：manifest body/resource正文/path/config/secret leak scan、pinned 
 回滚：删除Agent activation adapter，旧DAG Skill行为保持。
 
 建议commit：`feat(agent): adapt delegated and executable skills`。
+
+实施证据：新增`DelegatedSkillActivationService`，只接收`PublicSkillProfile`、Run identity与相等的pinned/resolved bundle
+revision，resource index再次收敛为公开四字段，canonical profile digest与deterministic `skill_activation` item经窄commit port持久化；
+服务不接触Manifest或Executor。Executable Skill继续走现有SkillExecutor，可信`resolved/current_user_message` metadata覆盖模型
+query，bundle revision与Artifact context仍只读system metadata；delegated模式仍明确不可执行，SkillExecutor中不存在第二模型或
+`main_agent.respond` finalizer。P2-C canonical 12项、Skill capability 3项、agent_skills 200项及orchestration 196项通过；
+agent_skills的43项skip为既有可选平台/外部环境套件，不记为required通过。P2-C green，进入P2-D。
 
 ### P2-D：Run-bound MCP model binding与安全链
 

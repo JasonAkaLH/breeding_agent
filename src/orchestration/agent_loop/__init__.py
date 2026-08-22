@@ -16,6 +16,11 @@ from .tool_catalog import (
     CatalogPreflightDecision,
     CatalogPreflightResult,
 )
+from .skill_activation import (
+    DelegatedSkillActivation,
+    DelegatedSkillActivationService,
+    SkillActivationCommitPort,
+)
 from .models import (
     AgentCancellationToken,
     AgentFinishMetadata,
@@ -90,4 +95,7 @@ __all__ = [
     "CapabilityVisibilityContext",
     "CatalogPreflightDecision",
     "CatalogPreflightResult",
+    "DelegatedSkillActivation",
+    "DelegatedSkillActivationService",
+    "SkillActivationCommitPort",
 ]
