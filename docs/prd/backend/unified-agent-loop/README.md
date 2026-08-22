@@ -1,11 +1,11 @@
 # 统一同模型 Agent Loop 分阶段 PRD 索引
 
 - **日期**：2026-08-22
-- **状态**：PRD组逐篇document-perfectization审阅100/100通过；实现待开始
+- **状态**：实现进行中；Phase 0 `in_progress`，P0-A green checkpoint已完成，P0-B尚未开始
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
-- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（三轮document-perfectization，99/100，Pass with recorded assumptions；业务实现未开始）
+- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（三轮document-perfectization，99/100，Pass with recorded assumptions；P0-A已执行）
 - **总目标**：以同一模型持续完成规划、Tool选择、结果观察、纠错、上下文压缩和最终回答；全部执行与恢复入口最终统一进入同一AgentRun，不保留DAG runtime或旧任务兼容恢复。
 
 ## 目录权威
@@ -27,10 +27,10 @@
 
 ## 阶段文件
 
-| 阶段 | PRD | 主责 | 初始状态 |
+| 阶段 | PRD | 主责 | 当前状态 |
 |---|---|---|---|
 | 总纲 | `00-统一同模型AgentLoop总纲PRD.md` | 全局不变量、FR/NFR追踪、阶段门禁、文档处置 | approved |
-| Phase 0 | `01-阶段零-现状基线与AgentModelContractPRD.md` | Agent Model Contract、provider门禁、现状/PRD inventory | pending |
+| Phase 0 | `01-阶段零-现状基线与AgentModelContractPRD.md` | Agent Model Contract、provider门禁、现状/PRD inventory | in_progress（P0-A green；P0-B未开始） |
 | Phase 1 | `02-阶段一-AgentRunAgentItem与TaskLease存储PRD.md` | Agent durable state、原子操作、单一Task lease、三backend parity | pending |
 | Phase 2 | `03-阶段二-InvocationKernel与SkillMCP适配PRD.md` | Invocation Kernel、Tool Catalog/Policy、Skill/MCP适配 | pending |
 | Phase 3 | `04-阶段三-核心AgentLoop与FinalOutputPRD.md` | 核心Loop、multi-call、compaction、唯一final output | pending |

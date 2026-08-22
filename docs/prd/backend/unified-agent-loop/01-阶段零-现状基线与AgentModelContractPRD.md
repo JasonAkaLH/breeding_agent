@@ -1,8 +1,8 @@
 # Phase 0：现状基线与 Agent Model Contract PRD
 
 - **日期**：2026-08-22
-- **状态**：pending
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
+- **状态**：in_progress（P0-A green checkpoint已完成；P0-B尚未开始）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现按批准计划推进
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **主责需求**：FR-2、FR-3、FR-19
 - **主责NFR**：Provider兼容与同模型
@@ -155,6 +155,17 @@ conda run -n multi_agent python -m unittest \
 
 新增测试域必须覆盖native wire golden、multi-call deltas、required choice、unknown tool、role门禁、cancellation和同edition
 binding。运行`compileall`并记录未运行的真实Provider项；本阶段不新增外部真实Provider smoke门禁。
+
+### 10.1 P0-A 实施证据
+
+- 基线：`main@f4d6425`，tree `d77458ead5d3ed2afd8ec0b781fbed91032f32e9`；正式运行时仍为DAG；
+- `active-prd-inventory.md`以closed v1合同登记26份active PRD、54个旧测试和9类start/resume/cancel/recovery入口；
+- `tests.scripts.test_unified_agent_loop_evidence_contract` 3项通过；Phase 0 validator返回`status=closed`，未来三份handoff为
+  `not_due`；
+- LLM/model-edition基线44项最终全量通过；首次组合运行有1项Interrupt等待超时，隔离重跑通过，随后相同44项组合重跑
+  全部通过，登记为既有时序观察，不改测试或Runtime；P0-B必须继续复验；
+- `conda run -n multi_agent python -m compileall -q src tests scripts`通过；
+- 未运行真实Provider smoke，符合本阶段非门禁约束；未新增Agent Model、Agent storage或真实route。
 
 ## 11. 风险、假设与开放问题
 

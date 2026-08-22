@@ -4,7 +4,8 @@
 
 - 日期：2026-08-22
 - 分支：`main`
-- 状态：document-perfectization三轮自主审查99/100通过；业务实现尚未开始
+- 状态：document-perfectization三轮自主审查99/100通过；Agent业务运行时实现尚未开始
+- 执行状态：P0-A green checkpoint已完成；Phase 0保持`in_progress`，P0-B尚未开始
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
