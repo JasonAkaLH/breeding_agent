@@ -20,6 +20,44 @@ GENERIC_DATA_SKILL_ID = "skill.generic_data_lookup"
 GENERIC_DATA_SKILL_NAME = "generic-data-lookup"
 
 
+def test_llm_config() -> dict[str, object]:
+    return {
+        "agent_protocol_max_retries": 1,
+        "model_editions": {
+            "default": "api-test",
+            "options": [
+                {
+                    "value": "api-test",
+                    "label": "API Test",
+                    "reasoning_efforts": {
+                        "default": "minimal",
+                        "disabled_default": "minimal",
+                        "options": [
+                            {
+                                "value": "minimal",
+                                "label": "Minimal",
+                                "allow_when_thinking_disabled": True,
+                            },
+                            {
+                                "value": "max",
+                                "label": "Max",
+                                "allow_when_thinking_disabled": False,
+                            },
+                        ],
+                    },
+                    "agent_capabilities": {
+                        "supports_messages": True,
+                        "roles": ["system", "developer", "user", "assistant", "tool"],
+                        "supports_native_tools": True,
+                        "supports_required_tool_choice": True,
+                        "supports_streamed_tool_calls": True,
+                    },
+                }
+            ],
+        },
+    }
+
+
 class InMemoryTaskRuntimeSidecar:
     """Small Task/TaskNode authority used by canonical MCP rollout API tests."""
 
@@ -147,10 +185,15 @@ class InMemoryTaskRuntimeSidecar:
         }
 
 
-def blocking_mysql_adapter() -> tuple[MySQLReadonlyAdapter, threading.Event]:
+def blocking_mysql_adapter(
+    *,
+    started: threading.Event | None = None,
+) -> tuple[MySQLReadonlyAdapter, threading.Event]:
     release = threading.Event()
 
     def _runner(sql: str) -> ReadonlyQueryResult:
+        if started is not None:
+            started.set()
         if not release.wait(timeout=10):
             raise TimeoutError(f"Timed out waiting to release blocking SQL runner for {sql!r}.")
         return ReadonlyQueryResult(
@@ -276,6 +319,14 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                     _prompt,
                     **self._stream_generator_supported_options(delegated_main_agent_stream_generator, _kwargs),
                 )
+        if (
+            main_agent_llm_config is None
+            and main_agent_llm_config_path is None
+            and planner_llm_config is None
+            and planner_llm_config_path is None
+            and planner_llm_client_factory is None
+        ):
+            main_agent_llm_config = test_llm_config()
         effective_skill_roots = tuple(skill_roots) if skill_roots is not None else tuple(self.default_skill_roots())
         effective_public_skill_roots = (
             tuple(public_skill_roots)

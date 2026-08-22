@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from httpx_sse import aconnect_sse
 
@@ -75,18 +76,23 @@ class TaskCancelAPITest(APITestCase):
         self.assertNotIn("workflow.plan_built", event_types[cancel_index + 1:])
 
     async def test_cancel_endpoint_drives_real_cancellation_and_audit_output(self) -> None:
-        blocking_adapter, release = blocking_mysql_adapter()
+        query_started = threading.Event()
+        blocking_adapter, release = blocking_mysql_adapter(started=query_started)
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
 
         response = await self.submit_message()
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
-        async def _task_started() -> bool:
+        async def _query_started() -> bool:
             current = await self.runtime.storage.get_task(task_id)
-            return current is not None and current.status == "running"
+            return (
+                current is not None
+                and current.status == "running"
+                and query_started.is_set()
+            )
 
-        await self.wait_for_condition(_task_started)
+        await self.wait_for_condition(_query_started)
 
         cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
         self.assertEqual(cancel_response.status_code, 202)
@@ -125,6 +131,30 @@ class TaskCancelAPITest(APITestCase):
         reloaded = await self.runtime.storage.get_task("task-terminal-api")
         self.assertEqual(reloaded.status, TaskStatus.COMPLETED)
         self.assertIsNone(reloaded.cancel_requested_at)
+
+    async def test_local_cancel_intent_does_not_rewrite_a_terminal_task(self) -> None:
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id="conv-race", username="acc-1")
+        )
+        task = Task(
+            task_id="task-terminal-race",
+            conversation_id="conv-race",
+            root_message_id="msg-terminal-race",
+            status=TaskStatus.COMPLETED,
+        )
+        await self.runtime.storage.save_task(task)
+        self.runtime._locally_cancelled_task_ids.add(task.task_id)
+
+        restored = await self.runtime._restore_cancelled_task_if_requested(
+            task.task_id,
+            task.conversation_id,
+        )
+
+        self.assertIsNone(restored)
+        reloaded = await self.runtime.storage.get_task(task.task_id)
+        self.assertEqual(reloaded.status, TaskStatus.COMPLETED)
+        events = await self.runtime.storage.list_events_for_task(task.task_id)
+        self.assertFalse(any(event.event_type == "task.late_result_discarded" for event in events))
 
     async def test_cancel_stops_transient_stream_and_discards_partial_answer(self) -> None:
         release_first = asyncio.Event()

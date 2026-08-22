@@ -74,6 +74,8 @@ from src.core.models import (
 from src.api.file_selection_runtime import ConversationFileSelectionRuntimeMixin
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.agent_skills import (
+    PROJECT_SKILL_BUNDLE_DIGEST_ENV,
+    ProjectSkillBundleDigestError,
     SkillCapabilityRegistry,
     SkillCatalog,
     SkillPlatformHandlerRegistry,
@@ -97,6 +99,7 @@ from src.integrations.agent_skills import (
     select_input_schema,
     should_trigger_history_recall,
     transition_slot_collection,
+    validate_project_skill_bundle_digest,
 )
 from src.integrations.agent_skills.missing_input_interrupt import (
     SLOT_COLLECTION_FIELD,
@@ -3568,6 +3571,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             return None
         if task.status == TaskStatus.CANCELLED:
             return task
+        if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+            return None
         if (
             task.status != TaskStatus.CANCELLING
             and task.cancel_requested_at is None
@@ -11276,6 +11281,7 @@ def build_api_runtime(
     skill_roots: Iterable[str | Path] | None = None,
     public_skill_roots: Iterable[str | Path] | None = None,
     skill_catalog: SkillCatalog | None = None,
+    project_skill_bundle_digest: str | None = None,
     mcp_config: Mapping[str, Any] | None = None,
     mcp_client_factory: Callable[..., Any] | None = None,
     mcp_sidecar_client: Any | None = None,
@@ -11429,6 +11435,18 @@ def build_api_runtime(
             f"{configured_mode} requires a Rust runtime sidecar client"
         )
     audit_sink = JsonlAuditSink(audit_log_path)
+    skill_assembly_injected = skill_roots is not None or public_skill_roots is not None
+    roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
+    resolved_public_skill_roots = (
+        tuple(public_skill_roots) if public_skill_roots is not None else roots[:1]
+    )
+    _validate_project_skill_bundle_startup(
+        public_skill_roots=resolved_public_skill_roots,
+        expected_digest=project_skill_bundle_digest,
+        skill_assembly_injected=skill_assembly_injected,
+        audit_sink=audit_sink,
+        env=os.environ,
+    )
     auth_generation_cache = AuthGenerationCache()
     auth_invalidation_bus = InMemoryAuthInvalidationBus()
     postgres_auth_invalidation_bus = None
@@ -11818,9 +11836,6 @@ def build_api_runtime(
         auth_generation_cache=auth_generation_cache,
         auth_invalidation_bus=auth_invalidation_bus,
     )
-
-    roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
-    resolved_public_skill_roots = tuple(public_skill_roots) if public_skill_roots is not None else roots[:1]
 
     capability_registry = CapabilityRegistry()
     _register_capability_descriptors(
@@ -13164,7 +13179,12 @@ def _bootstrap_runtime_config_env(
         elif main_agent_llm_client_factory is None:
             should_bootstrap_default = True
 
-    if enable_conversation_memory:
+    if (
+        enable_conversation_memory
+        and main_agent_llm_config is None
+        and main_agent_llm_config_path is None
+        and main_agent_llm_client_factory is None
+    ):
         should_bootstrap_default = True
 
     seen_paths: set[Path] = set()
@@ -14225,3 +14245,71 @@ def _resolve_main_agent_stream_binding(
 
 def _default_skill_roots() -> tuple[Path, ...]:
     return (Path.cwd() / "skill",)
+
+
+def _validate_project_skill_bundle_startup(
+    *,
+    public_skill_roots: tuple[str | Path, ...],
+    expected_digest: str | None,
+    skill_assembly_injected: bool,
+    audit_sink: JsonlAuditSink,
+    env: Mapping[str, str],
+) -> None:
+    project_root = Path(public_skill_roots[0]) if public_skill_roots else None
+    resolved_expected = expected_digest
+    if not skill_assembly_injected and resolved_expected is None:
+        configured = env.get(PROJECT_SKILL_BUNDLE_DIGEST_ENV, "").strip()
+        resolved_expected = configured or None
+    has_project_skills = _project_skill_root_has_manifests(project_root)
+    if resolved_expected is None:
+        if not skill_assembly_injected and has_project_skills:
+            error = ProjectSkillBundleDigestError(
+                "project_skill_bundle_digest_required", "missing"
+            )
+            _record_project_skill_bundle_validation_failure(audit_sink, error)
+            raise error
+        return
+    if project_root is None:
+        error = ProjectSkillBundleDigestError(
+            "project_skill_bundle_unsafe_entry", "root_missing"
+        )
+        _record_project_skill_bundle_validation_failure(audit_sink, error)
+        raise error
+    try:
+        result = validate_project_skill_bundle_digest(project_root, resolved_expected)
+    except ProjectSkillBundleDigestError as exc:
+        _record_project_skill_bundle_validation_failure(audit_sink, exc)
+        raise
+    audit_sink.record_sync(
+        "skill.project_bundle_validated",
+        {
+            "result": "valid",
+            "file_count": result.file_count,
+            "total_bytes": result.total_bytes,
+            "duration_ms": result.duration_ms,
+            "digest_prefix": result.digest[:19],
+        },
+    )
+
+
+def _project_skill_root_has_manifests(root: Path | None) -> bool:
+    if root is None or not root.is_dir():
+        return False
+    try:
+        return any(path.is_file() for path in root.glob("*/SKILL.md"))
+    except OSError:
+        return False
+
+
+def _record_project_skill_bundle_validation_failure(
+    audit_sink: JsonlAuditSink,
+    error: ProjectSkillBundleDigestError,
+) -> None:
+    audit_sink.record_sync(
+        "skill.project_bundle_validated",
+        {
+            "result": "failed",
+            "code": error.code,
+            "reason": error.reason,
+        },
+    )

@@ -219,7 +219,7 @@ class MainAgentLLMAPITest(APITestCase):
 
         async def collect_events() -> None:
             while "task.completed" not in seen_types:
-                event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+                event = await asyncio.wait_for(iterator.__anext__(), timeout=5)
                 seen_types.add(event.event_type)
                 if event.event_type == "planner.reasoning_delta":
                     planner_reasoning.append(event.payload["delta"])

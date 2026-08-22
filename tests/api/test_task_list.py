@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from tests.api.support import APITestCase, blocking_mysql_adapter
 
 
@@ -14,7 +16,8 @@ class TaskListAPITest(APITestCase):
         )
 
     async def test_conversation_unfinished_task_list_can_drive_stop_action(self) -> None:
-        blocking_adapter, release = blocking_mysql_adapter()
+        query_started = threading.Event()
+        blocking_adapter, release = blocking_mysql_adapter(started=query_started)
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
 
         response = await self.submit_message(content="查询龙粳33", capability_id="skill.generic_data_lookup")
@@ -27,6 +30,7 @@ class TaskListAPITest(APITestCase):
             return (
                 task is not None
                 and str(task.status) == "running"
+                and query_started.is_set()
                 and any(str(node.status) in {"running", "ready"} for node in nodes)
             )
 

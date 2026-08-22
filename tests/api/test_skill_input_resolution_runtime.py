@@ -262,6 +262,7 @@ inputs:
 
         answer_prompts: list[str] = []
         slot_prompts: list[str] = []
+        normal_extraction_calls = 0
 
         async def streamer(prompt: str):
             answer_prompts.append(prompt)
@@ -275,6 +276,7 @@ inputs:
                 return {"provider": "fake", "config_source": config_source, "reasoning_effort": reasoning_effort}
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
+                nonlocal normal_extraction_calls
                 slot_prompts.append(prompt)
                 if '"mode": "interrupt_turn_understanding"' in prompt:
                     return json.dumps(
@@ -292,6 +294,10 @@ inputs:
                             "reason": "blocks resolved",
                         }
                     )
+                if "受限的 v2 Skill 参数补槽器" in prompt:
+                    normal_extraction_calls += 1
+                    if normal_extraction_calls == 1:
+                        return json.dumps({"resolved": {}})
                 self_test_payload = {
                     "resolved": {
                         "blocks": {
