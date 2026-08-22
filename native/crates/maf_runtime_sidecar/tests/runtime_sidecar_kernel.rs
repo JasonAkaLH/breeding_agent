@@ -79,6 +79,40 @@ fn agent_item() -> AgentItemRecord {
     }
 }
 
+fn agent_tool_item(
+    item_id: &str,
+    sequence: u64,
+    kind: &str,
+    source_call_item_id: Option<&str>,
+) -> AgentItemRecord {
+    let payload = format!("{{\"id\":\"{item_id}\"}}\n").into_bytes();
+    AgentItemRecord {
+        item_id: item_id.to_owned(),
+        run_id: "run-agent".to_owned(),
+        task_id: "task-agent".to_owned(),
+        sequence,
+        kind: kind.to_owned(),
+        state: if kind == "tool_result" {
+            "reserved".to_owned()
+        } else {
+            "committed".to_owned()
+        },
+        payload_size_bytes: payload.len() as u64,
+        payload_sha256: format!("{:x}", Sha256::digest(&payload)),
+        payload_json: payload,
+        parent_item_id: None,
+        source_call_item_id: source_call_item_id.map(str::to_owned),
+        provider_sample_id: None,
+        call_ordinal: Some(0),
+        created_at_ms: 1,
+        committed_at_ms: if kind == "tool_result" { None } else { Some(1) },
+    }
+}
+
+fn agent_final_projection() -> Vec<u8> {
+    br#"{"event":{"event_id":"agent-event","event_type":"agent.final_output","message_id":"agent-message"},"message":{"content":"ok","conversation_id":"conv-agent","message_id":"agent-message","role":"assistant","task_id":"task-agent"},"receipt":{"assistant_item_id":"item-agent-1","artifact_id":"agent-artifact","event_id":"agent-event","message_id":"agent-message","node_id":"agent-node","receipt_id":"agent-receipt","run_id":"run-agent","task_id":"task-agent","text_sha256":"digest"}}"#.to_vec()
+}
+
 #[test]
 fn agent_state_commit_is_atomic_cas_idempotent_and_ordered() {
     let mut kernel = RuntimeSidecarKernel::new();
@@ -93,15 +127,93 @@ fn agent_state_commit_is_atomic_cas_idempotent_and_ordered() {
             owner: "test".to_owned(),
             deadline_ms: 0,
         }),
+        task_nodes: Vec::new(),
+        artifacts: Vec::new(),
+        final_projection_json: None,
+        task: None,
     };
     let (_, _, duplicate) = kernel
         .commit_agent_state(create.clone())
         .expect("create AgentRun");
     assert!(!duplicate);
     assert!(kernel.commit_agent_state(create).expect("exact retry").2);
-    let commit = CommitAgentStateRequest {
+    let orphan = CommitAgentStateRequest {
         operation: "commit_sample".to_owned(),
         run: Some(agent_run(1)),
+        items: vec![agent_tool_item(
+            "result-orphan",
+            1,
+            "tool_result",
+            Some("missing"),
+        )],
+        expected_revision: 0,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: "agent-orphan".to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+        task_nodes: Vec::new(),
+        artifacts: Vec::new(),
+        final_projection_json: None,
+        task: None,
+    };
+    assert_eq!(
+        kernel.commit_agent_state(orphan).unwrap_err().code,
+        "runtime_store_write_failed"
+    );
+    let duplicate_results = CommitAgentStateRequest {
+        operation: "commit_sample".to_owned(),
+        run: Some(agent_run(1)),
+        items: vec![
+            agent_tool_item("call-one", 1, "tool_call", None),
+            agent_tool_item("result-one", 2, "tool_result", Some("call-one")),
+            agent_tool_item("result-two", 3, "tool_result", Some("call-one")),
+        ],
+        expected_revision: 0,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: "agent-duplicate-result".to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+        task_nodes: Vec::new(),
+        artifacts: Vec::new(),
+        final_projection_json: None,
+        task: None,
+    };
+    assert_eq!(
+        kernel
+            .commit_agent_state(duplicate_results)
+            .unwrap_err()
+            .code,
+        "runtime_store_write_failed"
+    );
+    assert_eq!(kernel.get_agent_run("run-agent").unwrap().revision, 0);
+    let mut agent_node = task_node("completed");
+    agent_node.node_id = "agent-node".to_owned();
+    agent_node.task_id = "task-agent".to_owned();
+    agent_node.capability_id = "agent.final_output".to_owned();
+    let agent_artifact = maf_runtime_sidecar::ArtifactRecord {
+        artifact_id: "agent-artifact".to_owned(),
+        task_id: "task-agent".to_owned(),
+        producer_node_id: "agent-node".to_owned(),
+        artifact_type: "json".to_owned(),
+        storage_ref: "opaque://agent".to_owned(),
+        summary: "safe".to_owned(),
+        is_complete: true,
+        created_at: "1".to_owned(),
+    };
+    let mut agent_task = task_record("completed");
+    agent_task.task_id = "task-agent".to_owned();
+    agent_task.conversation_id = "conv-agent".to_owned();
+    agent_task.root_node_id = Some("agent-node".to_owned());
+    let mut final_run = agent_run(1);
+    final_run.status = "completed".to_owned();
+    final_run.terminal_at_ms = Some(2);
+    let commit = CommitAgentStateRequest {
+        operation: "commit_final".to_owned(),
+        run: Some(final_run),
         items: vec![agent_item()],
         expected_revision: 0,
         expected_claim_token: None,
@@ -110,10 +222,21 @@ fn agent_state_commit_is_atomic_cas_idempotent_and_ordered() {
             owner: "test".to_owned(),
             deadline_ms: 0,
         }),
+        task_nodes: vec![agent_node.clone()],
+        artifacts: vec![agent_artifact.clone()],
+        final_projection_json: Some(agent_final_projection()),
+        task: Some(agent_task.clone()),
     };
     kernel.commit_agent_state(commit).expect("commit sample");
     assert_eq!(kernel.get_agent_run("run-agent").unwrap().revision, 1);
     assert_eq!(kernel.list_agent_items("run-agent"), vec![agent_item()]);
+    assert_eq!(kernel.get_task_node("agent-node"), Some(agent_node));
+    assert_eq!(kernel.get_artifact("agent-artifact"), Some(agent_artifact));
+    assert_eq!(kernel.get_task("task-agent"), Some(agent_task));
+    assert_eq!(
+        kernel.get_agent_final_projection("run-agent"),
+        Some(agent_final_projection())
+    );
     let stale = CommitAgentStateRequest {
         operation: "commit_outcome".to_owned(),
         run: Some(agent_run(2)),
@@ -125,6 +248,10 @@ fn agent_state_commit_is_atomic_cas_idempotent_and_ordered() {
             owner: "test".to_owned(),
             deadline_ms: 0,
         }),
+        task_nodes: Vec::new(),
+        artifacts: Vec::new(),
+        final_projection_json: None,
+        task: None,
     };
     assert_eq!(
         kernel.commit_agent_state(stale).unwrap_err().code,

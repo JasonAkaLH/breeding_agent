@@ -1,8 +1,8 @@
 # Phase 1：AgentRun、AgentItem 与 Task Lease 存储 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P1-A/P1-B green；P1-C待实施）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
+- **状态**：proof_complete（P1-A/P1-B/P1-C green）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；Phase 1实现与退出证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0 Agent Model Contract必须`proof_complete`
 - **主责需求**：FR-17、FR-26
@@ -197,22 +197,30 @@ Rust gate时本阶段为`blocked`，不能标记`proof_complete`。
   同源`SQLiteBase.metadata`创建fresh runtime tables，schema manifest/reconciler仍由既有22项验证；该邻接bootstrap缺陷未在
   Agent checkpoint内重构，后续应单独修复；
 - 精确临时容器已删除，仅含一次性测试数据且不可恢复；未删除镜像/卷，未连接现有开发或生产数据库。P1-B green，
-  Phase 1继续`in_progress`并进入P1-C。
+  Phase 1当时继续`in_progress`并进入P1-C。
 
-### 10.3 P1-C additive contract checkpoint（未完成）
+### 10.3 P1-C Runtime Sidecar parity实施证据
 
 - proto additive新增`AgentRunRecord`、`AgentItemRecord`和`CommitAgentState/GetAgentRun/ListAgentItems` RPC；旧TaskEdge、
   Task/Node/Artifact/Event和lease RPC全部保留；
 - `maf_core_types`、`maf_runtime_store`和Sidecar contract artifact已加入closed Agent status/kind/model、`agent_state`
   feature及write/read policies，schema/proto hash升级到20260822 Agent state版本；
-- Rust in-memory kernel和SQLite adapter已提供run/task一对一、CAS、item sequence唯一、idempotency exact retry、canonical
-  payload/SHA/131072-byte校验及跨重启读回；Python dependency-free gRPC client/facade完成新RPC编码、解码与响应校验；
-- 共享Python/Rust canonical vectors通过；P1-C Python canonical 56项通过，统一Rust `cargo_fmt/cargo_clippy/cargo_test`
-  gate通过；一次直接`cargo test --workspace --all-targets --all-features`因macOS缺`libpython3.13.dylib`失败，随后项目统一
-  gate按其受控PyO3环境完整通过，前者不记green；
-- 尚未闭合：sample/outcome/final对应TaskNode/Artifact/Message/Event/receipt投影尚未与AgentRun/AgentItem纳入同一
-  Sidecar事务，也尚无实现`AgentAtomicWriter`业务接口的Python Sidecar repository。故本节只是additive contract检查点，
-  P1-C和Phase 1仍为`in_progress`，不得进入Phase 2。
+- Rust in-memory kernel和SQLite adapter提供run/task一对一、CAS、item sequence唯一、idempotency exact retry、canonical
+  payload/SHA/131072-byte校验及跨重启读回；reserved result只允许保持reserved或按immutable identity提交，orphan result、
+  同call多result、sequence/identity漂移均fail closed；
+- `CommitAgentState`在一个事务中同步AgentRun/AgentItem、Task、TaskNode、Artifact与final projection；final projection精确包含
+  一份Message/Event/receipt并由additive `GetAgentFinalProjection`恢复读取。投影校验在item/node写入后失败的fault vector证明
+  SQLite Sidecar全事务回滚；
+- Python dependency-free gRPC client/facade完成全部新RPC编码、解码、handshake与response校验；新增
+  `RuntimeSidecarAgentRepository`实现`AgentRunRepository`/`AgentAtomicWriter`业务语义，真实Rust Sidecar进程验证双call、waiting、
+  staged Artifact不可见、resume outcome、final Task/Node/Artifact/Message/Event/receipt投影及确定性final retry；
+- Runtime schema/proto hash升级为`agent_atomic_projection`，旧合同不能与新binary混用；共享Python/Rust canonical vectors、P1-C
+  Python canonical 57项及统一Rust `cargo_fmt/cargo_clippy/cargo_test` gate通过；Phase 1聚焦44项、core 46项和storage 398项通过。
+  storage discover的7项skip属于未配置外部PG DSN的既有真实环境测试，不记为通过；Agent PostgreSQL必需证据仍为P1-B隔离PG
+  32项零skip；
+- 早先一次直接`cargo test --workspace --all-targets --all-features`因macOS缺`libpython3.13.dylib`失败；项目统一gate随后及
+  本检查点再次按受控PyO3环境完整通过，前者仍不记green。AL-P1-01～10三backend证据闭合，Phase 1为`proof_complete`，
+  可进入P2-A；正式route仍为DAG。
 
 ## 11. 风险、假设与开放问题
 

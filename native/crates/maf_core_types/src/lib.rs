@@ -9,7 +9,7 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
-pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260822_agent_state";
+pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260822_auth_generation_agent_state";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

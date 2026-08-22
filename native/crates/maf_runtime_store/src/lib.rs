@@ -6,9 +6,9 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260822_agent_state";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260822_agent_atomic_projection";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260822_agent_state";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260822_agent_atomic_projection";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
@@ -396,6 +396,7 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
             "event_replay",
             "agent_run_get",
             "agent_item_list",
+            "agent_final_projection_get",
         ]
         .into_iter()
         .map(|name| OperationPolicy {

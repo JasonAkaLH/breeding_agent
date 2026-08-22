@@ -1,7 +1,7 @@
 {
   "component": "maf_runtime_sidecar",
   "protocol_version": "maf.runtime.v1",
-  "schema_hash": "maf_runtime_v1_schema_20260822_agent_state",
+  "schema_hash": "maf_runtime_v1_schema_20260822_agent_atomic_projection",
   "error_code_table_hash": "maf_runtime_error_table_v1_idempotency_conflict_20260812",
   "supported_features": [
     "runtime_store",
@@ -205,6 +205,13 @@
       "enforce_failure": "read_only_degraded_error",
       "python_legacy_write_fallback": false,
       "idempotency_required": false
+    },
+    {
+      "name": "agent_final_projection_get",
+      "kind": "read",
+      "enforce_failure": "read_only_degraded_error",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": false
     }
   ],
   "error_codes": [
@@ -368,7 +375,7 @@
       "schema_hash",
       "provenance_attestation"
     ],
-    "expected_proto_hash": "maf_runtime_proto_v1_20260822_agent_state",
+    "expected_proto_hash": "maf_runtime_proto_v1_20260822_agent_atomic_projection",
     "require_schema_hash_match": true,
     "require_checksum_allowlist": true,
     "require_cargo_lock_digest_allowlist": true,

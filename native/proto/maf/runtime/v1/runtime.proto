@@ -18,7 +18,9 @@ service RuntimeSidecar {
   rpc MarkPlannerReplanClaim(MarkPlannerReplanClaimRequest) returns (PlannerReplanClaimResponse);
   rpc CommitAgentState(CommitAgentStateRequest) returns (AgentStateResponse);
   rpc GetAgentRun(GetAgentRunRequest) returns (AgentRunResponse);
+  rpc GetAgentRunForTask(GetAgentRunForTaskRequest) returns (AgentRunResponse);
   rpc ListAgentItems(ListAgentItemsRequest) returns (ListAgentItemsResponse);
+  rpc GetAgentFinalProjection(GetAgentFinalProjectionRequest) returns (AgentFinalProjectionResponse);
   rpc GetTaskNode(GetTaskNodeRequest) returns (GetTaskNodeResponse);
   rpc ListTaskNodesForTask(ListTaskNodesForTaskRequest) returns (ListTaskNodesForTaskResponse);
   rpc TransitionNode(TransitionNodeRequest) returns (TransitionNodeResponse);
@@ -241,6 +243,10 @@ message CommitAgentStateRequest {
   uint64 expected_revision = 4;
   optional string expected_claim_token = 5;
   Idempotency idempotency = 6;
+  repeated TaskNodeRecord task_nodes = 7;
+  repeated ArtifactRecord artifacts = 8;
+  optional bytes final_projection_json = 9;
+  optional TaskRecord task = 10;
 }
 
 message AgentStateResponse {
@@ -251,6 +257,7 @@ message AgentStateResponse {
 }
 
 message GetAgentRunRequest { string run_id = 1; }
+message GetAgentRunForTaskRequest { string task_id = 1; }
 message AgentRunResponse {
   AgentRunRecord run = 1;
   bool found = 2;
@@ -260,6 +267,12 @@ message ListAgentItemsRequest { string run_id = 1; }
 message ListAgentItemsResponse {
   repeated AgentItemRecord items = 1;
   maf.common.v1.TypedError error = 2;
+}
+message GetAgentFinalProjectionRequest { string run_id = 1; }
+message AgentFinalProjectionResponse {
+  optional bytes projection_json = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
 }
 
 message TransitionNodeRequest {

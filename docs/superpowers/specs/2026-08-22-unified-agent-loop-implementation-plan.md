@@ -5,13 +5,15 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0 `proof_complete`；P1-A/P1-B green（真实隔离PG 32项零skip），Phase 1 `in_progress`；下一检查点P1-C
+- 执行状态：Phase 0、Phase 1均`proof_complete`；P1-A/P1-B/P1-C green（真实隔离PG 32项零skip、真实Rust
+  Sidecar进程完成AgentAtomicWriter全链路）；下一检查点P2-A
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - 拆分依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
 - 业务代码基线：`f707235`；计划审查起点：`7d929b8`。两者之间只有本计划、索引和CHANGELOG变更；正式运行时仍为
-  DAG；仓库已有Phase 0 `AgentModelPort`，尚无`AgentRun`、`AgentItem`或`AgentLoopOrchestrator`
+  DAG；计划起点只有Phase 0 `AgentModelPort`，当前已完成Phase 1 additive Agent storage，仍无正式route可达的
+  `AgentLoopOrchestrator`
 - 计划边界：本计划只安排`main`开发仓库实现，不部署`prod`，不迁移或恢复旧DAG Task
 
 本计划把已批准PRD转换为逐文件、逐测试、逐回滚点的green checkpoint。计划不改变同模型、无固定轮次上限、
@@ -273,6 +275,14 @@ contract additive兼容验证通过。
 建议commit：`feat(runtime): add sidecar agent state contract`。
 
 Phase 1退出：AL-P1-01～10在三backend全部通过，状态才可标记`proof_complete`。
+
+实施证据：P1-C新增实现`AgentAtomicWriter`业务合同的Python Sidecar repository；Rust内存核与SQLite adapter在同一CAS事务
+写AgentRun/AgentItem、Task、TaskNode、Artifact及final Message/Event/receipt投影，reserved result可按immutable identity转为
+waiting或terminal，orphan/重复result fail closed。真实Rust Sidecar进程完成sample、双call、waiting staged Artifact不可见、
+resume outcome、唯一final、投影读取及final retry；P1-C Python canonical 57项、统一Rust fmt/clippy/test gate、Phase 1聚焦44项、
+core 46项和storage 398项通过。storage discover的7项skip均为未注入外部PostgreSQL DSN的既有真实环境套件；Agent必需PG
+证据仍引用P1-B同一代码基线上的隔离PG 32项零skip，不把本次skip记为通过。Phase 1据此`proof_complete`，正式入口仍保持DAG，
+下一检查点P2-A。
 
 ## 7. Phase 2：Invocation Kernel、Catalog、Skill 与 MCP
 
@@ -722,7 +732,7 @@ discover域；P6/P7必须逐条运行目录README的全部canonical命令。未�
 | P0-B | `conda run -n multi_agent python -m unittest tests.integrations.test_agent_model_adapter tests.integrations.test_agent_model_gate tests.integrations.test_llm_client tests.integrations.test_llm_runtime tests.integrations.test_llm_request_options tests.api.test_model_edition_selection` |
 | P1-A | `conda run -n multi_agent python -m unittest tests.orchestration.test_agent_models tests.storage.test_agent_storage_sqlite tests.storage.test_agent_storage_conformance` |
 | P1-B | `conda run -n multi_agent python -m unittest tests.storage.test_agent_storage_postgres_integration tests.storage.test_agent_task_lease tests.storage.test_postgres_runtime_schema_manifest tests.storage.test_postgres_schema_reconciler`；必须配置`MAF_POSTGRES_TEST_DSN`且测试不得skip |
-| P1-C | `conda run -n multi_agent python -m unittest tests.integrations.test_runtime_sidecar_grpc_client tests.storage.test_rust_runtime_sidecar_contract tests.storage.test_agent_storage_conformance`；另运行`conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only cargo_fmt --only cargo_clippy --only cargo_test` |
+| P1-C | `conda run -n multi_agent python -m unittest tests.integrations.test_runtime_sidecar_grpc_client tests.storage.test_rust_runtime_sidecar_contract tests.storage.test_agent_storage_conformance tests.storage.test_runtime_sidecar_agent_repository`；另运行`conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only cargo_fmt --only cargo_clippy --only cargo_test` |
 | P2-A | `conda run -n multi_agent python -m unittest tests.orchestration.test_agent_invocation tests.orchestration.test_fake_capability_flow tests.orchestration.test_mcp_route_handoff_service tests.lifecycle.test_task_cancellation` |
 | P2-B | `conda run -n multi_agent python -m unittest tests.orchestration.test_agent_tool_catalog tests.orchestration.test_agent_catalog_preflight tests.orchestration.test_registry_scheduler tests.orchestration.test_prompt_envelope` |
 | P2-C | `conda run -n multi_agent python -m unittest tests.orchestration.test_agent_skill_activation tests.capabilities.skill_tool.test_executor tests.integrations.agent_skills.test_public_skill_profile tests.integrations.agent_skills.test_execution` |

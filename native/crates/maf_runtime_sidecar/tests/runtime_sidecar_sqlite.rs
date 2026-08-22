@@ -1,6 +1,6 @@
 use maf_runtime_sidecar::{
-    AgentItemRecord, AgentRunRecord, ArtifactRecord, RuntimeSidecarSqliteAdapter, TaskEdgeRecord,
-    TaskNodeRecord, TaskRecord, TaskRouteAssignment,
+    AgentItemRecord, AgentRunRecord, ArtifactRecord, CommitAgentStateRequest, Idempotency,
+    RuntimeSidecarSqliteAdapter, TaskEdgeRecord, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
 };
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -56,30 +56,118 @@ fn agent_item() -> AgentItemRecord {
     }
 }
 
+fn agent_node() -> TaskNodeRecord {
+    TaskNodeRecord {
+        node_id: "agent-node".to_owned(),
+        task_id: "task-agent".to_owned(),
+        capability_id: "agent.final_output".to_owned(),
+        assigned_instance_id: None,
+        status: "completed".to_owned(),
+        criticality: "required".to_owned(),
+        dependency_type: "hard".to_owned(),
+        retry_policy_json: b"{}".to_vec(),
+        timeout_policy_json: b"{}".to_vec(),
+        resource_class: None,
+        input_refs: vec!["item-agent-1".to_owned()],
+        output_refs: vec!["agent-artifact".to_owned()],
+        started_at: Some("1".to_owned()),
+        finished_at: Some("1".to_owned()),
+    }
+}
+
+fn agent_artifact() -> ArtifactRecord {
+    ArtifactRecord {
+        artifact_id: "agent-artifact".to_owned(),
+        task_id: "task-agent".to_owned(),
+        producer_node_id: "agent-node".to_owned(),
+        artifact_type: "text".to_owned(),
+        storage_ref: "opaque://agent-final".to_owned(),
+        summary: "safe".to_owned(),
+        is_complete: true,
+        created_at: "1".to_owned(),
+    }
+}
+
+fn agent_task() -> TaskRecord {
+    TaskRecord {
+        task_id: "task-agent".to_owned(),
+        conversation_id: "conv-agent".to_owned(),
+        root_message_id: "message-agent".to_owned(),
+        status: "completed".to_owned(),
+        routing_mode: "auto".to_owned(),
+        requested_capability_id: None,
+        root_node_id: Some("agent-node".to_owned()),
+        summary: None,
+        cancel_requested_at: None,
+        created_at: Some("1".to_owned()),
+        updated_at: Some("1".to_owned()),
+        assignment: None,
+    }
+}
+
+fn agent_final_projection() -> Vec<u8> {
+    br#"{"event":{"event_id":"agent-event","event_type":"agent.final_output","message_id":"agent-message"},"message":{"content":"ok","conversation_id":"conv-agent","message_id":"agent-message","role":"assistant","task_id":"task-agent"},"receipt":{"assistant_item_id":"item-agent-1","artifact_id":"agent-artifact","event_id":"agent-event","message_id":"agent-message","node_id":"agent-node","receipt_id":"agent-receipt","run_id":"run-agent","task_id":"task-agent","text_sha256":"digest"}}"#.to_vec()
+}
+
+fn completed_agent_run() -> AgentRunRecord {
+    let mut run = agent_run(1);
+    run.status = "completed".to_owned();
+    run.terminal_at_ms = Some(2);
+    run
+}
+
+fn agent_request(
+    operation: &str,
+    run: AgentRunRecord,
+    items: Vec<AgentItemRecord>,
+    expected_revision: u64,
+    key: &str,
+) -> CommitAgentStateRequest {
+    CommitAgentStateRequest {
+        operation: operation.to_owned(),
+        run: Some(run),
+        items,
+        expected_revision,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: key.to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+        task_nodes: Vec::new(),
+        artifacts: Vec::new(),
+        final_projection_json: None,
+        task: None,
+    }
+}
+
 #[test]
 fn sqlite_adapter_persists_agent_state_atomically_across_reopen() {
     let db_path = temp_db_path("agent-state");
     {
         let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).expect("open adapter");
         adapter
-            .commit_agent_state(
+            .commit_agent_state(agent_request(
                 "create_run",
                 agent_run(0),
                 Vec::new(),
                 0,
-                None,
                 "agent-create",
-            )
+            ))
             .expect("create AgentRun");
+        let mut sample = agent_request(
+            "commit_final",
+            completed_agent_run(),
+            vec![agent_item()],
+            0,
+            "agent-sample",
+        );
+        sample.task_nodes = vec![agent_node()];
+        sample.artifacts = vec![agent_artifact()];
+        sample.final_projection_json = Some(agent_final_projection());
+        sample.task = Some(agent_task());
         adapter
-            .commit_agent_state(
-                "commit_sample",
-                agent_run(1),
-                vec![agent_item()],
-                0,
-                None,
-                "agent-sample",
-            )
+            .commit_agent_state(sample)
             .expect("commit Agent sample");
     }
     let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen adapter");
@@ -95,18 +183,71 @@ fn sqlite_adapter_persists_agent_state_atomically_across_reopen() {
         reopened.list_agent_items("run-agent").unwrap(),
         vec![agent_item()]
     );
+    assert_eq!(
+        reopened.get_task_node("agent-node").unwrap(),
+        Some(agent_node())
+    );
+    assert_eq!(
+        reopened.get_artifact("agent-artifact").unwrap(),
+        Some(agent_artifact())
+    );
+    assert_eq!(
+        reopened.get_agent_final_projection("run-agent").unwrap(),
+        Some(agent_final_projection())
+    );
+    assert_eq!(reopened.get_task("task-agent").unwrap(), Some(agent_task()));
     let stale = reopened
-        .commit_agent_state(
+        .commit_agent_state(agent_request(
             "commit_outcome",
             agent_run(2),
             Vec::new(),
             0,
-            None,
             "agent-stale",
-        )
+        ))
         .expect_err("stale CAS rejected");
     assert_eq!(stale.code, "runtime_store_write_failed");
     let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn sqlite_agent_state_projection_failure_rolls_back_run_item_and_node() {
+    let adapter = RuntimeSidecarSqliteAdapter::open_in_memory().expect("open adapter");
+    adapter
+        .commit_agent_state(agent_request(
+            "create_run",
+            agent_run(0),
+            Vec::new(),
+            0,
+            "agent-create-fault",
+        ))
+        .expect("create AgentRun");
+    let mut wrong_artifact = agent_artifact();
+    wrong_artifact.task_id = "wrong-task".to_owned();
+    let mut fault = agent_request(
+        "commit_sample",
+        agent_run(1),
+        vec![agent_item()],
+        0,
+        "agent-sample-fault",
+    );
+    fault.task_nodes = vec![agent_node()];
+    fault.artifacts = vec![wrong_artifact];
+    fault.task = Some(agent_task());
+    let error = adapter
+        .commit_agent_state(fault)
+        .expect_err("invalid projection rolls back transaction");
+    assert_eq!(error.code, "runtime_store_write_failed");
+    assert_eq!(
+        adapter
+            .get_agent_run("run-agent")
+            .unwrap()
+            .unwrap()
+            .revision,
+        0
+    );
+    assert!(adapter.list_agent_items("run-agent").unwrap().is_empty());
+    assert_eq!(adapter.get_task_node("agent-node").unwrap(), None);
+    assert_eq!(adapter.get_task("task-agent").unwrap(), None);
 }
 
 fn authority_task(status: &str) -> TaskRecord {

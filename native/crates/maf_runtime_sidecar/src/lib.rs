@@ -272,6 +272,10 @@ pub struct CommitAgentStateRequest {
     pub expected_revision: u64,
     pub expected_claim_token: Option<String>,
     pub idempotency: Option<Idempotency>,
+    pub task_nodes: Vec<TaskNodeRecord>,
+    pub artifacts: Vec<ArtifactRecord>,
+    pub final_projection_json: Option<Vec<u8>>,
+    pub task: Option<TaskRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +291,10 @@ pub(crate) struct AgentStateReceipt {
     pub(crate) operation: String,
     pub(crate) run: AgentRunRecord,
     pub(crate) items: Vec<AgentItemRecord>,
+    pub(crate) task_nodes: Vec<TaskNodeRecord>,
+    pub(crate) artifacts: Vec<ArtifactRecord>,
+    pub(crate) final_projection_json: Option<Vec<u8>>,
+    pub(crate) task: Option<TaskRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -792,6 +800,7 @@ pub struct RuntimeSidecarKernel {
     agent_runs: BTreeMap<String, AgentRunRecord>,
     agent_task_runs: BTreeMap<String, String>,
     agent_items: BTreeMap<String, AgentItemRecord>,
+    agent_final_projections: BTreeMap<String, Vec<u8>>,
     agent_state_idempotency: BTreeMap<String, AgentStateReceipt>,
     dispatched_task_ids: BTreeSet<String>,
     node_transition_idempotency: BTreeMap<String, NodeTransitionReceipt>,
@@ -831,6 +840,7 @@ impl RuntimeSidecarKernel {
             agent_runs: BTreeMap::new(),
             agent_task_runs: BTreeMap::new(),
             agent_items: BTreeMap::new(),
+            agent_final_projections: BTreeMap::new(),
             agent_state_idempotency: BTreeMap::new(),
             dispatched_task_ids: BTreeSet::new(),
             node_transition_idempotency: BTreeMap::new(),
@@ -1027,10 +1037,23 @@ impl RuntimeSidecarKernel {
         for item in &request.items {
             validate_agent_item_record(item, &run)?;
         }
+        validate_agent_final_commit_shape(
+            &request.operation,
+            &run,
+            &request.items,
+            &request.task_nodes,
+            &request.artifacts,
+            request.task.as_ref(),
+            request.final_projection_json.as_deref(),
+        )?;
         if let Some(receipt) = self.agent_state_idempotency.get(&idempotency_key) {
             if receipt.operation != request.operation
                 || receipt.run != run
                 || receipt.items != request.items
+                || receipt.task_nodes != request.task_nodes
+                || receipt.artifacts != request.artifacts
+                || receipt.final_projection_json != request.final_projection_json
+                || receipt.task != request.task
             {
                 return Err(idempotency_conflict(
                     "agent state idempotency key was reused with different state",
@@ -1063,17 +1086,83 @@ impl RuntimeSidecarKernel {
                 ));
             }
         }
-        let mut sequences = BTreeSet::new();
-        for existing in self
+        let existing_items = self
             .agent_items
             .values()
             .filter(|item| item.run_id == run.run_id)
-        {
-            sequences.insert(existing.sequence);
+            .cloned()
+            .collect::<Vec<_>>();
+        validate_agent_item_relationships(&existing_items, &request.items)?;
+        let mut sequences = BTreeMap::new();
+        for existing in &existing_items {
+            sequences.insert(existing.sequence, existing.item_id.clone());
         }
+        let mut request_item_ids = BTreeSet::new();
         for item in &request.items {
-            if self.agent_items.contains_key(&item.item_id) || !sequences.insert(item.sequence) {
+            if !request_item_ids.insert(item.item_id.clone()) {
                 return Err(write_failed("AgentItem identity or sequence conflict"));
+            }
+            if let Some(existing) = self.agent_items.get(&item.item_id) {
+                validate_agent_item_update(existing, item)?;
+            } else if let Some(existing_item_id) = sequences.get(&item.sequence) {
+                if existing_item_id != &item.item_id {
+                    return Err(write_failed("AgentItem identity or sequence conflict"));
+                }
+            } else {
+                sequences.insert(item.sequence, item.item_id.clone());
+            }
+        }
+        for node in &request.task_nodes {
+            validate_task_node_record(node)?;
+            if node.task_id != run.task_id {
+                return Err(write_failed("Agent TaskNode belongs to a different Task"));
+            }
+            if let Some(existing) = self.task_nodes.get(&node.node_id) {
+                validate_task_node_update(existing, node)?;
+            }
+        }
+        for artifact in &request.artifacts {
+            if artifact.artifact_id.is_empty()
+                || artifact.producer_node_id.is_empty()
+                || artifact.artifact_type.is_empty()
+                || artifact.storage_ref.is_empty()
+                || artifact.task_id != run.task_id
+            {
+                return Err(write_failed("Agent Artifact belongs to a different Task"));
+            }
+            if self.artifacts.contains_key(&artifact.artifact_id)
+                || (!self.task_nodes.contains_key(&artifact.producer_node_id)
+                    && !request
+                        .task_nodes
+                        .iter()
+                        .any(|node| node.node_id == artifact.producer_node_id))
+            {
+                return Err(write_failed("Agent Artifact identity or producer conflict"));
+            }
+        }
+        if let Some(projection) = &request.final_projection_json {
+            if request.operation != "commit_final"
+                || self.agent_final_projections.contains_key(&run.run_id)
+            {
+                return Err(write_failed("Agent final projection operation conflict"));
+            }
+            validate_agent_final_projection(
+                projection,
+                &run,
+                &request.task_nodes,
+                &request.artifacts,
+                &request.items,
+            )?;
+        } else if request.operation == "commit_final" {
+            return Err(write_failed("Agent final projection is required"));
+        }
+        if let Some(task) = &request.task {
+            validate_task_record(task)?;
+            if task.task_id != run.task_id || task.conversation_id != run.conversation_id {
+                return Err(write_failed("Agent Task projection identity mismatch"));
+            }
+            if let Some(existing) = self.tasks.get(&task.task_id) {
+                validate_task_update(existing, task)?;
             }
         }
         self.agent_task_runs
@@ -1082,15 +1171,50 @@ impl RuntimeSidecarKernel {
         for item in &request.items {
             self.agent_items.insert(item.item_id.clone(), item.clone());
         }
+        for node in &request.task_nodes {
+            self.task_nodes.insert(node.node_id.clone(), node.clone());
+            self.node_statuses.insert(
+                (node.task_id.clone(), node.node_id.clone()),
+                node.status.clone(),
+            );
+        }
+        for artifact in &request.artifacts {
+            self.artifacts
+                .insert(artifact.artifact_id.clone(), artifact.clone());
+        }
+        if let Some(projection) = &request.final_projection_json {
+            self.agent_final_projections
+                .insert(run.run_id.clone(), projection.clone());
+        }
+        if let Some(task) = &request.task {
+            self.tasks.insert(task.task_id.clone(), task.clone());
+        }
         self.agent_state_idempotency.insert(
             idempotency_key,
             AgentStateReceipt {
                 operation: request.operation,
                 run: run.clone(),
                 items: request.items.clone(),
+                task_nodes: request.task_nodes,
+                artifacts: request.artifacts,
+                final_projection_json: request.final_projection_json,
+                task: request.task,
             },
         );
         Ok((run, request.items, false))
+    }
+
+    #[must_use]
+    pub fn get_agent_final_projection(&self, run_id: &str) -> Option<Vec<u8>> {
+        self.agent_final_projections.get(run_id).cloned()
+    }
+
+    #[must_use]
+    pub fn get_agent_run_for_task(&self, task_id: &str) -> Option<AgentRunRecord> {
+        self.agent_task_runs
+            .get(task_id)
+            .and_then(|run_id| self.agent_runs.get(run_id))
+            .cloned()
     }
 
     #[must_use]
@@ -2484,16 +2608,32 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                 .into_iter()
                 .map(agent_item_record_from_pb)
                 .collect();
+            let task_nodes: Vec<_> = request
+                .task_nodes
+                .into_iter()
+                .map(task_node_record_from_pb)
+                .collect();
+            let artifacts: Vec<_> = request
+                .artifacts
+                .into_iter()
+                .map(artifact_from_pb)
+                .collect();
+            let final_projection_json = request.final_projection_json;
+            let task = request.task.map(task_record_from_pb);
             let response = match run {
                 Some(run) => match self.run_sqlite_write(|| {
-                    adapter.commit_agent_state(
-                        &request.operation,
-                        run,
+                    adapter.commit_agent_state(CommitAgentStateRequest {
+                        operation: request.operation,
+                        run: Some(run),
                         items,
-                        request.expected_revision,
-                        request.expected_claim_token.as_deref(),
-                        &pb_idempotency_key(request.idempotency.clone()),
-                    )
+                        expected_revision: request.expected_revision,
+                        expected_claim_token: request.expected_claim_token,
+                        idempotency: request.idempotency.map(idempotency_from_pb),
+                        task_nodes,
+                        artifacts,
+                        final_projection_json,
+                        task,
+                    })
                 })? {
                     Ok((run, items, duplicate)) => AgentStateResponse {
                         run: Some(run),
@@ -2528,6 +2668,18 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
             expected_revision: request.expected_revision,
             expected_claim_token: request.expected_claim_token,
             idempotency: request.idempotency.map(idempotency_from_pb),
+            task_nodes: request
+                .task_nodes
+                .into_iter()
+                .map(task_node_record_from_pb)
+                .collect(),
+            artifacts: request
+                .artifacts
+                .into_iter()
+                .map(artifact_from_pb)
+                .collect(),
+            final_projection_json: request.final_projection_json,
+            task: request.task.map(task_record_from_pb),
         });
         Ok(tonic::Response::new(agent_state_response_to_pb(response)))
     }
@@ -2554,6 +2706,41 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
             }
         } else {
             self.lock()?.get_agent_run(&run_id)
+        };
+        Ok(tonic::Response::new(runtime_pb::AgentRunResponse {
+            found: response.run.is_some(),
+            run: response.run.map(agent_run_record_to_pb),
+            error: response.error.map(typed_error_to_pb),
+        }))
+    }
+
+    async fn get_agent_run_for_task(
+        &self,
+        request: tonic::Request<runtime_pb::GetAgentRunForTaskRequest>,
+    ) -> Result<tonic::Response<runtime_pb::AgentRunResponse>, tonic::Status> {
+        let task_id = request.into_inner().task_id;
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.get_agent_run_for_task(&task_id) {
+                Ok(run) => AgentStateResponse {
+                    run,
+                    items: Vec::new(),
+                    duplicate: false,
+                    error: None,
+                },
+                Err(error) => AgentStateResponse {
+                    run: None,
+                    items: Vec::new(),
+                    duplicate: false,
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            AgentStateResponse {
+                run: self.lock()?.kernel.get_agent_run_for_task(&task_id),
+                items: Vec::new(),
+                duplicate: false,
+                error: None,
+            }
         };
         Ok(tonic::Response::new(runtime_pb::AgentRunResponse {
             found: response.run.is_some(),
@@ -2593,6 +2780,31 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                 .collect(),
             error: response.error.map(typed_error_to_pb),
         }))
+    }
+
+    async fn get_agent_final_projection(
+        &self,
+        request: tonic::Request<runtime_pb::GetAgentFinalProjectionRequest>,
+    ) -> Result<tonic::Response<runtime_pb::AgentFinalProjectionResponse>, tonic::Status> {
+        let run_id = request.into_inner().run_id;
+        let result = if let Some(adapter) = &self.sqlite_adapter {
+            adapter.get_agent_final_projection(&run_id)
+        } else {
+            Ok(self.lock()?.kernel.get_agent_final_projection(&run_id))
+        };
+        let response = match result {
+            Ok(projection_json) => runtime_pb::AgentFinalProjectionResponse {
+                found: projection_json.is_some(),
+                projection_json,
+                error: None,
+            },
+            Err(error) => runtime_pb::AgentFinalProjectionResponse {
+                projection_json: None,
+                found: false,
+                error: Some(typed_error_to_pb(error.into())),
+            },
+        };
+        Ok(tonic::Response::new(response))
     }
 
     async fn transition_node(
@@ -3326,7 +3538,7 @@ pub fn supported_features() -> Vec<String> {
     ]
 }
 
-fn idempotency_key(idempotency: Option<Idempotency>) -> String {
+pub(crate) fn idempotency_key(idempotency: Option<Idempotency>) -> String {
     idempotency.map_or_else(String::new, |value| value.key)
 }
 
@@ -4074,6 +4286,174 @@ pub(crate) fn validate_agent_item_record(
     }
     if item.kind == "tool_result" && item.source_call_item_id.is_none() {
         return Err(write_failed("tool_result requires source_call_item_id"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_agent_item_update(
+    existing: &AgentItemRecord,
+    updated: &AgentItemRecord,
+) -> Result<(), RuntimeSidecarError> {
+    let immutable_identity_matches = existing.item_id == updated.item_id
+        && existing.run_id == updated.run_id
+        && existing.task_id == updated.task_id
+        && existing.sequence == updated.sequence
+        && existing.kind == updated.kind
+        && existing.parent_item_id == updated.parent_item_id
+        && existing.source_call_item_id == updated.source_call_item_id
+        && existing.provider_sample_id == updated.provider_sample_id
+        && existing.call_ordinal == updated.call_ordinal
+        && existing.created_at_ms == updated.created_at_ms;
+    if !immutable_identity_matches
+        || existing.kind != "tool_result"
+        || existing.state != "reserved"
+        || !matches!(updated.state.as_str(), "reserved" | "committed")
+    {
+        return Err(write_failed(
+            "AgentItem update violates reserved result contract",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_agent_item_relationships(
+    existing: &[AgentItemRecord],
+    requested: &[AgentItemRecord],
+) -> Result<(), RuntimeSidecarError> {
+    let call_ids = existing
+        .iter()
+        .chain(requested.iter())
+        .filter(|item| item.kind == "tool_call")
+        .map(|item| item.item_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut result_ids_by_call = BTreeMap::new();
+    for item in existing.iter().chain(requested.iter()) {
+        if item.kind != "tool_result" {
+            continue;
+        }
+        let source_call_item_id = item
+            .source_call_item_id
+            .as_ref()
+            .ok_or_else(|| write_failed("Agent tool result source call is missing"))?;
+        if !call_ids.contains(source_call_item_id) {
+            return Err(write_failed("Agent tool result references an unknown call"));
+        }
+        if let Some(existing_result_id) =
+            result_ids_by_call.insert(source_call_item_id.clone(), item.item_id.clone())
+            && existing_result_id != item.item_id
+        {
+            return Err(write_failed("Agent call has more than one result"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_agent_final_projection(
+    projection: &[u8],
+    run: &AgentRunRecord,
+    nodes: &[TaskNodeRecord],
+    artifacts: &[ArtifactRecord],
+    items: &[AgentItemRecord],
+) -> Result<(), RuntimeSidecarError> {
+    let value: serde_json::Value = serde_json::from_slice(projection)
+        .map_err(|_| write_failed("Agent final projection JSON is invalid"))?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| write_failed("Agent final projection must be an object"))?;
+    if root.keys().map(String::as_str).collect::<BTreeSet<_>>()
+        != BTreeSet::from(["event", "message", "receipt"])
+    {
+        return Err(write_failed("Agent final projection fields are invalid"));
+    }
+    let event = root["event"]
+        .as_object()
+        .ok_or_else(|| write_failed("Agent final Event projection is invalid"))?;
+    let message = root["message"]
+        .as_object()
+        .ok_or_else(|| write_failed("Agent final Message projection is invalid"))?;
+    let receipt = root["receipt"]
+        .as_object()
+        .ok_or_else(|| write_failed("Agent final receipt projection is invalid"))?;
+    let message_id = json_non_empty_string(message, "message_id")?;
+    let event_id = json_non_empty_string(event, "event_id")?;
+    let node_id = json_non_empty_string(receipt, "node_id")?;
+    let artifact_id = json_non_empty_string(receipt, "artifact_id")?;
+    let assistant_item_id = json_non_empty_string(receipt, "assistant_item_id")?;
+    if json_non_empty_string(message, "conversation_id")? != run.conversation_id
+        || json_non_empty_string(message, "task_id")? != run.task_id
+        || json_non_empty_string(message, "role")? != "assistant"
+        || json_non_empty_string(event, "event_type")? != "agent.final_output"
+        || json_non_empty_string(event, "message_id")? != message_id
+        || json_non_empty_string(receipt, "event_id")? != event_id
+        || json_non_empty_string(receipt, "message_id")? != message_id
+        || json_non_empty_string(receipt, "run_id")? != run.run_id
+        || json_non_empty_string(receipt, "task_id")? != run.task_id
+        || !nodes.iter().any(|node| node.node_id == node_id)
+        || !artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id == artifact_id)
+        || !items.iter().any(|item| {
+            item.item_id == assistant_item_id
+                && item.kind == "assistant_message"
+                && item.state == "committed"
+        })
+    {
+        return Err(write_failed(
+            "Agent final projection references are inconsistent",
+        ));
+    }
+    json_non_empty_string(receipt, "receipt_id")?;
+    json_non_empty_string(receipt, "text_sha256")?;
+    json_non_empty_string(message, "content")?;
+    Ok(())
+}
+
+fn json_non_empty_string<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a str, RuntimeSidecarError> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| write_failed("Agent final projection identity is invalid"))
+}
+
+pub(crate) fn validate_agent_final_commit_shape(
+    operation: &str,
+    run: &AgentRunRecord,
+    items: &[AgentItemRecord],
+    nodes: &[TaskNodeRecord],
+    artifacts: &[ArtifactRecord],
+    task: Option<&TaskRecord>,
+    projection: Option<&[u8]>,
+) -> Result<(), RuntimeSidecarError> {
+    if operation != "commit_final" {
+        if projection.is_some() {
+            return Err(write_failed("Agent final projection operation conflict"));
+        }
+        return Ok(());
+    }
+    let task = task.ok_or_else(|| write_failed("Agent final Task projection is required"))?;
+    if projection.is_none()
+        || run.status != "completed"
+        || run.terminal_at_ms.is_none()
+        || run.claim_owner.is_some()
+        || run.claim_token.is_some()
+        || run.lease_expires_at_ms.is_some()
+        || !run.waiting_call_item_ids.is_empty()
+        || items.len() != 1
+        || nodes.len() != 1
+        || artifacts.len() != 1
+        || items[0].kind != "assistant_message"
+        || items[0].state != "committed"
+        || nodes[0].capability_id != "agent.final_output"
+        || nodes[0].status != "completed"
+        || artifacts[0].producer_node_id != nodes[0].node_id
+        || task.status != "completed"
+        || task.root_node_id.as_deref() != Some(nodes[0].node_id.as_str())
+    {
+        return Err(write_failed("Agent final commit shape is invalid"));
     }
     Ok(())
 }

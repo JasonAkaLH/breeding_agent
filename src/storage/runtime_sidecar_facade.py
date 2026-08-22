@@ -208,6 +208,23 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
         for item in items:
             _validate_agent_item_record(item)
         return
+    if operation_name == "agent_final_projection_get":
+        found = response.get("found")
+        projection = response.get("projection_json")
+        if not isinstance(found, bool):
+            _raise_response_invalid()
+        if found:
+            if not isinstance(projection, bytes) or not projection:
+                _raise_response_invalid()
+            try:
+                value = json.loads(projection)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                _raise_response_invalid()
+            if not isinstance(value, dict):
+                _raise_response_invalid()
+        elif projection is not None:
+            _raise_response_invalid()
+        return
     if operation_name == "task_edge_save":
         _validate_task_edge_record(response.get("edge"))
         return

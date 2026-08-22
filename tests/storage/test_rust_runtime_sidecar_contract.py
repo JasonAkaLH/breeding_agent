@@ -691,16 +691,17 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(operation_policy("task_node_list")["kind"], "read")
         self.assertEqual(operation_policy("agent_run_get")["kind"], "read")
         self.assertEqual(operation_policy("agent_item_list")["kind"], "read")
+        self.assertEqual(operation_policy("agent_final_projection_get")["kind"], "read")
         conflict = next(error for error in contract["error_codes"] if error["code"] == "runtime_store_idempotency_conflict")
         self.assertEqual(conflict["category"], "internal")
         self.assertFalse(conflict["retriable"])
         self.assertEqual(
             contract["schema_hash"],
-            "maf_runtime_v1_schema_20260822_agent_state",
+            "maf_runtime_v1_schema_20260822_agent_atomic_projection",
         )
         self.assertEqual(
             contract["artifact_policy"]["expected_proto_hash"],
-            "maf_runtime_proto_v1_20260822_agent_state",
+            "maf_runtime_proto_v1_20260822_agent_atomic_projection",
         )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:

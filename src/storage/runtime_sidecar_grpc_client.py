@@ -419,6 +419,10 @@ class RuntimeSidecarGrpcClient:
         expected_revision: int,
         expected_claim_token: str | None,
         idempotency_key: str,
+        task_nodes: tuple[Mapping[str, Any], ...] = (),
+        artifacts: tuple[Mapping[str, Any], ...] = (),
+        final_projection_json: bytes | None = None,
+        task: Mapping[str, Any] | None = None,
         owner: str = "python-runtime",
         timeout_seconds: float = 5,
     ) -> dict[str, Any]:
@@ -432,6 +436,28 @@ class RuntimeSidecarGrpcClient:
         if expected_claim_token is not None:
             request += _field_string(5, expected_claim_token)
         request += _field_bytes(6, _idempotency(idempotency_key, owner))
+        request += b"".join(_field_bytes(7, _task_node_record(node)) for node in task_nodes)
+        request += b"".join(
+            _field_bytes(
+                8,
+                _artifact_record(
+                    artifact_id=str(artifact["artifact_id"]),
+                    task_id=str(artifact["task_id"]),
+                    producer_node_id=str(artifact["producer_node_id"]),
+                    artifact_type=str(artifact["artifact_type"]),
+                    storage_ref=str(artifact["storage_ref"]),
+                    summary=str(artifact.get("summary") or ""),
+                    is_complete=bool(artifact["is_complete"]),
+                    created_at=str(artifact["created_at"]),
+                ),
+            )
+            for artifact in artifacts
+        )
+        if final_projection_json is not None:
+            request += _field_bytes(9, final_projection_json)
+        if task is not None:
+            validate_runtime_sidecar_task_record(task)
+            request += _field_bytes(10, _task_record(task))
         payload = self._unary("CommitAgentState", request, timeout_seconds=timeout_seconds)
         response = _agent_state_response("agent_state_commit", _decode_message(payload))
         _consume_response("agent_state_commit", response)
@@ -455,6 +481,26 @@ class RuntimeSidecarGrpcClient:
             _raise_task_identity_invalid("AgentRun response identity differs from request")
         return response
 
+    def get_agent_run_for_task(
+        self, *, task_id: str, timeout_seconds: float = 5
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary(
+            "GetAgentRunForTask", _field_string(1, task_id), timeout_seconds=timeout_seconds
+        )
+        fields = _decode_message(payload)
+        run_payload = _first_message(fields, 1)
+        response = {
+            "operation": "agent_run_get",
+            "run": _decode_agent_run_record(run_payload) if run_payload else None,
+            "found": _first_bool(fields, 2, default=False),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("agent_run_get", response)
+        if response["run"] is not None and response["run"]["task_id"] != task_id:
+            _raise_task_identity_invalid("AgentRun response identity differs from requested Task")
+        return response
+
     def list_agent_items(self, *, run_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
         self._ensure_compatible(timeout_seconds=timeout_seconds)
         payload = self._unary("ListAgentItems", _field_string(1, run_id), timeout_seconds=timeout_seconds)
@@ -468,6 +514,28 @@ class RuntimeSidecarGrpcClient:
         _consume_response("agent_item_list", response)
         if any(item["run_id"] != run_id for item in items):
             _raise_task_identity_invalid("AgentItem list contains a different run_id")
+        return response
+
+    def get_agent_final_projection(
+        self, *, run_id: str, timeout_seconds: float = 5
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary(
+            "GetAgentFinalProjection", _field_string(1, run_id), timeout_seconds=timeout_seconds
+        )
+        fields = _decode_message(payload)
+        projection = _first_message(fields, 1)
+        response = {
+            "operation": "agent_final_projection_get",
+            "projection_json": projection or None,
+            "found": _first_bool(fields, 2, default=False),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("agent_final_projection_get", response)
+        if response["found"] != (response["projection_json"] is not None):
+            raise RuntimeError(
+                "runtime_store_response_invalid: Agent final projection response is inconsistent"
+            )
         return response
 
     def get_task_node(self, *, node_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
