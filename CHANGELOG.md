@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- External Project Skill Bundle Authority S1已实现确定性bundle digest纯函数和operator：按`path NUL size NUL file_sha256 LF`计算`sha256:<64-lower-hex>`，只排除`.git`/`__pycache__`/`.pyc`，拒绝内部symlink、特殊文件、非UTF-8路径、读期漂移、1,000文件/256 MiB上限和2秒deadline；operator直接脚本入口可用，只输出safe JSON且不泄漏正文或绝对路径。10项聚焦测试、Agent Skill 207项（43项待外部bundle闭合的skip）、scripts 50项与compileall通过。License Requirement：只使用Python stdlib，无新增依赖或许可变更。
+
 - External Project Skill Bundle Authority设计经document-perfectization四轮以100/100 `Pass`，新增双仓实施计划：按S0～S6依次闭合起点红测、bundle digest/operator、pre-catalog fail-closed与非敏感clean config、受审Mini BreedStat v2恢复、Field Design/Analysis/Rice Genie和双Skill路由对齐、工作树全量及双archive/Docker证明；仅在Agent Skill零skip、API自给、digest只读防漂移和成对回滚全部通过后解锁P6-A。License Requirement：计划只恢复已有Git对象并复用现有Python/R/SQLite/Docker依赖，禁止新第三方代码或远程asset。
 
 - 新增已批准的External Project Skill Bundle Authority设计：保持`breeding_agent` runtime与`vibe-breeding/dev:skills/`内容双仓权威，从受审历史恢复Mini BreedStat RCBD完整实现后适配v2 manifest，只定向修复Field Design/Analysis与Rice Genie合同；P6-A以两仓commit/tree、normalized bundle digest、双clean archive、Agent Skill/API零skip和Docker只读挂载证明闭合，不放宽测试、不将Skill vendoring回主仓。License Requirement：设计仅复用两仓已有Python/R/SQLite/Docker资产，无新增依赖或许可变更。
