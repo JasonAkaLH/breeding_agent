@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 统一同模型Agent Loop P4-A完成multi-waiting与identity-bound continuation：locator只保存Run/sample/call/Task/Node/Capability/owner/conversation/resume kind/authority digest/pinned bundle/model binding等closed引用，不保存Tool参数、raw result、credential、附件正文或用户文本；waiting authority随reserved result原子持久化。Core runner在任何新sample前优先恢复active sample的reserved calls，同一parallel wave两个waiting可同时挂起，回答一个不采样且不启动后续exclusive wave，全部闭合后复用同一lease/binding恢复remaining wave；ambiguous locator明确拒绝，waiting release无heartbeat。P4-A canonical 3项、含既有Loop聚焦5项、orchestration 209项通过；Phase 4仍`in_progress`，下一步P4-B，正式入口仍为DAG。License Requirement：复用Python stdlib、Phase 1 repository/lease和P3 test-only runner，无新增依赖或许可变更。
+
 - 统一同模型Agent Loop P3-C及Phase 3已`proof_complete`：新增无Model/Catalog/Executor依赖的final publisher，只消费已持久化、无calls、非空且非mixed的assistant candidate，并在final lease phase调用Phase 1唯一CAS发布确定性Node/Artifact/Message/Event/receipt。正常、事务fault、恢复与响应丢失重试均保持唯一投影，40个历史sample不受旧replan/dynamic node阈值影响。canonical 35项、orchestration 207项通过；正式入口仍为DAG，下一检查点P4-A。License Requirement：复用现有Python、Phase 1 atomic final、Task lease与P3 durable items，无新增依赖或许可变更。
 
 - 统一同模型Agent Loop P3-B完成同模型compaction：三backend Agent writer新增range/digest/CAS summary提交，原items保留且禁止reserved来源或切开multi-call sample；CompactionService只响应typed history decision，以Run固定binding/no-tools生成summary，推进boundary后重建完整Catalog/context再preflight，无eligible/no-progress/required超限均确定性收敛。canonical 3项、Agent storage/真实Sidecar聚焦16项、orchestration 204项通过。License Requirement：复用现有Python、AgentModelPort、canonical codec、三backend repository与P2 preflight，无新增依赖或许可变更。

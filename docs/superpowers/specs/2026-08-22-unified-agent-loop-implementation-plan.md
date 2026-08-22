@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 3均`proof_complete`；P3-A～P3-C green；下一检查点P4-A
+- 执行状态：Phase 0～Phase 3均`proof_complete`；P4-A green；Phase 4保持`in_progress`，下一检查点P4-B
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -482,6 +482,13 @@ Green gate：两个同wave waiting、回答一个不采样、全部闭合后恢�
 回滚：删除Agent locator/test coordinator；旧DAG continuation保持正式路径。
 
 建议commit：`feat(agent): persist multi-waiting continuations`。
+
+实施证据：新增只含closed identity/model引用的Continuation Locator，绑定Run、active sample、内部/Provider call、Task、Node、
+Capability、owner、conversation、resume kind、authority digest和可选pinned bundle revision；持久化投影不含Tool参数、raw result、
+credential、附件正文或用户文本。Core runner在任何新sample前先闭合active sample的reserved calls：两个parallel-safe waiting可在
+同wave持久化，回答一个后仍waiting且模型/后续exclusive call均不启动，全部闭合后复用同一lease与model binding执行remaining
+wave。ambiguous locator拒绝、waiting直接release且零heartbeat通过。P4-A canonical 3项、包含既有Agent Loop的聚焦5项、
+orchestration 209项、compileall/diff通过；真实route仍为DAG，进入P4-B recovery/no-replay/cancel。
 
 ### P4-B：恢复、no-replay与cancel线性化
 

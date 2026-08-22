@@ -31,6 +31,11 @@ from .runner import (
 )
 from .compaction import AgentCompactionOutcome, AgentCompactionService
 from .final_output import AgentFinalOutputPublisher
+from .continuation import (
+    AgentContinuationLocator,
+    AgentContinuationLocatorService,
+    AgentResumeKind,
+)
 from .models import (
     AgentCancellationToken,
     AgentFinishMetadata,
@@ -122,4 +127,7 @@ __all__ = [
     "AgentCompactionOutcome",
     "AgentCompactionService",
     "AgentFinalOutputPublisher",
+    "AgentContinuationLocator",
+    "AgentContinuationLocatorService",
+    "AgentResumeKind",
 ]

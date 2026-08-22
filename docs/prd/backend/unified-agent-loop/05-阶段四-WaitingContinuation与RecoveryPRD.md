@@ -1,8 +1,8 @@
 # Phase 4：Waiting、Continuation 与 Recovery PRD
 
 - **日期**：2026-08-22
-- **状态**：pending
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
+- **状态**：in_progress（P4-A green；P4-B pending）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P4-A实现证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～3必须`proof_complete`
 - **主责需求**：FR-8、FR-9、FR-18
@@ -213,3 +213,12 @@ AL-P4-01～10及所有Skill/MCP/cancel恢复回归通过；所有恢复回到原
 
 交付Phase 5：start/resume统一内部入口、waiting集合、continuation locator和recovery/cancel coordinator。Phase 5不得消费
 raw MCP result、旧continuation plan或进程内Future。
+
+## 15. 当前实施证据
+
+P4-A已完成：新增identity-bound Continuation Locator及其closed安全序列化；Skill missing input、MCP approval、elicitation和
+remote Task映射到明确waiting种类。Agent runner在采样前优先恢复active sample的reserved calls，同一parallel wave两个waiting
+可同时持久化，回答一个时仍保持waiting且模型调用数为零，全部闭合后才执行原sample的exclusive remaining wave。locator
+歧义明确拒绝，waiting release不启动heartbeat。P4-A canonical 3项、含既有Loop聚焦5项、orchestration 209项、compileall和
+diff检查通过；Phase 4尚未完成，P4-B仍须闭合Skill/MCP durable authority、crash/no-replay、duplicate、cancel/late-result及API
+continuation门禁。正式API route未切换，仍由DAG运行时提供服务。

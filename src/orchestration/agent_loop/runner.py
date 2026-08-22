@@ -14,6 +14,8 @@ from .models import (
     AgentCallOutcomeStatus,
     AgentCancellationToken,
     AgentItem,
+    AgentItemKind,
+    AgentItemState,
     AgentRun,
     AgentRunStatus,
     AgentSampleCommit,
@@ -95,12 +97,57 @@ class AgentLoopRunner:
         cancellation: AgentCancellationToken | None = None,
     ) -> AgentLoopRunResult:
         handle = await self._leases.acquire(run_id, owner_id=self._owner_id)
+        return await self.run_claimed(
+            run_id,
+            handle=handle,
+            initial_required_tool_name=initial_required_tool_name,
+            trusted_facts=trusted_facts,
+            cancellation=cancellation,
+        )
+
+    async def run_claimed(
+        self,
+        run_id: str,
+        *,
+        handle: AgentLeaseHandle,
+        initial_required_tool_name: str | None = None,
+        trusted_facts: tuple[str, ...] = (),
+        cancellation: AgentCancellationToken | None = None,
+    ) -> AgentLoopRunResult:
+        if handle.current.run_id != run_id:
+            raise AgentStorageConflict("agent_task_lease_run_mismatch")
         required_tool_name = initial_required_tool_name
         while True:
             self._check_cancel(cancellation)
             run = await self._require_active_run(run_id)
             items = await self._runs.list_items(run_id)
+            if run.status in {
+                AgentRunStatus.WAITING_FOR_INPUT,
+                AgentRunStatus.WAITING_FOR_DEPENDENCY,
+            }:
+                released = await self._leases.release_waiting(run_id, handle=handle)
+                return AgentLoopRunResult(
+                    run=released,
+                    state="waiting",
+                    lease_handle=handle,
+                )
             catalog = self._catalog_builder.build(self._visibility)
+            pending_records = _pending_active_batch(run, items)
+            if pending_records:
+                waiting = await self._execute_records(
+                    run,
+                    pending_records,
+                    catalog.policies,
+                    {
+                        tool.provider_safe_name: tool.capability_id
+                        for tool in catalog.tools
+                    },
+                    handle,
+                    cancellation,
+                )
+                if waiting is not None:
+                    return waiting
+                continue
             choice = (
                 AgentToolChoice("required", required_tool_name)
                 if required_tool_name is not None
@@ -141,63 +188,62 @@ class AgentLoopRunner:
                     final_candidate=committed.assistant_item,
                 )
             required_tool_name = None
-            call_records = tuple(
-                zip(
-                    sample.tool_calls,
-                    committed.call_items,
-                    committed.result_reservations,
-                    strict=True,
-                )
-            )
-            policies = catalog.policies
-            tool_to_capability = {
-                tool.provider_safe_name: tool.capability_id for tool in catalog.tools
-            }
-            for wave in deterministic_invocation_waves(
-                call_records,
-                is_parallel_safe=lambda record: _parallel_safe(
-                    record[0], tool_to_capability, policies
+
+    async def _execute_records(
+        self,
+        run: AgentRun,
+        records: tuple[tuple[AgentToolCall, AgentItem, AgentItem], ...],
+        policies: Mapping[str, CapabilityInvocationPolicy],
+        tool_to_capability: Mapping[str, str],
+        handle: AgentLeaseHandle,
+        cancellation: AgentCancellationToken | None,
+    ) -> AgentLoopRunResult | None:
+        for wave in deterministic_invocation_waves(
+            records,
+            is_parallel_safe=lambda record: _parallel_safe(
+                record[0], tool_to_capability, policies
+            ),
+        ):
+            self._check_cancel(cancellation)
+            wave_results = await self._leases.run_active_phase(
+                "capability_wave",
+                handle,
+                lambda _handle, current_wave=wave: self._execute_wave(
+                    run,
+                    current_wave,
+                    tool_to_capability,
+                    policies,
+                    cancellation,
                 ),
-            ):
-                self._check_cancel(cancellation)
-                wave_results = await self._leases.run_active_phase(
-                    "capability_wave",
-                    handle,
-                    lambda _handle, current_wave=wave: self._execute_wave(
-                        committed.run,
-                        current_wave,
-                        tool_to_capability,
-                        policies,
-                        cancellation,
-                    ),
+            )
+            for (_, call_item, _), outcome in zip(wave, wave_results, strict=True):
+                latest = await self._require_active_run(run.run_id)
+                await self._writer.commit_agent_call_outcome(
+                    AgentCallOutcomeCommit(
+                        run_id=run.run_id,
+                        expected_revision=latest.revision,
+                        expected_claim_token=handle.current.token,
+                        call_item_id=call_item.item_id,
+                        safe_result_payload=outcome.safe_result_payload,
+                        status=outcome.status,
+                        staged_artifacts=outcome.staged_artifacts,
+                        safe_error_code=outcome.safe_error_code,
+                    )
                 )
-                for (_, call_item, _), outcome in zip(wave, wave_results, strict=True):
-                    latest = await self._require_active_run(run_id)
-                    await self._writer.commit_agent_call_outcome(
-                        AgentCallOutcomeCommit(
-                            run_id=run_id,
-                            expected_revision=latest.revision,
-                            expected_claim_token=handle.current.token,
-                            call_item_id=call_item.item_id,
-                            safe_result_payload=outcome.safe_result_payload,
-                            status=outcome.status,
-                            staged_artifacts=outcome.staged_artifacts,
-                            safe_error_code=outcome.safe_error_code,
-                        )
-                    )
-                latest = await self._runs.get_run(run_id)
-                if latest is None:
-                    raise AgentStorageConflict("agent_run_missing")
-                if latest.status in {
-                    AgentRunStatus.WAITING_FOR_INPUT,
-                    AgentRunStatus.WAITING_FOR_DEPENDENCY,
-                }:
-                    released = await self._leases.release_waiting(run_id, handle=handle)
-                    return AgentLoopRunResult(
-                        run=released,
-                        state="waiting",
-                        lease_handle=handle,
-                    )
+            latest = await self._runs.get_run(run.run_id)
+            if latest is None:
+                raise AgentStorageConflict("agent_run_missing")
+            if latest.status in {
+                AgentRunStatus.WAITING_FOR_INPUT,
+                AgentRunStatus.WAITING_FOR_DEPENDENCY,
+            }:
+                released = await self._leases.release_waiting(run.run_id, handle=handle)
+                return AgentLoopRunResult(
+                    run=released,
+                    state="waiting",
+                    lease_handle=handle,
+                )
+        return None
 
     async def _execute_wave(
         self,
@@ -264,3 +310,46 @@ def _parallel_safe(
     capability_id = tool_to_capability.get(call.provider_safe_name)
     policy = policies.get(capability_id or "")
     return bool(policy is not None and policy.parallel_safe)
+
+
+def _pending_active_batch(
+    run: AgentRun,
+    items: tuple[AgentItem, ...],
+) -> tuple[tuple[AgentToolCall, AgentItem, AgentItem], ...]:
+    if run.active_sample_item_id is None:
+        return ()
+    calls = {
+        item.item_id: item
+        for item in items
+        if item.kind is AgentItemKind.TOOL_CALL
+        and item.parent_item_id == run.active_sample_item_id
+    }
+    reservations = {
+        item.source_call_item_id: item
+        for item in items
+        if item.kind is AgentItemKind.TOOL_RESULT
+        and item.state is AgentItemState.RESERVED
+        and item.source_call_item_id in calls
+    }
+    records = []
+    for call_item in sorted(
+        calls.values(),
+        key=lambda item: item.call_ordinal if item.call_ordinal is not None else -1,
+    ):
+        reservation = reservations.get(call_item.item_id)
+        if reservation is None or call_item.item_id in run.waiting_call_item_ids:
+            continue
+        payload = json.loads(call_item.payload_json)
+        records.append(
+            (
+                AgentToolCall(
+                    call_id=str(payload["call_id"]),
+                    provider_safe_name=str(payload["provider_safe_name"]),
+                    arguments_json=str(payload["arguments_json"]),
+                    ordinal=call_item.call_ordinal or 0,
+                ),
+                call_item,
+                reservation,
+            )
+        )
+    return tuple(records)
