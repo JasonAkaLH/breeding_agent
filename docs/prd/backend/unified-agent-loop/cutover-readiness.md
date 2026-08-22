@@ -20,7 +20,7 @@
 | Phase 3 | proof_complete | `8e21e01`～`066f1e6`；durable loop、compaction、atomic final闭合 |
 | Phase 4 | proof_complete | `b982386`、`927e122`；multi-waiting、continuation、recovery、cancel/no-replay闭合 |
 | Phase 5 | proof_complete | P5-A `768dd00`；P5-B tested commit `af5dfd8`；后端、Frontend、可访问性及本readiness闭合 |
-| Phase 6 | blocked | P6-A预检未通过required no-skip门禁；当前正式start仍为DAG |
+| Phase 6 | blocked | P6-A仍缺权威外部Agent Skill bundle/runtime的required no-skip证据；当前正式start仍为DAG |
 | Phase 7 | pending | backup/restore operator、三backend破坏性schema删除和最终真实MCP证明尚未开始 |
 
 ## 2. Start、resume、cancel 与 recovery 入口
@@ -90,12 +90,12 @@ backup→restore-check→apply门禁。
 | DAG runtime/config/event/test删除尚未执行 | P6-B单一受审bundle完成并通过零引用扫描 | blocks cutover_complete |
 | 三backend备份恢复/operator未实现 | P7-A真实restore proof | blocks destructive schema deletion |
 | 真实MCP最终smoke未执行 | P7-C受控授权smoke或用户明确书面waiver | blocks final complete |
-| canonical storage discover存在环境skip，且共享单库会产生跨模块schema污染 | 为每类真实PG合同提供隔离库并使canonical storage全域命令零skip/零失败 | blocks P6-A freeze |
+| canonical storage discover存在环境skip，且共享单库会产生跨模块schema污染 | 为每类真实PG合同提供隔离库并使canonical storage全域命令零skip/零失败 | resolved：`10c0b9e`，441项零skip通过 |
 | external Agent Skill suite有43项平台/外部bundle skip，当前环境缺少权威`/data/peihai/vibe-breeding-dev/skills`挂载 | 挂载与当前测试合同匹配的权威Skill bundle及所需runtime，令canonical Agent Skill命令零skip/零失败 | blocks P6-A freeze |
 
-P6-A已进入预检但未达到freeze条件。候选DAG代码检查点为`574b44713f4a6cc4ec1e0b3dc46aa6b50083b118`，
-tree为`48583430124342356b7be978cbca959b36d94214`；该检查点包含预检发现并已由真实PostgreSQL证明的runtime manifest CHECK命名和
-CP7 owner guard初始化修复，但不是已冻结回滚点。因上述两项required no-skip门禁未闭合，未执行clean archive rehearsal，
+P6-A已进入预检但未达到freeze条件。当前候选DAG代码检查点为`10c0b9e8af67f382f64210efc21f88bedcd32ab9`，
+tree为`00ce0daed27a2730e17a345bceedc5790177804f`；该检查点包含预检发现并已由真实PostgreSQL证明的runtime manifest CHECK命名、
+CP7 owner guard初始化和canonical storage模块隔离修复，但不是已冻结回滚点。因外部Agent Skill required no-skip门禁仍未闭合，未执行clean archive rehearsal，
 未进入P6-B，也未改变任何route或生产数据。本文件不授权部署`prod`、迁移旧DAG Task、跳过P6-A切换或删除。
 
 ### 6.1 P6-A预检证据（2026-08-22）
@@ -105,8 +105,11 @@ CP7 owner guard初始化修复，但不是已冻结回滚点。因上述两项re
   Rust `cargo_fmt`/`cargo_clippy`/`cargo_test`。integrations中2项Linux-only Result Parser在Ubuntu容器内单独2项通过。
 - 真实PostgreSQL隔离库：Agent schema/transaction/lease/concurrency 4项、conversation delete 3项、legacy migration 15项、
   rollout 20项、permissions 15项、CP7 3项、MVCC 1项，合计61项零skip通过。
-- 未通过required no-skip口径：默认storage discover 399项通过但7项外部PG环境skip；同一共享PG库全域运行
-  因测试模块间的schema变更相互污染出现2项失败。Agent Skill discover 200项通过但43项外部bundle/平台skip。
+- storage no-skip已闭合：设置`MAF_POSTGRES_AGENT_TEST_DSN`、`MAF_POSTGRES_CONVERSATION_DELETE_TEST_DSN`、
+  `MAF_POSTGRES_MVCC_TEST_DSN`、`MAF_POSTGRES_LEGACY_MIGRATION_TEST_DSN`、`MAF_POSTGRES_ROLLOUT_INTEGRATION_TEST_DSN`、
+  `MAF_POSTGRES_ROLLOUT_PERMISSIONS_TEST_DSN`与`CP7_POSTGRES_VALIDATION_DSN`，并指向同一PostgreSQL 17实例的七个隔离数据库后，
+  canonical storage discover实际运行441项，零skip、零失败。默认无外部环境口径仍为402项通过、7项显式skip。
+- 仍未通过required no-skip口径：Agent Skill discover 200项通过但43项外部bundle/平台skip。
 - 外部Skill调查：当前环境无权威部署挂载；本地其他workspace与历史Git snapshot分别只满足现行测试的部分互相冲突合同，
   未拷贝、未合成fixture、未放宽测试。
 

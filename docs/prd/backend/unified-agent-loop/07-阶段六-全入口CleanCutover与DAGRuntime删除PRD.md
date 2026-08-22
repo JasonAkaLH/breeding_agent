@@ -1,7 +1,7 @@
 # Phase 6：全入口 Clean Cutover 与 DAG Runtime 删除 PRD
 
 - **日期**：2026-08-22
-- **状态**：blocked（P6-A required no-skip预检未闭合）
+- **状态**：blocked（P6-A权威外部Agent Skill required no-skip未闭合）
 - **文档审阅**：document-perfectization第二次全量审计100/100通过；P6-A预检已开始，未进入cutover
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～5必须`proof_complete`，cutover-readiness无未知入口
