@@ -1,29 +1,41 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .models import CapabilityDescriptor, ExecutionInstance, OrchestrationRequest
 from .planner_payload_policy import CapabilityPayloadPolicy
+
+if TYPE_CHECKING:
+    from .agent_loop.tool_catalog import CapabilityInvocationPolicy
 
 
 class CapabilityRegistry:
     def __init__(self) -> None:
         self._capabilities: dict[str, CapabilityDescriptor] = {}
         self._planner_payload_policies: dict[str, CapabilityPayloadPolicy] = {}
+        self._invocation_policies: dict[str, CapabilityInvocationPolicy] = {}
 
     def register(
         self,
         descriptor: CapabilityDescriptor,
         *,
         planner_payload_policy: CapabilityPayloadPolicy | None = None,
+        invocation_policy: CapabilityInvocationPolicy | None = None,
     ) -> None:
         self._capabilities[descriptor.capability_id] = descriptor
         if planner_payload_policy is None:
             self._planner_payload_policies.pop(descriptor.capability_id, None)
         else:
             self._planner_payload_policies[descriptor.capability_id] = planner_payload_policy
+        if invocation_policy is None:
+            self._invocation_policies.pop(descriptor.capability_id, None)
+        else:
+            self._invocation_policies[descriptor.capability_id] = invocation_policy
 
     def unregister(self, capability_id: str) -> None:
         self._capabilities.pop(capability_id, None)
         self._planner_payload_policies.pop(capability_id, None)
+        self._invocation_policies.pop(capability_id, None)
 
     def get(self, capability_id: str) -> CapabilityDescriptor | None:
         return self._capabilities.get(capability_id)
@@ -33,6 +45,9 @@ class CapabilityRegistry:
 
     def planner_payload_policies(self) -> dict[str, CapabilityPayloadPolicy]:
         return dict(self._planner_payload_policies)
+
+    def invocation_policies(self) -> dict[str, CapabilityInvocationPolicy]:
+        return dict(self._invocation_policies)
 
     def list(self, *, public_only: bool = False) -> list[CapabilityDescriptor]:
         descriptors = list(self._capabilities.values())
@@ -52,8 +67,33 @@ class CapabilityRegistry:
         at least one safe, available server profile for the authenticated user.
         """
 
+        from .agent_loop.tool_catalog import CapabilityVisibilityContext
+
+        return self.list_for_visibility(
+            CapabilityVisibilityContext(
+                authenticated_owner_scope="legacy_orchestration_request",
+                execution_path=str(request.metadata.get("mcp_execution_mode") or "default"),
+                safe_mcp_server_profiles=request.available_mcp_servers,
+            ),
+            public_only=public_only,
+        )
+
+    def list_for_visibility(
+        self,
+        context: object,
+        *,
+        public_only: bool = True,
+    ) -> list[CapabilityDescriptor]:
         descriptors = self.list(public_only=public_only)
-        execution_path = str(request.metadata.get("mcp_execution_mode") or "").strip()
+        descriptors = [descriptor for descriptor in descriptors if descriptor.enabled]
+        allowlist = getattr(context, "public_capability_allowlist", None)
+        if allowlist is not None:
+            descriptors = [
+                descriptor
+                for descriptor in descriptors
+                if descriptor.capability_id in allowlist
+            ]
+        execution_path = str(getattr(context, "execution_path", "default") or "default").strip()
         if execution_path == "user_scoped":
             descriptors = [descriptor for descriptor in descriptors if not _is_legacy_mcp_descriptor(descriptor)]
         elif execution_path == "legacy":
@@ -65,7 +105,8 @@ class CapabilityRegistry:
                 if descriptor.capability_id != "mcp.dispatch" and not _is_legacy_mcp_descriptor(descriptor)
             ]
 
-        if request.available_mcp_servers and execution_path not in {"legacy", "unavailable"}:
+        safe_profiles = tuple(getattr(context, "safe_mcp_server_profiles", ()) or ())
+        if safe_profiles and execution_path not in {"legacy", "unavailable"}:
             return descriptors
         return [descriptor for descriptor in descriptors if descriptor.capability_id != "mcp.dispatch"]
 

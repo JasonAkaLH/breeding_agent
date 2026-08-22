@@ -7,6 +7,15 @@ from .invocation import (
     InvocationRequest,
     InvocationResult,
 )
+from .tool_catalog import (
+    AgentCatalogPreflight,
+    AgentToolCatalog,
+    AgentToolCatalogBuilder,
+    CapabilityInvocationPolicy,
+    CapabilityVisibilityContext,
+    CatalogPreflightDecision,
+    CatalogPreflightResult,
+)
 from .models import (
     AgentCancellationToken,
     AgentFinishMetadata,
@@ -74,4 +83,11 @@ __all__ = [
     "InvocationCommitPort",
     "InvocationRequest",
     "InvocationResult",
+    "AgentCatalogPreflight",
+    "AgentToolCatalog",
+    "AgentToolCatalogBuilder",
+    "CapabilityInvocationPolicy",
+    "CapabilityVisibilityContext",
+    "CatalogPreflightDecision",
+    "CatalogPreflightResult",
 ]

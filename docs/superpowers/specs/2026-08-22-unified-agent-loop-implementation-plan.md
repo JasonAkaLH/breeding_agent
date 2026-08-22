@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0、Phase 1均`proof_complete`；Phase 2 `in_progress`，P2-A green；下一检查点P2-B
+- 执行状态：Phase 0、Phase 1均`proof_complete`；Phase 2 `in_progress`，P2-A/P2-B green；下一检查点P2-C
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -337,6 +337,13 @@ Green gate：可见性、prompt injection、热重载、完整schema预算、no-
 回滚：删除Agent catalog/preflight，旧DAG继续使用公共Kernel。
 
 建议commit：`feat(agent): build policy-filtered tool catalog`。
+
+实施证据：新增closed `CapabilityVisibilityContext`、`CapabilityInvocationPolicy`、`AgentToolCatalogBuilder`和
+`AgentCatalogPreflight`。Registry legacy request入口委托可信visibility视图；Catalog只保留public/enabled/allowlisted且有policy的
+Skill与单一`mcp.dispatch`，动态Server enum只来自安全Profiles，不展开Server Tool。Policy执行model field allowlist、Draft
+2020-12 schema和system authority覆盖，默认`parallel_safe=false/can_suspend=false`；Preflight完整计入catalog，只返回
+`fits|history_compaction_required|fatal_required_segments_too_large`及低敏计数，不生成summary或裁剪schema。P2-B聚焦34项、
+orchestration discover 194项、compileall/diff检查通过；P2-B green，下一检查点P2-C。
 
 ### P2-C：delegated activation与executable Skill
 

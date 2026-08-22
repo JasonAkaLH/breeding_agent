@@ -1,8 +1,8 @@
 # Phase 2：Invocation Kernel 与 Skill/MCP 适配 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P2-A green；下一步P2-B）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P2-A实现证据已闭合
+- **状态**：in_progress（P2-A/P2-B green；下一步P2-C）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P2-A/P2-B实现证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0、Phase 1必须`proof_complete`
 - **主责需求**：FR-13、FR-15、FR-16、FR-20、FR-24
@@ -204,6 +204,18 @@ conda run -n multi_agent python -m unittest discover -s tests/integrations/mcp -
   旧`OrchestrationService._execute_node`降为DTO映射和Kernel委托；Agent fixture仅注入Phase 1 atomic writer提交outcome；
 - P2-A聚焦20项、`tests/orchestration` discover 187项、compileall和diff检查通过；旧DAG scheduler、Planner/Replanner、API入口
   及真实route均未改变。P2-A green，Phase 2继续`in_progress`进入P2-B。
+
+### 11.2 P2-B实施证据
+
+- 新增closed `CapabilityVisibilityContext`，只接收authenticated owner scope、execution path、pinned Skill revision、安全MCP
+  Profiles和请求级公开allowlist；Registry的legacy request入口委托该安全视图，disabled/private/跨allowlist项fail closed；
+- `CapabilityInvocationPolicy`冻结model allowlist、Draft 2020-12 input schema、system payload factory、`parallel_safe`和
+  `can_suspend`；执行前再次过滤/schema校验，system同名字段覆盖模型值，缺policy项不进入Catalog；
+- Outer Catalog只保留public Skill与一个`mcp.dispatch`，后者Server enum按当前安全Profiles动态生成，完整Server Tool list、
+  source path、schema正文均不进入低敏preflight结果；Registry热重载后下次build立即读取新descriptor/policy；
+- Preflight完整计入stable rules、safe Tool rules、catalog、当前用户输入、最小suffix及history，只返回三种closed decision和
+  tool/schema/token计数；无eligible range或required segments超限直接fatal，不生成summary、不裁剪schema；
+- P2-B聚焦34项、`tests/orchestration` discover 194项、compileall/diff检查通过。P2-B green，Phase 2继续`in_progress`进入P2-C。
 
 ## 12. 风险、假设与开放问题
 
