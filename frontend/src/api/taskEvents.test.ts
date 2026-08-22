@@ -96,6 +96,39 @@ describe('taskEvents', () => {
     }))).toBeNull();
   });
 
+  it('parses only closed Agent frontend event payloads', () => {
+    const waiting = {
+      event_id: 'agent-waiting-1',
+      conversation_id: 'conv-1',
+      event_type: 'agent.run.waiting',
+      task_id: 'task-1',
+      node_id: 'node-1',
+      created_at: '2026-04-27T00:00:00Z',
+      payload: {
+        interrupt_id: 'interrupt-1',
+        reason_kind: 'skill_input',
+        remaining_count: 2,
+      },
+    };
+    const reasoning = {
+      ...waiting,
+      event_id: 'agent-reasoning-1',
+      event_type: 'agent.reasoning_delta',
+      payload: { delta: '瞬时思考', ordinal: 0, sample_id: 'sample-1' },
+    };
+
+    expect(parseTaskEventData(JSON.stringify(waiting))).toMatchObject(waiting);
+    expect(parseTaskEventData(JSON.stringify(reasoning))).toMatchObject(reasoning);
+    expect(parseTaskEventData(JSON.stringify({
+      ...waiting,
+      payload: { ...waiting.payload, prompt: 'must-not-pass' },
+    }))).toBeNull();
+    expect(parseTaskEventData(JSON.stringify({
+      ...reasoning,
+      payload: { ...reasoning.payload, ordinal: -1 },
+    }))).toBeNull();
+  });
+
   it('builds task event URLs without query tokens', () => {
     expect(taskEventsUrl('task/id', 'https://api.example')).toBe('https://api.example/api/v1/tasks/task%2Fid/events');
   });
@@ -233,6 +266,12 @@ describe('taskEvents', () => {
         'node.orphaned',
         'node.ready_to_resume',
         'node.resuming',
+        'agent.reasoning_delta',
+        'agent.run.waiting',
+        'agent.run.resumed',
+        'agent.run.completed',
+        'agent.run.failed',
+        'agent.run.cancelled',
       ]) {
         expect(listeners.get(eventName), eventName).toBeDefined();
       }

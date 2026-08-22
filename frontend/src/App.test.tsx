@@ -3365,6 +3365,80 @@ describe('App', () => {
     expect(api.cancelTask).not.toHaveBeenCalled();
   });
 
+  it('presents Agent multi-waiting interrupts one at a time and keeps the task waiting', async () => {
+    const firstInterrupt = {
+      interrupt_id: 'interrupt-agent-1',
+      conversation_id: 'conv-test',
+      task_id: 'task-1',
+      node_id: 'node-agent-1',
+      question: '请先补充作物类型。',
+      reason_code: 'crop_not_resolved',
+      required_fields: { crop: { options: ['rice', 'corn'] } },
+      status: 'open',
+    };
+    const secondInterrupt = {
+      ...firstInterrupt,
+      interrupt_id: 'interrupt-agent-2',
+      node_id: 'node-agent-2',
+      question: '请继续补充试验地点。',
+      reason_code: 'location_not_resolved',
+      required_fields: { location: { type: 'string' } },
+    };
+    const listInterrupts = vi.fn()
+      .mockResolvedValueOnce({ task_id: 'task-1', interrupts: [firstInterrupt, secondInterrupt] })
+      .mockResolvedValue({ task_id: 'task-1', interrupts: [secondInterrupt] });
+    const api = makeApi({
+      listInterrupts,
+      getTaskGraph: vi.fn(async () => ({ task_id: 'task-1', nodes: [], edges: [] })),
+      getTask: vi.fn(async () => ({
+        task_id: 'task-1',
+        conversation_id: 'conv-test',
+        status: 'running',
+        root_node_id: null,
+        active_node_count: 2,
+        completed_node_count: 0,
+        failed_node_count: 0,
+        cancel_requested: false,
+        created_at: null,
+        updated_at: null,
+      })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [
+          event('task.graph_created', { node_count: 0, edge_count: 0, root_node_id: null }, 'agent-graph-created'),
+          event('agent.run.waiting', {
+            interrupt_id: 'interrupt-agent-1', reason_kind: 'skill_input', remaining_count: 2,
+          }, 'agent-waiting-1', 'node-agent-1'),
+        ],
+        [
+          event('agent.run.resumed', { outcome: 'resumed', remaining_count: 1 }, 'agent-resumed-1', 'node-agent-1'),
+          event('agent.run.waiting', {
+            interrupt_id: 'interrupt-agent-2', reason_kind: 'skill_input', remaining_count: 1,
+          }, 'agent-waiting-2', 'node-agent-2'),
+        ],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '开始多补参任务' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByPlaceholderText('请先补充作物类型。')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      content: '水稻',
+      metadata: { interrupt_id: 'interrupt-agent-1' },
+    })));
+    expect(await screen.findByPlaceholderText('请继续补充试验地点。')).toBeInTheDocument();
+    expect(screen.getByText(/下一条消息将继续当前任务/)).toBeInTheDocument();
+    expect(screen.queryByText('任务已完成')).not.toBeInTheDocument();
+    await expectComposerFocused();
+  });
+
   it('keeps an upload-accepting interrupt open when draft upload fails', async () => {
     const waitingGraph = {
       task_id: 'task-1',

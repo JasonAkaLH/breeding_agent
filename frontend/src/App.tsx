@@ -1898,7 +1898,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
       void loadArtifacts(taskId, assistantId);
     }
-    if (event.event_type === 'node.waiting_for_input') {
+    if (event.event_type === 'node.waiting_for_input' || event.event_type === 'agent.run.waiting') {
       void loadPendingInterruptFromWaitingEvent(event, taskId, assistantId, generation, targetConversationId);
     }
   }

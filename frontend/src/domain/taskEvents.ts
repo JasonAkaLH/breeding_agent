@@ -31,6 +31,12 @@ export interface CapabilityFallbackNotice {
   artifactGenerationAllowed: false;
 }
 
+export interface AgentWaitingState {
+  interruptId: string;
+  nodeId: string | null;
+  reasonKind: 'mcp_approval' | 'mcp_elicitation' | 'mcp_remote_task' | 'skill_input';
+}
+
 export type MCPApprovalDecision = 'allow_once' | 'always_allow' | 'deny';
 export type MCPCallStatus = 'running' | 'still_running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
 
@@ -156,6 +162,8 @@ export interface TaskEventState {
   answerReasoningText: string;
   errorMessage: string | null;
   fallbackNotice: CapabilityFallbackNotice | null;
+  agentWaiting: AgentWaitingState[];
+  agentRemainingWaitCount: number;
   mcp: MCPTaskState;
   seenEventIds: string[];
   eventFingerprints: Record<string, string>;
@@ -180,6 +188,8 @@ export function createInitialTaskEventState(): TaskEventState {
     answerReasoningText: '',
     errorMessage: null,
     fallbackNotice: null,
+    agentWaiting: [],
+    agentRemainingWaitCount: 0,
     mcp: {
       serverDisplayName: null,
       discovery: null,
@@ -231,6 +241,8 @@ export function prepareTaskEventResync(state: TaskEventState): TaskEventState {
     eventFingerprints: {},
     pendingEvents: [],
     eventSyncError: null,
+    agentWaiting: [],
+    agentRemainingWaitCount: 0,
   };
 }
 
@@ -361,6 +373,45 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
     }
     case 'node.waiting_for_input':
       return markWaitingInputRequired(withEvent);
+    case 'agent.run.waiting': {
+      const interruptId = event.payload.interrupt_id as string;
+      const nodeId = event.node_id;
+      const waiting = withEvent.agentWaiting.filter((item) => (
+        item.interruptId !== interruptId
+        && (nodeId === null || item.nodeId !== nodeId)
+      ));
+      waiting.push({
+        interruptId,
+        nodeId,
+        reasonKind: event.payload.reason_kind as AgentWaitingState['reasonKind'],
+      });
+      return {
+        ...withEvent,
+        phase: 'waiting_for_input',
+        statusText: '任务等待补充信息',
+        currentActivityText: '任务仍有待处理的补充信息或授权',
+        errorMessage: '请处理当前请求；完成后若仍有待处理项，系统会继续显示。',
+        agentWaiting: waiting,
+        agentRemainingWaitCount: event.payload.remaining_count as number,
+      };
+    }
+    case 'agent.run.resumed': {
+      const remainingCount = event.payload.remaining_count as number;
+      const waiting = remainingCount === 0
+        ? []
+        : event.node_id === null
+          ? withEvent.agentWaiting
+          : withEvent.agentWaiting.filter((item) => item.nodeId !== event.node_id);
+      return {
+        ...withEvent,
+        phase: remainingCount > 0 ? 'waiting_for_input' : 'running',
+        statusText: remainingCount > 0 ? '任务仍有待处理请求' : '正在继续任务',
+        currentActivityText: remainingCount > 0 ? '请继续处理剩余请求' : '已恢复执行',
+        errorMessage: remainingCount > 0 ? '当前请求处理完成后，仍需处理剩余请求。' : null,
+        agentWaiting: waiting,
+        agentRemainingWaitCount: remainingCount,
+      };
+    }
     case 'node.ready_to_resume':
       return markNodeResumeProgress(withEvent, event, '补充信息已提交', '准备恢复执行', '已收到补充信息，准备恢复执行');
     case 'node.resuming':
@@ -372,6 +423,25 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
     }
     case 'main_agent.reasoning_delta': {
       const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
+      const answerReasoningText = `${state.answerReasoningText}${delta}`;
+      return {
+        ...withEvent,
+        phase: 'streaming',
+        statusText: '正在思考并生成答案',
+        currentActivityText: null,
+        answerReasoningText,
+        reasoningText: composeReasoningText({
+          memory: state.memoryReasoningText,
+          planner: state.plannerReasoningText,
+          interrupt: state.interruptReasoningText,
+          skill: state.skillReasoningText,
+          answer: answerReasoningText,
+        }),
+        errorMessage: null,
+      };
+    }
+    case 'agent.reasoning_delta': {
+      const delta = event.payload.delta as string;
       const answerReasoningText = `${state.answerReasoningText}${delta}`;
       return {
         ...withEvent,
@@ -611,7 +681,34 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         statusText: '任务完成，正在整理结果',
         currentActivityText: null,
         skillStatuses: markRunningSkillStatusesCompleted(withEvent.skillStatuses),
+        agentWaiting: [],
+        agentRemainingWaitCount: 0,
         errorMessage: null,
+      };
+    case 'agent.run.completed':
+      return {
+        ...withEvent,
+        statusText: 'Agent 执行完成，正在同步任务结果',
+        currentActivityText: null,
+        agentWaiting: [],
+        agentRemainingWaitCount: 0,
+        errorMessage: null,
+      };
+    case 'agent.run.failed':
+      return {
+        ...withEvent,
+        statusText: 'Agent 执行未完成，正在同步任务状态',
+        currentActivityText: null,
+        agentWaiting: [],
+        agentRemainingWaitCount: 0,
+      };
+    case 'agent.run.cancelled':
+      return {
+        ...withEvent,
+        statusText: 'Agent 已取消，正在同步任务状态',
+        currentActivityText: null,
+        agentWaiting: [],
+        agentRemainingWaitCount: 0,
       };
     case 'task.cancellation_requested':
       return { ...withEvent, phase: 'cancelling', statusText: '取消请求已发送', currentActivityText: '正在取消当前任务', errorMessage: null };
@@ -691,6 +788,26 @@ const KNOWN_TASK_EVENT_TYPES = new Set([
   'task.completed', 'task.cancellation_requested', 'task.cancelled', 'node.cancelled',
   'node.blocked_by_cancellation', 'node.orphaned', 'node.failed', 'task.failed',
   'skill.progress',
+  'agent.run.waiting', 'agent.run.resumed', 'agent.run.completed',
+  'agent.run.failed', 'agent.run.cancelled', 'agent.reasoning_delta',
+]);
+
+const AGENT_FRONTEND_EVENT_TYPES = new Set([
+  'agent.run.waiting',
+  'agent.run.resumed',
+  'agent.run.completed',
+  'agent.run.failed',
+  'agent.run.cancelled',
+  'agent.reasoning_delta',
+]);
+
+const AGENT_OUTCOMES = new Set([
+  'aborted', 'acquired', 'cancelled', 'completed', 'duplicate', 'failed',
+  'lease_conflict', 'lease_lost', 'rejected', 'renewed', 'resumed', 'waiting',
+]);
+
+const AGENT_WAITING_REASONS = new Set([
+  'mcp_approval', 'mcp_elicitation', 'mcp_remote_task', 'skill_input',
 ]);
 
 function isKnownTaskEventType(eventType: string): boolean {
@@ -700,6 +817,9 @@ function isKnownTaskEventType(eventType: string): boolean {
 export function isClosedCP7Event(event: TaskEventEnvelope): boolean {
   const payload = event.payload;
   if (!isRecord(payload)) return false;
+  if (AGENT_FRONTEND_EVENT_TYPES.has(event.event_type)) {
+    return isClosedAgentFrontendEvent(event, payload);
+  }
   if (event.event_type === 'mcp.result_artifact_projection') {
     const projection = parseMCPResultArtifactProjection(payload);
     return projection !== null
@@ -804,6 +924,37 @@ export function isClosedCP7Event(event: TaskEventEnvelope): boolean {
       && event.event_id === expectedCorrectionEventId(payload.call_id);
   }
   return true;
+}
+
+function isClosedAgentFrontendEvent(
+  event: TaskEventEnvelope,
+  payload: Record<string, unknown>,
+): boolean {
+  if (event.event_type === 'agent.reasoning_delta') {
+    return hasExactKeys(payload, ['delta', 'ordinal', 'sample_id'])
+      && isNonEmptyString(payload.delta)
+      && isNonNegativeInteger(payload.ordinal)
+      && isNonEmptyString(payload.sample_id);
+  }
+  if (event.event_type === 'agent.run.waiting') {
+    return hasExactKeys(payload, ['interrupt_id', 'reason_kind', 'remaining_count'])
+      && isNonEmptyString(payload.interrupt_id)
+      && AGENT_WAITING_REASONS.has(String(payload.reason_kind))
+      && isNonNegativeInteger(payload.remaining_count);
+  }
+  if (event.event_type === 'agent.run.resumed') {
+    return hasExactKeys(payload, ['outcome', 'remaining_count'])
+      && AGENT_OUTCOMES.has(String(payload.outcome))
+      && isNonNegativeInteger(payload.remaining_count);
+  }
+  return hasExactKeys(payload, [
+    'compaction_count', 'duration_seconds', 'outcome', 'sample_count', 'tool_call_count',
+  ])
+    && isNonNegativeInteger(payload.compaction_count)
+    && isNonNegativeFiniteNumber(payload.duration_seconds)
+    && AGENT_OUTCOMES.has(String(payload.outcome))
+    && isNonNegativeInteger(payload.sample_count)
+    && isNonNegativeInteger(payload.tool_call_count);
 }
 
 export function foldMCPResultArtifactProjections(
@@ -1001,6 +1152,10 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 function expectedUnknownEventId(callId: unknown, intentRevision: unknown): string {

@@ -359,6 +359,101 @@ describe('applyTaskEvent', () => {
     expect(state.assistantText).toBe('');
   });
 
+  it('renders transient Agent reasoning once without treating it as assistant output', () => {
+    let state = createInitialTaskEventState();
+    const delta = event('agent.reasoning_delta', {
+      delta: '继续分析工具结果',
+      ordinal: 0,
+      sample_id: 'sample-1',
+    }, 'agent-reasoning-1');
+
+    state = applyTaskEvent(state, delta);
+    state = applyTaskEvent(state, delta);
+
+    expect(state.reasoningText).toBe('继续分析工具结果');
+    expect(state.answerReasoningText).toBe('继续分析工具结果');
+    expect(state.assistantText).toBe('');
+    expect(state.seenEventIds).toEqual(['agent-reasoning-1']);
+  });
+
+  it('tracks multiple Agent waits by interrupt and node until each is resumed', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('agent.run.waiting', {
+      interrupt_id: 'interrupt-1',
+      reason_kind: 'skill_input',
+      remaining_count: 2,
+    }, 'agent-waiting-1', 'node-1'));
+    state = applyTaskEvent(state, event('agent.run.waiting', {
+      interrupt_id: 'interrupt-2',
+      reason_kind: 'mcp_approval',
+      remaining_count: 2,
+    }, 'agent-waiting-2', 'node-2'));
+
+    expect(state.phase).toBe('waiting_for_input');
+    expect(state.agentRemainingWaitCount).toBe(2);
+    expect(state.agentWaiting).toEqual([
+      { interruptId: 'interrupt-1', nodeId: 'node-1', reasonKind: 'skill_input' },
+      { interruptId: 'interrupt-2', nodeId: 'node-2', reasonKind: 'mcp_approval' },
+    ]);
+
+    state = applyTaskEvent(state, event('agent.run.resumed', {
+      outcome: 'resumed',
+      remaining_count: 1,
+    }, 'agent-resumed-1', 'node-1'));
+    expect(state.phase).toBe('waiting_for_input');
+    expect(state.agentWaiting).toEqual([
+      { interruptId: 'interrupt-2', nodeId: 'node-2', reasonKind: 'mcp_approval' },
+    ]);
+
+    state = applyTaskEvent(state, event('agent.run.resumed', {
+      outcome: 'resumed',
+      remaining_count: 0,
+    }, 'agent-resumed-2', 'node-2'));
+    expect(state.phase).toBe('running');
+    expect(state.agentWaiting).toEqual([]);
+    expect(state.agentRemainingWaitCount).toBe(0);
+  });
+
+  it('deduplicates Agent replay and requests resync on same-id payload conflict', () => {
+    const waiting = event('agent.run.waiting', {
+      interrupt_id: 'interrupt-1',
+      reason_kind: 'skill_input',
+      remaining_count: 1,
+    }, 'agent-waiting-conflict', 'node-1');
+    const once = applyTaskEvent(createInitialTaskEventState(), waiting);
+    const duplicate = applyTaskEvent(once, waiting);
+    const conflicted = applyTaskEvent(duplicate, {
+      ...waiting,
+      payload: { ...waiting.payload, remaining_count: 2 },
+    });
+
+    expect(duplicate).toBe(once);
+    expect(conflicted.agentWaiting).toHaveLength(1);
+    expect(conflicted.eventSyncError).toContain('内容发生冲突');
+  });
+
+  it('safely ignores Agent audit and tool-result events', () => {
+    const initial = createInitialTaskEventState();
+    const afterAudit = applyTaskEvent(initial, event('agent.sample.completed', {
+      duration_seconds: 1,
+      outcome: 'completed',
+      sample_id: 'sample-1',
+      tool_count: 1,
+      usage_status: 'available',
+    }, 'agent-audit-1'));
+    const afterToolResult = applyTaskEvent(afterAudit, event('agent.tool_result.committed', {
+      call_id: 'call-1',
+      status: 'completed',
+      error_code: null,
+      artifact_count: 1,
+      result_digest: 'a'.repeat(64),
+    }, 'agent-tool-result-1'));
+
+    expect(afterAudit).toBe(initial);
+    expect(afterToolResult).toBe(initial);
+    expect(afterToolResult.assistantText).toBe('');
+  });
+
   it('groups all streaming reasoning buckets in display order', () => {
     let state = createInitialTaskEventState();
     state = applyTaskEvent(state, event('memory.reasoning_delta', { delta: '先查历史', ordinal: 1 }, 'memory-reasoning-1'));
