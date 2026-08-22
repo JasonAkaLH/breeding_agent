@@ -1,8 +1,8 @@
 # Phase 5：API、SSE、Frontend 与 Observability 适配 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P5-A green；P5-B pending）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；后端投影、事件与指标检查点已闭合
+- **状态**：proof_complete（P5-A、P5-B green；正式入口仍为DAG）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；后端、Frontend、可访问性与readiness门禁已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～4必须`proof_complete`
 - **主责需求**：FR-21、FR-22
@@ -221,5 +221,9 @@ AL-P5-01～10、后端API/observability和Frontend三门禁通过；`cutover-rea
 - Agent final在live与Sidecar-like refresh投影中保持确定性单Message、`stream_status=complete`、fallback metadata与既有
   Artifact/download安全链；真实`build_api_runtime`未装配Agent projection或请求开关。
 - P5-A canonical 41项、API discover 493项、storage discover 398项（7项既有外部PG环境skip）、observability discover
-  39项通过。P5-B的Frontend、多waiting、可访问性三门禁和`cutover-readiness.md`尚未执行，因此Phase 5不得标记
-  `proof_complete`。
+  39项通过。
+- P5-B closed schema消费Agent waiting/resumed/terminal/transient reasoning；multi-waiting按interrupt/node逐项呈现，同ID
+  replay幂等、payload conflict resync、unknown audit/tool-result safe-ignore。Frontend focused 55项、完整21文件313项、
+  typecheck与build通过；现有approval/interrupt/progress可访问性测试保持通过且未新增DOM控件。
+- `cutover-readiness.md`绑定tested commit `af5dfd8`和tree `c1c4656`，闭合9个start/resume/cancel/recovery入口、26份active
+  PRD、55个legacy test、remaining blockers及三backend DAG schema inventory。AL-P5-01～10闭合，正式route仍为DAG。

@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 4均`proof_complete`；P5-A green，Phase 5 `in_progress`；下一检查点P5-B
+- 执行状态：Phase 0～Phase 5均`proof_complete`；P5-A～P5-B green；下一检查点P6-A
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -572,6 +572,13 @@ Green gate：Frontend Vitest、typecheck、build和可访问性测试通过；AL
 回滚：删除Agent-only reducer/fixture分支和readiness候选；不改变用户数据。
 
 建议commit：`feat(frontend): consume agent run projections`；readiness可使用独立`docs(agent): record cutover readiness`。
+
+执行证据（P5-B green）：Frontend以closed schema消费Agent waiting/resumed/terminal/transient reasoning，unknown audit/tool-result
+安全忽略；reducer按interrupt/node跟踪multi-waiting，同event ID幂等且payload冲突触发resync。App复用现有Interrupt composer
+逐项呈现两个waiting，回答首项后不提前complete并继续第二项，焦点恢复、键盘/语义与既有approval测试无DOM回归。Frontend
+focused 55项、完整21文件313项、typecheck和production build通过。创建closed `cutover-readiness.md`，绑定tested commit
+`af5dfd8`/tree `c1c4656`，闭合9个入口、26份active PRD、55个legacy test、remaining blockers和三backend DAG physical
+schema inventory；Phase 5为`proof_complete`，进入P6-A。
 
 ## 11. Phase 6：全入口 Clean Cutover 与 DAG Runtime 删除
 

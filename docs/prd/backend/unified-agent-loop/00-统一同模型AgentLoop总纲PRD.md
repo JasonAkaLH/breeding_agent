@@ -1,7 +1,7 @@
 # 统一同模型 Agent Loop 总纲 PRD
 
 - **日期**：2026-08-22
-- **状态**：已批准未来架构；document-perfectization第二次全量审计100/100通过；Phase 0～Phase 4已`proof_complete`，P5-A green
+- **状态**：已批准未来架构；document-perfectization第二次全量审计100/100通过；Phase 0～Phase 5已`proof_complete`
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`

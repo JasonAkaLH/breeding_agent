@@ -132,7 +132,7 @@
 ## 4. Baseline conclusion
 
 - Active PRD matched set：26，全部已登记唯一closed disposition。
-- Legacy test matched set：54，全部已登记行为迁移、混合迁移/删除或纯DAG shape删除责任；Phase 0不删除测试。
+- Legacy test matched set：55，全部已登记行为迁移、混合迁移/删除或纯DAG shape删除责任；Phase 0不删除测试。
 - Execution/recovery entry set：9，覆盖普通、显式Skill、显式MCP、Skill补充输入、MCP approval、MRTR、remote completion、
   cancel与crash/startup recovery。
 - 当前无Agent route、AgentRun/AgentItem storage或Agent Model contract；P0-A只建立证据和基线。
