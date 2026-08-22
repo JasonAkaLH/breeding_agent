@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 2均`proof_complete`；Phase 3 `in_progress`，P3-A/P3-B green；下一检查点P3-C
+- 执行状态：Phase 0～Phase 3均`proof_complete`；P3-A～P3-C green；下一检查点P4-A
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -458,6 +458,12 @@ Green gate：final前/后、delta前/后、commit前/后fault matrix无重复；
 回滚：删除test-only publisher与提取的Agent adapter，旧`main_agent.respond`仍为正式入口。
 
 建议commit：`feat(agent): publish atomic final output`。
+
+实施证据：新增无Model/Catalog/Executor依赖的`AgentFinalOutputPublisher`，只消费Run当前已持久化、committed、无子calls、
+非空且非mixed的assistant candidate，在`final_publish` lease phase调用Phase 1唯一final CAS。正常、投影事务中途fault、恢复重试和
+响应丢失重试均恰有一组确定性Node/Artifact/Message/Event/receipt；40个历史sample不触发旧replan/dynamic node阈值，mixed
+text+calls拒绝发布。P3-C canonical 35项、orchestration 207项、compileall/diff通过；AL-P3门禁闭合，Phase 3为
+`proof_complete`，正式入口仍为DAG，进入P4-A。
 
 ## 9. Phase 4：Waiting、Continuation、Recovery 与 Cancel
 

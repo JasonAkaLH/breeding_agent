@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 统一同模型Agent Loop P3-C及Phase 3已`proof_complete`：新增无Model/Catalog/Executor依赖的final publisher，只消费已持久化、无calls、非空且非mixed的assistant candidate，并在final lease phase调用Phase 1唯一CAS发布确定性Node/Artifact/Message/Event/receipt。正常、事务fault、恢复与响应丢失重试均保持唯一投影，40个历史sample不受旧replan/dynamic node阈值影响。canonical 35项、orchestration 207项通过；正式入口仍为DAG，下一检查点P4-A。License Requirement：复用现有Python、Phase 1 atomic final、Task lease与P3 durable items，无新增依赖或许可变更。
+
 - 统一同模型Agent Loop P3-B完成同模型compaction：三backend Agent writer新增range/digest/CAS summary提交，原items保留且禁止reserved来源或切开multi-call sample；CompactionService只响应typed history decision，以Run固定binding/no-tools生成summary，推进boundary后重建完整Catalog/context再preflight，无eligible/no-progress/required超限均确定性收敛。canonical 3项、Agent storage/真实Sidecar聚焦16项、orchestration 204项通过。License Requirement：复用现有Python、AgentModelPort、canonical codec、三backend repository与P2 preflight，无新增依赖或许可变更。
 
 - 统一同模型Agent Loop P3-A完成test-only durable loop：固定Context顺序并将multi-call重建为单一assistant message/provider call关联；Runner持单一Task lease完成同binding采样、atomic sample/reservation、deterministic wave和ordinal outcome提交。连续parallel-safe并发、exclusive独占，乱序副作用不改变账本；三轮链路、ordinary error纠错、required首轮恢复auto、waiting不提前采样/先提交后release均通过，源码无轮次上限或真实route。canonical 3项、orchestration 201项通过。License Requirement：复用现有Python、AgentModelPort、Phase 1 repository/lease与P2 Invocation边界，无新增依赖或许可变更。

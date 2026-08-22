@@ -1,8 +1,8 @@
 # Phase 3：核心 Agent Loop 与 Final Output PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P3-A/P3-B green；下一步P3-C）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P3-A/P3-B实现证据已闭合
+- **状态**：proof_complete（P3-A～P3-C green）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；Phase 3实现与退出证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～2必须`proof_complete`
 - **主责需求**：FR-4、FR-5、FR-6、FR-7、FR-10、FR-11、FR-12、FR-23
@@ -209,6 +209,17 @@ conda run -n multi_agent python -m unittest \
 - 每次成功commit后重建完整Catalog/context再preflight；digest/CAS失败零推进，无eligible range、相同range无推进或required
   segments fatal均立即收敛，不设置迭代预算也不busy-loop；multi-call assistant/calls/results不得被range切开；
 - P3-B canonical 3项、Agent storage/真实Rust Sidecar聚焦16项、orchestration 204项、compileall/diff通过。P3-B green，进入P3-C。
+
+### 11.3 P3-C实施证据
+
+- `AgentFinalOutputPublisher`没有Model、Catalog或Executor依赖，只读取已持久化且为Run active sample的committed assistant；
+  candidate必须非空、无子Tool calls且非mixed text+calls；
+- publisher在`final_publish` lease phase调用Phase 1唯一final CAS，Artifact/Message/Event/receipt和final Node由repository确定性
+  生成；completed重试读取相同candidate/text并返回同一receipt，不再次调用模型；
+- 正常、final projection后fault全回滚、恢复发布、响应丢失重试均证明最终投影恰一份；40个历史sample仍可完成，旧
+  max_replans/max_dynamic_nodes不参与；mixed text+calls不进入history/final；
+- P3-C canonical 35项、`tests/orchestration` 207项、compileall/diff通过。Phase 3门禁闭合并标记`proof_complete`，正式入口
+  仍为DAG，进入P4-A。
 
 ## 12. 风险、假设与开放问题
 

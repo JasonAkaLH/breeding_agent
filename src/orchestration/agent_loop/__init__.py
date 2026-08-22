@@ -30,6 +30,7 @@ from .runner import (
     AgentLoopRunner,
 )
 from .compaction import AgentCompactionOutcome, AgentCompactionService
+from .final_output import AgentFinalOutputPublisher
 from .models import (
     AgentCancellationToken,
     AgentFinishMetadata,
@@ -120,4 +121,5 @@ __all__ = [
     "AgentLoopRunner",
     "AgentCompactionOutcome",
     "AgentCompactionService",
+    "AgentFinalOutputPublisher",
 ]
