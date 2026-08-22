@@ -410,6 +410,66 @@ class RuntimeSidecarGrpcClient:
         _consume_response("node_state_transition", response)
         return response
 
+    def commit_agent_state(
+        self,
+        *,
+        operation: str,
+        run: Mapping[str, Any],
+        items: tuple[Mapping[str, Any], ...],
+        expected_revision: int,
+        expected_claim_token: str | None,
+        idempotency_key: str,
+        owner: str = "python-runtime",
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = (
+            _field_string(1, operation)
+            + _field_bytes(2, _agent_run_record(run))
+            + b"".join(_field_bytes(3, _agent_item_record(item)) for item in items)
+            + _field_varint(4, expected_revision)
+        )
+        if expected_claim_token is not None:
+            request += _field_string(5, expected_claim_token)
+        request += _field_bytes(6, _idempotency(idempotency_key, owner))
+        payload = self._unary("CommitAgentState", request, timeout_seconds=timeout_seconds)
+        response = _agent_state_response("agent_state_commit", _decode_message(payload))
+        _consume_response("agent_state_commit", response)
+        if response["run"] is None or response["run"]["run_id"] != run["run_id"]:
+            _raise_task_identity_invalid("Agent state response run identity differs from request")
+        return response
+
+    def get_agent_run(self, *, run_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary("GetAgentRun", _field_string(1, run_id), timeout_seconds=timeout_seconds)
+        fields = _decode_message(payload)
+        run_payload = _first_message(fields, 1)
+        response = {
+            "operation": "agent_run_get",
+            "run": _decode_agent_run_record(run_payload) if run_payload else None,
+            "found": _first_bool(fields, 2, default=False),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("agent_run_get", response)
+        if response["run"] is not None and response["run"]["run_id"] != run_id:
+            _raise_task_identity_invalid("AgentRun response identity differs from request")
+        return response
+
+    def list_agent_items(self, *, run_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary("ListAgentItems", _field_string(1, run_id), timeout_seconds=timeout_seconds)
+        fields = _decode_message(payload)
+        items = [_decode_agent_item_record(value) for value in fields.get(1, [])]
+        response = {
+            "operation": "agent_item_list",
+            "items": items,
+            "error": _optional_typed_error(fields, 2),
+        }
+        _consume_response("agent_item_list", response)
+        if any(item["run_id"] != run_id for item in items):
+            _raise_task_identity_invalid("AgentItem list contains a different run_id")
+        return response
+
     def get_task_node(self, *, node_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
         self._ensure_compatible(timeout_seconds=timeout_seconds)
         payload = self._unary("GetTaskNode", _field_string(1, node_id), timeout_seconds=timeout_seconds)
@@ -1102,6 +1162,114 @@ def _task_node_record(node: Mapping[str, Any]) -> bytes:
     return payload
 
 
+def _agent_run_record(run: Mapping[str, Any]) -> bytes:
+    digests = run.get("binding_option_digests_json", b"{}")
+    if isinstance(digests, Mapping):
+        digests = json.dumps(digests, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    payload = b"".join(
+        [
+            _field_string(1, str(run["run_id"])),
+            _field_string(2, str(run["task_id"])),
+            _field_string(3, str(run["conversation_id"])),
+            _field_string(4, str(run["status"])),
+            _field_string(5, str(run["model_edition"])),
+            _field_string(6, str(run["reasoning_effort"])),
+            _field_varint(7, 1 if run.get("thinking_enabled") else 0),
+            _field_bytes(8, bytes(digests)),
+            _field_varint(9, int(run["next_item_sequence"])),
+            _field_varint(10, int(run["compacted_through_sequence"])),
+            b"".join(_field_string(12, str(value)) for value in run.get("waiting_call_item_ids", ())),
+            _field_varint(13, int(run.get("next_batch_call_ordinal", 0))),
+            _field_varint(17, int(run["revision"])),
+            _field_varint(19, int(run["created_at_ms"])),
+            _field_varint(20, int(run["updated_at_ms"])),
+        ]
+    )
+    for number, name in ((11, "active_sample_item_id"), (14, "claim_owner"), (15, "claim_token"), (18, "terminal_reason_code")):
+        if run.get(name) is not None:
+            payload += _field_string(number, str(run[name]))
+    for number, name in ((16, "lease_expires_at_ms"), (21, "terminal_at_ms")):
+        if run.get(name) is not None:
+            payload += _field_varint(number, int(run[name]))
+    return payload
+
+
+def _decode_agent_run_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    return {
+        "run_id": _first_string(fields, 1),
+        "task_id": _first_string(fields, 2),
+        "conversation_id": _first_string(fields, 3),
+        "status": _first_string(fields, 4),
+        "model_edition": _first_string(fields, 5),
+        "reasoning_effort": _first_string(fields, 6),
+        "thinking_enabled": _first_bool(fields, 7, default=False),
+        "binding_option_digests_json": _first_message(fields, 8),
+        "next_item_sequence": _first_int(fields, 9),
+        "compacted_through_sequence": _first_int(fields, 10),
+        "active_sample_item_id": _optional_string(fields, 11),
+        "waiting_call_item_ids": _all_strings(fields, 12),
+        "next_batch_call_ordinal": _first_int(fields, 13),
+        "claim_owner": _optional_string(fields, 14),
+        "claim_token": _optional_string(fields, 15),
+        "lease_expires_at_ms": _optional_int(fields, 16),
+        "revision": _first_int(fields, 17),
+        "terminal_reason_code": _optional_string(fields, 18),
+        "created_at_ms": _first_int(fields, 19),
+        "updated_at_ms": _first_int(fields, 20),
+        "terminal_at_ms": _optional_int(fields, 21),
+    }
+
+
+def _agent_item_record(item: Mapping[str, Any]) -> bytes:
+    payload = b"".join(
+        [
+            _field_string(1, str(item["item_id"])),
+            _field_string(2, str(item["run_id"])),
+            _field_string(3, str(item["task_id"])),
+            _field_varint(4, int(item["sequence"])),
+            _field_string(5, str(item["kind"])),
+            _field_string(6, str(item["state"])),
+            _field_bytes(7, bytes(item["payload_json"])),
+            _field_varint(8, int(item["payload_size_bytes"])),
+            _field_string(9, str(item["payload_sha256"])),
+            _field_varint(14, int(item["created_at_ms"])),
+        ]
+    )
+    for number, name in ((10, "parent_item_id"), (11, "source_call_item_id"), (12, "provider_sample_id")):
+        if item.get(name) is not None:
+            payload += _field_string(number, str(item[name]))
+    for number, name in ((13, "call_ordinal"), (15, "committed_at_ms")):
+        if item.get(name) is not None:
+            payload += _field_varint(number, int(item[name]))
+    return payload
+
+
+def _decode_agent_item_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    return {
+        "item_id": _first_string(fields, 1), "run_id": _first_string(fields, 2),
+        "task_id": _first_string(fields, 3), "sequence": _first_int(fields, 4),
+        "kind": _first_string(fields, 5), "state": _first_string(fields, 6),
+        "payload_json": _first_message(fields, 7), "payload_size_bytes": _first_int(fields, 8),
+        "payload_sha256": _first_string(fields, 9), "parent_item_id": _optional_string(fields, 10),
+        "source_call_item_id": _optional_string(fields, 11), "provider_sample_id": _optional_string(fields, 12),
+        "call_ordinal": _optional_int(fields, 13), "created_at_ms": _first_int(fields, 14),
+        "committed_at_ms": _optional_int(fields, 15),
+    }
+
+
+def _agent_state_response(operation: str, fields: dict[int, list[Any]]) -> dict[str, Any]:
+    run_payload = _first_message(fields, 1)
+    return {
+        "operation": operation,
+        "run": _decode_agent_run_record(run_payload) if run_payload else None,
+        "items": [_decode_agent_item_record(value) for value in fields.get(2, [])],
+        "duplicate": _first_bool(fields, 3, default=False),
+        "error": _optional_typed_error(fields, 4),
+    }
+
+
 def _decode_task_node_record(payload: bytes) -> dict[str, Any]:
     fields = _decode_message(payload)
     try:
@@ -1280,6 +1448,11 @@ def _first_string(fields: dict[int, list[Any]], field_number: int) -> str:
 def _optional_string(fields: dict[int, list[Any]], field_number: int) -> str | None:
     values = fields.get(field_number, [])
     return bytes(values[0]).decode("utf-8") if values else None
+
+
+def _optional_int(fields: dict[int, list[Any]], field_number: int) -> int | None:
+    values = fields.get(field_number, [])
+    return int(values[0]) if values else None
 
 
 def _first_int(fields: dict[int, list[Any]], field_number: int) -> int:

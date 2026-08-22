@@ -199,6 +199,21 @@ Rust gate时本阶段为`blocked`，不能标记`proof_complete`。
 - 精确临时容器已删除，仅含一次性测试数据且不可恢复；未删除镜像/卷，未连接现有开发或生产数据库。P1-B green，
   Phase 1继续`in_progress`并进入P1-C。
 
+### 10.3 P1-C additive contract checkpoint（未完成）
+
+- proto additive新增`AgentRunRecord`、`AgentItemRecord`和`CommitAgentState/GetAgentRun/ListAgentItems` RPC；旧TaskEdge、
+  Task/Node/Artifact/Event和lease RPC全部保留；
+- `maf_core_types`、`maf_runtime_store`和Sidecar contract artifact已加入closed Agent status/kind/model、`agent_state`
+  feature及write/read policies，schema/proto hash升级到20260822 Agent state版本；
+- Rust in-memory kernel和SQLite adapter已提供run/task一对一、CAS、item sequence唯一、idempotency exact retry、canonical
+  payload/SHA/131072-byte校验及跨重启读回；Python dependency-free gRPC client/facade完成新RPC编码、解码与响应校验；
+- 共享Python/Rust canonical vectors通过；P1-C Python canonical 56项通过，统一Rust `cargo_fmt/cargo_clippy/cargo_test`
+  gate通过；一次直接`cargo test --workspace --all-targets --all-features`因macOS缺`libpython3.13.dylib`失败，随后项目统一
+  gate按其受控PyO3环境完整通过，前者不记green；
+- 尚未闭合：sample/outcome/final对应TaskNode/Artifact/Message/Event/receipt投影尚未与AgentRun/AgentItem纳入同一
+  Sidecar事务，也尚无实现`AgentAtomicWriter`业务接口的Python Sidecar repository。故本节只是additive contract检查点，
+  P1-C和Phase 1仍为`in_progress`，不得进入Phase 2。
+
 ## 11. 风险、假设与开放问题
 
 | 风险 | 缓解/阻断条件 |

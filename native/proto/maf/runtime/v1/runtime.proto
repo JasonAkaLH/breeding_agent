@@ -16,6 +16,9 @@ service RuntimeSidecar {
   rpc ClaimPlannerReplan(ClaimPlannerReplanRequest) returns (PlannerReplanClaimResponse);
   rpc GetPlannerReplanClaim(GetPlannerReplanClaimRequest) returns (PlannerReplanClaimResponse);
   rpc MarkPlannerReplanClaim(MarkPlannerReplanClaimRequest) returns (PlannerReplanClaimResponse);
+  rpc CommitAgentState(CommitAgentStateRequest) returns (AgentStateResponse);
+  rpc GetAgentRun(GetAgentRunRequest) returns (AgentRunResponse);
+  rpc ListAgentItems(ListAgentItemsRequest) returns (ListAgentItemsResponse);
   rpc GetTaskNode(GetTaskNodeRequest) returns (GetTaskNodeResponse);
   rpc ListTaskNodesForTask(ListTaskNodesForTaskRequest) returns (ListTaskNodesForTaskResponse);
   rpc TransitionNode(TransitionNodeRequest) returns (TransitionNodeResponse);
@@ -187,6 +190,76 @@ message PlannerReplanClaimResponse {
   PlannerReplanClaimRecord claim = 1;
   bool found = 2;
   maf.common.v1.TypedError error = 3;
+}
+
+message AgentRunRecord {
+  string run_id = 1;
+  string task_id = 2;
+  string conversation_id = 3;
+  string status = 4;
+  string model_edition = 5;
+  string reasoning_effort = 6;
+  bool thinking_enabled = 7;
+  bytes binding_option_digests_json = 8;
+  uint64 next_item_sequence = 9;
+  uint64 compacted_through_sequence = 10;
+  optional string active_sample_item_id = 11;
+  repeated string waiting_call_item_ids = 12;
+  uint64 next_batch_call_ordinal = 13;
+  optional string claim_owner = 14;
+  optional string claim_token = 15;
+  optional int64 lease_expires_at_ms = 16;
+  uint64 revision = 17;
+  optional string terminal_reason_code = 18;
+  int64 created_at_ms = 19;
+  int64 updated_at_ms = 20;
+  optional int64 terminal_at_ms = 21;
+}
+
+message AgentItemRecord {
+  string item_id = 1;
+  string run_id = 2;
+  string task_id = 3;
+  uint64 sequence = 4;
+  string kind = 5;
+  string state = 6;
+  bytes payload_json = 7;
+  uint64 payload_size_bytes = 8;
+  string payload_sha256 = 9;
+  optional string parent_item_id = 10;
+  optional string source_call_item_id = 11;
+  optional string provider_sample_id = 12;
+  optional uint64 call_ordinal = 13;
+  int64 created_at_ms = 14;
+  optional int64 committed_at_ms = 15;
+}
+
+message CommitAgentStateRequest {
+  string operation = 1;
+  AgentRunRecord run = 2;
+  repeated AgentItemRecord items = 3;
+  uint64 expected_revision = 4;
+  optional string expected_claim_token = 5;
+  Idempotency idempotency = 6;
+}
+
+message AgentStateResponse {
+  AgentRunRecord run = 1;
+  repeated AgentItemRecord items = 2;
+  bool duplicate = 3;
+  maf.common.v1.TypedError error = 4;
+}
+
+message GetAgentRunRequest { string run_id = 1; }
+message AgentRunResponse {
+  AgentRunRecord run = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+message ListAgentItemsRequest { string run_id = 1; }
+message ListAgentItemsResponse {
+  repeated AgentItemRecord items = 1;
+  maf.common.v1.TypedError error = 2;
 }
 
 message TransitionNodeRequest {

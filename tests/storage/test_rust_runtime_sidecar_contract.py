@@ -672,6 +672,7 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             "cancellation_token_write",
             "bundle_revision_pin",
             "bundle_revision_release",
+            "agent_state_commit",
         ]:
             self.assertIn(name, write_ops)
             self.assertEqual(write_ops[name]["enforce_failure"], "fail_closed")
@@ -680,6 +681,7 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
     def test_task_authority_contract_exposes_read_and_non_retriable_conflict(self) -> None:
         contract = load_runtime_sidecar_contract()
         self.assertIn("task_read", contract["supported_features"])
+        self.assertIn("agent_state", contract["supported_features"])
         task_get = next(operation for operation in contract["operations"] if operation["name"] == "task_get")
         self.assertEqual(task_get["kind"], "read")
         self.assertFalse(task_get["idempotency_required"])
@@ -687,16 +689,18 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(operation_policy("task_get_active_for_conversation")["kind"], "read")
         self.assertEqual(operation_policy("task_node_get")["kind"], "read")
         self.assertEqual(operation_policy("task_node_list")["kind"], "read")
+        self.assertEqual(operation_policy("agent_run_get")["kind"], "read")
+        self.assertEqual(operation_policy("agent_item_list")["kind"], "read")
         conflict = next(error for error in contract["error_codes"] if error["code"] == "runtime_store_idempotency_conflict")
         self.assertEqual(conflict["category"], "internal")
         self.assertFalse(conflict["retriable"])
         self.assertEqual(
             contract["schema_hash"],
-            "maf_runtime_v1_schema_20260818_planner_replan_claim",
+            "maf_runtime_v1_schema_20260822_agent_state",
         )
         self.assertEqual(
             contract["artifact_policy"]["expected_proto_hash"],
-            "maf_runtime_proto_v1_20260818_planner_replan_claim",
+            "maf_runtime_proto_v1_20260822_agent_state",
         )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:

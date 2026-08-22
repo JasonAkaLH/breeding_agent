@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import shutil
 import socket
 import subprocess
@@ -158,6 +159,68 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     self.assertEqual(filtered_tasks["tasks"], [])
                     active_task = client.get_active_task_for_conversation(conversation_id="conv")
                     self.assertTrue(active_task["found"])
+                    agent_run = {
+                        "run_id": "run-agent",
+                        "task_id": "task-agent",
+                        "conversation_id": "conv",
+                        "status": "running",
+                        "model_edition": "edition",
+                        "reasoning_effort": "minimal",
+                        "thinking_enabled": False,
+                        "binding_option_digests_json": {},
+                        "next_item_sequence": 1,
+                        "compacted_through_sequence": 0,
+                        "active_sample_item_id": None,
+                        "waiting_call_item_ids": [],
+                        "next_batch_call_ordinal": 0,
+                        "claim_owner": None,
+                        "claim_token": None,
+                        "lease_expires_at_ms": None,
+                        "revision": 0,
+                        "terminal_reason_code": None,
+                        "created_at_ms": 1,
+                        "updated_at_ms": 1,
+                        "terminal_at_ms": None,
+                    }
+                    created_agent = client.commit_agent_state(
+                        operation="create_run",
+                        run=agent_run,
+                        items=(),
+                        expected_revision=0,
+                        expected_claim_token=None,
+                        idempotency_key="agent-create",
+                    )
+                    self.assertFalse(created_agent["duplicate"])
+                    payload_json = b'{"text":"ok"}\n'
+                    agent_item = {
+                        "item_id": "item-agent",
+                        "run_id": "run-agent",
+                        "task_id": "task-agent",
+                        "sequence": 1,
+                        "kind": "assistant_message",
+                        "state": "committed",
+                        "payload_json": payload_json,
+                        "payload_size_bytes": len(payload_json),
+                        "payload_sha256": hashlib.sha256(payload_json).hexdigest(),
+                        "parent_item_id": None,
+                        "source_call_item_id": None,
+                        "provider_sample_id": "sample-agent",
+                        "call_ordinal": None,
+                        "created_at_ms": 1,
+                        "committed_at_ms": 1,
+                    }
+                    committed_run = {**agent_run, "revision": 1, "next_item_sequence": 2, "updated_at_ms": 2}
+                    committed_agent = client.commit_agent_state(
+                        operation="commit_sample",
+                        run=committed_run,
+                        items=(agent_item,),
+                        expected_revision=0,
+                        expected_claim_token=None,
+                        idempotency_key="agent-sample",
+                    )
+                    self.assertEqual(committed_agent["run"]["revision"], 1)
+                    self.assertEqual(client.get_agent_run(run_id="run-agent")["run"], committed_run | {"binding_option_digests_json": b"{}"})
+                    self.assertEqual(client.list_agent_items(run_id="run-agent")["items"], [agent_item])
                     self.assertEqual(active_task["task"], task_record)
                     self.assertFalse(
                         client.get_active_task_for_conversation(conversation_id="missing")["found"]

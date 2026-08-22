@@ -1,0 +1,16 @@
+[
+  {
+    "name": "utf8_sorted",
+    "value": {"z": "中文", "a": 1},
+    "canonical_json": "{\"a\":1,\"z\":\"中文\"}\n",
+    "size_bytes": 21,
+    "sha256": "ce47860859cabb27d5f4d8c90eece2e7c153ffecb28433346ef628686dde803a"
+  },
+  {
+    "name": "nested_compact",
+    "value": {"nested": {"b": false, "a": null}, "list": [3, 2, 1]},
+    "canonical_json": "{\"list\":[3,2,1],\"nested\":{\"a\":null,\"b\":false}}\n",
+    "size_bytes": 47,
+    "sha256": "8af83ec67d4f709d67d5a0f672ebf522858cca8adb27efd1382c0a844db4c32e"
+  }
+]

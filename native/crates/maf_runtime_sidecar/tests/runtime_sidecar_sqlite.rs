@@ -1,12 +1,113 @@
 use maf_runtime_sidecar::{
-    ArtifactRecord, RuntimeSidecarSqliteAdapter, TaskEdgeRecord, TaskNodeRecord, TaskRecord,
-    TaskRouteAssignment,
+    AgentItemRecord, AgentRunRecord, ArtifactRecord, RuntimeSidecarSqliteAdapter, TaskEdgeRecord,
+    TaskNodeRecord, TaskRecord, TaskRouteAssignment,
 };
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn agent_run(revision: u64) -> AgentRunRecord {
+    AgentRunRecord {
+        run_id: "run-agent".to_owned(),
+        task_id: "task-agent".to_owned(),
+        conversation_id: "conv-agent".to_owned(),
+        status: "running".to_owned(),
+        model_edition: "edition".to_owned(),
+        reasoning_effort: "minimal".to_owned(),
+        thinking_enabled: false,
+        binding_option_digests_json: b"{}".to_vec(),
+        next_item_sequence: revision + 1,
+        compacted_through_sequence: 0,
+        active_sample_item_id: None,
+        waiting_call_item_ids: Vec::new(),
+        next_batch_call_ordinal: 0,
+        claim_owner: None,
+        claim_token: None,
+        lease_expires_at_ms: None,
+        revision,
+        terminal_reason_code: None,
+        created_at_ms: 1,
+        updated_at_ms: revision as i64 + 1,
+        terminal_at_ms: None,
+    }
+}
+
+fn agent_item() -> AgentItemRecord {
+    let payload = b"{\"text\":\"ok\"}\n".to_vec();
+    AgentItemRecord {
+        item_id: "item-agent-1".to_owned(),
+        run_id: "run-agent".to_owned(),
+        task_id: "task-agent".to_owned(),
+        sequence: 1,
+        kind: "assistant_message".to_owned(),
+        state: "committed".to_owned(),
+        payload_size_bytes: payload.len() as u64,
+        payload_sha256: format!("{:x}", Sha256::digest(&payload)),
+        payload_json: payload,
+        parent_item_id: None,
+        source_call_item_id: None,
+        provider_sample_id: Some("sample".to_owned()),
+        call_ordinal: None,
+        created_at_ms: 1,
+        committed_at_ms: Some(1),
+    }
+}
+
+#[test]
+fn sqlite_adapter_persists_agent_state_atomically_across_reopen() {
+    let db_path = temp_db_path("agent-state");
+    {
+        let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).expect("open adapter");
+        adapter
+            .commit_agent_state(
+                "create_run",
+                agent_run(0),
+                Vec::new(),
+                0,
+                None,
+                "agent-create",
+            )
+            .expect("create AgentRun");
+        adapter
+            .commit_agent_state(
+                "commit_sample",
+                agent_run(1),
+                vec![agent_item()],
+                0,
+                None,
+                "agent-sample",
+            )
+            .expect("commit Agent sample");
+    }
+    let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen adapter");
+    assert_eq!(
+        reopened
+            .get_agent_run("run-agent")
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+    assert_eq!(
+        reopened.list_agent_items("run-agent").unwrap(),
+        vec![agent_item()]
+    );
+    let stale = reopened
+        .commit_agent_state(
+            "commit_outcome",
+            agent_run(2),
+            Vec::new(),
+            0,
+            None,
+            "agent-stale",
+        )
+        .expect_err("stale CAS rejected");
+    assert_eq!(stale.code, "runtime_store_write_failed");
+    let _ = std::fs::remove_file(db_path);
+}
 
 fn authority_task(status: &str) -> TaskRecord {
     TaskRecord {

@@ -1,7 +1,8 @@
 use crate::{
-    ArtifactRecord, BundleRevisionResult, CancellationToken, EventCursor, NodeTransitionResult,
-    PlannerReplanClaimRecord, TaskEdgeRecord, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
-    idempotency_conflict, migration_blocked, require_idempotency_key,
+    AgentItemRecord, AgentRunRecord, AgentStateReceipt, ArtifactRecord, BundleRevisionResult,
+    CancellationToken, EventCursor, NodeTransitionResult, PlannerReplanClaimRecord, TaskEdgeRecord,
+    TaskNodeRecord, TaskRecord, TaskRouteAssignment, idempotency_conflict, migration_blocked,
+    require_idempotency_key, validate_agent_item_record, validate_agent_run_record,
     validate_planner_replan_identity, validate_task_node_record, validate_task_node_update,
     validate_task_record, validate_task_update,
 };
@@ -40,6 +41,160 @@ impl RuntimeSidecarSqliteAdapter {
         };
         adapter.initialize_schema()?;
         Ok(adapter)
+    }
+
+    pub fn commit_agent_state(
+        &self,
+        operation: &str,
+        run: AgentRunRecord,
+        items: Vec<AgentItemRecord>,
+        expected_revision: u64,
+        expected_claim_token: Option<&str>,
+        idempotency_key: &str,
+    ) -> Result<(AgentRunRecord, Vec<AgentItemRecord>, bool), RuntimeSidecarError> {
+        let idempotency_key = require_idempotency_key(idempotency_key)?;
+        validate_agent_run_record(&run)?;
+        for item in &items {
+            validate_agent_item_record(item, &run)?;
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| sqlite_error("begin Agent state transaction failed", error))?;
+        if let Some(receipt_json) = transaction
+            .query_row(
+                "SELECT receipt_json FROM agent_state_idempotency WHERE idempotency_key = ?1",
+                rusqlite::params![&idempotency_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| sqlite_error("read Agent state idempotency failed", error))?
+        {
+            let receipt: AgentStateReceipt = serde_json::from_str(&receipt_json)
+                .map_err(|_| write_failed("decode Agent state receipt failed"))?;
+            if receipt.operation != operation || receipt.run != run || receipt.items != items {
+                return Err(idempotency_conflict(
+                    "agent state idempotency key was reused with different state",
+                ));
+            }
+            transaction
+                .commit()
+                .map_err(|error| sqlite_error("commit idempotent Agent state failed", error))?;
+            return Ok((receipt.run, receipt.items, true));
+        }
+        let existing = transaction
+            .query_row(
+                "SELECT run_json FROM agent_runs WHERE run_id = ?1",
+                rusqlite::params![&run.run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| sqlite_error("read AgentRun failed", error))?
+            .map(|payload| {
+                serde_json::from_str::<AgentRunRecord>(&payload)
+                    .map_err(|_| write_failed("decode AgentRun failed"))
+            })
+            .transpose()?;
+        if operation == "create_run" {
+            let task_bound = transaction
+                .query_row(
+                    "SELECT 1 FROM agent_runs WHERE task_id = ?1",
+                    rusqlite::params![&run.task_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("check AgentRun Task binding failed", error))?
+                .is_some();
+            if existing.is_some()
+                || task_bound
+                || expected_revision != 0
+                || run.revision != 0
+                || !items.is_empty()
+            {
+                return Err(write_failed("create_run Agent state conflict"));
+            }
+        } else {
+            let existing = existing.ok_or_else(|| write_failed("AgentRun is missing"))?;
+            if existing.task_id != run.task_id
+                || existing.conversation_id != run.conversation_id
+                || existing.revision != expected_revision
+                || existing.claim_token.as_deref() != expected_claim_token
+                || run.revision != expected_revision + 1
+            {
+                return Err(write_failed("Agent state CAS mismatch"));
+            }
+        }
+        for item in &items {
+            let item_json =
+                serde_json::to_string(item).map_err(|_| write_failed("encode AgentItem failed"))?;
+            transaction
+                .execute(
+                    "INSERT INTO agent_items (item_id, run_id, task_id, sequence, item_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![&item.item_id, &item.run_id, &item.task_id, item.sequence as i64, item_json],
+                )
+                .map_err(|error| sqlite_error("insert AgentItem failed", error))?;
+        }
+        let run_json =
+            serde_json::to_string(&run).map_err(|_| write_failed("encode AgentRun failed"))?;
+        transaction
+            .execute(
+                "INSERT INTO agent_runs (run_id, task_id, revision, claim_token, run_json) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(run_id) DO UPDATE SET revision=excluded.revision, claim_token=excluded.claim_token, run_json=excluded.run_json",
+                rusqlite::params![&run.run_id, &run.task_id, run.revision as i64, &run.claim_token, run_json],
+            )
+            .map_err(|error| sqlite_error("upsert AgentRun failed", error))?;
+        let receipt = AgentStateReceipt {
+            operation: operation.to_owned(),
+            run: run.clone(),
+            items: items.clone(),
+        };
+        let receipt_json = serde_json::to_string(&receipt)
+            .map_err(|_| write_failed("encode Agent state receipt failed"))?;
+        transaction
+            .execute(
+                "INSERT INTO agent_state_idempotency (idempotency_key, receipt_json) VALUES (?1, ?2)",
+                rusqlite::params![idempotency_key, receipt_json],
+            )
+            .map_err(|error| sqlite_error("insert Agent state receipt failed", error))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit Agent state failed", error))?;
+        Ok((run, items, false))
+    }
+
+    pub fn get_agent_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<AgentRunRecord>, RuntimeSidecarError> {
+        self.lock_connection()?
+            .query_row(
+                "SELECT run_json FROM agent_runs WHERE run_id = ?1",
+                rusqlite::params![run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| sqlite_error("read AgentRun failed", error))?
+            .map(|payload| {
+                serde_json::from_str(&payload).map_err(|_| write_failed("decode AgentRun failed"))
+            })
+            .transpose()
+    }
+
+    pub fn list_agent_items(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<AgentItemRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare("SELECT item_json FROM agent_items WHERE run_id = ?1 ORDER BY sequence")
+            .map_err(|error| sqlite_error("prepare AgentItem list failed", error))?;
+        let rows = statement
+            .query_map(rusqlite::params![run_id], |row| row.get::<_, String>(0))
+            .map_err(|error| sqlite_error("query AgentItem list failed", error))?;
+        rows.map(|row| {
+            let payload = row.map_err(|error| sqlite_error("read AgentItem failed", error))?;
+            serde_json::from_str(&payload).map_err(|_| write_failed("decode AgentItem failed"))
+        })
+        .collect()
     }
 
     pub fn submit_task(
@@ -1252,6 +1407,25 @@ impl RuntimeSidecarSqliteAdapter {
                     bundle_kind TEXT NOT NULL,
                     revision TEXT NOT NULL,
                     released INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    run_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL UNIQUE,
+                    revision INTEGER NOT NULL,
+                    claim_token TEXT,
+                    run_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_items (
+                    item_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    item_json TEXT NOT NULL,
+                    UNIQUE(run_id, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS agent_state_idempotency (
+                    idempotency_key TEXT PRIMARY KEY,
+                    receipt_json TEXT NOT NULL
                 );
                 ",
             )

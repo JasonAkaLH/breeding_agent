@@ -185,6 +185,29 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
         for node in nodes:
             _validate_task_node_record(node)
         return
+    if operation_name == "agent_state_commit":
+        _validate_agent_run_record(response.get("run"))
+        items = response.get("items")
+        if not isinstance(items, list) or not isinstance(response.get("duplicate"), bool):
+            _raise_response_invalid()
+        for item in items:
+            _validate_agent_item_record(item)
+        return
+    if operation_name == "agent_run_get":
+        found = response.get("found")
+        run = response.get("run")
+        if not isinstance(found, bool) or found != (run is not None):
+            _raise_response_invalid()
+        if run is not None:
+            _validate_agent_run_record(run)
+        return
+    if operation_name == "agent_item_list":
+        items = response.get("items")
+        if not isinstance(items, list):
+            _raise_response_invalid()
+        for item in items:
+            _validate_agent_item_record(item)
+        return
     if operation_name == "task_edge_save":
         _validate_task_edge_record(response.get("edge"))
         return
@@ -239,6 +262,37 @@ def _validate_event_cursor(cursor: Any) -> None:
         and isinstance(cursor.get("sequence"), int)
         and cursor["sequence"] > 0
         and isinstance(cursor.get("created_at_ms"), int)
+    ):
+        _raise_response_invalid()
+
+
+def _validate_agent_run_record(run: Any) -> None:
+    if not isinstance(run, Mapping):
+        _raise_response_invalid()
+    if not all(_non_empty_string(run.get(name)) for name in ("run_id", "task_id", "conversation_id", "status", "model_edition", "reasoning_effort")):
+        _raise_response_invalid()
+    if not (
+        isinstance(run.get("thinking_enabled"), bool)
+        and isinstance(run.get("next_item_sequence"), int)
+        and run["next_item_sequence"] > 0
+        and isinstance(run.get("compacted_through_sequence"), int)
+        and isinstance(run.get("waiting_call_item_ids"), list)
+        and isinstance(run.get("revision"), int)
+    ):
+        _raise_response_invalid()
+
+
+def _validate_agent_item_record(item: Any) -> None:
+    if not isinstance(item, Mapping):
+        _raise_response_invalid()
+    payload = item.get("payload_json")
+    if not (
+        all(_non_empty_string(item.get(name)) for name in ("item_id", "run_id", "task_id", "kind", "state", "payload_sha256"))
+        and isinstance(item.get("sequence"), int)
+        and item["sequence"] > 0
+        and isinstance(payload, bytes)
+        and isinstance(item.get("payload_size_bytes"), int)
+        and item["payload_size_bytes"] == len(payload)
     ):
         _raise_response_invalid()
 

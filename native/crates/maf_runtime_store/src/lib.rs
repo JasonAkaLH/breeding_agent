@@ -6,9 +6,9 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260818_planner_replan_claim";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260822_agent_state";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260818_planner_replan_claim";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260822_agent_state";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
@@ -16,6 +16,7 @@ pub const FEATURE_TASK_GRAPH: &str = "task_graph";
 pub const FEATURE_ARTIFACT_METADATA: &str = "artifact_metadata";
 pub const FEATURE_TASK_READ: &str = "task_read";
 pub const FEATURE_PLANNER_REPLAN_CLAIM: &str = "planner_replan_claim";
+pub const FEATURE_AGENT_STATE: &str = "agent_state";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
 pub const MAX_IN_FLIGHT_CPU_MULTIPLIER: u64 = 4;
@@ -366,6 +367,7 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
         "cancellation_token_write",
         "bundle_revision_pin",
         "bundle_revision_release",
+        "agent_state_commit",
     ]
     .into_iter()
     .map(write_operation)
@@ -392,6 +394,8 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
             "artifact_get",
             "artifact_list",
             "event_replay",
+            "agent_run_get",
+            "agent_item_list",
         ]
         .into_iter()
         .map(|name| OperationPolicy {
@@ -706,6 +710,7 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             FEATURE_ARTIFACT_METADATA.to_owned(),
             FEATURE_TASK_READ.to_owned(),
             FEATURE_PLANNER_REPLAN_CLAIM.to_owned(),
+            FEATURE_AGENT_STATE.to_owned(),
         ],
         modes: vec!["off".to_owned(), "shadow".to_owned(), "enforce".to_owned()],
         mode_env: BTreeMap::from([

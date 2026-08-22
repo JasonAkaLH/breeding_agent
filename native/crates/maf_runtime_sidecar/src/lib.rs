@@ -6,16 +6,17 @@
 
 use maf_event_log::EventLog;
 use maf_runtime_store::{
-    ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_ARTIFACT_METADATA,
-    FEATURE_EVENT_LOG, FEATURE_PLANNER_REPLAN_CLAIM, FEATURE_RUNTIME_STORE,
-    FEATURE_TASK_DISPATCHER, FEATURE_TASK_GRAPH, FEATURE_TASK_READ, LeaseRegistry,
-    PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError, RuntimeSidecarErrorCode,
-    SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
+    ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_AGENT_STATE,
+    FEATURE_ARTIFACT_METADATA, FEATURE_EVENT_LOG, FEATURE_PLANNER_REPLAN_CLAIM,
+    FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER, FEATURE_TASK_GRAPH, FEATURE_TASK_READ,
+    LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError,
+    RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
 };
 use maf_task_dispatcher::{
     TaskDispatcher, TaskSubmitRequest as DispatcherTaskSubmitRequest, TaskSubmitResult,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
@@ -217,6 +218,75 @@ pub struct PlannerReplanClaimResponse {
     pub claim: Option<PlannerReplanClaimRecord>,
     pub found: bool,
     pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunRecord {
+    pub run_id: String,
+    pub task_id: String,
+    pub conversation_id: String,
+    pub status: String,
+    pub model_edition: String,
+    pub reasoning_effort: String,
+    pub thinking_enabled: bool,
+    pub binding_option_digests_json: Vec<u8>,
+    pub next_item_sequence: u64,
+    pub compacted_through_sequence: u64,
+    pub active_sample_item_id: Option<String>,
+    pub waiting_call_item_ids: Vec<String>,
+    pub next_batch_call_ordinal: u64,
+    pub claim_owner: Option<String>,
+    pub claim_token: Option<String>,
+    pub lease_expires_at_ms: Option<i64>,
+    pub revision: u64,
+    pub terminal_reason_code: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub terminal_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentItemRecord {
+    pub item_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub sequence: u64,
+    pub kind: String,
+    pub state: String,
+    pub payload_json: Vec<u8>,
+    pub payload_size_bytes: u64,
+    pub payload_sha256: String,
+    pub parent_item_id: Option<String>,
+    pub source_call_item_id: Option<String>,
+    pub provider_sample_id: Option<String>,
+    pub call_ordinal: Option<u64>,
+    pub created_at_ms: i64,
+    pub committed_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAgentStateRequest {
+    pub operation: String,
+    pub run: Option<AgentRunRecord>,
+    pub items: Vec<AgentItemRecord>,
+    pub expected_revision: u64,
+    pub expected_claim_token: Option<String>,
+    pub idempotency: Option<Idempotency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStateResponse {
+    pub run: Option<AgentRunRecord>,
+    pub items: Vec<AgentItemRecord>,
+    pub duplicate: bool,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentStateReceipt {
+    pub(crate) operation: String,
+    pub(crate) run: AgentRunRecord,
+    pub(crate) items: Vec<AgentItemRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -719,6 +789,10 @@ pub struct RuntimeSidecarKernel {
     task_record_idempotency: BTreeMap<String, TaskRecord>,
     tasks: BTreeMap<String, TaskRecord>,
     planner_replan_claims: BTreeMap<(String, String), PlannerReplanClaimRecord>,
+    agent_runs: BTreeMap<String, AgentRunRecord>,
+    agent_task_runs: BTreeMap<String, String>,
+    agent_items: BTreeMap<String, AgentItemRecord>,
+    agent_state_idempotency: BTreeMap<String, AgentStateReceipt>,
     dispatched_task_ids: BTreeSet<String>,
     node_transition_idempotency: BTreeMap<String, NodeTransitionReceipt>,
     task_edge_idempotency: BTreeMap<String, TaskEdgeRecord>,
@@ -754,6 +828,10 @@ impl RuntimeSidecarKernel {
             task_record_idempotency: BTreeMap::new(),
             tasks: BTreeMap::new(),
             planner_replan_claims: BTreeMap::new(),
+            agent_runs: BTreeMap::new(),
+            agent_task_runs: BTreeMap::new(),
+            agent_items: BTreeMap::new(),
+            agent_state_idempotency: BTreeMap::new(),
             dispatched_task_ids: BTreeSet::new(),
             node_transition_idempotency: BTreeMap::new(),
             task_edge_idempotency: BTreeMap::new(),
@@ -934,6 +1012,102 @@ impl RuntimeSidecarKernel {
     #[must_use]
     pub fn get_task(&self, task_id: &str) -> Option<TaskRecord> {
         self.tasks.get(task_id).cloned()
+    }
+
+    pub fn commit_agent_state(
+        &mut self,
+        request: CommitAgentStateRequest,
+    ) -> Result<(AgentRunRecord, Vec<AgentItemRecord>, bool), RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        let idempotency_key = require_idempotency_key(idempotency_key(request.idempotency))?;
+        let run = request
+            .run
+            .ok_or_else(|| write_failed("AgentRunRecord is required"))?;
+        validate_agent_run_record(&run)?;
+        for item in &request.items {
+            validate_agent_item_record(item, &run)?;
+        }
+        if let Some(receipt) = self.agent_state_idempotency.get(&idempotency_key) {
+            if receipt.operation != request.operation
+                || receipt.run != run
+                || receipt.items != request.items
+            {
+                return Err(idempotency_conflict(
+                    "agent state idempotency key was reused with different state",
+                ));
+            }
+            return Ok((receipt.run.clone(), receipt.items.clone(), true));
+        }
+        if request.operation == "create_run" {
+            if request.expected_revision != 0 || run.revision != 0 || !request.items.is_empty() {
+                return Err(write_failed("create_run Agent state shape is invalid"));
+            }
+            if self.agent_runs.contains_key(&run.run_id)
+                || self.agent_task_runs.contains_key(&run.task_id)
+            {
+                return Err(write_failed("Task already has an AgentRun"));
+            }
+        } else {
+            let existing = self
+                .agent_runs
+                .get(&run.run_id)
+                .ok_or_else(|| write_failed("AgentRun is missing"))?;
+            if existing.task_id != run.task_id
+                || existing.conversation_id != run.conversation_id
+                || existing.revision != request.expected_revision
+                || existing.claim_token != request.expected_claim_token
+                || run.revision != request.expected_revision + 1
+            {
+                return Err(write_failed(
+                    "Agent state CAS or immutable identity mismatch",
+                ));
+            }
+        }
+        let mut sequences = BTreeSet::new();
+        for existing in self
+            .agent_items
+            .values()
+            .filter(|item| item.run_id == run.run_id)
+        {
+            sequences.insert(existing.sequence);
+        }
+        for item in &request.items {
+            if self.agent_items.contains_key(&item.item_id) || !sequences.insert(item.sequence) {
+                return Err(write_failed("AgentItem identity or sequence conflict"));
+            }
+        }
+        self.agent_task_runs
+            .insert(run.task_id.clone(), run.run_id.clone());
+        self.agent_runs.insert(run.run_id.clone(), run.clone());
+        for item in &request.items {
+            self.agent_items.insert(item.item_id.clone(), item.clone());
+        }
+        self.agent_state_idempotency.insert(
+            idempotency_key,
+            AgentStateReceipt {
+                operation: request.operation,
+                run: run.clone(),
+                items: request.items.clone(),
+            },
+        );
+        Ok((run, request.items, false))
+    }
+
+    #[must_use]
+    pub fn get_agent_run(&self, run_id: &str) -> Option<AgentRunRecord> {
+        self.agent_runs.get(run_id).cloned()
+    }
+
+    #[must_use]
+    pub fn list_agent_items(&self, run_id: &str) -> Vec<AgentItemRecord> {
+        let mut items: Vec<_> = self
+            .agent_items
+            .values()
+            .filter(|item| item.run_id == run_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|item| item.sequence);
+        items
     }
 
     #[must_use]
@@ -1615,6 +1789,44 @@ impl RuntimeSidecarService {
         }
     }
 
+    pub fn commit_agent_state(&mut self, request: CommitAgentStateRequest) -> AgentStateResponse {
+        match self.kernel.commit_agent_state(request) {
+            Ok((run, items, duplicate)) => AgentStateResponse {
+                run: Some(run),
+                items,
+                duplicate,
+                error: None,
+            },
+            Err(error) => AgentStateResponse {
+                run: None,
+                items: Vec::new(),
+                duplicate: false,
+                error: Some(error.into()),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn get_agent_run(&self, run_id: &str) -> AgentStateResponse {
+        let run = self.kernel.get_agent_run(run_id);
+        AgentStateResponse {
+            duplicate: false,
+            items: Vec::new(),
+            error: None,
+            run,
+        }
+    }
+
+    #[must_use]
+    pub fn list_agent_items(&self, run_id: &str) -> AgentStateResponse {
+        AgentStateResponse {
+            run: None,
+            items: self.kernel.list_agent_items(run_id),
+            duplicate: false,
+            error: None,
+        }
+    }
+
     pub fn transition_node(&mut self, request: TransitionNodeRequest) -> TransitionNodeResponse {
         match self.kernel.transition_node(
             request.task_id,
@@ -2258,6 +2470,129 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                 error: response.error.map(typed_error_to_pb),
             },
         ))
+    }
+
+    async fn commit_agent_state(
+        &self,
+        request: tonic::Request<runtime_pb::CommitAgentStateRequest>,
+    ) -> Result<tonic::Response<runtime_pb::AgentStateResponse>, tonic::Status> {
+        let request = request.into_inner();
+        if let Some(adapter) = &self.sqlite_adapter {
+            let run = request.run.map(agent_run_record_from_pb);
+            let items: Vec<_> = request
+                .items
+                .into_iter()
+                .map(agent_item_record_from_pb)
+                .collect();
+            let response = match run {
+                Some(run) => match self.run_sqlite_write(|| {
+                    adapter.commit_agent_state(
+                        &request.operation,
+                        run,
+                        items,
+                        request.expected_revision,
+                        request.expected_claim_token.as_deref(),
+                        &pb_idempotency_key(request.idempotency.clone()),
+                    )
+                })? {
+                    Ok((run, items, duplicate)) => AgentStateResponse {
+                        run: Some(run),
+                        items,
+                        duplicate,
+                        error: None,
+                    },
+                    Err(error) => AgentStateResponse {
+                        run: None,
+                        items: Vec::new(),
+                        duplicate: false,
+                        error: Some(error.into()),
+                    },
+                },
+                None => AgentStateResponse {
+                    run: None,
+                    items: Vec::new(),
+                    duplicate: false,
+                    error: Some(write_failed("AgentRunRecord is required").into()),
+                },
+            };
+            return Ok(tonic::Response::new(agent_state_response_to_pb(response)));
+        }
+        let response = self.lock()?.commit_agent_state(CommitAgentStateRequest {
+            operation: request.operation,
+            run: request.run.map(agent_run_record_from_pb),
+            items: request
+                .items
+                .into_iter()
+                .map(agent_item_record_from_pb)
+                .collect(),
+            expected_revision: request.expected_revision,
+            expected_claim_token: request.expected_claim_token,
+            idempotency: request.idempotency.map(idempotency_from_pb),
+        });
+        Ok(tonic::Response::new(agent_state_response_to_pb(response)))
+    }
+
+    async fn get_agent_run(
+        &self,
+        request: tonic::Request<runtime_pb::GetAgentRunRequest>,
+    ) -> Result<tonic::Response<runtime_pb::AgentRunResponse>, tonic::Status> {
+        let run_id = request.into_inner().run_id;
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.get_agent_run(&run_id) {
+                Ok(run) => AgentStateResponse {
+                    run,
+                    items: Vec::new(),
+                    duplicate: false,
+                    error: None,
+                },
+                Err(error) => AgentStateResponse {
+                    run: None,
+                    items: Vec::new(),
+                    duplicate: false,
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            self.lock()?.get_agent_run(&run_id)
+        };
+        Ok(tonic::Response::new(runtime_pb::AgentRunResponse {
+            found: response.run.is_some(),
+            run: response.run.map(agent_run_record_to_pb),
+            error: response.error.map(typed_error_to_pb),
+        }))
+    }
+
+    async fn list_agent_items(
+        &self,
+        request: tonic::Request<runtime_pb::ListAgentItemsRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ListAgentItemsResponse>, tonic::Status> {
+        let run_id = request.into_inner().run_id;
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.list_agent_items(&run_id) {
+                Ok(items) => AgentStateResponse {
+                    run: None,
+                    items,
+                    duplicate: false,
+                    error: None,
+                },
+                Err(error) => AgentStateResponse {
+                    run: None,
+                    items: Vec::new(),
+                    duplicate: false,
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            self.lock()?.list_agent_items(&run_id)
+        };
+        Ok(tonic::Response::new(runtime_pb::ListAgentItemsResponse {
+            items: response
+                .items
+                .into_iter()
+                .map(agent_item_record_to_pb)
+                .collect(),
+            error: response.error.map(typed_error_to_pb),
+        }))
     }
 
     async fn transition_node(
@@ -2987,6 +3322,7 @@ pub fn supported_features() -> Vec<String> {
         FEATURE_ARTIFACT_METADATA.to_owned(),
         FEATURE_TASK_READ.to_owned(),
         FEATURE_PLANNER_REPLAN_CLAIM.to_owned(),
+        FEATURE_AGENT_STATE.to_owned(),
     ]
 }
 
@@ -3161,6 +3497,111 @@ fn planner_replan_claim_to_pb(
         status: claim.status,
         created_at: claim.created_at,
         updated_at: claim.updated_at,
+    }
+}
+
+fn agent_run_record_from_pb(run: runtime_pb::AgentRunRecord) -> AgentRunRecord {
+    AgentRunRecord {
+        run_id: run.run_id,
+        task_id: run.task_id,
+        conversation_id: run.conversation_id,
+        status: run.status,
+        model_edition: run.model_edition,
+        reasoning_effort: run.reasoning_effort,
+        thinking_enabled: run.thinking_enabled,
+        binding_option_digests_json: run.binding_option_digests_json,
+        next_item_sequence: run.next_item_sequence,
+        compacted_through_sequence: run.compacted_through_sequence,
+        active_sample_item_id: run.active_sample_item_id,
+        waiting_call_item_ids: run.waiting_call_item_ids,
+        next_batch_call_ordinal: run.next_batch_call_ordinal,
+        claim_owner: run.claim_owner,
+        claim_token: run.claim_token,
+        lease_expires_at_ms: run.lease_expires_at_ms,
+        revision: run.revision,
+        terminal_reason_code: run.terminal_reason_code,
+        created_at_ms: run.created_at_ms,
+        updated_at_ms: run.updated_at_ms,
+        terminal_at_ms: run.terminal_at_ms,
+    }
+}
+
+fn agent_run_record_to_pb(run: AgentRunRecord) -> runtime_pb::AgentRunRecord {
+    runtime_pb::AgentRunRecord {
+        run_id: run.run_id,
+        task_id: run.task_id,
+        conversation_id: run.conversation_id,
+        status: run.status,
+        model_edition: run.model_edition,
+        reasoning_effort: run.reasoning_effort,
+        thinking_enabled: run.thinking_enabled,
+        binding_option_digests_json: run.binding_option_digests_json,
+        next_item_sequence: run.next_item_sequence,
+        compacted_through_sequence: run.compacted_through_sequence,
+        active_sample_item_id: run.active_sample_item_id,
+        waiting_call_item_ids: run.waiting_call_item_ids,
+        next_batch_call_ordinal: run.next_batch_call_ordinal,
+        claim_owner: run.claim_owner,
+        claim_token: run.claim_token,
+        lease_expires_at_ms: run.lease_expires_at_ms,
+        revision: run.revision,
+        terminal_reason_code: run.terminal_reason_code,
+        created_at_ms: run.created_at_ms,
+        updated_at_ms: run.updated_at_ms,
+        terminal_at_ms: run.terminal_at_ms,
+    }
+}
+
+fn agent_item_record_from_pb(item: runtime_pb::AgentItemRecord) -> AgentItemRecord {
+    AgentItemRecord {
+        item_id: item.item_id,
+        run_id: item.run_id,
+        task_id: item.task_id,
+        sequence: item.sequence,
+        kind: item.kind,
+        state: item.state,
+        payload_json: item.payload_json,
+        payload_size_bytes: item.payload_size_bytes,
+        payload_sha256: item.payload_sha256,
+        parent_item_id: item.parent_item_id,
+        source_call_item_id: item.source_call_item_id,
+        provider_sample_id: item.provider_sample_id,
+        call_ordinal: item.call_ordinal,
+        created_at_ms: item.created_at_ms,
+        committed_at_ms: item.committed_at_ms,
+    }
+}
+
+fn agent_item_record_to_pb(item: AgentItemRecord) -> runtime_pb::AgentItemRecord {
+    runtime_pb::AgentItemRecord {
+        item_id: item.item_id,
+        run_id: item.run_id,
+        task_id: item.task_id,
+        sequence: item.sequence,
+        kind: item.kind,
+        state: item.state,
+        payload_json: item.payload_json,
+        payload_size_bytes: item.payload_size_bytes,
+        payload_sha256: item.payload_sha256,
+        parent_item_id: item.parent_item_id,
+        source_call_item_id: item.source_call_item_id,
+        provider_sample_id: item.provider_sample_id,
+        call_ordinal: item.call_ordinal,
+        created_at_ms: item.created_at_ms,
+        committed_at_ms: item.committed_at_ms,
+    }
+}
+
+fn agent_state_response_to_pb(response: AgentStateResponse) -> runtime_pb::AgentStateResponse {
+    runtime_pb::AgentStateResponse {
+        run: response.run.map(agent_run_record_to_pb),
+        items: response
+            .items
+            .into_iter()
+            .map(agent_item_record_to_pb)
+            .collect(),
+        duplicate: response.duplicate,
+        error: response.error.map(typed_error_to_pb),
     }
 }
 
@@ -3544,6 +3985,97 @@ fn validate_expected_status(
             "expected status does not match current authoritative status",
         )),
     }
+}
+
+pub(crate) fn validate_agent_run_record(run: &AgentRunRecord) -> Result<(), RuntimeSidecarError> {
+    if run.run_id.is_empty()
+        || run.task_id.is_empty()
+        || run.conversation_id.is_empty()
+        || run.model_edition.is_empty()
+        || run.reasoning_effort.is_empty()
+        || run.next_item_sequence == 0
+        || run.compacted_through_sequence >= run.next_item_sequence
+        || !matches!(
+            run.status.as_str(),
+            "running"
+                | "waiting_for_input"
+                | "waiting_for_dependency"
+                | "completed"
+                | "failed"
+                | "cancelled"
+        )
+    {
+        return Err(write_failed("AgentRunRecord violates the closed contract"));
+    }
+    let digests: serde_json::Value = serde_json::from_slice(&run.binding_option_digests_json)
+        .map_err(|_| write_failed("AgentRun binding digests JSON is invalid"))?;
+    if !digests.is_object() {
+        return Err(write_failed(
+            "AgentRun binding digests JSON must be an object",
+        ));
+    }
+    if run
+        .waiting_call_item_ids
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .len()
+        != run.waiting_call_item_ids.len()
+    {
+        return Err(write_failed("AgentRun waiting call IDs must be unique"));
+    }
+    let claim_shape = (
+        run.claim_owner.is_some(),
+        run.claim_token.is_some(),
+        run.lease_expires_at_ms.is_some(),
+    );
+    if !matches!(claim_shape, (false, false, false) | (true, true, true)) {
+        return Err(write_failed("AgentRun claim fields must be all-or-none"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_agent_item_record(
+    item: &AgentItemRecord,
+    run: &AgentRunRecord,
+) -> Result<(), RuntimeSidecarError> {
+    if item.item_id.is_empty()
+        || item.run_id != run.run_id
+        || item.task_id != run.task_id
+        || item.sequence == 0
+        || !matches!(item.state.as_str(), "reserved" | "committed")
+        || !matches!(
+            item.kind.as_str(),
+            "user_message"
+                | "assistant_message"
+                | "tool_call"
+                | "tool_result"
+                | "skill_activation"
+                | "context_summary"
+                | "continuation"
+        )
+        || item.payload_json.len() > 131_072
+        || item.payload_size_bytes != item.payload_json.len() as u64
+        || !item.payload_json.ends_with(b"\n")
+    {
+        return Err(write_failed("AgentItemRecord violates the closed contract"));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&item.payload_json[..item.payload_json.len() - 1])
+            .map_err(|_| write_failed("AgentItem payload JSON is invalid"))?;
+    let mut canonical = serde_json::to_vec(&parsed)
+        .map_err(|_| write_failed("AgentItem payload JSON cannot be canonicalized"))?;
+    canonical.push(b'\n');
+    if canonical != item.payload_json {
+        return Err(write_failed("AgentItem payload JSON is not canonical"));
+    }
+    let digest = format!("{:x}", Sha256::digest(&item.payload_json));
+    if digest != item.payload_sha256 {
+        return Err(write_failed("AgentItem payload SHA-256 mismatch"));
+    }
+    if item.kind == "tool_result" && item.source_call_item_id.is_none() {
+        return Err(write_failed("tool_result requires source_call_item_id"));
+    }
+    Ok(())
 }
 
 pub(crate) fn idempotency_conflict(message: &str) -> RuntimeSidecarError {

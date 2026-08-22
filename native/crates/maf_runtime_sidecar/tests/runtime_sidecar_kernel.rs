@@ -1,9 +1,136 @@
 use maf_runtime_sidecar::{
-    AppendEventRequest, BundleRevisionResult, COMPONENT_ID, CompatibilityCheck,
-    CompatibilityCheckRequest, HealthState, Idempotency, PROTOCOL_VERSION, ReadinessState,
-    ReplayEventsRequest, RuntimeSidecarKernel, RuntimeSidecarService, TaskNodeRecord, TaskRecord,
-    TaskRouteAssignment,
+    AgentItemRecord, AgentRunRecord, AppendEventRequest, BundleRevisionResult, COMPONENT_ID,
+    CommitAgentStateRequest, CompatibilityCheck, CompatibilityCheckRequest, HealthState,
+    Idempotency, PROTOCOL_VERSION, ReadinessState, ReplayEventsRequest, RuntimeSidecarKernel,
+    RuntimeSidecarService, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
 };
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+#[derive(Deserialize)]
+struct CanonicalVector {
+    value: serde_json::Value,
+    canonical_json: String,
+    size_bytes: usize,
+    sha256: String,
+}
+
+#[test]
+fn shared_python_rust_agent_payload_vectors_match() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tests/fixtures/agent_payload_vectors.json");
+    let vectors: Vec<CanonicalVector> = serde_json::from_str(
+        &std::fs::read_to_string(path).expect("read shared Agent payload vectors"),
+    )
+    .expect("decode vectors");
+    for vector in vectors {
+        let mut canonical = serde_json::to_vec(&vector.value).expect("canonicalize JSON");
+        canonical.push(b'\n');
+        assert_eq!(canonical, vector.canonical_json.as_bytes());
+        assert_eq!(canonical.len(), vector.size_bytes);
+        assert_eq!(format!("{:x}", Sha256::digest(&canonical)), vector.sha256);
+    }
+}
+
+fn agent_run(revision: u64) -> AgentRunRecord {
+    AgentRunRecord {
+        run_id: "run-agent".to_owned(),
+        task_id: "task-agent".to_owned(),
+        conversation_id: "conv-agent".to_owned(),
+        status: "running".to_owned(),
+        model_edition: "edition".to_owned(),
+        reasoning_effort: "minimal".to_owned(),
+        thinking_enabled: false,
+        binding_option_digests_json: b"{}".to_vec(),
+        next_item_sequence: revision + 1,
+        compacted_through_sequence: 0,
+        active_sample_item_id: None,
+        waiting_call_item_ids: Vec::new(),
+        next_batch_call_ordinal: 0,
+        claim_owner: None,
+        claim_token: None,
+        lease_expires_at_ms: None,
+        revision,
+        terminal_reason_code: None,
+        created_at_ms: 1,
+        updated_at_ms: revision as i64 + 1,
+        terminal_at_ms: None,
+    }
+}
+
+fn agent_item() -> AgentItemRecord {
+    let payload = b"{\"text\":\"ok\"}\n".to_vec();
+    AgentItemRecord {
+        item_id: "item-agent-1".to_owned(),
+        run_id: "run-agent".to_owned(),
+        task_id: "task-agent".to_owned(),
+        sequence: 1,
+        kind: "assistant_message".to_owned(),
+        state: "committed".to_owned(),
+        payload_size_bytes: payload.len() as u64,
+        payload_sha256: format!("{:x}", Sha256::digest(&payload)),
+        payload_json: payload,
+        parent_item_id: None,
+        source_call_item_id: None,
+        provider_sample_id: Some("sample".to_owned()),
+        call_ordinal: None,
+        created_at_ms: 1,
+        committed_at_ms: Some(1),
+    }
+}
+
+#[test]
+fn agent_state_commit_is_atomic_cas_idempotent_and_ordered() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    let create = CommitAgentStateRequest {
+        operation: "create_run".to_owned(),
+        run: Some(agent_run(0)),
+        items: Vec::new(),
+        expected_revision: 0,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: "agent-create".to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+    };
+    let (_, _, duplicate) = kernel
+        .commit_agent_state(create.clone())
+        .expect("create AgentRun");
+    assert!(!duplicate);
+    assert!(kernel.commit_agent_state(create).expect("exact retry").2);
+    let commit = CommitAgentStateRequest {
+        operation: "commit_sample".to_owned(),
+        run: Some(agent_run(1)),
+        items: vec![agent_item()],
+        expected_revision: 0,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: "agent-sample".to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+    };
+    kernel.commit_agent_state(commit).expect("commit sample");
+    assert_eq!(kernel.get_agent_run("run-agent").unwrap().revision, 1);
+    assert_eq!(kernel.list_agent_items("run-agent"), vec![agent_item()]);
+    let stale = CommitAgentStateRequest {
+        operation: "commit_outcome".to_owned(),
+        run: Some(agent_run(2)),
+        items: Vec::new(),
+        expected_revision: 0,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: "agent-stale".to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+    };
+    assert_eq!(
+        kernel.commit_agent_state(stale).unwrap_err().code,
+        "runtime_store_write_failed"
+    );
+}
 
 fn task_node(status: &str) -> TaskNodeRecord {
     TaskNodeRecord {
