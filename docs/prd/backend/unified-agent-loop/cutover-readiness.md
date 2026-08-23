@@ -1,14 +1,14 @@
 # 统一 Agent Loop Cutover Readiness
 
-- **日期**：2026-08-22
+- **日期**：2026-08-23
 - **证据状态**：closed
 - **适用分支**：main
-- **tested commit**：af5dfd8d52a2993eac76eb2314de425306f1fe0a
-- **tested tree**：c1c4656fb78dccf6b6ae5cbdab196dbd0e8f34de
-- **证据边界**：该commit是P5-B已测试代码检查点；本证据的后续docs-only commit不改变已测试runtime/frontend树。P6-A必须绑定
-  当时HEAD重新复验，不得沿用本文件替代clean-archive rehearsal。
+- **tested DAG commit/tree**：`7bb8a05f8acdaf05349624dbcbc68027fa8f8f08` / `cfdb89bf3c5e083c7893f1ec60085a04ad1f9801`
+- **tested Skill commit/tree**：`49b3aa0412438b55bbabc0c5ac6cad7fb14cf71f` / `06c8ff8924302a3163792ace214c4df1f9afdd14`
+- **证据边界**：上述双仓检查点是P6-A已测试clean archive authority；本证据的后续docs-only commit不改变已测试runtime、
+  frontend或Skill树。P6-B必须以正常commit推进，回滚时成对revert，不得用本文件替代代码、数据或pre-Phase7 schema证明。
 - **schema inventory状态**：closed inventory；只登记Phase 7待删对象，本阶段不执行破坏性迁移。
-- **remaining blocker结论**：Phase 5无未知入口或未闭合门禁；Phase 6/7的计划工作仍是显式blocker，禁止提前部署或删schema。
+- **remaining blocker结论**：P6-A门禁已闭合；P6-B/P6-C与Phase 7的计划工作仍是显式blocker，禁止提前部署、切换authority或删schema。
 
 ## 1. Phase 状态
 
@@ -20,7 +20,7 @@
 | Phase 3 | proof_complete | `8e21e01`～`066f1e6`；durable loop、compaction、atomic final闭合 |
 | Phase 4 | proof_complete | `b982386`、`927e122`；multi-waiting、continuation、recovery、cancel/no-replay闭合 |
 | Phase 5 | proof_complete | P5-A `768dd00`；P5-B tested commit `af5dfd8`；后端、Frontend、可访问性及本readiness闭合 |
-| Phase 6 | blocked | P6-A仍缺权威外部Agent Skill bundle/runtime的required no-skip证据；当前正式start仍为DAG |
+| Phase 6 | in_progress | P6-A clean rollback authority已冻结；下一检查点P6-B，当前正式start仍为DAG |
 | Phase 7 | pending | backup/restore operator、三backend破坏性schema删除和最终真实MCP证明尚未开始 |
 
 ## 2. Start、resume、cancel 与 recovery 入口
@@ -45,9 +45,14 @@ bundle内全部切换到replacement authority，不得保留请求flag、fallbac
 | 证据域 | 当前tested commit结果 |
 |---|---|
 | P5-A canonical backend | 41 tests passed |
-| API discover | 493 tests passed |
-| Storage discover | 398 tests passed；7项既有外部PG环境skip，真实PG门禁已在Phase 1独立闭合 |
+| API discover | 502 tests passed |
+| Storage discover | PostgreSQL 17七个隔离库441 tests passed，zero skip；临时库和role已精确清理 |
+| Agent Skill discover | 209 tests passed，zero skip |
+| Integrations discover | macOS 705 tests passed、2项Linux-only诊断skip；`linux/amd64`候选环境705 tests passed，zero skip |
+| Core/Lifecycle/Orchestration/Main Agent | 46 / 36 / 209 / 65 tests passed |
+| MCP Dispatch/MCP Tool/E2E | 15 / 15 / 2 tests passed |
 | Observability discover | 39 tests passed |
+| Scripts/Deployment | 51 / 3 tests passed |
 | Frontend focused Agent reducer/SSE | 55 tests passed |
 | Frontend App multi-waiting | 1 test passed；完整suite同时覆盖该用例 |
 | Frontend Vitest | 21 files、313 tests passed |
@@ -86,19 +91,19 @@ backup→restore-check→apply门禁。
 | blocker | 解除条件 | 当前结论 |
 |---|---|---|
 | 当前9个入口仍命中DAG | P6-B全入口spies/E2E只命中Agent | expected pending work |
-| 尚无最后DAG clean rollback archive | P6-A从clean archive在隔离库复验Phase 0～5 | blocks P6-B |
+| 最后DAG clean rollback archive | P6-A从双仓clean archive在隔离环境复验Phase 0～5 | resolved：双archive、只读Docker与Linux no-skip已闭合 |
 | DAG runtime/config/event/test删除尚未执行 | P6-B单一受审bundle完成并通过零引用扫描 | blocks cutover_complete |
 | 三backend备份恢复/operator未实现 | P7-A真实restore proof | blocks destructive schema deletion |
 | 真实MCP最终smoke未执行 | P7-C受控授权smoke或用户明确书面waiver | blocks final complete |
 | canonical storage discover存在环境skip，且共享单库会产生跨模块schema污染 | 为每类真实PG合同提供隔离库并使canonical storage全域命令零skip/零失败 | resolved：`10c0b9e`，441项零skip通过 |
-| external Agent Skill suite有43项平台/外部bundle skip，当前环境缺少权威`/data/peihai/vibe-breeding-dev/skills`挂载 | 挂载与当前测试合同匹配的权威Skill bundle及所需runtime，令canonical Agent Skill命令零skip/零失败 | blocks P6-A freeze |
+| external Agent Skill suite曾有43项平台/外部bundle skip | 挂载与当前测试合同匹配的权威Skill bundle及所需runtime，令canonical Agent Skill命令零skip/零失败 | resolved：209项零skip、零失败 |
 
-P6-A已进入预检但未达到freeze条件。当前候选DAG代码检查点为`10c0b9e8af67f382f64210efc21f88bedcd32ab9`，
-tree为`00ce0daed27a2730e17a345bceedc5790177804f`；该检查点包含预检发现并已由真实PostgreSQL证明的runtime manifest CHECK命名、
-CP7 owner guard初始化和canonical storage模块隔离修复，但不是已冻结回滚点。因外部Agent Skill required no-skip门禁仍未闭合，未执行clean archive rehearsal，
-未进入P6-B，也未改变任何route或生产数据。本文件不授权部署`prod`、迁移旧DAG Task、跳过P6-A切换或删除。
+P6-A已达到freeze条件。最后DAG代码authority为`7bb8a05f8acdaf05349624dbcbc68027fa8f8f08`/tree
+`cfdb89bf3c5e083c7893f1ec60085a04ad1f9801`，外部Skill authority为`49b3aa0412438b55bbabc0c5ac6cad7fb14cf71f`/tree
+`06c8ff8924302a3163792ace214c4df1f9afdd14`。P6-B尚未改变任何route或数据；本文件不授权部署`prod`、迁移旧DAG Task、
+跳过P6-B/P6-C或执行Phase 7删除。
 
-### 6.1 P6-A预检证据（2026-08-22）
+### 6.1 P6-A历史预检证据（2026-08-22）
 
 - 通过：Python compileall；core 46项、lifecycle 36项、integrations 705项、orchestration 209项、main_agent 65项、
   mcp_dispatch 15项、mcp_tool 15项、API 493项、E2E 2项、observability 39项、scripts 48项、deployment 3项；
@@ -115,6 +120,27 @@ CP7 owner guard初始化和canonical storage模块隔离修复，但不是已冻
 - 第三次外部环境审计：宿主`/data/peihai/vibe-breeding-dev/skills`不存在；当前backend的`/app/skill`挂载为只读空Skill卷且无
   `SKILL.md`；当前backend、本地`0.1.24`与已缓存开发镜像的`/app/skill`镜像层均无`SKILL.md`；Docker无其他Skill卷。
   因此不存在可直接复验的权威bundle，且不允许用本地漂移副本或合成fixture代替required证据。
+
+### 6.2 P6-A冻结证据（2026-08-23）
+
+- 双仓authority：主仓commit/tree为`7bb8a05f8acdaf05349624dbcbc68027fa8f8f08`/
+  `cfdb89bf3c5e083c7893f1ec60085a04ad1f9801`；外部`vibe-breeding/dev` commit/tree为
+  `49b3aa0412438b55bbabc0c5ac6cad7fb14cf71f`/`06c8ff8924302a3163792ace214c4df1f9afdd14`。
+- clean archive：主仓archive SHA-256为`7746c19b1d77090581ad00f85ea9c59498615197d81b364f34f6ab704433c6db`；
+  外部Skill仓archive SHA-256为`495fb0d145540b7403ed2bdc17e0f5a1ff530485cffbed3a3d1ed6583e106bcb`。
+- exact bundle：两份clean archive均得到
+  `sha256:38f4842d88a8d57a9df75b1bdd7284097c78429de0338ebff819358e312c4e86`，118文件、9,992,399字节、
+  约25ms；两项未跟踪Finder metadata不属于Git authority，未进入archive或digest。
+- clean archive回归：focused contract/route/Mini 11项、Agent Skill 209项、API 502项全部零skip、零失败；使用受跟踪的
+  非敏感Agent-ready配置，未读取ignored本地配置。
+- Docker候选：`linux/amd64`镜像ID
+  `sha256:f4c62fad40b0d6df7d76c8050737665eeddbb3893597dea4e0fb45caaecccec4` readiness通过并注册12个合同合法Skill；
+  `/app/skill`只读挂载的写入尝试被拒绝。篡改bundle容器在readiness前以
+  `project_skill_bundle_digest_mismatch`退出，不存在catalog后校验窗口。
+- Linux required证据：临时候选环境先构建并安装core lifecycle与safety kernels PyO3 wheel，再运行完整Integrations 705项，
+  最终零skip、零失败；该结果替代macOS两项诊断skip，不改变现有运行时代码。
+- 回滚边界：P6-B/P6-C失败时停止新Task，以正常`git revert`成对回退主仓cutover bundle和外部Skill提交；不使用
+  reset/checkout移动分支，不恢复旧DAG Task，不回退单一仓或单一backend。
 
 ## 7. 验证命令
 

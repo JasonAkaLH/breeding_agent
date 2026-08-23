@@ -5,7 +5,7 @@
 - 日期：2026-08-22
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 5均`proof_complete`；P5-A～P5-B green；P6-A因权威外部Agent Skill required skip保持`blocked`
+- 执行状态：Phase 0～Phase 5均`proof_complete`；P6-A green并已冻结双仓clean rollback authority；下一检查点P6-B
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -141,7 +141,7 @@ Phase 0～5只允许additive schema、行为保持Kernel抽取和test-only Agent
 | 4 | P4-B | continuation、crash recovery、cancel/no-replay | `proof_complete` |
 | 5 | P5-A | API/SSE/history/graph/events/metrics投影 | `in_progress` |
 | 5 | P5-B | Frontend恢复、多waiting、可访问性与readiness报告 | `proof_complete` |
-| 6 | P6-A | 最后DAG回滚检查点与cutover预检 | `blocked`：外部Agent Skill required no-skip门禁未闭合 |
+| 6 | P6-A | 最后DAG回滚检查点与cutover预检 | `proof_complete` |
 | 6 | P6-B | 全入口切换、DAG runtime/wiring/config删除 | `in_progress` |
 | 6 | P6-C | 全量证明、删除报告与文档authority切换 | `cutover_complete` |
 | 7 | P7-A | 三backend仓库外备份及隔离恢复演练 | `in_progress` |
@@ -601,6 +601,17 @@ Green gate：具备可整体回滚的DAG checkpoint；任一缺口使Phase 6保�
 
 建议commit：`docs(agent): freeze pre-cutover rollback checkpoint`；该docs-only commit记录已测试的DAG代码commit/tree，
 自身仍是可运行DAG检查点。
+
+执行证据（P6-A green）：主仓DAG检查点`7bb8a05f8acdaf05349624dbcbc68027fa8f8f08`/tree
+`cfdb89bf3c5e083c7893f1ec60085a04ad1f9801`与外部`vibe-breeding/dev` Skill检查点
+`49b3aa0412438b55bbabc0c5ac6cad7fb14cf71f`/tree `06c8ff8924302a3163792ace214c4df1f9afdd14`分别生成clean archive；
+archive SHA-256为`7746c19b1d77090581ad00f85ea9c59498615197d81b364f34f6ab704433c6db`与
+`495fb0d145540b7403ed2bdc17e0f5a1ff530485cffbed3a3d1ed6583e106bcb`。两份archive中的Skill bundle均精确得到
+`sha256:38f4842d88a8d57a9df75b1bdd7284097c78429de0338ebff819358e312c4e86`（118文件、9,992,399字节）；
+Agent Skill 209项和API 502项零skip/零失败。`linux/amd64`候选镜像`sha256:f4c62fad40b0d6df7d76c8050737665eeddbb3893597dea4e0fb45caaecccec4`
+以只读Skill挂载启动并注册12个合法Skill，篡改bundle在readiness前以`project_skill_bundle_digest_mismatch`拒绝；候选环境
+Integrations 705项零skip、零失败。正式route、数据与`prod`均未改变；P6-B回滚必须成对revert主仓cutover提交和外部Skill
+提交，不移动分支指针。
 
 ### P6-B：单一受审commit序列完成cutover与删除
 

@@ -1,8 +1,8 @@
 # Phase 6：全入口 Clean Cutover 与 DAG Runtime 删除 PRD
 
 - **日期**：2026-08-22
-- **状态**：blocked（P6-A权威外部Agent Skill required no-skip未闭合）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P6-A预检已开始，未进入cutover
+- **状态**：in_progress（P6-A proof_complete；下一检查点P6-B，尚未进入cutover）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P6-A双仓clean archive与Linux零skip证据已冻结
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～5必须`proof_complete`，cutover-readiness无未知入口
 - **主责需求**：FR-1、FR-14
@@ -29,6 +29,10 @@ Phase 0～5已经证明Model、Storage、Invocation、Loop、Recovery和API/Fron
 - 当前分支确认是`main`，不涉及`prod`。
 
 任一条件缺失，本阶段为`blocked`。
+
+P6-A进入门禁已全部闭合：主仓DAG检查点`7bb8a05`/tree `cfdb89b`与外部Skill检查点`49b3aa0`/tree
+`06c8ff8`的clean archive、相同bundle digest `sha256:38f4842d…c4e86`、只读`linux/amd64`候选启动、篡改前置拒绝及
+Integrations 705项零skip证据均记录于`cutover-readiness.md`。该结论只解锁P6-B，不表示任何正式入口已切换。
 
 ### 2.1 当前证据与受影响模块
 
