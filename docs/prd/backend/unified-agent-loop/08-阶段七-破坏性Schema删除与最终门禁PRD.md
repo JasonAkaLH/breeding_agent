@@ -1,8 +1,8 @@
 # Phase 7：破坏性 Schema 删除与最终门禁 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（Phase 6 cutover_complete；下一检查点P7-A备份与restore-all）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现尚未开始
+- **状态**：in_progress（Phase 6 cutover_complete；P7-A restore_proof_complete；下一检查点P7-B）
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；P7-A真实备份恢复证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 6必须`cutover_complete`
 - **主责需求**：FR-25

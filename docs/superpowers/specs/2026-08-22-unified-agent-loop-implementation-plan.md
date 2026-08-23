@@ -5,7 +5,7 @@
 - 日期：2026-08-23
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 5均`proof_complete`；Phase 6 `cutover_complete`；下一检查点P7-A
+- 执行状态：Phase 0～Phase 5均`proof_complete`；Phase 6 `cutover_complete`；P7-A `restore_proof_complete`；下一检查点P7-B
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -143,8 +143,8 @@ Phase 0～5只允许additive schema、行为保持Kernel抽取和test-only Agent
 | 6 | P6-A | 最后DAG回滚检查点与cutover预检 | `proof_complete` |
 | 6 | P6-B | 全入口切换、DAG runtime/wiring/config删除 | `proof_complete` |
 | 6 | P6-C | 全量证明、删除报告与文档authority切换 | `cutover_complete` |
-| 7 | P7-A | 三backend仓库外备份及隔离恢复演练 | `in_progress` |
-| 7 | P7-B | TaskEdge/DAG-only schema/proto破坏性删除 | `pending` |
+| 7 | P7-A | 三backend仓库外备份及隔离恢复演练 | `restore_proof_complete` |
+| 7 | P7-B | TaskEdge/DAG-only schema/proto破坏性删除 | `in_progress` |
 | 7 | P7-C | 全量、真实环境、静态与文档最终证明 | `pending` |
 
 ## 5. Phase 0：基线与 Agent Model Contract
@@ -713,6 +713,13 @@ Green gate：三类备份均实际恢复成功；只存在文件、dry-run或打
 
 建议commit序列：`feat(storage): add agent schema migration operator`，随后
 `docs(agent): record pre-migration restore proof`。两个commit共同构成P7-A，未取得restore proof时不得进入P7-B。
+
+执行结果（2026-08-23）：`36752d2`实现operator，`e43b2da`补齐恢复后真实Rust Sidecar readiness，`7109f50`确保exact
+retry返回前重新校验report ref与backup文件。Canonical report SHA为
+`sha256:da8002c7acda659846d1f550c739a381f84f8871e85774396cc5bbb1583a3adb`，三backend仓库外backup-set SHA为
+`sha256:99a2534b24dbe85bb2e34ee55dedb80f95535e0abceb6acf7994dad85008193a`；SQLite、PostgreSQL 17和Runtime Sidecar均在
+全新隔离目标实际恢复，62项计划门禁及合并old-DAG application smoke后的75项均零skip通过。完整脱敏证据见
+`docs/prd/backend/unified-agent-loop/destructive-migration-evidence.md`。P7-A状态为`restore_proof_complete`，下一步P7-B。
 
 ### P7-B：DAG physical schema/proto删除
 

@@ -30,7 +30,7 @@ class UnifiedAgentLoopEvidenceContractTest(unittest.TestCase):
                 "active-prd-inventory.md": "closed",
                 "cutover-readiness.md": "closed",
                 "dag-runtime-deletion-report.md": "closed",
-                "destructive-migration-evidence.md": "not_due",
+                "destructive-migration-evidence.md": "open",
             },
         )
 
@@ -64,6 +64,25 @@ class UnifiedAgentLoopEvidenceContractTest(unittest.TestCase):
             self.assertEqual(
                 collect_legacy_test_matches(root),
                 {"tests/test_old_runtime.py": ("TaskEdge",)},
+            )
+
+    def test_phase_seven_evidence_is_present_but_not_finally_closed(self) -> None:
+        self.assertEqual(
+            validate_handoff_schedule(
+                _REPO_ROOT,
+                phase=7,
+                require_closed=False,
+            )["destructive-migration-evidence.md"],
+            "open",
+        )
+        with self.assertRaisesRegex(
+            EvidenceContractError,
+            "destructive-migration-evidence.md evidence status must be closed",
+        ):
+            validate_handoff_schedule(
+                _REPO_ROOT,
+                phase=7,
+                require_closed=True,
             )
 
     def test_handoff_becomes_required_at_owner_phase(self) -> None:

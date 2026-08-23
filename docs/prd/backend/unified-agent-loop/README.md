@@ -1,7 +1,7 @@
 # 统一同模型 Agent Loop 分阶段 PRD 索引
 
 - **日期**：2026-08-23
-- **状态**：Phase 6 `cutover_complete`；当前任务编排authority；下一检查点P7-A
+- **状态**：Phase 6 `cutover_complete`；P7-A `restore_proof_complete`；当前任务编排authority；下一检查点P7-B
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
@@ -36,7 +36,7 @@
 | Phase 4 | `05-阶段四-WaitingContinuation与RecoveryPRD.md` | Waiting、Continuation、Crash Recovery、Cancel | proof_complete |
 | Phase 5 | `06-阶段五-APISSEFrontend与Observability适配PRD.md` | API/SSE/history/graph、Frontend、事件指标、可访问性 | proof_complete |
 | Phase 6 | `07-阶段六-全入口CleanCutover与DAGRuntime删除PRD.md` | 全入口切换、旧runtime/wiring删除、单控制面 | cutover_complete |
-| Phase 7 | `08-阶段七-破坏性Schema删除与最终门禁PRD.md` | 旧physical storage/proto删除、恢复演练、最终证明 | in_progress（下一检查点P7-A） |
+| Phase 7 | `08-阶段七-破坏性Schema删除与最终门禁PRD.md` | 旧physical storage/proto删除、恢复演练、最终证明 | in_progress（P7-A闭合；下一检查点P7-B） |
 
 ## 严格依赖
 
