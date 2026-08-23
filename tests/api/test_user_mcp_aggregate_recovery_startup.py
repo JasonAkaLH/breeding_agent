@@ -3,13 +3,20 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from functools import partial
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from src.api.runtime import ApiRuntime, build_api_runtime
+from src.api.runtime import ApiRuntime, build_api_runtime as _build_api_runtime
+
+build_api_runtime = partial(
+    _build_api_runtime,
+    skill_roots=(),
+    public_skill_roots=(),
+)
 from src.core.enums import NodeStatus, TaskStatus
 from tests.api.support import InMemoryTaskRuntimeSidecar
 
@@ -30,13 +37,12 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             enable_user_mcp=True,
             master_key_bytes=b"a" * 32,
             enable_platform_llm=False,
-            enable_llm_planner=False,
             enable_conversation_title_llm=False,
             enable_conversation_memory=False,
             runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
         )
 
-    async def test_network_capable_dispatch_recovery_starts_only_post_ready(self) -> None:
+    async def test_dispatch_recovery_finishes_before_runtime_becomes_ready(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(
@@ -53,20 +59,22 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             started = asyncio.Event()
             release = asyncio.Event()
 
-            async def post_ready_recovery() -> None:
+            async def startup_recovery() -> None:
                 started.set()
                 await release.wait()
 
-            runtime._reconcile_mcp_dispatch_recovery = post_ready_recovery
+            runtime._reconcile_mcp_dispatch_recovery = startup_recovery
 
-            await asyncio.wait_for(runtime.start(), timeout=2)
+            start_task = asyncio.create_task(runtime.start())
             await asyncio.wait_for(started.wait(), timeout=1)
-            self.assertFalse(runtime._mcp_post_ready_recovery_task.done())
+            self.assertFalse(start_task.done())
+            self.assertIsNone(runtime._mcp_result_artifact_reconciler_task)
+
+            release.set()
+            await asyncio.wait_for(start_task, timeout=2)
             self.assertIsNotNone(runtime._mcp_result_artifact_reconciler_task)
             self.assertFalse(runtime._mcp_result_artifact_reconciler_task.done())
 
-            release.set()
-            await asyncio.wait_for(runtime._mcp_post_ready_recovery_task, timeout=1)
             await runtime.shutdown()
             self.assertIsNone(runtime._mcp_result_artifact_reconciler_task)
 

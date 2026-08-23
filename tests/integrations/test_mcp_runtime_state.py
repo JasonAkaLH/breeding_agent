@@ -45,7 +45,7 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "通过 CRM MCP 服务查询客户基础信息。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                             },
                             {"tool_name": "hidden_tool", "expose": False},
                         ],
@@ -73,8 +73,8 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(descriptor.source, "mcp")
         self.assertEqual(descriptor.name, "Customer Search")
         self.assertNotIn("server text", descriptor.description)
-        self.assertEqual(bundle.payload_policies["mcp.crm.search_customer"].planner_allowed_fields, ("keyword",))
         binding = state.binding_for_capability("mcp.crm.search_customer")
+        self.assertEqual(binding.model_allowed_fields, ("keyword",))
         self.assertEqual(binding.server_id, "crm")
         self.assertEqual(binding.tool_name, "search_customer")
 
@@ -135,7 +135,7 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(state.active_bundle.descriptors, ())
-        self.assertEqual(state.active_bundle.diagnostics[0].reason, "invalid_planner_allowlist")
+        self.assertEqual(state.active_bundle.diagnostics[0].reason, "invalid_model_allowlist")
 
     async def test_prepare_refresh_does_not_activate_bundle_until_commit(self) -> None:
         first_client = FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}}}])

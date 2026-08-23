@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+from functools import partial
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -11,7 +12,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from src.api.dto import SubmitMessageRequest
-from src.api.runtime import ApiRuntime, build_api_runtime
+from src.api.runtime import ApiRuntime, build_api_runtime as _build_api_runtime
+
+build_api_runtime = partial(
+    _build_api_runtime,
+    skill_roots=(),
+    public_skill_roots=(),
+)
 from src.capabilities.mcp_dispatch.models import (
     MCPSelectorAction,
     MCPSelectorActionType,
@@ -134,7 +141,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             {"user_key": "retained"},
         )
 
-    def _build_runtime(self, root: Path, *, planner_text_generator=None):
+    def _build_runtime(self, root: Path, *, main_agent_stream_generator=None):
         key_path = root / "mcp.key"
         key_path.write_text(
             "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
@@ -147,8 +154,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             enable_user_mcp=True,
             master_key_bytes=b"a" * 32,
             enable_platform_llm=False,
-            enable_llm_planner=False,
-            planner_text_generator=planner_text_generator,
+            main_agent_stream_generator=main_agent_stream_generator,
             enable_conversation_title_llm=False,
             enable_conversation_memory=False,
             runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
@@ -1294,7 +1300,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("remote-private-id", str(projection_events[0].payload))
             await runtime.shutdown()
 
-    async def test_v2_open_interrupt_waits_then_recovers_automatic_metadata(
+    async def test_legacy_v2_open_interrupt_never_recovers_without_agent_locator(
         self,
     ) -> None:
         with (
@@ -1398,15 +1404,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.storage.save_interrupt(interrupt)
 
-            resume = AsyncMock()
-            with patch.object(
-                runtime.orchestration_service,
-                "resume_persisted_mcp_dispatch_node",
-                resume,
-            ):
-                await runtime._reconcile_cp7_mcp_authority()
-
-            resume.assert_not_awaited()
+            await runtime._reconcile_cp7_mcp_authority()
             outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(
                 mcp_dispatch_resume_outbox_id(intent_id)
             )
@@ -1421,14 +1419,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             task = await runtime.storage.save_task(
                 replace(task, cancel_requested_at=now)
             )
-            cancelled_resume = AsyncMock()
-            with patch.object(
-                runtime.orchestration_service,
-                "resume_persisted_mcp_dispatch_node",
-                cancelled_resume,
-            ):
-                await runtime._reconcile_cp7_mcp_authority()
-            cancelled_resume.assert_not_awaited()
+            await runtime._reconcile_cp7_mcp_authority()
             outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(
                 mcp_dispatch_resume_outbox_id(intent_id)
             )
@@ -1436,27 +1427,11 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             task = await runtime.storage.save_task(
                 replace(task, cancel_requested_at=None)
             )
-            resume = AsyncMock(
-                return_value=(
-                    replace(ready_node, status=NodeStatus.COMPLETED),
-                    {},
-                )
-            )
-            with patch.object(
-                runtime.orchestration_service,
-                "resume_persisted_mcp_dispatch_node",
-                resume,
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "agent_continuation_locator_missing",
             ):
                 await runtime._reconcile_cp7_mcp_authority()
-
-            resume.assert_awaited_once()
-            resume_request = resume.await_args.args[0]
-            self.assertEqual(
-                resume_request.metadata["mcp_binding_mode"], "automatic"
-            )
-            self.assertEqual(
-                resume_request.metadata["user_message"], "wait for my answer"
-            )
             await runtime.shutdown()
 
     async def test_runtime_restart_completes_2025_task_result_into_safe_store(
@@ -1673,12 +1648,12 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ),
         ):
-            async def planner_text_generator(_prompt: str) -> str:
+            async def main_agent_stream_generator(_prompt: str) -> str:
                 return "{}"
 
             runtime = self._build_runtime(
                 Path(directory),
-                planner_text_generator=planner_text_generator,
+                main_agent_stream_generator=main_agent_stream_generator,
             )
             self.assertIsNotNone(runtime._mcp_rollout_metric_recorder)
             lease_expiry_sink = (
@@ -1998,11 +1973,11 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ),
         ):
-            async def planner_text_generator(_prompt: str) -> str:
+            async def main_agent_stream_generator(_prompt: str) -> str:
                 return "{}"
 
             runtime = self._build_runtime(
-                Path(directory), planner_text_generator=planner_text_generator
+                Path(directory), main_agent_stream_generator=main_agent_stream_generator
             )
             now = datetime(2026, 8, 13, 12, 4, 30)
             await runtime.storage.save_conversation(Conversation("conv-a", "alice"))
@@ -2132,12 +2107,12 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ),
         ):
-            async def planner_text_generator(_prompt: str) -> str:
+            async def main_agent_stream_generator(_prompt: str) -> str:
                 return "{}"
 
             runtime = self._build_runtime(
                 Path(directory),
-                planner_text_generator=planner_text_generator,
+                main_agent_stream_generator=main_agent_stream_generator,
             )
             now = datetime(2026, 8, 13, 12, 2, 30, tzinfo=timezone.utc)
             await runtime.storage.save_conversation(Conversation("conv-a", "alice"))

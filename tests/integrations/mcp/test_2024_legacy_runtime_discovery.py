@@ -79,7 +79,7 @@ class MCP2024LegacyRuntimeDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Legacy Customer Search",
                                 "public_description": "通过 legacy MCP 查询客户。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                             }
                         ],
                     }

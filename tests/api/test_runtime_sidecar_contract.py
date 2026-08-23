@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from src.core.enums import TaskStatus
 from src.core.models import EventRecord, Task
-from src.orchestration.models import OrchestrationRequest
+from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract, mode_for_component
 from tests.api.support import APITestCase
 from tests.api.test_user_mcp_runtime_wiring import (
@@ -135,12 +135,13 @@ class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
 
 
 class RuntimeSidecarContractAPITest(APITestCase):
-    def _request(self, task_id: str = "task-bundle-pin") -> OrchestrationRequest:
-        return OrchestrationRequest(
+    def _request(self, task_id: str = "task-bundle-pin") -> AgentExecutionRequest:
+        return AgentExecutionRequest(
             task_id=task_id,
             conversation_id="conv-bundle-pin",
             root_message_id="msg-bundle-pin",
             user_message="bundle pin",
+            owner_scope="owner:test",
         )
 
     async def test_dispatcher_enforce_rejects_python_legacy_bundle_revision_pin_without_sidecar(self) -> None:
@@ -179,7 +180,14 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(self.runtime._task_skill_bundle_revisions[request.task_id], retained_revision)  # noqa: SLF001
 
     async def test_runtime_configures_grpc_sidecar_client_from_deployment_endpoint_env(self) -> None:
-        sentinel_client = object()
+        class AgentReadySentinelClient:
+            commit_agent_state = staticmethod(lambda **_kwargs: None)
+            get_agent_run = staticmethod(lambda **_kwargs: None)
+            get_agent_run_for_task = staticmethod(lambda **_kwargs: None)
+            list_agent_runs = staticmethod(lambda **_kwargs: None)
+            list_agent_items = staticmethod(lambda **_kwargs: None)
+
+        sentinel_client = AgentReadySentinelClient()
         with (
             patch.dict(os.environ, {"MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535"}),
             patch("src.api.runtime.RuntimeSidecarGrpcClient", return_value=sentinel_client) as client_factory,
@@ -260,7 +268,14 @@ class RuntimeSidecarContractAPITest(APITestCase):
 
     async def test_runtime_enforce_validates_sidecar_artifact_allowlist_before_client_use(self) -> None:
         migration_env = _write_task_authority_migration_evidence(self.workspace)
-        sentinel_client = object()
+        class AgentReadySentinelClient:
+            commit_agent_state = staticmethod(lambda **_kwargs: None)
+            get_agent_run = staticmethod(lambda **_kwargs: None)
+            get_agent_run_for_task = staticmethod(lambda **_kwargs: None)
+            list_agent_runs = staticmethod(lambda **_kwargs: None)
+            list_agent_items = staticmethod(lambda **_kwargs: None)
+
+        sentinel_client = AgentReadySentinelClient()
         manifest, allowlist, metadata = self._write_runtime_sidecar_artifact_trust_files()
         with (
             patch.dict(

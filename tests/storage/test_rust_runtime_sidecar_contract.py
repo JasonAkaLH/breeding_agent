@@ -701,7 +701,7 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         self.assertEqual(
             contract["artifact_policy"]["expected_proto_hash"],
-            "maf_runtime_proto_v1_20260822_agent_atomic_projection",
+            "maf_runtime_proto_v1_20260823_agent_startup_recovery",
         )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:

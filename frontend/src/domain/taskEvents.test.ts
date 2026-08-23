@@ -153,24 +153,16 @@ describe('applyTaskEvent', () => {
     expect(state.seenEventIds).toEqual([]);
   });
 
-  it('replays visible output, reasoning, and skill progress from restoring state', () => {
+  it('replays Agent reasoning and skill progress from restoring state', () => {
     let state = createRestoringTaskState();
-    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '已生成内容', response_role: 'final' }, 'restore-output'));
-    state = applyTaskEvent(state, event('main_agent.reasoning_delta', { delta: '先分析' }, 'restore-reasoning'));
+    state = applyTaskEvent(state, event('agent.reasoning_delta', { delta: '先分析', ordinal: 1, sample_id: 'sample-restore' }, 'restore-reasoning'));
     state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.example', skill_name: 'ExampleSkill', label: '正在处理文件' }, 'restore-skill', 'node-skill'));
 
-    expect(state.assistantText).toBe('已生成内容');
+    expect(state.assistantText).toBe('');
     expect(state.reasoningText).toBe('先分析');
     expect(state.skillStatuses).toEqual([
       expect.objectContaining({ capabilityId: 'skill.example', label: 'ExampleSkill', statusText: '正在处理文件', status: 'running' }),
     ]);
-  });
-
-  it('keeps intermediate main-agent deltas hidden during restore replay', () => {
-    const state = applyTaskEvent(createRestoringTaskState(), event('main_agent.output_delta', { delta: '中间结果', response_role: 'intermediate' }, 'restore-intermediate'));
-
-    expect(state.assistantText).toBe('');
-    expect(state.seenEventIds).toEqual(['restore-intermediate']);
   });
 
   it('maps accepted and running events to business states', () => {
@@ -274,19 +266,17 @@ describe('applyTaskEvent', () => {
     expect(unknownFailure.errorMessage).toContain('数据库暂时不可用');
   });
 
-  it('marks node cancellation, blocked, and orphaned events on matching skill rows', () => {
+  it('marks node cancellation and blocked events on matching skill rows', () => {
     let state = createInitialTaskEventState();
     state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'sql-start', 'node-sql'));
     state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.rcbd', skill_name: 'RCBD' }, 'rcbd-start', 'node-rcbd'));
     state = applyTaskEvent(state, event('node.cancelled', { capability_id: 'skill.data_query' }, 'sql-cancelled', 'node-sql'));
     state = applyTaskEvent(state, event('node.blocked_by_cancellation', { capability_id: 'skill.rcbd' }, 'rcbd-blocked', 'node-rcbd'));
-    state = applyTaskEvent(state, event('node.orphaned', { capability_id: 'skill.report', skill_name: 'ReportSkill' }, 'report-orphaned', 'node-report'));
 
     expect(state.phase).toBe('running');
     expect(state.skillStatuses).toEqual([
       expect.objectContaining({ key: 'node-sql', label: 'data-query', status: 'cancelled', statusText: '已取消' }),
       expect.objectContaining({ key: 'node-rcbd', label: 'RCBD', status: 'blocked', statusText: '已被取消阻断' }),
-      expect.objectContaining({ key: 'node-report', label: 'ReportSkill', status: 'blocked', statusText: '已被重规划跳过' }),
     ]);
   });
 
@@ -307,9 +297,37 @@ describe('applyTaskEvent', () => {
     expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ key: 'node-sql', label: 'data-query', status: 'running', statusText: '正在恢复执行' }));
   });
 
+  it('maps Agent Run terminal events to public terminal phases', () => {
+    const terminalPayload = {
+      compaction_count: 0,
+      duration_seconds: 0,
+      sample_count: 1,
+      tool_call_count: 0,
+    };
+    const completed = applyTaskEvent(createInitialTaskEventState(), event(
+      'agent.run.completed',
+      { ...terminalPayload, outcome: 'completed' },
+      'agent-completed',
+    ));
+    const failed = applyTaskEvent(createInitialTaskEventState(), event(
+      'agent.run.failed',
+      { ...terminalPayload, outcome: 'failed' },
+      'agent-failed',
+    ));
+    const cancelled = applyTaskEvent(createInitialTaskEventState(), event(
+      'agent.run.cancelled',
+      { ...terminalPayload, outcome: 'cancelled' },
+      'agent-cancelled',
+    ));
+
+    expect(completed.phase).toBe('loading_artifacts');
+    expect(failed.phase).toBe('failed');
+    expect(cancelled.phase).toBe('cancelled');
+  });
+
   it('does not create skill rows for main-agent nodes and uses fallback keys when node ids are missing', () => {
     let state = createInitialTaskEventState();
-    state = applyTaskEvent(state, event('node.started', { capability_id: 'main_agent.respond' }, 'main-start', 'node-main'));
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'agent.final_output' }, 'main-start', 'node-main'));
     expect(state.skillStatuses).toEqual([]);
 
     state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.report', skill_name: 'ReportSkill' }, 'fallback-start'));
@@ -317,46 +335,6 @@ describe('applyTaskEvent', () => {
 
     expect(state.skillStatuses).toHaveLength(1);
     expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ key: 'skill.report::ReportSkill', nodeId: null, label: 'ReportSkill', statusText: '正在整理报告' }));
-  });
-
-  it('appends main-agent deltas once by event id', () => {
-    let state = createInitialTaskEventState();
-    const delta = event('main_agent.output_delta', { delta: '你好', ordinal: 1 }, 'evt-delta-1');
-    state = applyTaskEvent(state, delta);
-    state = applyTaskEvent(state, delta);
-    expect(state.phase).toBe('streaming');
-    expect(state.assistantText).toBe('你好');
-  });
-
-  it('only appends final or legacy main-agent response events to the visible assistant text', () => {
-    let state = createInitialTaskEventState();
-    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '中间回答', ordinal: 1, response_role: 'intermediate' }, 'intermediate-delta'));
-    state = applyTaskEvent(state, event('main_agent.output_final', { response_role: 'intermediate' }, 'intermediate-final'));
-
-    expect(state.phase).toBe('idle');
-    expect(state.assistantText).toBe('');
-    expect(state.seenEventIds).toEqual(['intermediate-delta', 'intermediate-final']);
-
-    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '最终回答', ordinal: 1, response_role: 'final' }, 'final-delta'));
-    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '，兼容旧事件', ordinal: 2 }, 'legacy-delta'));
-
-    expect(state.phase).toBe('streaming');
-    expect(state.assistantText).toBe('最终回答，兼容旧事件');
-  });
-
-  it('appends main-agent reasoning deltas separately once by event id', () => {
-    let state = createInitialTaskEventState();
-    const delta = event('main_agent.reasoning_delta', { delta: '先分析', ordinal: 1 }, 'evt-reasoning-1');
-    state = applyTaskEvent(state, delta);
-    state = applyTaskEvent(state, delta);
-    expect(state.phase).toBe('streaming');
-    expect(state.reasoningText).toBe('先分析');
-    expect(state.answerReasoningText).toBe('先分析');
-    expect(state.memoryReasoningText).toBe('');
-    expect(state.plannerReasoningText).toBe('');
-    expect(state.interruptReasoningText).toBe('');
-    expect(state.skillReasoningText).toBe('');
-    expect(state.assistantText).toBe('');
   });
 
   it('renders transient Agent reasoning once without treating it as assistant output', () => {
@@ -454,37 +432,18 @@ describe('applyTaskEvent', () => {
     expect(afterToolResult.assistantText).toBe('');
   });
 
-  it('groups all streaming reasoning buckets in display order', () => {
+  it('groups Agent, memory, and interrupt reasoning in display order', () => {
     let state = createInitialTaskEventState();
     state = applyTaskEvent(state, event('memory.reasoning_delta', { delta: '先查历史', ordinal: 1 }, 'memory-reasoning-1'));
-    state = applyTaskEvent(state, event('planner.reasoning_delta', { delta: '再定计划', ordinal: 1 }, 'planner-reasoning-1'));
     state = applyTaskEvent(state, event('interrupt.reasoning_delta', { delta: '理解补参', ordinal: 1 }, 'interrupt-reasoning-1'));
-    state = applyTaskEvent(state, event('soft_skill.reasoning_delta', { delta: '判断Skill', ordinal: 1 }, 'soft-skill-reasoning-1'));
-    state = applyTaskEvent(state, event('main_agent.reasoning_delta', { delta: '生成回答', ordinal: 1 }, 'answer-reasoning-1'));
+    state = applyTaskEvent(state, event('agent.reasoning_delta', { delta: '生成回答', ordinal: 1, sample_id: 'sample-answer' }, 'answer-reasoning-1'));
 
     expect(state.memoryReasoningText).toBe('先查历史');
-    expect(state.plannerReasoningText).toBe('再定计划');
     expect(state.interruptReasoningText).toBe('理解补参');
-    expect(state.skillReasoningText).toBe('判断Skill');
     expect(state.answerReasoningText).toBe('生成回答');
     expect(state.reasoningText).toBe(
-      '### 记忆思考\n先查历史\n\n### 规划思考\n再定计划\n\n### 补参思考\n理解补参\n\n### Skill思考\n判断Skill\n\n### 回答思考\n生成回答',
+      '### 记忆思考\n先查历史\n\n### 补参思考\n理解补参\n\n### Agent思考\n生成回答',
     );
-  });
-
-  it('labels planner reasoning separately from final-answer reasoning', () => {
-    let state = createInitialTaskEventState();
-    state = applyTaskEvent(state, event('planner.reasoning_delta', { delta: '先规划', ordinal: 1 }, 'planner-reasoning-1'));
-
-    expect(state.phase).toBe('streaming');
-    expect(state.statusText).toContain('规划');
-    expect(state.plannerReasoningText).toBe('先规划');
-    expect(state.reasoningText).toBe('### 规划思考\n先规划');
-
-    state = applyTaskEvent(state, event('main_agent.reasoning_delta', { delta: '再回答', ordinal: 1 }, 'answer-reasoning-1'));
-
-    expect(state.answerReasoningText).toBe('再回答');
-    expect(state.reasoningText).toBe('### 规划思考\n先规划\n\n### 回答思考\n再回答');
   });
 
   it('stores sanitized capability fallback notices from SSE events', () => {
@@ -547,7 +506,7 @@ describe('applyTaskEvent', () => {
   it('maps node waiting-for-input events to a resumable clarification state', () => {
     const state = applyTaskEvent(createInitialTaskEventState(), event(
       'node.waiting_for_input',
-      { capability_id: 'main_agent.respond', interrupt_id: 'interrupt-1', reason_code: 'lookup_target_missing' },
+      { capability_id: 'agent.final_output', interrupt_id: 'interrupt-1', reason_code: 'lookup_target_missing' },
       'waiting-event',
       'node-main',
     ));
@@ -610,7 +569,7 @@ describe('applyTaskEvent', () => {
 
   it('ignores audit/debug events that should not be visible by default', () => {
     const initial = createInitialTaskEventState();
-    const state = applyTaskEvent(initial, event('main_agent.llm_call', { provider: 'hidden' }));
+    const state = applyTaskEvent(initial, event('agent.internal_debug', { provider: 'hidden' }));
     expect(state).toEqual(initial);
   });
 

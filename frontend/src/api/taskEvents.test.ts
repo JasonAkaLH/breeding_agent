@@ -143,7 +143,7 @@ describe('taskEvents', () => {
       start(controller) {
         controller.enqueue(encoder.encode('event: task.accepted\n'));
         controller.enqueue(encoder.encode('data: {"event_id":"evt-1","event_type":"task.accepted","task_id":"task-1","payload":{}}\n\n'));
-        controller.enqueue(encoder.encode('data: {"event_id":"evt-2","event_type":"task.completed","task_id":"task-1","payload":{}}\n\n'));
+        controller.enqueue(encoder.encode('data: {"event_id":"evt-2","event_type":"agent.run.completed","task_id":"task-1","payload":{"compaction_count":0,"duration_seconds":0,"outcome":"completed","sample_count":1,"tool_call_count":0}}\n\n'));
         controller.close();
       },
     });
@@ -174,9 +174,9 @@ describe('taskEvents', () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode('data: {"event_id":"evt-wrong","event_type":"main_agent.output_delta","task_id":"task-other","payload":{"delta":"leak"}}\n\n'));
-        controller.enqueue(encoder.encode('data: {"event_id":"evt-right","event_type":"main_agent.output_delta","task_id":"task-1","payload":{"delta":"ok"}}\n\n'));
-        controller.enqueue(encoder.encode('data: {"event_id":"evt-terminal","event_type":"task.completed","task_id":"task-1","payload":{}}\n\n'));
+        controller.enqueue(encoder.encode('data: {"event_id":"evt-wrong","event_type":"agent.reasoning_delta","task_id":"task-other","payload":{"delta":"leak","ordinal":1,"sample_id":"sample-wrong"}}\n\n'));
+        controller.enqueue(encoder.encode('data: {"event_id":"evt-right","event_type":"agent.reasoning_delta","task_id":"task-1","payload":{"delta":"ok","ordinal":1,"sample_id":"sample-right"}}\n\n'));
+        controller.enqueue(encoder.encode('data: {"event_id":"evt-terminal","event_type":"agent.run.completed","task_id":"task-1","payload":{"compaction_count":0,"duration_seconds":0,"outcome":"completed","sample_count":1,"tool_call_count":0}}\n\n'));
         controller.close();
       },
     });
@@ -234,9 +234,6 @@ describe('taskEvents', () => {
       createBrowserEventSourceFactory()('https://api.example/api/v1/tasks/task-1/events', { onMessage, onError });
       for (const eventName of [
         'auth.invalidated',
-        'task.replan_started',
-        'task.graph_updated',
-        'task.replan_available',
         'mcp.long_task_progress',
         'mcp.long_task_cancelled',
         'mcp.server_routed',
@@ -263,7 +260,6 @@ describe('taskEvents', () => {
         'node.waiting_for_input',
         'node.cancelled',
         'node.blocked_by_cancellation',
-        'node.orphaned',
         'node.ready_to_resume',
         'node.resuming',
         'agent.reasoning_delta',

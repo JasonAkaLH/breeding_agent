@@ -230,13 +230,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         platform_llm_config_path=None,
         platform_llm_client_factory=None,
         enable_platform_llm: bool | None = None,
-        planner_text_generator=None,
-        planner_llm_config=None,
-        planner_llm_config_path=None,
-        planner_llm_client_factory=None,
-        planner_reasoning_effort="minimal",
-        enable_llm_planner: bool | None = None,
-        planner_payload_policies=None,
         main_agent_stream_generator=None,
         main_agent_llm_config=None,
         main_agent_llm_config_path=None,
@@ -270,10 +263,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 rows=({"variety_name": "龙粳33"},),
                 row_count=1,
             )
-        )
-        planner_configured = any(
-            value is not None
-            for value in (planner_text_generator, planner_llm_config, planner_llm_config_path, planner_llm_client_factory)
         )
         platform_llm_configured = any(
             value is not None
@@ -322,9 +311,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         if (
             main_agent_llm_config is None
             and main_agent_llm_config_path is None
-            and planner_llm_config is None
-            and planner_llm_config_path is None
-            and planner_llm_client_factory is None
         ):
             main_agent_llm_config = test_llm_config()
         effective_skill_roots = tuple(skill_roots) if skill_roots is not None else tuple(self.default_skill_roots())
@@ -346,13 +332,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 platform_llm_config_path=platform_llm_config_path,
                 platform_llm_client_factory=platform_llm_client_factory,
                 enable_platform_llm=platform_llm_configured if enable_platform_llm is None else enable_platform_llm,
-                planner_text_generator=planner_text_generator,
-                planner_llm_config=planner_llm_config,
-                planner_llm_config_path=planner_llm_config_path,
-                planner_llm_client_factory=planner_llm_client_factory,
-                planner_reasoning_effort=planner_reasoning_effort,
-                enable_llm_planner=planner_configured if enable_llm_planner is None else enable_llm_planner,
-                planner_payload_policies=planner_payload_policies,
                 main_agent_stream_generator=main_agent_stream_generator,
                 main_agent_llm_config=main_agent_llm_config,
                 main_agent_llm_config_path=main_agent_llm_config_path,
@@ -411,13 +390,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         platform_llm_config_path=None,
         platform_llm_client_factory=None,
         enable_platform_llm: bool | None = None,
-        planner_text_generator=None,
-        planner_llm_config=None,
-        planner_llm_config_path=None,
-        planner_llm_client_factory=None,
-        planner_reasoning_effort="minimal",
-        enable_llm_planner: bool | None = None,
-        planner_payload_policies=None,
         main_agent_stream_generator=None,
         main_agent_llm_config=None,
         main_agent_llm_config_path=None,
@@ -454,13 +426,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             platform_llm_config_path=platform_llm_config_path,
             platform_llm_client_factory=platform_llm_client_factory,
             enable_platform_llm=enable_platform_llm,
-            planner_text_generator=planner_text_generator,
-            planner_llm_config=planner_llm_config,
-            planner_llm_config_path=planner_llm_config_path,
-            planner_llm_client_factory=planner_llm_client_factory,
-            planner_reasoning_effort=planner_reasoning_effort,
-            enable_llm_planner=enable_llm_planner,
-            planner_payload_policies=planner_payload_policies,
             main_agent_stream_generator=main_agent_stream_generator,
             main_agent_llm_config=main_agent_llm_config,
             main_agent_llm_config_path=main_agent_llm_config_path,
@@ -502,14 +467,9 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         request_capability_id = capability_id
         routing_mode = "auto"
         if capability_id is not None and capability_id.startswith("skill."):
-            request_capability_id = "main_agent.respond"
             routing_mode = "force_capability"
             request_metadata.setdefault("forced_by_slash_command", True)
             request_metadata.setdefault("slash_command", f"/{capability_id.removeprefix('skill.').replace('_', '-')}")
-            request_metadata["soft_skill_binding"] = {
-                "capability_id": capability_id,
-                "command": request_metadata["slash_command"],
-            }
         return await self.client.post(
             "/api/v1/conversations/chat-messages",
             json={

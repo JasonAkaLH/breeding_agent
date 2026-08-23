@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch
 
 from src.integrations.agent_skills.skill_runtime_state import SkillRuntimeRefreshResult
+from src.orchestration.agent_loop.models import AgentItemKind
 from tests.api.support import APITestCase
 
 
@@ -46,18 +47,25 @@ entrypoints:
         project_skill_root.mkdir(parents=True)
         prompts: list[str] = []
 
-        def planner(prompt: str, **_kwargs) -> str:
+        def agent_generator(prompt: str, **_kwargs) -> str:
             prompts.append(prompt)
-            return json.dumps({"nodes": [{"node_id": "demo", "capability_id": "skill.demo_hot_reload"}]})
-
-        async def streamer(_prompt: str, **_kwargs):
-            yield "done"
+            if '"activation":"completed"' in prompt:
+                return "done"
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "capability_id": "skill.demo_hot_reload",
+                            "arguments": {},
+                        }
+                    ]
+                }
+            )
 
         await self.reconfigure_runtime(
             skill_roots=(project_skill_root,),
             public_skill_roots=(project_skill_root,),
-            planner_text_generator=planner,
-            main_agent_stream_generator=streamer,
+            main_agent_stream_generator=agent_generator,
         )
         before = await self.client.get("/api/v1/capabilities")
         self.assertNotIn("skill.demo_hot_reload", {item["capability_id"] for item in before.json()["capabilities"]})
@@ -69,16 +77,22 @@ entrypoints:
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
 
-        self.assertIn("skill.demo_hot_reload", prompts[0])
+        self.assertGreaterEqual(len(prompts), 2)
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
-        self.assertEqual([node.capability_id for node in nodes], ["main_agent.respond"])
-        events = await self.runtime.storage.list_events_for_task(task_id)
-        event_types = [event.event_type for event in events]
-        self.assertIn("skill.forced_selected", event_types)
-        selected = next(event for event in events if event.event_type == "skill.forced_selected")
-        self.assertTrue(selected.payload.get("skill_bundle_revision"))
-        plan_built = next(event for event in events if event.event_type == "workflow.plan_built")
-        self.assertTrue(plan_built.payload["metadata"].get("skill_bundle_revision"))
+        self.assertEqual(
+            [node.capability_id for node in nodes],
+            ["skill.demo_hot_reload", "agent.final_output"],
+        )
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        activation = next(
+            item for item in items if item.kind is AgentItemKind.SKILL_ACTIVATION
+        )
+        self.assertIn(
+            self.runtime._skill_runtime_state.active_revision,
+            activation.payload_json,
+        )
 
         after = await self.client.get("/api/v1/capabilities")
         self.assertIn("skill.demo_hot_reload", {item["capability_id"] for item in after.json()["capabilities"]})
@@ -119,27 +133,33 @@ entrypoints:
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
         events = await self.runtime.storage.list_events_for_task(response.json()["task_id"])
-        decision = next(event for event in events if event.event_type == "soft_skill_binding.decision")
-        self.assertEqual(decision.payload["decision"], "execute")
-        self.assertEqual(decision.payload["target_capability_id"], "skill.demo_hot_reload")
+        self.assertNotIn(
+            "skill.question_answered",
+            {event.event_type for event in events},
+        )
+        run = await self.runtime.agent_run_repository.get_run_for_task(
+            response.json()["task_id"]
+        )
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        self.assertEqual(
+            sum(item.kind is AgentItemKind.SKILL_ACTIVATION for item in items),
+            1,
+        )
 
     async def test_new_conversation_refresh_removes_deleted_skill_from_capabilities_and_prompt(self) -> None:
         project_skill_root = self.workspace / "skill"
         self._write_skill(project_skill_root)
         prompts: list[str] = []
 
-        def planner(prompt: str, **_kwargs) -> str:
+        def agent_generator(prompt: str, **_kwargs) -> str:
             prompts.append(prompt)
-            return json.dumps({"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]})
-
-        async def streamer(_prompt: str, **_kwargs):
-            yield "done"
+            return "done"
 
         await self.reconfigure_runtime(
             skill_roots=(project_skill_root,),
             public_skill_roots=(project_skill_root,),
-            planner_text_generator=planner,
-            main_agent_stream_generator=streamer,
+            main_agent_stream_generator=agent_generator,
         )
         before = await self.client.get("/api/v1/capabilities")
         self.assertIn("skill.demo_hot_reload", {item["capability_id"] for item in before.json()["capabilities"]})
@@ -159,18 +179,25 @@ entrypoints:
         project_skill_root.mkdir(parents=True)
         prompts: list[str] = []
 
-        def planner(prompt: str, **_kwargs) -> str:
+        def agent_generator(prompt: str, **_kwargs) -> str:
             prompts.append(prompt)
-            return json.dumps({"nodes": [{"node_id": "demo", "capability_id": "skill.demo_hot_reload"}]})
-
-        async def streamer(_prompt: str, **_kwargs):
-            yield "done"
+            if '"activation":"completed"' in prompt:
+                return "done"
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "capability_id": "skill.demo_hot_reload",
+                            "arguments": {},
+                        }
+                    ]
+                }
+            )
 
         await self.reconfigure_runtime(
             skill_roots=(project_skill_root,),
             public_skill_roots=(project_skill_root,),
-            planner_text_generator=planner,
-            main_agent_stream_generator=streamer,
+            main_agent_stream_generator=agent_generator,
         )
         upload = await self.client.post(
             "/api/v1/conversations/uploads",
@@ -184,7 +211,7 @@ entrypoints:
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
-        self.assertIn("skill.demo_hot_reload", prompts[0])
+        self.assertGreaterEqual(len(prompts), 2)
 
     async def test_refresh_sync_failure_restores_previous_active_skill_bundle(self) -> None:
         project_skill_root = self.workspace / "skill"

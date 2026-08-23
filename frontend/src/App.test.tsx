@@ -68,7 +68,6 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       capabilities: [
         { capability_id: 'skill.data_lookup', name: 'data-lookup', display_name: '数据查询', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' },
         { capability_id: 'skill.mini_breedstat_rcbd', name: 'mini-breedstat-rcbd', display_name: '试验设计', description: '生成 RCBD 随机区组设计', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'mini_breedstat_rcbd_skill/SKILL.md' },
-        { capability_id: 'main_agent.respond', name: '普通对话', description: '主代理', version: '1', status: 'active', kind: 'builtin', source: 'builtin', source_path: '' },
       ],
     })),
     getModelEditions: vi.fn(async () => ({
@@ -910,15 +909,15 @@ describe('App', () => {
     const events = [
       event('task.accepted', {}, 'restore-accepted'),
       event('task.graph_created', {}, 'restore-graph'),
-      event('node.started', { capability_id: 'main_agent.respond' }, 'restore-node', 'node-main'),
-      event('main_agent.output_delta', { delta: '已生成内容', response_role: 'final' }, 'restore-output'),
+      event('node.started', { capability_id: 'agent.final_output' }, 'restore-node', 'node-main'),
+      event('agent.reasoning_delta', { delta: '恢复分析', ordinal: 1, sample_id: 'sample-restore' }, 'restore-reasoning'),
     ].map((item) => ({ ...item, task_id: 'task-running' }));
     const eventSource = makeInspectableEventSourceFactory(events);
 
     await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
 
     expect(await screen.findByText('以前的问题')).toBeInTheDocument();
-    expect(await screen.findByText('已生成内容')).toBeInTheDocument();
+    expect(await screen.findByText('恢复分析')).toBeInTheDocument();
     expect(screen.getByLabelText('请输入问题')).toBeDisabled();
     expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
     expect(api.getTask).toHaveBeenCalledWith('task-running');
@@ -993,7 +992,7 @@ describe('App', () => {
       getTask: vi.fn(async () => taskSummary('task-running', 'running')),
     });
     const eventSource = makeInspectableEventSourceFactory([
-      { ...event('main_agent.output_delta', { delta: '登录后恢复内容', response_role: 'final' }, 'restore-login-output'), task_id: 'task-running' },
+      { ...event('agent.reasoning_delta', { delta: '登录后恢复分析', ordinal: 1, sample_id: 'sample-login' }, 'restore-login-reasoning'), task_id: 'task-running' },
     ]);
 
     render(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
@@ -1003,7 +1002,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
 
     expect(await screen.findByText('登录前的问题')).toBeInTheDocument();
-    expect(await screen.findByText('登录后恢复内容')).toBeInTheDocument();
+    expect(await screen.findByText('登录后恢复分析')).toBeInTheDocument();
     expect(api.getTask).toHaveBeenCalledWith('task-running');
   });
 
@@ -1662,13 +1661,11 @@ describe('App', () => {
     confirm.mockRestore();
   });
 
-  it('submits normal chat and renders streaming answer', async () => {
+  it('submits normal chat and renders transient Agent reasoning', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
-      event('main_agent.reasoning_delta', { delta: '先分析。', ordinal: 1 }, 'reasoning-1'),
-      event('main_agent.output_delta', { delta: '**你好**，', ordinal: 1 }, 'delta-1'),
-      event('main_agent.output_delta', { delta: '已接通。', ordinal: 2 }, 'delta-2'),
+      event('agent.reasoning_delta', { delta: '先分析。', ordinal: 1, sample_id: 'sample-chat' }, 'reasoning-1'),
       event('task.completed'),
     ])} />);
 
@@ -1687,10 +1684,9 @@ describe('App', () => {
     fireEvent.click(within(reasoningBox as HTMLElement).getByRole('button', { name: '收起思考内容' }));
     expect(reasoningBox).toHaveClass('reasoning-box-collapsed');
     await waitFor(() => expect(screen.getAllByText('你好').length).toBeGreaterThan(0));
-    await screen.findByText(/已接通。/);
   });
 
-  it('renders formulas in user, reasoning, and streamed assistant surfaces while copying source', async () => {
+  it('renders formulas in user and transient Agent reasoning surfaces', async () => {
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, 'clipboard', {
@@ -1711,22 +1707,14 @@ describe('App', () => {
       expect(await screen.findByTestId('app-formula')).toHaveAttribute('data-source', 'u');
 
       await act(async () => {
-        streamHandlers?.onMessage(event('main_agent.reasoning_delta', { delta: '推理 $r$', ordinal: 1 }, 'formula-reasoning'));
-        streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '答案 $a', ordinal: 1 }, 'formula-open'));
+        streamHandlers?.onMessage(event('agent.reasoning_delta', { delta: '推理 $r$', ordinal: 1, sample_id: 'sample-formula' }, 'formula-reasoning'));
       });
-      expect(screen.getByText(/答案 \$a/)).toBeInTheDocument();
       expect(screen.getAllByTestId('app-formula').map((formula) => formula.dataset.source)).toEqual(['u', 'r']);
 
       await act(async () => {
-        streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '$', ordinal: 2 }, 'formula-close'));
         streamHandlers?.onMessage(event('task.completed', {}, 'formula-complete'));
       });
-      await waitFor(() => expect(screen.getAllByTestId('app-formula').map((formula) => formula.dataset.source)).toEqual(['u', 'r', 'a']));
-
-      const assistantFormula = screen.getAllByTestId('app-formula').find((formula) => formula.dataset.source === 'a') as HTMLElement;
-      const assistantBubble = assistantFormula.closest('.message-assistant') as HTMLElement;
-      fireEvent.click(await within(assistantBubble).findByRole('button', { name: '复制' }));
-      await waitFor(() => expect(writeText).toHaveBeenCalledWith('答案 $a$'));
+      await waitFor(() => expect(screen.getAllByTestId('app-formula').map((formula) => formula.dataset.source)).toEqual(['u', 'r']));
     } finally {
       if (originalClipboard) {
         Object.defineProperty(navigator, 'clipboard', originalClipboard);
@@ -2028,58 +2016,7 @@ describe('App', () => {
     })));
   });
 
-  it('only follows streaming output when the conversation view is already at the bottom', async () => {
-    let streamHandlers: TaskEventHandlers | null = null;
-    const api = makeApi();
-    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
-      streamHandlers = handlers;
-      return { close: vi.fn() };
-    };
-    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
-
-    const conversationList = screen.getByLabelText('对话内容') as HTMLDivElement;
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 1200 });
-    Object.defineProperty(conversationList, 'clientHeight', { configurable: true, value: 600 });
-    conversationList.scrollTop = 600;
-    fireEvent.scroll(conversationList);
-
-    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '生成一段长回答' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送' }));
-
-    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
-    expect(conversationList.scrollTop).toBe(1200);
-
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 1600 });
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '第一段内容。', ordinal: 1 }, 'delta-1'));
-    });
-
-    await screen.findByText('第一段内容。');
-    expect(conversationList.scrollTop).toBe(1600);
-
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 2000 });
-    conversationList.scrollTop = 200;
-    fireEvent.scroll(conversationList);
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '继续生成。', ordinal: 2 }, 'delta-2'));
-    });
-
-    await screen.findByText(/第一段内容。继续生成。/);
-    expect(conversationList.scrollTop).toBe(200);
-
-    conversationList.scrollTop = 1400;
-    fireEvent.scroll(conversationList);
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 2400 });
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '回到底部后继续。', ordinal: 3 }, 'delta-3'));
-    });
-
-    await screen.findByText(/回到底部后继续。/);
-    expect(conversationList.scrollTop).toBe(2400);
-  });
-
-
-  it('opens the slash Skill picker, selects a Skill with the keyboard, and submits a soft-bound main-agent route from the badge', async () => {
+  it('opens the slash Skill picker and submits a required Skill call from the badge', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -2099,11 +2036,10 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.data_lookup',
       metadata: expect.objectContaining({
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
       }),
     })));
   });
@@ -2144,7 +2080,7 @@ describe('App', () => {
     expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('试验设计');
   });
 
-  it('submits direct slash command input as a soft-bound main-agent call with cleaned content', async () => {
+  it('submits direct slash command input as a required Skill call with cleaned content', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -2154,11 +2090,10 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.data_lookup',
       metadata: expect.objectContaining({
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
       }),
     })));
   });
@@ -2173,11 +2108,10 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '',
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.data_lookup',
       metadata: expect.objectContaining({
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
       }),
     })));
   });
@@ -2195,7 +2129,7 @@ describe('App', () => {
     expect(await screen.findByText('未找到 Skill')).toBeInTheDocument();
   });
 
-  it('submits uploaded files and slash soft-binding metadata together', async () => {
+  it('submits uploaded files and required Skill metadata together', async () => {
     const api = makeApi({
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-test',
@@ -2234,12 +2168,11 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '用这个文件做3个区组RCBD',
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.mini_breedstat_rcbd',
       metadata: expect.objectContaining({
         upload_ids: ['upl-1'],
         forced_by_slash_command: true,
         slash_command: '/mini-breedstat-rcbd',
-        soft_skill_binding: { capability_id: 'skill.mini_breedstat_rcbd', command: '/mini-breedstat-rcbd' },
       }),
     })));
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
@@ -2693,7 +2626,6 @@ describe('App', () => {
   it('shows a reasoning box placeholder when deep thinking is enabled but no reasoning content arrives', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
-      event('main_agent.output_delta', { delta: '最终回答', ordinal: 1 }, 'delta-1'),
       event('task.completed'),
     ])} />);
 
@@ -2704,7 +2636,6 @@ describe('App', () => {
 
     await screen.findByText('思考内容');
     expect(await screen.findByText(/等待模型返回 reasoning_content|本次模型未返回 reasoning_content/)).toBeInTheDocument();
-    await screen.findByText('最终回答');
   });
 
 
@@ -2851,7 +2782,7 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '实时最终回答', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '实时最终回答', summary: 'final', is_complete: true, created_at: null },
           { artifact_id: 'filtered_query_result:live', producer_node_id: 'task-1:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ artifact_role: 'filtered_query_result', columns: ['品种名称'], rows: [{ 品种名称: '隆平381' }], row_count: 1, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
         ],
       })),
@@ -2885,7 +2816,7 @@ describe('App', () => {
             stream_status: 'complete',
             created_at: null,
             artifacts: [
-              { artifact_id: 'art-file-history', producer_node_id: 'task-file:main_agent.respond', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-history/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
+              { artifact_id: 'art-file-history', producer_node_id: 'task-file:agent.final_output', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-history/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
             ],
           },
         ],
@@ -2990,7 +2921,7 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'main_agent.respond', artifact_type: 'text', storage_ref: '主代理已自动调用数据查询能力，龙粳33共 1 行。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text', storage_ref: '主代理已自动调用数据查询能力，龙粳33共 1 行。', summary: 'final', is_complete: true, created_at: null },
           { artifact_id: 'query_result_preview:1', producer_node_id: 'task-1:query_data:execute_query', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [{ variety_name: '龙粳33' }], row_count: 1, truncated: false }), summary: 'preview', is_complete: true, created_at: null },
         ],
       })),
@@ -3018,8 +2949,8 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '已生成文件。', summary: 'final', is_complete: true, created_at: null },
-          { artifact_id: 'art-file-1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-1/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '已生成文件。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'art-file-1', producer_node_id: 'agent-node:task-1:final', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-1/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
         ],
       })),
     });
@@ -3089,7 +3020,7 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '主代理总结：图片中包含品种和处理信息。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '主代理总结：图片中包含品种和处理信息。', summary: 'final', is_complete: true, created_at: null },
           {
             artifact_id: 'task-1:skill_display:abc:ocr_raw_text',
             producer_node_id: 'task-1:ocr:skill_execute',
@@ -3145,7 +3076,7 @@ describe('App', () => {
     expect(within(assistantMessage.querySelector('.message-body') as HTMLElement).queryByText(/data-query/)).not.toBeInTheDocument();
   });
 
-  it('renders multiple skill status lines while keeping the final answer in the assistant bubble', async () => {
+  it('renders multiple skill status lines and completes them with the Agent task', async () => {
     let streamHandlers: TaskEventHandlers | null = null;
     const api = makeApi();
     const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
@@ -3176,42 +3107,11 @@ describe('App', () => {
     expect(rcbdStatus.closest('.message-body')).toBeNull();
 
     await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '最终汇总回答', ordinal: 1, response_role: 'final' }, 'final-delta', 'node-final'));
-      streamHandlers?.onMessage(event('main_agent.output_final', { response_role: 'final' }, 'final-output', 'node-final'));
       streamHandlers?.onMessage(event('task.completed', {}, 'task-completed'));
     });
 
-    const finalAnswer = await screen.findByText('最终汇总回答');
-    expect(finalAnswer.closest('.message-body')).not.toBeNull();
     expect(await screen.findByText('data-query：已完成')).toBeInTheDocument();
     expect(await screen.findByText('RCBD：已完成')).toBeInTheDocument();
-  });
-
-  it('does not show the assistant copy action until the reply is completed', async () => {
-    let streamHandlers: TaskEventHandlers | null = null;
-    const api = makeApi();
-    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
-      streamHandlers = handlers;
-      return { close: vi.fn() };
-    };
-    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
-
-    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送' }));
-    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
-    await waitFor(() => expect(streamHandlers).not.toBeNull());
-
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '流式主代理回答', ordinal: 1 }));
-    });
-    const streamingBubble = (await screen.findByText('流式主代理回答')).closest('.message-assistant') as HTMLElement;
-    expect(streamingBubble).not.toBeNull();
-    expect(within(streamingBubble).queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
-
-    await act(async () => {
-      streamHandlers?.onMessage(event('task.completed'));
-    });
-    expect(await within(streamingBubble).findByRole('button', { name: '复制' })).toBeInTheDocument();
   });
 
   it('replaces the waiting-for-event hint with live task progress inside the assistant bubble', async () => {
@@ -3563,7 +3463,7 @@ describe('App', () => {
     const waitingGraph = {
       task_id: 'task-1',
       nodes: [
-        { node_id: 'task-1:file_selection', capability_id: 'main_agent.respond', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'task-1:file_selection', capability_id: 'agent.final_output', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
     };
@@ -3641,7 +3541,7 @@ describe('App', () => {
     const waitingGraph = {
       task_id: 'task-1',
       nodes: [
-        { node_id: 'task-1:sheet_selection', capability_id: 'main_agent.respond', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'task-1:sheet_selection', capability_id: 'agent.final_output', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
     };
@@ -4037,7 +3937,7 @@ describe('App', () => {
       task_id: 'task-1',
       nodes: [
         { node_id: 'task-1:skill_data_query', capability_id: 'skill.data_query', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
-        { node_id: 'task-1:main_agent.respond', capability_id: 'main_agent.respond', status: 'pending', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'agent-node:task-1:final', capability_id: 'agent.final_output', status: 'pending', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
     };
@@ -4065,7 +3965,7 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '最终主代理回答：没有找到符合条件的记录。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '最终主代理回答：没有找到符合条件的记录。', summary: 'final', is_complete: true, created_at: null },
           { artifact_id: 'filtered_query_result:1', producer_node_id: 'task-1:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [], row_count: 0, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
         ],
       })),
@@ -4078,7 +3978,6 @@ describe('App', () => {
           event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-final-answer-interrupt', 'task-1:skill_data_query'),
         ],
         [
-          event('main_agent.output_delta', { delta: '流式主代理回答', ordinal: 1 }, 'delta-resumed-1'),
           event('task.completed', {}, 'task-completed-resumed'),
         ],
       ])}
@@ -4170,9 +4069,9 @@ describe('App', () => {
 
     await waitFor(() => expect(subscriptions).toHaveLength(2), { timeout: 2_000 });
     await act(async () => {
-      subscriptions[1].onMessage(event('main_agent.output_delta', { delta: '重连后的内容', response_role: 'final' }, 'delta-after-reconnect'));
+      subscriptions[1].onMessage(event('agent.reasoning_delta', { delta: '重连后的分析', ordinal: 1, sample_id: 'sample-reconnect' }, 'reasoning-after-reconnect'));
     });
-    expect(await screen.findByText('重连后的内容')).toBeInTheDocument();
+    expect(await screen.findByText('重连后的分析')).toBeInTheDocument();
   });
 
   it('keeps reconnecting the task event stream when status recovery is temporarily unavailable', async () => {
@@ -4201,9 +4100,9 @@ describe('App', () => {
     await waitFor(() => expect(api.getTask).toHaveBeenCalledWith('task-1'));
     await waitFor(() => expect(subscriptions).toHaveLength(2), { timeout: 2_000 });
     await act(async () => {
-      subscriptions[1].onMessage(event('main_agent.output_delta', { delta: '状态接口恢复前的 SSE 内容', response_role: 'final' }, 'delta-after-status-failure'));
+      subscriptions[1].onMessage(event('agent.reasoning_delta', { delta: '状态接口恢复前的分析', ordinal: 1, sample_id: 'sample-status-recovery' }, 'reasoning-after-status-failure'));
     });
-    expect(await screen.findByText('状态接口恢复前的 SSE 内容')).toBeInTheDocument();
+    expect(await screen.findByText('状态接口恢复前的分析')).toBeInTheDocument();
   });
 
   it('resubscribes after MCP approval and surfaces the next Tool approval', async () => {
@@ -4731,7 +4630,7 @@ describe('App', () => {
 
     await act(async () => {
       streamHandlers?.onMessage(event('task.cancellation_requested', { status: 'cancelling' }, 'stale-cancel-request'));
-      streamHandlers?.onMessage(event('node.started', { capability_id: 'main_agent.respond' }, 'stale-node-started', 'n1'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'agent.final_output' }, 'stale-node-started', 'n1'));
       streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-stale' }, 'stale-waiting', 'n1'));
     });
 
@@ -4779,7 +4678,7 @@ describe('App', () => {
     expect(screen.getByText('正在停止当前对话任务')).toBeInTheDocument();
 
     await act(async () => {
-      streamHandlers?.onMessage(event('node.started', { capability_id: 'main_agent.respond' }, 'stale-start-during-cancel', 'n1'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'agent.final_output' }, 'stale-start-during-cancel', 'n1'));
       streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-stale' }, 'stale-wait-during-cancel', 'n1'));
       await Promise.resolve();
     });

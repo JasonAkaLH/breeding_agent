@@ -215,7 +215,7 @@ class AgentTaskProjectionAPITest(APITestCase):
         self.assertEqual(projected_assistant.content, final_text)
         self.assertEqual(projected_assistant.stream_status, "complete")
 
-    async def test_status_mismatch_fails_closed(self) -> None:
+    async def test_status_transition_does_not_break_read_projection(self) -> None:
         _repository, run, _binding = await self._seed_task("mismatch")
         task = await self.runtime.storage.get_task(run.task_id)
         await self.runtime.storage.save_task(
@@ -227,10 +227,10 @@ class AgentTaskProjectionAPITest(APITestCase):
             )
         )
 
-        with self.assertRaisesRegex(ValueError, "status_mismatch"):
-            await self.runtime.agent_task_projection.get_agent_run(run.task_id)
+        projected = await self.runtime.agent_task_projection.get_agent_run(run.task_id)
+        self.assertEqual(projected, run)
 
-    async def test_agent_frontend_event_replays_and_real_runtime_has_no_agent_switch(self) -> None:
+    async def test_agent_frontend_event_replays_and_real_runtime_assembles_projection(self) -> None:
         _repository, run, _binding = await self._seed_task("event")
         event = AgentEventProjector().durable(
             event_id="event-agent-waiting",
@@ -251,8 +251,9 @@ class AgentTaskProjectionAPITest(APITestCase):
 
         self.assertEqual(replayed, event)
         runtime_source = inspect.getsource(build_api_runtime)
-        self.assertNotIn("AgentTaskProjectionService", runtime_source)
-        self.assertNotIn("agent_task_projection", runtime_source)
+        self.assertIn("AgentTaskProjectionService", runtime_source)
+        self.assertIn("agent_task_projection", runtime_source)
+        self.assertNotIn("OrchestrationService", runtime_source)
 
     async def test_agent_run_initialization_projects_empty_graph_created_event(self) -> None:
         _repository, run, _binding = await self._seed_task("graph-created")

@@ -112,7 +112,7 @@ execution:
         self.assertEqual(config.handler_factory, 'build_handler')
         self.assertEqual(config.services, ('demo.service',))
 
-    def test_runtime_state_exposes_skill_payload_policies(self) -> None:
+    def test_runtime_state_exposes_public_skill_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / 'skill'
             skill_dir = root / 'scripted'
@@ -150,8 +150,11 @@ entrypoints:
                 reserved_capability_ids=('main_agent.respond',),
             )
 
-        policy = state.active_bundle.skill_capabilities.payload_policies['skill.scripted']
-        self.assertEqual(policy.planner_allowed_fields, ('subtask_label', 'parent_question'))
+        descriptor = state.active_bundle.skill_capabilities.descriptors_by_id[
+            'skill.scripted'
+        ]
+        self.assertEqual(descriptor.capability_id, 'skill.scripted')
+        self.assertEqual(descriptor.kind, 'skill')
 
 
 if __name__ == '__main__':

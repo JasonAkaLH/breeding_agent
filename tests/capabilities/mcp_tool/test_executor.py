@@ -215,7 +215,7 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             capability_id="mcp.crm.search_customer",
             server_id="crm",
             tool_name="search_customer",
-            planner_allowed_fields=("keyword",),
+            model_allowed_fields=("keyword",),
             input_schema={"type": "object", "required": ["keyword"], "properties": {"keyword": {"type": "string"}}},
             max_output_bytes=200,
         )
@@ -246,7 +246,7 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             capability_id="mcp.crm.search_customer",
             server_id="crm",
             tool_name="search_customer",
-            planner_allowed_fields=("keyword",),
+            model_allowed_fields=("keyword",),
             input_schema={"type": "object", "required": ["keyword"], "properties": {"keyword": {"type": "string"}}},
         )
         runtime = FakeMCPRuntime(binding, {})
@@ -311,7 +311,7 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             capability_id="mcp.crm.search_customer",
             server_id="crm",
             tool_name="search_customer",
-            planner_allowed_fields=("keyword",),
+            model_allowed_fields=("keyword",),
             input_schema={"type": "object", "properties": {"keyword": {"type": "string"}}},
         )
         runtime = FakeMCPRuntime(binding, {"content": [{"type": "text", "text": "not found"}], "isError": True})
@@ -331,7 +331,7 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             capability_id="mcp.crm.search_customer",
             server_id="crm",
             tool_name="search_customer",
-            planner_allowed_fields=("keyword",),
+            model_allowed_fields=("keyword",),
             input_schema={"type": "object", "properties": {"keyword": {"type": "string"}}},
             output_schema={"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "token": {"type": "string"}, "url": {"type": "string"}}},
         )
@@ -360,7 +360,7 @@ class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             capability_id="mcp.crm.search_customer",
             server_id="crm",
             tool_name="search_customer",
-            planner_allowed_fields=("keyword",),
+            model_allowed_fields=("keyword",),
             input_schema={"type": "object", "properties": {"keyword": {"type": "string"}}},
             output_schema={"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
         )

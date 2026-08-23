@@ -4,7 +4,7 @@ import asyncio
 import unittest
 
 from src.api.runtime import ApiRuntime
-from src.orchestration.models import OrchestrationRequest
+from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 
 
 class ExecutionSingleflightTest(unittest.IsolatedAsyncioTestCase):
@@ -19,12 +19,13 @@ class ExecutionSingleflightTest(unittest.IsolatedAsyncioTestCase):
         return runtime
 
     @staticmethod
-    def _request() -> OrchestrationRequest:
-        return OrchestrationRequest(
+    def _request() -> AgentExecutionRequest:
+        return AgentExecutionRequest(
             task_id="task-1",
             conversation_id="conversation-1",
             root_message_id="message-1",
             user_message="run",
+            owner_scope="owner:test",
         )
 
     async def test_schedule_returns_existing_live_generation(self) -> None:

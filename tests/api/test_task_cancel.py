@@ -45,7 +45,7 @@ class TaskCancelAPITest(APITestCase):
         response = await self.submit_message(
             conversation_id="conv-cancel-memory",
             content="取消时不要继续构建记忆和规划",
-            capability_id="main_agent.respond",
+            capability_id=None,
         )
         self.assertEqual(response.status_code, 202, response.text)
         task_id = response.json()["task_id"]
@@ -73,7 +73,7 @@ class TaskCancelAPITest(APITestCase):
         cancel_index = event_types.index("task.cancelled")
         self.assertNotIn("conversation.memory_built", event_types[cancel_index + 1:])
         self.assertNotIn("conversation.memory_fallback", event_types[cancel_index + 1:])
-        self.assertNotIn("workflow.plan_built", event_types[cancel_index + 1:])
+        self.assertNotIn("agent.final_output", event_types[cancel_index + 1:])
 
     async def test_cancel_endpoint_drives_real_cancellation_and_audit_output(self) -> None:
         query_started = threading.Event()
@@ -156,15 +156,14 @@ class TaskCancelAPITest(APITestCase):
         events = await self.runtime.storage.list_events_for_task(task.task_id)
         self.assertFalse(any(event.event_type == "task.late_result_discarded" for event in events))
 
-    async def test_cancel_stops_transient_stream_and_discards_partial_answer(self) -> None:
-        release_first = asyncio.Event()
-        release_late = asyncio.Event()
+    async def test_cancel_stops_agent_sample_and_discards_late_answer(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
 
         async def streamer(_prompt: str):
-            await release_first.wait()
-            yield "第一段"
-            await release_late.wait()
-            yield PARTIAL_SENTINEL
+            started.set()
+            await release.wait()
+            return PARTIAL_SENTINEL
 
         await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
         response = await self.submit_message(
@@ -175,18 +174,11 @@ class TaskCancelAPITest(APITestCase):
         self.assertEqual(response.status_code, 202, response.text)
         task_id = response.json()["task_id"]
 
-        iterator = self.runtime.iter_frontend_events(task_id).__aiter__()
-        release_first.set()
-        first_delta = None
-        while first_delta is None:
-            event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
-            if event.event_type == "main_agent.output_delta":
-                first_delta = event
-        self.assertEqual(first_delta.payload["delta"], "第一段")
+        await asyncio.wait_for(started.wait(), timeout=2)
 
         cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
         self.assertEqual(cancel_response.status_code, 202, cancel_response.text)
-        release_late.set()
+        release.set()
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "cancelled")
 
@@ -196,7 +188,7 @@ class TaskCancelAPITest(APITestCase):
         await self.wait_for_condition(_execution_handle_removed)
 
         events = await self.runtime.storage.list_events_for_task(task_id)
-        self.assertFalse(any(event.event_type == "main_agent.output_final" for event in events))
+        self.assertFalse(any(event.event_type == "task.completed" for event in events))
         self.assertFalse(any(PARTIAL_SENTINEL in str(event.payload) for event in events))
         messages = await self.runtime.storage.list_messages_for_conversation("conv-cancel-stream")
         self.assertFalse(any(str(message.role) == "assistant" for message in messages))

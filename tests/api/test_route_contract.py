@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import tempfile
+from functools import partial
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from src.api.app import create_app
-from src.api.runtime import build_api_runtime
+from src.api.runtime import build_api_runtime as _build_api_runtime
+
+build_api_runtime = partial(
+    _build_api_runtime,
+    skill_roots=(),
+    public_skill_roots=(),
+)
 
 
 class APIRouteContractTest(unittest.TestCase):
@@ -24,7 +31,6 @@ class APIRouteContractTest(unittest.TestCase):
                 audit_log_path=Path(directory) / "audit.jsonl",
                 master_key_bytes=b"r" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_skill_input_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,

@@ -3,7 +3,23 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.orchestration.agent_loop.models import (
+    AgentFinishMetadata,
+    AgentSample,
+    AgentUsage,
+)
 from tests.api.support import APITestCase
+
+
+def _final_agent_sample(request, text: str) -> AgentSample:
+    return AgentSample(
+        sample_id=f"sample-{request.binding.model_edition}",
+        binding=request.binding,
+        visible_text=text,
+        tool_calls=(),
+        usage=AgentUsage(status="usage_unavailable"),
+        finish=AgentFinishMetadata("stop", 1),
+    )
 
 
 class ModelEditionSelectionAPITest(APITestCase):
@@ -173,7 +189,7 @@ class ModelEditionSelectionAPITest(APITestCase):
         with self.assertRaisesRegex(ValueError, "Default model edition is not Agent-ready"):
             self.build_runtime(main_agent_llm_config=config, enable_conversation_memory=False)
 
-    async def test_selected_model_edition_reaches_planner_and_main_agent_runtime(self) -> None:
+    async def test_selected_model_edition_reaches_unified_agent_runtime(self) -> None:
         class RecordingLLM:
             instances: list["RecordingLLM"] = []
 
@@ -190,8 +206,7 @@ class ModelEditionSelectionAPITest(APITestCase):
                 thinking: bool = False,
                 reasoning_effort: str = "minimal",
             ) -> str:
-                self.calls.append({"method": "generate_text", "model_edition": self.model_edition, "prompt": prompt})
-                return json.dumps({"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]}, ensure_ascii=False)
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
 
             async def generate_text_with_thinking(
                 self,
@@ -200,17 +215,18 @@ class ModelEditionSelectionAPITest(APITestCase):
                 thinking: bool = False,
                 reasoning_effort: str = "minimal",
             ):
-                self.calls.append({"method": "generate_text_with_thinking", "model_edition": self.model_edition, "prompt": prompt})
-                if "受边界约束的高层工作流规划器" in prompt:
-                    yield {
-                        "answer": json.dumps(
-                            {"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]},
-                            ensure_ascii=False,
-                        ),
-                        "reasoning": None,
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
+                yield
+
+            async def generate_agent_sample(self, request):
+                self.calls.append(
+                    {
+                        "method": "generate_agent_sample",
+                        "model_edition": self.model_edition,
+                        "prompt": request.request_id,
                     }
-                    return
-                yield {"answer": "已使用所选模型。", "reasoning": None}
+                )
+                return _final_agent_sample(request, "已使用所选模型。")
 
             def safe_metadata(self, *, config_source: str | None = None, reasoning_effort: str | None = None) -> dict[str, Any]:
                 return {
@@ -223,7 +239,6 @@ class ModelEditionSelectionAPITest(APITestCase):
         await self.reconfigure_runtime(
             main_agent_llm_config=self._model_config(),
             main_agent_llm_client_factory=RecordingLLM,
-            enable_llm_planner=True,
         )
         response = await self.client.post(
             "/api/v1/conversations/chat-messages",
@@ -242,14 +257,12 @@ class ModelEditionSelectionAPITest(APITestCase):
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual([client.model_edition for client in RecordingLLM.instances], ["deepseek-v4-flash-260425"])
-        self.assertGreaterEqual(len(RecordingLLM.instances[0].calls), 2)
+        self.assertEqual(len(RecordingLLM.instances[0].calls), 1)
         self.assertTrue(all(call["model_edition"] == "deepseek-v4-flash-260425" for call in RecordingLLM.instances[0].calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         accepted = next(event for event in events if event.event_type == "task.accepted")
         self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-flash-260425")
-        llm_call = next(event for event in events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(llm_call.payload["model_edition"], "deepseek-v4-flash-260425")
 
     async def test_interrupt_resume_preserves_frontend_model_and_reasoning_metadata(self) -> None:
         skill_root = self.workspace / "skill-model-resume"
@@ -343,14 +356,11 @@ inputs:
                 "conversation_id": "conv-model-interrupt-resume",
                 "content": "做对角线设计",
                 "routing_mode": "force_capability",
-                "capability_id": "main_agent.respond",
+                "capability_id": "skill.field_design",
                 "model_edition": "deepseek-v4-pro-260425",
                 "metadata": {
                     "deep_thinking": True,
                     "main_agent_reasoning_effort": "max",
-                    "forced_by_slash_command": True,
-                    "slash_command": "/field-design",
-                    "soft_skill_binding": {"capability_id": "skill.field_design", "command": "/field-design"},
                 },
             },
         )
@@ -388,10 +398,6 @@ inputs:
         accepted = next(event for event in events if event.event_type == "task.accepted")
         self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-pro-260425")
         self.assertTrue(accepted.payload["deep_thinking"])
-        llm_call = next(event for event in events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(llm_call.payload["model_edition"], "deepseek-v4-pro-260425")
-        self.assertTrue(llm_call.payload["thinking_enabled"])
-        self.assertEqual(llm_call.payload["reasoning_effort"], "max")
 
     async def test_selected_model_edition_controls_runtime_trim_budget(self) -> None:
         class RecordingLLM:
@@ -404,10 +410,14 @@ inputs:
                 RecordingLLM.instances.append(self)
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
-                return json.dumps({"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]}, ensure_ascii=False)
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
 
             async def generate_text_with_thinking(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal"):
-                yield {"answer": "已使用所选模型预算。", "reasoning": None}
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
+                yield
+
+            async def generate_agent_sample(self, request):
+                return _final_agent_sample(request, "已使用所选模型预算。")
 
             def safe_metadata(self, *, config_source: str | None = None, reasoning_effort: str | None = None) -> dict[str, Any]:
                 return {"provider": "fake", "model": self.model_edition, "trim_max_tokens": self.trim_max_tokens}
@@ -418,7 +428,6 @@ inputs:
         await self.reconfigure_runtime(
             main_agent_llm_config=config,
             main_agent_llm_client_factory=RecordingLLM,
-            enable_llm_planner=True,
         )
         response = await self.client.post(
             "/api/v1/conversations/chat-messages",

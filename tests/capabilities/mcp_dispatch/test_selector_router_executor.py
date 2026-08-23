@@ -11,7 +11,6 @@ from src.capabilities.mcp_dispatch import (
     MCPCallFingerprintBlocked,
     MCPDispatchExecutor,
     MCPDispatchOutcome,
-    MCPDispatchWorkflowProvider,
     MCPSelectorActionType,
     MCPSelectorContext,
     MCPSelectorOutputError,
@@ -22,7 +21,7 @@ from src.capabilities.mcp_dispatch import (
     build_mcp_call_fingerprint,
 )
 from src.core.contracts import CapabilityExecutionRequest
-from src.orchestration.models import OrchestrationRequest, UserMCPServerProfile
+from src.orchestration.models import UserMCPServerProfile
 
 
 class MCPSelectorTest(unittest.IsolatedAsyncioTestCase):
@@ -331,27 +330,6 @@ class MCPDispatchExecutorTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(coordinator.server_ids, [])
         self.assertEqual(result.error.code, "mcp_route_assignment_mismatch")
-
-
-class MCPDispatchWorkflowProviderTest(unittest.TestCase):
-    def test_resume_workflow_keeps_dispatch_before_finalizer(self) -> None:
-        plan = MCPDispatchWorkflowProvider().build_plan(
-            OrchestrationRequest(
-                task_id="task-resume",
-                conversation_id="conv-1",
-                root_message_id="msg-1",
-                user_message="继续查询",
-                metadata={
-                    "mcp_dispatch_server_id": "server-1",
-                    "resume_interrupted_node_id": "dispatch-original",
-                    "resume_finalizer_node_id": "answer-original",
-                },
-            )
-        )
-
-        self.assertEqual([node.capability_id for node in plan.nodes], ["mcp.dispatch", "main_agent.respond"])
-        self.assertEqual(plan.node_by_id("dispatch-original").input_payload, {"server_id": "server-1"})
-        self.assertEqual(plan.node_by_id("answer-original").depends_on, ("dispatch-original",))
 
 
 if __name__ == "__main__":

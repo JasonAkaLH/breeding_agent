@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.state.runtime_factory import StatePlatformBackend, build_state_platform_runtime_config
 
@@ -36,7 +36,7 @@ class StatePlatformRuntimeAssemblyTest(unittest.TestCase):
         from src.api import runtime as runtime_module
 
         fake_engine = object()
-        fake_storage = object()
+        fake_storage = MagicMock()
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
             os.environ,
             {
@@ -50,15 +50,15 @@ class StatePlatformRuntimeAssemblyTest(unittest.TestCase):
             runtime_module, "PostgreSQLStorage", return_value=fake_storage
         ):
             runtime = runtime_module.build_api_runtime(
+                skill_roots=(),
+                public_skill_roots=(),
                 database_path=Path(tmpdir) / "api.sqlite3",
                 audit_log_path=Path(tmpdir) / "audit.jsonl",
                 master_key_bytes=b"s" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_skill_input_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
-                skill_roots=(),
             )
         create_engine.assert_called_once_with("postgresql_fixture_dsn")
         bootstrap.assert_called_once_with(fake_engine)

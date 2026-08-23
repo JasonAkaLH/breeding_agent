@@ -23,6 +23,7 @@ from src.orchestration.agent_loop.models import (
     AgentStagedArtifact,
     AgentToolCall,
     AgentUsage,
+    AgentUserMessageCommit,
 )
 from src.storage.sqlite import (
     SQLiteAgentRepository,
@@ -130,6 +131,38 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
         items = await self.repository.list_items("run-1")
         self.assertEqual([item.sequence for item in items], [1])
         self.assertEqual(committed.run.next_item_sequence, 2)
+
+    async def test_initial_user_message_is_durable_idempotent_and_precedes_samples(self) -> None:
+        run = await self._create()
+        initialized = await self.repository.commit_agent_user_message(
+            AgentUserMessageCommit(run.run_id, run.revision, None, "用户问题")
+        )
+        duplicate = await self.repository.commit_agent_user_message(
+            AgentUserMessageCommit(
+                run.run_id,
+                initialized.run.revision,
+                None,
+                "用户问题",
+            )
+        )
+
+        self.assertEqual(initialized.item, duplicate.item)
+        self.assertEqual(initialized.item.kind, AgentItemKind.USER_MESSAGE)
+        self.assertEqual(initialized.run.next_item_sequence, 2)
+        committed = await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                run.run_id,
+                initialized.run.revision,
+                None,
+                self._sample(text="回答"),
+                {},
+            )
+        )
+        self.assertEqual(
+            [item.kind for item in await self.repository.list_items(run.run_id)],
+            [AgentItemKind.USER_MESSAGE, AgentItemKind.ASSISTANT_MESSAGE],
+        )
+        self.assertEqual(committed.assistant_item.sequence, 2)
 
     async def test_sample_atomically_persists_calls_result_slots_and_nodes_before_executor(self) -> None:
         executor_calls = 0

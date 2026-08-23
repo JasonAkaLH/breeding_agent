@@ -116,7 +116,7 @@ describe('parseAssistantTextArtifact', () => {
     expect(parseAssistantTextArtifact([artifact({ artifact_type: 'text', storage_ref: '最终回答', summary: '最终' })])).toBe('最终回答');
   });
 
-  it('prefers the main agent text artifact over capability-owned text artifacts', () => {
+  it('prefers the Agent final text artifact over capability-owned text artifacts', () => {
     expect(parseAssistantTextArtifact([
       artifact({
         artifact_id: 'weather_text:1',
@@ -125,25 +125,25 @@ describe('parseAssistantTextArtifact', () => {
         storage_ref: '天气能力文本',
       }),
       artifact({
-        artifact_id: 'main_agent_text:1',
-        producer_node_id: 'task-1:main_agent.respond',
+        artifact_id: 'agent-artifact:task-1:final',
+        producer_node_id: 'agent-node:task-1:final',
         artifact_type: 'text',
         storage_ref: '主代理最终回答',
       }),
     ])).toBe('主代理最终回答');
   });
 
-  it('uses artifact identity rather than opaque producer node id for main-agent preference', () => {
+  it('uses artifact identity rather than opaque producer node id for Agent-final preference', () => {
     expect(parseAssistantTextArtifact([
       artifact({
         artifact_id: 'weather_text:1',
-        producer_node_id: 'opaque:main_agent.respond:misleading',
+        producer_node_id: 'opaque:agent.final_output:misleading',
         artifact_type: 'text',
         storage_ref: '天气能力文本',
       }),
       artifact({
-        artifact_id: 'main_agent_text:1',
-        producer_node_id: 'task-1:plan:v1:p0:answer:0123456789abcdef0123',
+        artifact_id: 'agent-artifact:task-1:final',
+        producer_node_id: 'opaque:capability:misleading',
         artifact_type: 'text',
         storage_ref: '主代理最终回答',
       }),
@@ -178,7 +178,7 @@ describe('parseCapabilityArtifactDisplays', () => {
       artifact({ artifact_type: 'text', storage_ref: '最终回答', summary: '最终' }),
       artifact({
         artifact_id: 'art-file-1',
-        producer_node_id: 'task-1:main_agent.respond',
+        producer_node_id: 'agent-node:task-1:final',
         artifact_type: 'file',
         storage_ref: '',
         summary: 'HTML 布局',
@@ -240,7 +240,7 @@ describe('parseCapabilityArtifactDisplays', () => {
     const rawBody = '{"result":{"content":[{"type":"text","text":"不得展示的原始返回"}]}}';
     const artifacts = [
       artifact({
-        artifact_id: 'main_agent_text:1',
+        artifact_id: 'agent-artifact:task-1:final',
         artifact_type: 'text',
         storage_ref: '主代理总结',
         summary: 'final',

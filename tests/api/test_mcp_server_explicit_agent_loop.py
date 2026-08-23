@@ -14,13 +14,12 @@ from src.integrations.mcp.resume_envelope import (
 from tests.api.support import APITestCase
 
 
-class MCPServerSoftBindingAPITest(APITestCase):
+class MCPServerExplicitAgentLoopAPITest(APITestCase):
     def build_runtime(self, **kwargs):
         kwargs.setdefault(
-            "planner_text_generator",
+            "main_agent_stream_generator",
             lambda _prompt, **_options: '{"action":"finish","reason":"done"}',
         )
-        kwargs.setdefault("enable_llm_planner", True)
         with patch.dict(
             os.environ,
             {
@@ -224,7 +223,10 @@ class MCPServerSoftBindingAPITest(APITestCase):
         )
         scheduler.assert_awaited_once()
         orchestration_request = scheduler.await_args.args[0]
-        self.assertEqual(orchestration_request.available_mcp_servers, ())
+        self.assertEqual(
+            [profile.server_id for profile in orchestration_request.available_mcp_servers],
+            ["mcp-available"],
+        )
         self.assertEqual(orchestration_request.metadata["mcp_dispatch_server_id"], "mcp-available")
         self.assertNotIn("mcp_server_binding", orchestration_request.metadata)
         self.assertNotIn("mcp_server_binding_context", orchestration_request.metadata)

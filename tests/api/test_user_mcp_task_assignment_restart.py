@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import os
 import tempfile
+from functools import partial
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from src.api.dto import SubmitMessageRequest
-from src.api.runtime import build_api_runtime
+from src.api.runtime import build_api_runtime as _build_api_runtime
+
+build_api_runtime = partial(
+    _build_api_runtime,
+    skill_roots=(),
+    public_skill_roots=(),
+)
 from src.core.enums import NodeStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Interrupt, TaskNode, UserMCPServer
-from src.orchestration.models import OrchestrationRequest
+from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
+from src.orchestration.agent_loop.tool_catalog import CapabilityVisibilityContext
 from src.storage.sqlite.repositories import SQLiteStorage
 from tests.api.support import InMemoryTaskRuntimeSidecar
 
@@ -33,9 +41,9 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_user_scoped_task_keeps_persisted_assignment_after_rollout_config_changes(self) -> None:
         runtime = self._build_runtime(self._enforce_env(percent=100, salt="first-salt"))
-        scheduled: list[OrchestrationRequest] = []
+        scheduled: list[AgentExecutionRequest] = []
 
-        async def capture_execution(request: OrchestrationRequest) -> None:
+        async def capture_execution(request: AgentExecutionRequest) -> None:
             scheduled.append(request)
 
         runtime._schedule_execution = capture_execution
@@ -81,9 +89,9 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
         restarted = self._build_runtime(
             self._enforce_env(percent=0, salt="replacement-salt")
         )
-        resumed: list[OrchestrationRequest] = []
+        resumed: list[AgentExecutionRequest] = []
 
-        async def capture_resume(request: OrchestrationRequest) -> None:
+        async def capture_resume(request: AgentExecutionRequest) -> None:
             resumed.append(request)
 
         restarted._schedule_execution = capture_resume
@@ -112,22 +120,15 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.metadata["mcp_binding_mode"], "explicit_command")
             self.assertEqual(request.metadata["mcp_dispatch_server_id"], "server-a")
             self.assertEqual([profile.server_id for profile in request.available_mcp_servers], ["server-a"])
-            visible = restarted.capability_registry.list_for_request(
-                request,
-                public_only=True,
-            )
-            self.assertIn("mcp.dispatch", {item.capability_id for item in visible})
-            plan = restarted.workflow_provider.build_plan(request)
-            self.assertEqual(plan.nodes[0].capability_id, "mcp.dispatch")
-            self.assertEqual(plan.nodes[0].metadata["mcp_binding_mode"], "explicit_command")
+            self.assertEqual(request.requested_capability_id, None)
         finally:
             await restarted.shutdown()
 
     async def test_new_task_uses_legacy_assignment_when_restarted_with_routing_off(self) -> None:
         runtime = self._build_runtime(self._off_env())
-        scheduled: list[OrchestrationRequest] = []
+        scheduled: list[AgentExecutionRequest] = []
 
-        async def capture_execution(request: OrchestrationRequest) -> None:
+        async def capture_execution(request: AgentExecutionRequest) -> None:
             scheduled.append(request)
 
         runtime._schedule_execution = capture_execution
@@ -137,7 +138,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
                 SubmitMessageRequest(
                     conversation_id="conv-new-off",
                     content="普通请求",
-                    capability_id="main_agent.respond",
+                    capability_id=None,
                 ),
                 authenticated_username="alice",
             )
@@ -151,9 +152,9 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_task_keeps_persisted_assignment_after_enforce_restart(self) -> None:
         runtime = self._build_runtime(self._off_env())
-        scheduled: list[OrchestrationRequest] = []
+        scheduled: list[AgentExecutionRequest] = []
 
-        async def capture_execution(request: OrchestrationRequest) -> None:
+        async def capture_execution(request: AgentExecutionRequest) -> None:
             scheduled.append(request)
 
         runtime._schedule_execution = capture_execution
@@ -162,7 +163,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
             SubmitMessageRequest(
                 conversation_id="conv-legacy",
                 content="普通请求",
-                capability_id="main_agent.respond",
+                capability_id=None,
             ),
             authenticated_username="alice",
         )
@@ -170,7 +171,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
         node = TaskNode(
             node_id="node-legacy",
             task_id=task.task_id,
-            capability_id="main_agent.respond",
+            capability_id="agent.input",
             status=NodeStatus.RUNNING,
         )
         await runtime.storage.save_task_node(node)
@@ -180,7 +181,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
                 conversation_id=task.conversation_id,
                 task_id=task.task_id,
                 node_id="node-legacy",
-                source_agent="main_agent.respond",
+                source_agent="agent.input",
                 source_message_id=task.root_message_id,
                 question="继续吗？",
                 reason_code="input_required",
@@ -200,9 +201,9 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
         await runtime.shutdown()
 
         restarted = self._build_runtime(self._enforce_env(percent=100, salt="enforce-salt"))
-        resumed: list[OrchestrationRequest] = []
+        resumed: list[AgentExecutionRequest] = []
 
-        async def capture_resume(request: OrchestrationRequest) -> None:
+        async def capture_resume(request: AgentExecutionRequest) -> None:
             resumed.append(request)
 
         restarted._schedule_execution = capture_resume
@@ -225,8 +226,11 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
                 original_config_version,
             )
             self.assertEqual(request.available_mcp_servers, ())
-            visible = restarted.capability_registry.list_for_request(
-                request,
+            visible = restarted.capability_registry.list_for_visibility(
+                CapabilityVisibilityContext(
+                    authenticated_owner_scope="user:alice",
+                    execution_path="legacy",
+                ),
                 public_only=True,
             )
             self.assertNotIn("mcp.dispatch", {item.capability_id for item in visible})
@@ -265,7 +269,6 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
             audit_log_path=self.audit_log_path,
             master_key_bytes=b"a" * 32,
             mcp_config={"enabled": False},
-            planner_text_generator=lambda _prompt, **_kwargs: '{"action":"finish"}',
             main_agent_stream_generator=lambda _prompt, **_kwargs: "done",
             main_agent_llm_config={
                 "model_editions": {

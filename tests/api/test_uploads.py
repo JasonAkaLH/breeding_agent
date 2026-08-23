@@ -14,7 +14,7 @@ from openpyxl import Workbook
 from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, file_upload_message_id
 from src.api.routes.uploads import _read_upload_content_with_limit
 from src.api.upload_store import DEFAULT_MAX_UPLOAD_FILE_BYTES, InMemoryUploadStore, UploadValidationError
-from src.orchestration.models import OrchestrationRequest
+from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 from tests.api.support import APITestCase
 
 
@@ -386,11 +386,12 @@ class UploadsAPITest(APITestCase):
         )
         self.assertEqual(deleted.status_code, 200, deleted.text)
 
-        request = OrchestrationRequest(
+        request = AgentExecutionRequest(
             task_id="task-stale",
             conversation_id="conv-stale-metadata",
             root_message_id="msg-stale",
             user_message="use stale file",
+            owner_scope="owner:test",
             metadata={
                 "uploaded_artifacts": context["uploaded_artifacts"],
                 "skill_artifacts": context["skill_artifacts"],
@@ -411,10 +412,10 @@ class UploadsAPITest(APITestCase):
         )
         self.assertEqual(upload.status_code, 201, upload.text)
         upload_id = upload.json()["upload_id"]
-        scheduled: list[OrchestrationRequest] = []
+        scheduled: list[AgentExecutionRequest] = []
         main_agent_called = False
 
-        async def capture_execution(request: OrchestrationRequest) -> None:
+        async def capture_execution(request: AgentExecutionRequest) -> None:
             scheduled.append(request)
 
         def fail_if_called(_prompt: str, **_kwargs):

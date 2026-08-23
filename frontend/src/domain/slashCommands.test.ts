@@ -9,16 +9,6 @@ import {
 
 const capabilities: CapabilityResponse[] = [
   {
-    capability_id: 'main_agent.respond',
-    name: '普通对话',
-    description: 'Main agent',
-    version: '1',
-    status: 'active',
-    kind: 'capability',
-    source: 'builtin',
-    source_path: '',
-  },
-  {
     capability_id: 'skill.mini_breedstat_rcbd',
     name: 'mini-breedstat-rcbd',
     display_name: '田间试验设计',
@@ -59,7 +49,6 @@ describe('slashCommands', () => {
       expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup', hasCommandConflict: false }),
       expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd', displayName: '田间试验设计', hasCommandConflict: false }),
     ]);
-    expect(commands.map((command) => command.capabilityId)).not.toContain('main_agent.respond');
     expect(commands.map((command) => command.capabilityId)).not.toContain('skill.disabled_demo');
   });
 
@@ -86,7 +75,7 @@ describe('slashCommands', () => {
     expect(slashMenuCandidates('/SKILL.md', commands)).toEqual([]);
   });
 
-  it('parses exact slash command input into cleaned content and soft binding metadata', () => {
+  it('parses exact slash command input into a direct required Skill call', () => {
     const commands = deriveSlashCommands(capabilities);
 
     expect(parseDirectSlashCommand('/data-lookup 查询龙粳33', commands)).toEqual({
@@ -98,11 +87,10 @@ describe('slashCommands', () => {
       kind: 'ready',
       content: '查询龙粳33',
       command: expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup' }),
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.data_lookup',
       metadata: {
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
       },
     });
   });
@@ -114,11 +102,10 @@ describe('slashCommands', () => {
       kind: 'ready',
       content: '',
       command: expect.objectContaining({ command: '/data-lookup' }),
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.data_lookup',
       metadata: {
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
       },
     });
     expect(slashSubmitIntent('/unknown args', commands, null)).toEqual({ kind: 'blocked', reason: 'not_found', command: '/unknown' });
@@ -132,11 +119,10 @@ describe('slashCommands', () => {
       kind: 'ready',
       content: '/data-lookup 查询龙粳33',
       command: expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd' }),
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.mini_breedstat_rcbd',
       metadata: {
         forced_by_slash_command: true,
         slash_command: '/mini-breedstat-rcbd',
-        soft_skill_binding: { capability_id: 'skill.mini_breedstat_rcbd', command: '/mini-breedstat-rcbd' },
       },
     });
   });

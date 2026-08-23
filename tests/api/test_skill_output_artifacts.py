@@ -47,15 +47,16 @@ class SkillOutputArtifactsAPITest(APITestCase):
 name: file-skill
 description: 文件产出测试 Skill
 triggers: [生成文件, 多文件, 压缩, 拒绝压缩]
-scripts:
-  - name: emit
-    path: scripts/emit.py
-    runtime: python
-    auto_run: true
-outputs:
-  required: [answer]
 ---
 用于测试输出文件。
+""",
+            encoding="utf-8",
+        )
+        (root / "skill.contract.yaml").write_text(
+            """contract_version: '2'
+capability: {id: skill.file_output, display_name: File Output}
+runtime: {mode: python_subprocess, answer_mode: direct}
+entrypoints: {emit: {path: scripts/emit.py}}
 """,
             encoding="utf-8",
         )
@@ -70,6 +71,7 @@ outputs:
             main_agent_llm_config=self._main_agent_llm_config(),
             enable_conversation_memory=False,
         )
+        self.active_skill_id = "skill.file_output"
 
     async def _use_multi_script_skill(self) -> None:
         root = self.workspace / "skills" / "multi_script_skill"
@@ -80,19 +82,6 @@ outputs:
 name: multi-script-file-skill
 description: 多脚本文件产出测试 Skill
 triggers: [生成文件]
-scripts:
-  - name: first
-    path: scripts/first.py
-    runtime: python
-    auto_run: true
-    outputs:
-      required: [answer]
-  - name: second
-    path: scripts/second.py
-    runtime: python
-    auto_run: true
-    outputs:
-      required: [answer]
 ---
 用于测试同一响应内多个脚本输出文件。
 """,
@@ -124,6 +113,7 @@ print(json.dumps({'answer': 'second', 'output_files': [{'path': 'outputs/second.
             main_agent_llm_config=self._main_agent_llm_config(),
             enable_conversation_memory=False,
         )
+        self.active_skill_id = "skill.multi_script_file_skill"
 
     async def test_skill_output_file_is_downloadable_without_exposing_storage_ref(self) -> None:
         await self._use_skill(
@@ -135,7 +125,7 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/layout.html', 'filename': 'layout.html', 'mime_type': 'text/html', 'label': '布局', 'summary': 'HTML 布局'}]}, ensure_ascii=False))
 """
         )
-        response = await self.submit_message(conversation_id="conv-file", content="请生成文件", capability_id=None)
+        response = await self.submit_message(conversation_id="conv-file", content="请生成文件", capability_id=self.active_skill_id)
         task_id = response.json()["task_id"]
         await self.wait_for_terminal_task(task_id)
 
@@ -169,13 +159,13 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt', 'filename': 'result.txt', 'mime_type': 'text/plain'}]}, ensure_ascii=False))
 """
         )
-        first = await self.submit_message(conversation_id="conv-replace", content="请生成文件 第一版", capability_id=None)
+        first = await self.submit_message(conversation_id="conv-replace", content="请生成文件 第一版", capability_id=self.active_skill_id)
         first_task_id = first.json()["task_id"]
         await self.wait_for_terminal_task(first_task_id)
         first_artifacts = (await self.client.get(f"/api/v1/tasks/{first_task_id}/artifacts")).json()["artifacts"]
         first_file = next(artifact for artifact in first_artifacts if artifact["artifact_type"] == "file")
 
-        second = await self.submit_message(conversation_id="conv-replace", content="请生成文件 第二版", capability_id=None)
+        second = await self.submit_message(conversation_id="conv-replace", content="请生成文件 第二版", capability_id=self.active_skill_id)
         second_task_id = second.json()["task_id"]
         await self.wait_for_terminal_task(second_task_id)
         second_artifacts = (await self.client.get(f"/api/v1/tasks/{second_task_id}/artifacts")).json()["artifacts"]
@@ -200,7 +190,7 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/layout.html'}, {'path': 'outputs/fieldbook.csv'}]}, ensure_ascii=False))
 """
         )
-        response = await self.submit_message(conversation_id="conv-zip", content="请生成多文件", capability_id=None)
+        response = await self.submit_message(conversation_id="conv-zip", content="请生成多文件", capability_id=self.active_skill_id)
         task_id = response.json()["task_id"]
         await self.wait_for_terminal_task(task_id)
         artifacts = (await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")).json()["artifacts"]
@@ -225,7 +215,7 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'}]}, ensure_ascii=False))
 """
         )
-        response = await self.submit_message(conversation_id="conv-owner", content="请生成文件", capability_id=None)
+        response = await self.submit_message(conversation_id="conv-owner", content="请生成文件", capability_id=self.active_skill_id)
         task_id = response.json()["task_id"]
         await self.wait_for_terminal_task(task_id)
         artifact = next(
@@ -248,7 +238,7 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/bad.zip'}]}, ensure_ascii=False))
 """
         )
-        response = await self.submit_message(conversation_id="conv-source-zip", content="拒绝压缩", capability_id=None)
+        response = await self.submit_message(conversation_id="conv-source-zip", content="拒绝压缩", capability_id=self.active_skill_id)
         task_id = response.json()["task_id"]
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
@@ -270,7 +260,7 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'
             raise OSError("disk full")
 
         self.runtime.artifact_file_store.save_file = fail_save_file  # type: ignore[method-assign]
-        response = await self.submit_message(conversation_id="conv-store-fail", content="请生成文件", capability_id=None)
+        response = await self.submit_message(conversation_id="conv-store-fail", content="请生成文件", capability_id=self.active_skill_id)
         task_id = response.json()["task_id"]
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
@@ -291,7 +281,7 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'}]}, ensure_ascii=False))
 """
         )
-        first = await self.submit_message(conversation_id="conv-evict-fail", content="请生成文件 第一版", capability_id=None)
+        first = await self.submit_message(conversation_id="conv-evict-fail", content="请生成文件 第一版", capability_id=self.active_skill_id)
         first_task_id = first.json()["task_id"]
         await self.wait_for_terminal_task(first_task_id)
         first_file = next(
@@ -304,7 +294,7 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'
             raise OSError("locked")
 
         self.runtime.artifact_file_store.delete = fail_delete  # type: ignore[method-assign]
-        second = await self.submit_message(conversation_id="conv-evict-fail", content="请生成文件 第二版", capability_id=None)
+        second = await self.submit_message(conversation_id="conv-evict-fail", content="请生成文件 第二版", capability_id=self.active_skill_id)
         second_task_id = second.json()["task_id"]
         terminal = await self.wait_for_terminal_task(second_task_id)
         self.assertEqual(terminal["status"], "completed")
@@ -328,7 +318,7 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'}]}, ensure_ascii=False))
 """
         )
-        first = await self.submit_message(conversation_id="conv-evict-metadata-fail", content="请生成文件 第一版", capability_id=None)
+        first = await self.submit_message(conversation_id="conv-evict-metadata-fail", content="请生成文件 第一版", capability_id=self.active_skill_id)
         first_task_id = first.json()["task_id"]
         await self.wait_for_terminal_task(first_task_id)
         first_file = next(
@@ -344,7 +334,7 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'
             return await original_save_artifact(artifact)
 
         self.runtime.storage.save_artifact = fail_old_metadata_save  # type: ignore[method-assign]
-        second = await self.submit_message(conversation_id="conv-evict-metadata-fail", content="请生成文件 第二版", capability_id=None)
+        second = await self.submit_message(conversation_id="conv-evict-metadata-fail", content="请生成文件 第二版", capability_id=self.active_skill_id)
         second_task_id = second.json()["task_id"]
         terminal = await self.wait_for_terminal_task(second_task_id)
         self.assertEqual(terminal["status"], "completed")
@@ -368,7 +358,7 @@ out.mkdir(parents=True, exist_ok=True)
 print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'}]}, ensure_ascii=False))
 """
         )
-        first = await self.submit_message(conversation_id="conv-llm-fail-artifact", content="请生成文件 第一版", capability_id=None)
+        first = await self.submit_message(conversation_id="conv-llm-fail-artifact", content="请生成文件 第一版", capability_id=self.active_skill_id)
         first_task_id = first.json()["task_id"]
         await self.wait_for_terminal_task(first_task_id)
         first_file = next(
@@ -387,7 +377,7 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'
             main_agent_llm_config=self._main_agent_llm_config(),
             enable_conversation_memory=False,
         )
-        second = await self.submit_message(conversation_id="conv-llm-fail-artifact", content="请生成文件 第二版", capability_id=None)
+        second = await self.submit_message(conversation_id="conv-llm-fail-artifact", content="请生成文件 第二版", capability_id=self.active_skill_id)
         second_task_id = second.json()["task_id"]
         terminal = await self.wait_for_terminal_task(second_task_id)
         self.assertEqual(terminal["status"], "failed")
@@ -400,43 +390,7 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'
         self.assertEqual(new_download.status_code, 200)
         self.assertIn("第二版", new_download.text)
 
-    async def test_multiple_auto_run_scripts_in_same_response_keep_only_latest_output(self) -> None:
-        await self._use_multi_script_skill()
-        response = await self.submit_message(conversation_id="conv-same-run", content="请生成文件", capability_id=None)
-        task_id = response.json()["task_id"]
-        await self.wait_for_terminal_task(task_id)
-        artifacts = (await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")).json()["artifacts"]
-        file_artifacts = [artifact for artifact in artifacts if artifact["artifact_type"] == "file"]
 
-        self.assertEqual(len(file_artifacts), 1)
-        self.assertEqual(file_artifacts[0]["filename"], "second.txt")
-        download = await self.client.get(file_artifacts[0]["download_url"])
-        self.assertEqual(download.status_code, 200)
-        self.assertEqual(download.text, "second")
-
-    async def test_pending_same_response_output_cleanup_failure_does_not_fail_task(self) -> None:
-        await self._use_multi_script_skill()
-
-        def fail_delete(storage_key: str) -> bool:
-            raise OSError("locked")
-
-        self.runtime.artifact_file_store.delete = fail_delete  # type: ignore[method-assign]
-        response = await self.submit_message(conversation_id="conv-pending-cleanup", content="请生成文件", capability_id=None)
-        task_id = response.json()["task_id"]
-        terminal = await self.wait_for_terminal_task(task_id)
-        self.assertEqual(terminal["status"], "completed")
-        artifacts = (await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")).json()["artifacts"]
-        file_artifacts = [artifact for artifact in artifacts if artifact["artifact_type"] == "file"]
-        self.assertEqual(len(file_artifacts), 1)
-        self.assertEqual(file_artifacts[0]["filename"], "second.txt")
-        events = await self.runtime.storage.list_events_for_task(task_id)
-        self.assertTrue(
-            any(
-                event.event_type == "skill.output_file_rejected"
-                and event.payload.get("reason") == "pending_artifact_cleanup_failed"
-                for event in events
-            )
-        )
 
 
 if __name__ == "__main__":

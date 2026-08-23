@@ -40,7 +40,6 @@ class ProjectSkillBundleStartupGateTest(unittest.TestCase):
             main_agent_stream_generator=lambda _prompt, **_kwargs: "test",
             main_agent_llm_config=test_llm_config(),
             enable_platform_llm=False,
-            enable_llm_planner=False,
             enable_skill_input_llm=False,
             enable_conversation_title_llm=False,
             enable_conversation_memory=False,

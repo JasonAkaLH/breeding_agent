@@ -79,8 +79,9 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("任务终态仍保持", response.text)
         self.assertIn("columns_truncated", response.text)
         self.assertIn("excel_sheets_truncated", response.text)
-        self.assertIn("metadata.soft_skill_binding", response.text)
-        self.assertIn("direct_skill_execution_disabled", response.text)
+        self.assertNotIn("metadata.soft_skill_binding", response.text)
+        self.assertNotIn("direct_skill_execution_disabled", response.text)
+        self.assertIn("capability_id=skill.*", response.text)
         self.assertIn("skill.contract.yaml", response.text)
         self.assertIn("schemas/*.input.yaml", response.text)
         self.assertIn("SkillResourceService", response.text)
@@ -95,8 +96,8 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("runtime/", response.text)
         self.assertIn("schemas/", response.text)
         self.assertIn("config.yaml", response.text)
-        self.assertIn("soft_skill_binding.decision", response.text)
-        self.assertIn("main_agent.output_delta", response.text)
+        self.assertIn("agent.reasoning_delta", response.text)
+        self.assertIn("agent.run.completed", response.text)
         self.assertIn("文件产物判定规则", response.text)
         self.assertIn("sandbox:/mnt/data", response.text)
         self.assertIn("/api/v1/artifacts/{artifact_id}/download", response.text)
@@ -111,7 +112,7 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("以 SSE 为主账本", response.text)
         self.assertIn("只有当 SSE 中收到", response.text)
         self.assertIn("不能替代 SSE 触发 interrupt", response.text)
-        self.assertIn("graph 只能说明“现在看起来是什么状态”", response.text)
+        self.assertIn("graph 只提供当前活动快照", response.text)
         self.assertIn("所有 interrupt 回答统一通过 chat-messages 提交", response.text)
         self.assertIn("开放性追问", response.text)
         self.assertIn("metadata.upload_sheet_selections", response.text)
@@ -131,10 +132,6 @@ class DeveloperDocsAPITest(APITestCase):
             "auth.invalidated",
             "task.accepted",
             "task.graph_created",
-            "task.graph_updated",
-            "task.replan_started",
-            "task.replan_rejected",
-            "task.replan_available",
             "task.completed",
             "task.failed",
             "task.cancellation_requested",
@@ -147,16 +144,23 @@ class DeveloperDocsAPITest(APITestCase):
             "node.waiting_for_input",
             "node.cancelled",
             "node.blocked_by_cancellation",
-            "node.orphaned",
             "node.ready_to_resume",
             "node.resuming",
-            "main_agent.output_delta",
-            "main_agent.reasoning_delta",
-            "planner.reasoning_delta",
+            "agent.reasoning_delta",
             "interrupt.reasoning_delta",
             "memory.reasoning_delta",
-            "soft_skill.reasoning_delta",
-            "main_agent.output_final",
+            "agent.run.waiting",
+            "agent.run.resumed",
+            "agent.run.completed",
+            "agent.run.failed",
+            "agent.run.cancelled",
+            "agent.run.started",
+            "agent.sample.started",
+            "agent.sample.completed",
+            "agent.tool_call.accepted",
+            "agent.tool_result.committed",
+            "agent.run.lease_lost",
+            "agent.context.compacted",
             "skill.progress",
             "mcp.long_task_started",
             "mcp.long_task_progress",
@@ -171,20 +175,10 @@ class DeveloperDocsAPITest(APITestCase):
             "assistant_history_sync.failed",
             "conversation.memory_built",
             "conversation.memory_fallback",
-            "main_agent.llm_call",
-            "main_agent.llm_stream_failed",
-            "main_agent.prompt_envelope_failed",
-            "main_agent.prompt_envelope_rendered",
-            "main_agent.prompt_profile_rendered",
-            "main_agent.stream_cancelled",
             "mcp.tool_call_blocked",
             "mcp.tool_call_started",
             "mcp.tool_call_failed",
             "mcp.tool_call_completed",
-            "pending_skill_context.superseded",
-            "pending_skill_context.consumed",
-            "pending_skill_context.created",
-            "skill.bundle_missing",
             "skill.entrypoint_started",
             "skill.entrypoint_failed",
             "skill.entrypoint_completed",
@@ -192,30 +186,19 @@ class DeveloperDocsAPITest(APITestCase):
             "skill.execution_failed",
             "skill.execution_completed",
             "skill.execution_interrupted",
-            "skill.forced_missing",
-            "skill.forced_selected",
             "skill.input_resolution_prompt_profile",
             "skill.input_resolution_diagnostic",
             "skill.input_resolved",
             "skill.input_missing",
-            "skill.match_fallback",
-            "skill.match_suppressed",
-            "skill.matched",
             "skill.output_error",
             "skill.output_file_rejected",
             "skill.output_file_collected",
             "skill.script_started",
             "skill.script_failed",
             "skill.script_completed",
-            "skill.service_denied",
-            "skill.service_bound",
             "skill.resource_read",
             "skill.output_contract_validated",
-            "soft_skill_binding.decision",
-            "soft_skill_binding.llm_failed",
             "task.late_result_discarded",
-            "task.replanned",
-            "workflow.plan_built",
         ):
             self.assertIn(event_type, response.text)
             self.assertRegex(
@@ -223,6 +206,17 @@ class DeveloperDocsAPITest(APITestCase):
                 rf'<code class="inline-code">{re.escape(event_type)}</code>（[^）]+）',
             )
         self.assertNotIn("task.updated", response.text)
+        for removed_event_type in (
+            "task.graph_updated",
+            "task.replanned",
+            "workflow.plan_built",
+            "planner.reasoning_delta",
+            "soft_skill.reasoning_delta",
+            "soft_skill_binding.decision",
+            "main_agent.output_delta",
+            "main_agent.output_final",
+        ):
+            self.assertNotIn(removed_event_type, event_enum_section)
         self.assertIn("ConversationSummaryResponse", response.text)
         self.assertIn("username", response.text)
         self.assertIn("51888", response.text)

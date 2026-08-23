@@ -271,7 +271,7 @@ class StreamableHTTPVersionTests(unittest.IsolatedAsyncioTestCase):
                                         "public_name": "Customer Search",
                                         "public_description": "通过 MCP 查询客户。",
                                         "risk_level": "read_only",
-                                        "planner_allowed_fields": ["keyword"],
+                                        "model_allowed_fields": ["keyword"],
                                     }
                                 ],
                             }
@@ -291,7 +291,7 @@ class StreamableHTTPVersionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("icon", descriptor.description.lower())
                 binding = state.binding_for_capability(descriptor.capability_id)
                 self.assertEqual(binding.output_schema, {"type": "object", "properties": {"ok": {"type": "boolean"}}})
-                self.assertEqual(binding.planner_allowed_fields, ("keyword",))
+                self.assertEqual(binding.model_allowed_fields, ("keyword",))
                 self.assertEqual(result["structuredContent"], {"ok": True})
 
     def test_tasks_resources_prompts_elicitation_remain_non_public_feature_gated(self) -> None:

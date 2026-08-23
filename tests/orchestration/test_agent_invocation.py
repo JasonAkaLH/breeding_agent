@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import inspect
 import unittest
 from dataclasses import replace
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from src.core.contracts import CapabilityExecutionRequest, CapabilityExecutionResult
@@ -14,14 +12,21 @@ from src.orchestration.agent_loop.invocation import (
     CapabilityInvocationService,
     InvocationRequest,
 )
+from src.orchestration.agent_loop.capability_invoker import AgentCapabilityInvoker
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
+    AgentItem,
+    AgentItemKind,
+    AgentItemState,
     AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
+    AgentToolCall,
 )
 from src.orchestration.models import ExecutionInstance, InstanceState
 from src.orchestration.registry import InstanceRegistry
-from src.orchestration.scheduler import Scheduler
+from src.orchestration.instance_selector import InstanceSelector
 from tests.orchestration.support import FakeExecutor
 
 
@@ -151,6 +156,96 @@ class _AgentFixtureCommitPort(_RecordingCommitPort):
 
 
 class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_mcp_hook_wraps_the_real_dispatch_invocation(self) -> None:
+        instances = InstanceRegistry()
+        instances.register(
+            ExecutionInstance(
+                "instance-mcp",
+                ("mcp.dispatch",),
+                InstanceState.ONLINE,
+                0,
+            )
+        )
+        task = Task("task-1", "conv-1", "message-1", status=TaskStatus.RUNNING)
+        node = TaskNode("node-1", "task-1", "mcp.dispatch", status=NodeStatus.PENDING)
+        port = _RecordingCommitPort(task=task, node=node)
+        timeline: list[str] = []
+
+        def execute(request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
+            timeline.append("execute")
+            self.assertEqual(request.input_payload, {"server_id": "server-1"})
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={"status": "completed"},
+            )
+
+        kernel = CapabilityInvocationService(
+            instance_selector=InstanceSelector(instances),
+            executor=FakeExecutor({"mcp.dispatch": execute}),
+            commit_port=port,
+            now_fn=lambda: datetime(2026, 8, 23, 12, 0),
+        )
+
+        async def hook(**values: Any) -> object | None:
+            phase = str(values["phase"])
+            timeline.append(f"hook:{phase}")
+            if phase == "begin":
+                self.assertEqual(values["capability_id"], "mcp.dispatch")
+                self.assertEqual(values["effective_payload"], {"server_id": "server-1"})
+                return object()
+            self.assertEqual(values["result"].node.status, NodeStatus.COMPLETED)
+            return None
+
+        async def load_task(_task_id: str) -> Task:
+            return task
+
+        async def load_node(_node_id: str) -> TaskNode:
+            return node
+
+        run = AgentRun(
+            run_id="run-1",
+            task_id="task-1",
+            conversation_id="conv-1",
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding("edition-a"),
+            claim_token="claim-1",
+            revision=3,
+        )
+        call_item = AgentItem(
+            item_id="call-item-1",
+            run_id=run.run_id,
+            task_id=run.task_id,
+            sequence=1,
+            kind=AgentItemKind.TOOL_CALL,
+            state=AgentItemState.COMMITTED,
+            payload_json='{"node_id":"node-1"}',
+            payload_sha256="0" * 64,
+        )
+        invoker = AgentCapabilityInvoker(
+            invocation_service=kernel,
+            runs=object(),
+            task_loader=load_task,
+            node_loader=load_node,
+            request_metadata_loader=lambda _run: {},
+            current_user_input_loader=lambda _run: "",
+            invocation_hook=hook,
+        )
+
+        outcome = await invoker.invoke(
+            run=run,
+            call=AgentToolCall("call-1", "mcp_dispatch", "{}", 0),
+            call_item=call_item,
+            result_reservation=object(),
+            capability_id="mcp.dispatch",
+            effective_payload={"server_id": "server-1"},
+            cancellation=None,
+        )
+
+        self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
+        self.assertEqual(timeline, ["hook:begin", "execute", "hook:finish"])
+
     async def test_agent_fixture_injects_only_agent_atomic_writer_for_outcome(self) -> None:
         instances = InstanceRegistry()
         instances.register(
@@ -161,7 +256,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
         writer = _RecordingAgentAtomicWriter()
         port = _AgentFixtureCommitPort(task=task, node=node, writer=writer)
         kernel = CapabilityInvocationService(
-            scheduler=Scheduler(instances),
+            instance_selector=InstanceSelector(instances),
             executor=FakeExecutor(
                 {
                     "cap.lookup": CapabilityExecutionResult(
@@ -231,7 +326,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         kernel = CapabilityInvocationService(
-            scheduler=Scheduler(instances),
+            instance_selector=InstanceSelector(instances),
             executor=FakeExecutor({"cap.lookup": execute}),
             commit_port=port,
             now_fn=lambda: datetime(2026, 8, 22, 12, 0),
@@ -277,7 +372,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         kernel = CapabilityInvocationService(
-            scheduler=Scheduler(instances),
+            instance_selector=InstanceSelector(instances),
             executor=FakeExecutor({"cap.lookup": cancel_during_execute}),
             commit_port=port,
             now_fn=lambda: datetime(2026, 8, 22, 12, 0),
@@ -290,18 +385,3 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(port.steps, ["owned", "start", "execute", "owned", "late_result"])
         self.assertEqual(result.node.status, NodeStatus.CANCELLED)
         self.assertEqual(result.output_payload, {})
-
-    def test_orchestration_service_delegates_executor_lifecycle_to_kernel(self) -> None:
-        from src.orchestration import service
-
-        service_source = inspect.getsource(service.OrchestrationService._execute_node)
-        self.assertNotIn("_executor.execute", service_source)
-        self.assertIn("_invocation_service.invoke", service_source)
-        invocation_source = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "orchestration"
-            / "agent_loop"
-            / "invocation.py"
-        ).read_text(encoding="utf-8")
-        self.assertEqual(invocation_source.count("self._executor.execute("), 1)

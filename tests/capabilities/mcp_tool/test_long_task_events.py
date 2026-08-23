@@ -16,7 +16,7 @@ class LongTaskRuntime:
             capability_id="mcp.crm.search_customer",
             server_id="crm",
             tool_name="search_customer",
-            planner_allowed_fields=("keyword",),
+            model_allowed_fields=("keyword",),
             input_schema={"type": "object", "properties": {"keyword": {"type": "string"}}},
             task_augmented_call=True,
         )
@@ -143,7 +143,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "查询客户。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                             }
                         ],
                     }

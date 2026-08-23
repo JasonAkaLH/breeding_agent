@@ -33,7 +33,7 @@ class StreamingWriteAfterCompletionUnitTest(unittest.IsolatedAsyncioTestCase):
             event_id="evt-transient",
             conversation_id="conv-transient",
             task_id="task-transient",
-            event_type="main_agent.output_delta",
+            event_type="agent.reasoning_delta",
             payload={"delta": PARTIAL_SENTINEL, "ordinal": 1},
             visibility=EventVisibility.FRONTEND,
         )
@@ -69,12 +69,10 @@ class StreamingWriteAfterCompletionAPITest(APITestCase):
         events = await self.runtime.storage.list_events_for_task(task_id)
         serialized_events = json.dumps([dict(event.payload) for event in events], ensure_ascii=False, default=str)
         self.assertNotIn(PARTIAL_SENTINEL, serialized_events)
-        failure_event = next(event for event in events if event.event_type == "main_agent.llm_stream_failed")
-        self.assertTrue(failure_event.payload["partial_output_discarded"])
-        self.assertEqual(failure_event.payload["answer_chunk_count"], 1)
-        self.assertEqual(failure_event.payload["answer_char_count"], len(PARTIAL_SENTINEL))
+        failure_event = next(event for event in events if event.event_type == "task.failed")
+        self.assertEqual(failure_event.payload["code"], "execution_crash")
         self.assertEqual(failure_event.payload["error_type"], "TimeoutError")
-        self.assertFalse(any(event.event_type == "main_agent.output_final" for event in events))
+        self.assertFalse(any(event.event_type == "agent.final_output" for event in events))
 
         messages = await self.runtime.storage.list_messages_for_conversation("conv-stream-fail")
         artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
@@ -126,13 +124,13 @@ class StreamingWriteAfterCompletionAPITest(APITestCase):
                     event_id=f"evt-readonly-sse-{index}",
                     conversation_id="conv-readonly-sse",
                     task_id="task-readonly-sse",
-                    event_type="main_agent.output_delta",
+                    event_type="agent.reasoning_delta",
                     payload={"delta": f"chunk-{index}", "ordinal": index + 1},
                     visibility=EventVisibility.FRONTEND,
                 )
             )
             event = await asyncio.wait_for(pending, timeout=1)
-            self.assertEqual(event.event_type, "main_agent.output_delta")
+            self.assertEqual(event.event_type, "agent.reasoning_delta")
             pending = asyncio.create_task(iterator.__anext__())
 
         pending.cancel()

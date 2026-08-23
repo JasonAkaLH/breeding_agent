@@ -10,7 +10,6 @@ from pathlib import Path
 from src.capabilities.mcp_dispatch.models import MCPBindingMode, MCPToolProfile
 from src.core.enums import (
     ArtifactType,
-    EdgeType,
     MessageRole,
     NodeStatus,
     TaskStatus,
@@ -26,7 +25,6 @@ from src.core.models import (
     MCPTerminalState,
     Message,
     Task,
-    TaskEdge,
     TaskInputAttachment,
     TaskNode,
     UserMCPServer,
@@ -98,25 +96,6 @@ class _ProjectionStorage:
             capability_id="mcp.dispatch",
             status=NodeStatus.RUNNING,
         )
-        self.dependency = TaskNode(
-            node_id="node-dependency",
-            task_id=self.task.task_id,
-            capability_id="main.agent",
-            status=NodeStatus.COMPLETED,
-            output_refs=("artifact-a",),
-        )
-        self.edge = TaskEdge(
-            self.dependency.node_id, self.node.node_id, EdgeType.DATA
-        )
-        self.artifact = Artifact(
-            artifact_id="artifact-a",
-            task_id=self.task.task_id,
-            producer_node_id=self.dependency.node_id,
-            artifact_type=ArtifactType.TEXT,
-            storage_ref="artifact://a",
-            summary="上游持久化摘要",
-            is_complete=True,
-        )
         self.attachment = TaskInputAttachment(
             attachment_id="attachment-a",
             task_id=self.task.task_id,
@@ -155,9 +134,9 @@ class _ProjectionStorage:
         envelope = build_mcp_dispatch_resume_envelope_v2(
             task=self.task,
             node=self.node,
-            edges=(self.edge,),
+            edges=(),
             attachments=(self.attachment,),
-            dependency_nodes=(self.dependency,),
+            dependency_nodes=(),
             server_id=self.server.server_id,
         )
         self.intent = SimpleNamespace(
@@ -259,10 +238,10 @@ class _ProjectionStorage:
         return [self.attachment] if task_id == self.task.task_id else []
 
     async def list_task_edges(self, task_id):
-        return [self.edge] if task_id == self.task.task_id else []
+        return []
 
     async def get_artifact(self, artifact_id):
-        return self.artifact if artifact_id == self.artifact.artifact_id else None
+        return None
 
     async def list_mcp_call_records(self, owner_user_id, task_id, *, branch_id=None):
         del owner_user_id, task_id, branch_id
@@ -397,10 +376,7 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
             before_restart.completed_result_projections,
             ("projection:call-1", "projection:call-2"),
         )
-        self.assertEqual(
-            before_restart.upstream_facts,
-            ("node-dependency:safe_summary=上游持久化摘要",),
-        )
+        self.assertEqual(before_restart.upstream_facts, ())
         self.assertEqual(before_restart.remaining_call_budget, 18)
         self.assertEqual(before_restart.selector_step_total, 7)
         self.assertEqual(before_restart.approval_round_total, 2)

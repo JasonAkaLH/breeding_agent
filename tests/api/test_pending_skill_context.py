@@ -198,11 +198,10 @@ entrypoints: {run: {path: scripts/fail.py}}
                 "conversation_id": conversation_id,
                 "content": content,
                 "routing_mode": "force_capability",
-                "capability_id": "main_agent.respond",
+                "capability_id": "skill.need_variety",
                 "metadata": {
                     "forced_by_slash_command": True,
                     "slash_command": "/need-variety",
-                    "soft_skill_binding": {"capability_id": "skill.need_variety", "command": "/need-variety"},
                 },
             },
         )
@@ -245,15 +244,8 @@ entrypoints: {run: {path: scripts/fail.py}}
         self.assertIsNotNone(original_task)
         assert original_task is not None
         original_root_node_id = original_task.root_node_id
-        nodes_before_answer = {node.node_id: node for node in await self.runtime.storage.list_task_nodes_for_task(task_id)}
         edges_before_answer = await self.runtime.storage.list_task_edges(task_id)
-        finalizer_node_ids = [
-            edge.to_node_id
-            for edge in edges_before_answer
-            if edge.from_node_id == interrupted_node_id and nodes_before_answer[edge.to_node_id].capability_id == "main_agent.respond"
-        ]
-        self.assertLessEqual(len(finalizer_node_ids), 1)
-        original_finalizer_node_id = finalizer_node_ids[0] if finalizer_node_ids else None
+        self.assertEqual(edges_before_answer, [])
 
         answer = await self.answer_interrupt_with_chat(
             conversation_id="conv-pending",
@@ -272,7 +264,8 @@ entrypoints: {run: {path: scripts/fail.py}}
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["active_node_count"], 0)
-        self.assertEqual(terminal["root_node_id"], original_root_node_id)
+        self.assertNotEqual(terminal["root_node_id"], original_root_node_id)
+        self.assertTrue(str(terminal["root_node_id"]).endswith(":final"))
 
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         skill_nodes = [node for node in nodes if node.capability_id == "skill.need_variety"]
@@ -282,13 +275,11 @@ entrypoints: {run: {path: scripts/fail.py}}
             any(node.node_id == f"{task_id}:skill_execute" for node in nodes if node.node_id != interrupted_node_id),
             "interrupt resume must reuse the interrupted dynamic Skill node instead of creating a second direct Skill node",
         )
-        if original_finalizer_node_id is not None:
-            finalizer_node = next(node for node in nodes if node.node_id == original_finalizer_node_id)
-            self.assertEqual(str(finalizer_node.status), "completed")
+        self.assertEqual(await self.runtime.storage.list_task_edges(task_id), [])
 
         task = await self.runtime.storage.get_task(task_id)
         self.assertEqual(task.routing_mode, RoutingMode.FORCE_CAPABILITY)
-        self.assertEqual(task.requested_capability_id, "main_agent.respond")
+        self.assertEqual(task.requested_capability_id, "skill.need_variety")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-pending"))
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertIn("task.interrupt_answered", [event.event_type for event in events])
@@ -420,7 +411,7 @@ entrypoints: {run: {path: scripts/fail.py}}
         response = await self.submit_message(
             conversation_id="conv-explicit-upload",
             content="请使用这个材料文件做设计",
-            capability_id="main_agent.respond",
+            capability_id=None,
             metadata={"upload_ids": [upload_id]},
         )
 
@@ -441,7 +432,7 @@ entrypoints: {run: {path: scripts/fail.py}}
         response = await self.submit_message(
             conversation_id="conv-missing-upload-id",
             content="请使用缺失文件",
-            capability_id="main_agent.respond",
+            capability_id=None,
             metadata={"upload_ids": ["upl-missing"]},
         )
 
@@ -477,7 +468,7 @@ entrypoints: {run: {path: scripts/fail.py}}
         response = await self.submit_message(
             conversation_id="conv-deleted-upload-id",
             content="继续使用刚才删除的文件",
-            capability_id="main_agent.respond",
+            capability_id=None,
             metadata={"upload_ids": [upload_id]},
         )
 
@@ -506,7 +497,7 @@ entrypoints: {run: {path: scripts/fail.py}}
         response = await self.submit_message(
             conversation_id="conv-upload-other",
             content="请使用另一个会话的文件",
-            capability_id="main_agent.respond",
+            capability_id=None,
             metadata={"upload_ids": [upload_id]},
         )
 
@@ -637,11 +628,10 @@ entrypoints: {run: {path: scripts/fail.py}}
                 "conversation_id": "conv-interrupt",
                 "content": "帮我查询一下",
                 "routing_mode": "force_capability",
-                "capability_id": "main_agent.respond",
+                "capability_id": "skill.generic_data_lookup",
                 "metadata": {
                     "forced_by_slash_command": True,
                     "slash_command": "/generic-data-lookup",
-                    "soft_skill_binding": {"capability_id": "skill.generic_data_lookup", "command": "/generic-data-lookup"},
                 },
             },
         )
@@ -659,15 +649,14 @@ entrypoints: {run: {path: scripts/fail.py}}
                 "conversation_id": "conv-plain-failure",
                 "content": "请执行失败技能",
                 "routing_mode": "force_capability",
-                "capability_id": "main_agent.respond",
+                "capability_id": "skill.plain_fail",
                 "metadata": {
                     "forced_by_slash_command": True,
                     "slash_command": "/plain-fail",
-                    "soft_skill_binding": {"capability_id": "skill.plain_fail", "command": "/plain-fail"},
                 },
             },
         )
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
-        self.assertEqual(terminal["status"], "failed")
+        self.assertEqual(terminal["status"], "completed")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-plain-failure"))

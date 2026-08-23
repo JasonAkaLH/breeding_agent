@@ -363,7 +363,7 @@ input_schemas:
             if mode == "interrupt_resume_verification":
                 return json.dumps({"allow_resume": True, "confidence": 0.99, "reason": "clear slot answer"}, ensure_ascii=False)
             if mode == "normal_extraction":
-                seen["planner_hint"] = payload.get("planner_hint")
+                seen["turn_hint"] = payload.get("turn_hint")
                 seen["current_user_answer"] = payload.get("current_user_answer")
                 return "{}"
             return "{}"
@@ -401,16 +401,16 @@ input_schemas:
         self.assertEqual(terminal["status"], "completed")
 
         self.assertEqual(seen["current_user_answer"], "10")
-        planner_hint = seen["planner_hint"]
-        self.assertIsInstance(planner_hint, dict)
-        assert isinstance(planner_hint, dict)
-        self.assertEqual(planner_hint["target_slots"], ["ncols"])
-        self.assertEqual(planner_hint["reason"], "用户明确提供了田块列数10，对应缺失的ncols槽位。")
+        turn_hint = seen["turn_hint"]
+        self.assertIsInstance(turn_hint, dict)
+        assert isinstance(turn_hint, dict)
+        self.assertEqual(turn_hint["target_slots"], ["ncols"])
+        self.assertEqual(turn_hint["reason"], "用户明确提供了田块列数10，对应缺失的ncols槽位。")
         collection = await self.runtime.storage.get_slot_collection(collection_id)
         self.assertIsNotNone(collection)
         assert collection is not None
         self.assertEqual(collection.resolved["ncols"]["value"], 10)
-        self.assertEqual(collection.resolved["ncols"]["source"], "planner_hint")
+        self.assertEqual(collection.resolved["ncols"]["source"], "turn_hint")
 
     async def test_v2_interrupt_question_is_persisted_as_visible_assistant_history(self) -> None:
         root = self.workspace / "skill-v2-visible-question"
@@ -854,11 +854,11 @@ input_schemas:
         events = await self.runtime.storage.list_events_for_task(task_id)
         event_types = [event.event_type for event in events]
         self.assertIn("task.interrupt_question_answered", event_types)
-        self.assertIn("soft_skill_binding.decision", event_types)
+        self.assertIn("skill.question_answered", event_types)
         self.assertIn("skill.resource_read", event_types)
         resource_read_payloads = [event.payload for event in events if event.event_type == "skill.resource_read"]
         self.assertTrue(any(payload.get("resource_id") == "material_data_example" for payload in resource_read_payloads))
-        self.assertNotIn("main_agent.output_final", event_types)
+        self.assertNotIn("agent.final_output", event_types)
 
     async def test_interrupt_open_skill_question_includes_skill_md_overview(self) -> None:
         root = self.workspace / "skill-v2-skill-md-question"

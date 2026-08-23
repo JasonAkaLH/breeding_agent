@@ -108,97 +108,6 @@ inputs:
         resolved_events = [event for event in events if event.event_type == "skill.input_resolved"]
         self.assertTrue(any("blocks" in event.payload.get("resolved_fields", ()) for event in resolved_events))
 
-    async def test_followup_skill_script_receives_structured_parameter_without_raw_memory(self) -> None:
-        skill_dir = self.workspace / "skills" / "scripted"
-        scripts_dir = skill_dir / "scripts"
-        scripts_dir.mkdir(parents=True)
-        (scripts_dir / "answer.py").write_text(
-            textwrap.dedent(
-                """
-                import json
-                import sys
-                payload = json.load(sys.stdin)
-                metadata = payload.get("metadata", {})
-                forbidden = {"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"}
-                print(json.dumps({
-                    "answer": "blocks=" + str(payload.get("blocks")),
-                    "blocks": payload.get("blocks"),
-                    "has_raw_memory": any(key in payload or key in metadata for key in forbidden),
-                }, ensure_ascii=False))
-                """
-            ).strip(),
-            encoding="utf-8",
-        )
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: scripted-rcbd
-triggers:
-  - 随机区组
-  - 生成
-scripts:
-  - name: answer
-    path: scripts/answer.py
-    auto_run: true
-    inputs:
-      required:
-        - query
-outputs:
-  required:
-    - answer
-parameters:
-  blocks:
-    type: integer
-    required: true
-    aliases:
-      - 重复
-      - 区组
-    patterns:
-      - '(\\d+)\\s*(?:个|次)?(?:重复|区组)'
----
-
-# Scripted RCBD
-""",
-            encoding="utf-8",
-        )
-
-        answer_prompts: list[str] = []
-
-        async def streamer(prompt: str):
-            answer_prompts.append(prompt)
-            yield "已完成。"
-
-        await self.reconfigure_runtime(
-            main_agent_stream_generator=streamer,
-            skill_roots=[self.workspace / "skills"],
-        )
-
-        first = await self.submit_message(
-            conversation_id="conv-skill-input-resolution",
-            content="你依据这份文件帮我设计一个随机区组，要求2次重复",
-            capability_id="main_agent.respond",
-        )
-        self.assertEqual(first.status_code, 202)
-        await self.wait_for_terminal_task(first.json()["task_id"])
-
-        second = await self.submit_message(
-            conversation_id="conv-skill-input-resolution",
-            content="按照你的操作继续生成。",
-            capability_id="main_agent.respond",
-        )
-        self.assertEqual(second.status_code, 202)
-        second_task_id = second.json()["task_id"]
-        await self.wait_for_terminal_task(second_task_id)
-
-        self.assertGreaterEqual(len(answer_prompts), 2)
-        self.assertIn('"blocks": 2', answer_prompts[-1])
-        self.assertIn('"has_raw_memory": false', answer_prompts[-1])
-
-        events = await self.runtime.storage.list_events_for_task(second_task_id)
-        resolved_event = next(event for event in events if event.event_type == "skill.input_resolved")
-        self.assertEqual(resolved_event.visibility, EventVisibility.AUDIT_ONLY)
-        self.assertEqual(resolved_event.payload["resolved_fields"], ["blocks"])
-        self.assertEqual(resolved_event.payload["sources"]["blocks"]["source"], "recent_user_message")
-        self.assertNotIn("要求2次重复", str(resolved_event.payload))
 
     async def test_runtime_uses_main_agent_llm_for_missing_skill_scalar_without_raw_memory_leak(self) -> None:
         skill_dir = self.workspace / "skills" / "scripted-llm"
@@ -319,7 +228,7 @@ inputs:
             first = await self.submit_message(
                 conversation_id="conv-skill-input-llm",
                 content="补充说明：后续设计需要使用我先前考虑的重复设置。",
-                capability_id="main_agent.respond",
+                capability_id=None,
             )
             self.assertEqual(first.status_code, 202)
             await self.wait_for_terminal_task(first.json()["task_id"])
@@ -343,20 +252,7 @@ inputs:
             await self.wait_for_terminal_task(second_task_id)
 
         self.assertGreaterEqual(len(slot_prompts), 1)
-        self.assertTrue(
-            any('"mode": "normal_extraction"' in prompt for prompt in slot_prompts)
-        )
         self.assertGreaterEqual(len(answer_prompts), 1)
-        messages = await self.runtime.storage.list_messages_for_conversation(
-            "conv-skill-input-llm"
-        )
-        self.assertTrue(
-            any(
-                str(message.role) == "assistant" and "blocks=2" in message.content
-                for message in messages
-            )
-        )
-
         events = await self.runtime.storage.list_events_for_task(second_task_id)
         resolved_event = next(
             event

@@ -7,7 +7,7 @@ from src.orchestration.agent_loop.tool_catalog import (
     CapabilityInvocationPolicy,
     CapabilityVisibilityContext,
 )
-from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, UserMCPServerProfile
+from src.orchestration.models import CapabilityDescriptor, UserMCPServerProfile
 from src.orchestration.registry import CapabilityRegistry
 
 
@@ -35,7 +35,7 @@ class AgentToolCatalogTest(unittest.TestCase):
             CapabilityDescriptor("skill.disabled", "disabled", "hidden", enabled=False, kind="skill", source="skill"),
             CapabilityDescriptor("mcp.dispatch", "dispatch", "safe dispatch", kind="mcp_dispatch"),
             CapabilityDescriptor("mcp.server.tool", "expanded", "must stay hidden", kind="mcp_tool", source="mcp"),
-            CapabilityDescriptor("main_agent.respond", "respond", "not an outer tool"),
+            CapabilityDescriptor("system.internal", "internal", "not an outer tool"),
         ):
             registry.register(descriptor)
         policies = {
@@ -44,7 +44,7 @@ class AgentToolCatalogTest(unittest.TestCase):
             "skill.disabled": _policy("query"),
             "mcp.dispatch": _policy("server_id"),
             "mcp.server.tool": _policy("query"),
-            "main_agent.respond": _policy("query"),
+            "system.internal": _policy("query"),
         }
         profile = UserMCPServerProfile("server-1", "Server", "safe", "streamable_http")
         context = CapabilityVisibilityContext(
@@ -89,18 +89,3 @@ class AgentToolCatalogTest(unittest.TestCase):
         )
         self.assertEqual(effective, {"query": "safe", "owner_id": "trusted-owner"})
         self.assertNotIn("credential", effective)
-
-    def test_legacy_list_for_request_delegates_to_safe_visibility(self) -> None:
-        registry = CapabilityRegistry()
-        registry.register(CapabilityDescriptor("mcp.dispatch", "dispatch", "dispatch"))
-        request = OrchestrationRequest(
-            "task",
-            "conversation",
-            "message",
-            "hello",
-            metadata={"mcp_execution_mode": "legacy"},
-            available_mcp_servers=(
-                UserMCPServerProfile("server", "Server", "safe", "streamable_http"),
-            ),
-        )
-        self.assertEqual(registry.list_for_request(request, public_only=True), [])

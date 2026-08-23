@@ -42,7 +42,7 @@ MCP_CONFIG = {
                     "public_name": "Customer Search",
                     "public_description": "通过 CRM MCP 服务查询客户基础信息。",
                     "risk_level": "read_only",
-                    "planner_allowed_fields": ["keyword"],
+                    "model_allowed_fields": ["keyword"],
                 }
             ],
         }
@@ -72,7 +72,6 @@ class MCPRuntimeRegistrationAPITests(APITestCase):
         response.raise_for_status()
         capabilities = {item["capability_id"]: item for item in response.json()["capabilities"]}
 
-        self.assertIn("main_agent.respond", capabilities)
         self.assertIn("skill.generic_data_lookup", capabilities)
         self.assertNotIn("legacy.query", capabilities)
         self.assertIn("mcp.crm.search_customer", capabilities)
@@ -89,54 +88,10 @@ class MCPRuntimeRegistrationAPITests(APITestCase):
         response.raise_for_status()
         capability_ids = {item["capability_id"] for item in response.json()["capabilities"]}
 
-        self.assertIn("main_agent.respond", capability_ids)
         self.assertIn("skill.generic_data_lookup", capability_ids)
         self.assertNotIn("legacy.query", capability_ids)
         self.assertNotIn("mcp.crm.search_customer", capability_ids)
 
-    async def test_planner_can_call_public_mcp_capability_and_main_agent_receives_result(self) -> None:
-        mcp_client = FakeMCPClient()
-        planner_calls = []
-        main_prompts = []
-
-        def planner(prompt, **_kwargs):
-            planner_calls.append(prompt)
-            return json.dumps(
-                {
-                    "nodes": [
-                        {
-                            "node_id": "lookup",
-                            "capability_id": "mcp.crm.search_customer",
-                            "input_payload": {"keyword": "龙粳", "token": "SECRET", "endpoint": "https://evil"},
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            )
-
-        def main_agent(prompt, **_kwargs):
-            main_prompts.append(prompt)
-            return "已查询到客户基础信息。"
-
-        await self.reconfigure_runtime(
-            mcp_config=MCP_CONFIG,
-            mcp_client_factory=lambda server: mcp_client,
-            planner_text_generator=planner,
-            main_agent_stream_generator=main_agent,
-        )
-        response = await self.submit_message(content="查一下龙粳的客户信息", capability_id=None)
-        response.raise_for_status()
-        task_id = response.json()["task_id"]
-        terminal = await self.wait_for_terminal_task(task_id)
-
-        self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(mcp_client.calls, [("search_customer", {"keyword": "龙粳"})])
-        self.assertIn("mcp.crm.search_customer", planner_calls[0])
-        self.assertNotIn("endpoint", repr(mcp_client.calls))
-        self.assertIn("客户基础信息：龙粳33", main_prompts[-1])
-        events = await self.runtime.storage.list_events_for_task(task_id)
-        self.assertIn("mcp.tool_call_started", [event.event_type for event in events])
-        self.assertNotIn("SECRET", repr([event.payload for event in events]))
 
     async def test_runtime_shutdown_closes_mcp_clients(self) -> None:
         client = FakeMCPClient()

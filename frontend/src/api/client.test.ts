@@ -154,7 +154,7 @@ describe('createApiClient', () => {
   });
 
 
-  it('submits slash soft binding through main agent while preserving metadata', async () => {
+  it('submits a slash-selected Skill as the required capability', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
@@ -162,24 +162,22 @@ describe('createApiClient', () => {
       conversationId: 'conv-1',
       content: '查询龙粳33',
       mode: 'chat',
-      capabilityId: 'main_agent.respond',
+      capabilityId: 'skill.data_lookup',
       metadata: {
         upload_ids: ['upl-1'],
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
       },
     });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body).toMatchObject({
       routing_mode: 'force_capability',
-      capability_id: 'main_agent.respond',
+      capability_id: 'skill.data_lookup',
       metadata: {
         upload_ids: ['upl-1'],
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
         deep_thinking: false,
       },
     });

@@ -63,13 +63,12 @@ class _ForbiddenRouter:
         raise AssertionError(f"explicit binding must not call Server Router: {kwargs}")
 
 
-class MCPServerSoftBindingE2ETest(APITestCase):
+class MCPServerExplicitAgentLoopE2ETest(APITestCase):
     def build_runtime(self, **kwargs):
         kwargs.setdefault(
-            "planner_text_generator",
+            "main_agent_stream_generator",
             lambda _prompt, **_options: '{"action":"finish","reason":"done"}',
         )
-        kwargs.setdefault("enable_llm_planner", True)
         with patch.dict(
             os.environ,
             {
@@ -84,7 +83,7 @@ class MCPServerSoftBindingE2ETest(APITestCase):
                 enable_user_mcp_routing=True,
             )
 
-    async def test_fixed_server_discovery_finish_finalizer_and_history(self) -> None:
+    async def test_fixed_server_discovery_finish_agent_final_and_history(self) -> None:
         now = datetime(2026, 8, 17, 10, 0, 0)
         await self.runtime.storage.create_user_mcp_server(
             UserMCPServer(
@@ -102,8 +101,8 @@ class MCPServerSoftBindingE2ETest(APITestCase):
         executor = next(
             item
             for item in (
-                self.runtime.orchestration_service
-                ._invocation_service._executor._executors
+                self.runtime._agent_capability_invoker
+                ._invocation._executor._executors
             )
             if isinstance(item, MCPDispatchExecutor)
         )
@@ -130,11 +129,18 @@ class MCPServerSoftBindingE2ETest(APITestCase):
 
         self.assertEqual(response.status_code, 202, response.text)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
-        self.assertEqual(terminal["status"], "completed")
+        events = await self.runtime.storage.list_events_for_task(
+            response.json()["task_id"]
+        )
+        self.assertEqual(
+            terminal["status"],
+            "completed",
+            [(event.event_type, event.payload) for event in events],
+        )
         nodes = await self.runtime.storage.list_task_nodes_for_task(response.json()["task_id"])
         self.assertEqual(
             {node.capability_id for node in nodes},
-            {"mcp.dispatch", "main_agent.respond"},
+            {"mcp.dispatch", "agent.final_output"},
         )
         dispatch_node = next(
             node for node in nodes if node.capability_id == "mcp.dispatch"

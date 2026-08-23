@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.api import runtime as runtime_module
 
@@ -130,7 +130,7 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
 
     def test_canonical_off_postgres_runtime_does_not_require_app_dsn(self) -> None:
         state_engine = object()
-        storage = object()
+        storage = MagicMock()
         env = {
             "MAF_API_ENV": "production",
             "MAF_STATE_STORE_BACKEND": "postgresql",
@@ -167,15 +167,15 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
             return_value=storage,
         ) as storage_type:
             runtime = runtime_module.build_api_runtime(
+                skill_roots=(),
+                public_skill_roots=(),
                 database_path=Path(tmpdir) / "api.sqlite3",
                 audit_log_path=Path(tmpdir) / "audit.jsonl",
                 master_key_bytes=b"p" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_skill_input_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
-                skill_roots=(),
             )
 
         self.assertIs(runtime.storage, storage)
@@ -189,7 +189,7 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
     def test_canonical_postgres_runtime_wires_distinct_validated_app_session(self) -> None:
         state_engine = object()
         rollout_engine = object()
-        storage = object()
+        storage = MagicMock()
         env = {
             "MAF_API_ENV": "test",
             "MAF_STATE_STORE_BACKEND": "postgresql",
@@ -221,7 +221,7 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
         ) as validate_role, patch.object(
             runtime_module,
             "create_postgres_session_factory",
-            side_effect=("rollout_session_factory", "state_session_factory"),
+            side_effect=("state_session_factory", "rollout_session_factory"),
         ), patch.object(
             runtime_module,
             "PostgreSQLStorage",
@@ -232,15 +232,15 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
             return_value=None,
         ):
             runtime = runtime_module.build_api_runtime(
+                skill_roots=(),
+                public_skill_roots=(),
                 database_path=Path(tmpdir) / "api.sqlite3",
                 audit_log_path=Path(tmpdir) / "audit.jsonl",
                 master_key_bytes=b"p" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_skill_input_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
-                skill_roots=(),
             )
 
         self.assertIs(runtime.storage, storage)

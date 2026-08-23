@@ -114,13 +114,13 @@ def _candidate_payload() -> dict[str, Any]:
         },
         "baseline_tests": {
             "python_orchestration": [
-                "tests/orchestration/test_workflow_plan_validator.py",
-                "tests/orchestration/test_registry_scheduler.py",
-                "tests/orchestration/test_completion_policy.py",
+                "tests/orchestration/test_agent_loop.py",
+                "tests/orchestration/test_agent_invocation.py",
+                "tests/orchestration/test_agent_final_output.py",
                 "tests/orchestration/test_backpressure.py",
             ],
             "token_counter": ["tests/integrations/test_token_counter.py"],
-            "main_agent_sanitizer": ["tests/capabilities/main_agent/test_runtime_replanner.py"],
+            "main_agent_sanitizer": ["tests/capabilities/main_agent/test_conversation_memory_prompt.py"],
         },
         "future_release_gates": {
             "artifact_provenance_required": True,

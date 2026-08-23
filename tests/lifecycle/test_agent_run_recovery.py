@@ -324,6 +324,63 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["outcome"], "aborted")
         self.assertEqual(payload["safe_error_code"], "side_effect_unknown_no_replay")
 
+    async def test_startup_recovery_aborts_reserved_call_without_replay_then_resumes(self) -> None:
+        task_id = "task-crashed"
+        run_id = "run-crashed"
+        with self.sessions.begin() as session:
+            session.add(
+                TaskRow(
+                    task_id=task_id,
+                    conversation_id="conv-crashed",
+                    root_message_id="message-crashed",
+                    status="running",
+                    routing_mode="auto",
+                )
+            )
+        run = await self.repository.create_run(
+            AgentRun(
+                run_id,
+                task_id,
+                "conv-crashed",
+                AgentRunStatus.RUNNING,
+                self.binding,
+            )
+        )
+        committed = await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                run_id=run_id,
+                expected_revision=run.revision,
+                expected_claim_token=None,
+                sample=AgentSample(
+                    sample_id="sample-crashed",
+                    binding=self.binding,
+                    visible_text="",
+                    tool_calls=(
+                        AgentToolCall("call-crashed", "tool_safe", "{}", 0),
+                    ),
+                    usage=AgentUsage(status="usage_unavailable"),
+                    finish=AgentFinishMetadata("tool_calls", 1),
+                ),
+                capability_ids_by_tool_name={"tool_safe": "skill.safe"},
+            )
+        )
+
+        recoverable = await self.repository.list_recoverable_runs()
+        self.assertIn(run_id, {item.run_id for item in recoverable})
+        result = await self.coordinator.recover_crashed_run(run_id)
+
+        self.assertEqual(result.state, AgentRecoveryState.RESUMED)
+        self.assertEqual(self.resumer.run_ids[-1], run_id)
+        items = await self.repository.list_items(run_id)
+        tool_result = next(
+            item
+            for item in items
+            if item.source_call_item_id == committed.call_items[0].item_id
+        )
+        payload = json.loads(tool_result.payload_json)
+        self.assertEqual(payload["outcome"], "aborted")
+        self.assertEqual(payload["safe_error_code"], "side_effect_unknown_no_replay")
+
     async def test_authoritative_result_repairs_reserved_item_and_ack_loss_retries(self) -> None:
         locator, _, _ = await self._seed_waiting("repair", AgentResumeKind.MCP_REMOTE_TASK)
         resolution = AgentAuthorityResolution(

@@ -7,6 +7,7 @@ import hmac
 import inspect
 import json
 import tempfile
+from functools import partial
 import unittest
 import warnings
 from datetime import datetime
@@ -15,10 +16,16 @@ from unittest.mock import patch
 
 import src.api.runtime as api_runtime
 from src.api.dto import SubmitMessageRequest
-from src.api.runtime import build_api_runtime
+from src.api.runtime import build_api_runtime as _build_api_runtime
+
+build_api_runtime = partial(
+    _build_api_runtime,
+    skill_roots=(),
+    public_skill_roots=(),
+)
 from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Task, UserMCPServer
-from src.orchestration.models import OrchestrationRequest
+from src.orchestration.agent_loop.tool_catalog import CapabilityVisibilityContext
 from src.integrations.master_key import MasterKeyError
 from src.integrations.mcp.credentials import CredentialSecurityError
 from tests.api.support import InMemoryTaskRuntimeSidecar
@@ -123,7 +130,7 @@ _LEGACY_MCP_CONFIG = {
                     "public_name": "Legacy CRM",
                     "public_description": "系统 CRM 查询能力",
                     "risk_level": "read_only",
-                    "planner_allowed_fields": [],
+                    "model_allowed_fields": [],
                 }
             ],
         }
@@ -237,7 +244,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 audit_log_path=root / "audit.jsonl",
                 master_key_bytes=b"a" * 32,
                 user_mcp_terminal_result_store_path=terminal_root,
-                planner_text_generator=lambda _prompt, **_kwargs: '{"nodes":[]}',
                 enable_platform_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
@@ -287,7 +293,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 audit_log_path=root / "audit.jsonl",
                 master_key_bytes=b"a" * 32,
                 mcp_client_factory=forbidden_client_factory,
-                planner_text_generator=lambda _prompt, **_kwargs: '{"nodes":[]}',
                 enable_platform_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
@@ -343,7 +348,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 master_key_bytes=b"r" * 32,
                 mcp_config={"enabled": False},
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
             )
@@ -391,12 +395,11 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                         master_key_bytes=b"a" * 32,
                         mcp_config={"enabled": False},
                         enable_platform_llm=False,
-                        enable_llm_planner=False,
                         enable_conversation_title_llm=False,
                         enable_conversation_memory=False,
                     )
 
-    async def test_runtime_store_authority_is_independent_from_rollout_off(self) -> None:
+    async def test_runtime_store_enforce_requires_agent_sidecar_authority_even_when_rollout_off(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ,
             {
@@ -416,35 +419,20 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
         ):
             root = Path(directory)
             os.environ.update(_write_task_authority_migration_evidence(root))
-            runtime = build_api_runtime(
-                database_path=root / "runtime.sqlite3",
-                audit_log_path=root / "audit.jsonl",
-                master_key_bytes=b"r" * 32,
-                mcp_config={"enabled": False},
-                enable_platform_llm=False,
-                enable_llm_planner=False,
-                enable_conversation_title_llm=False,
-                enable_conversation_memory=False,
-                runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
-            )
-            task = Task(
-                task_id="task-canonical-off",
-                conversation_id="conv-canonical-off",
-                root_message_id="msg-canonical-off",
-                status=TaskStatus.ACCEPTED,
-                requested_capability_id="mcp.dispatch",
-                mcp_execution_mode="legacy",
-                mcp_shadow_enabled=False,
-                mcp_rollout_config_version="mcp-rollout-off:test",
-                mcp_route_reason_code="routing_off",
-                mcp_rollout_mode="off",
-            )
-            try:
-                self.assertEqual(runtime.storage._mcp_task_authority_mode, "enforce")
-                self.assertEqual(await runtime.storage.save_task(task), task)
-                self.assertEqual(await runtime.storage.get_task(task.task_id), task)
-            finally:
-                await runtime.shutdown()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "agent_runtime_store_unavailable",
+            ):
+                build_api_runtime(
+                    database_path=root / "runtime.sqlite3",
+                    audit_log_path=root / "audit.jsonl",
+                    master_key_bytes=b"r" * 32,
+                    mcp_config={"enabled": False},
+                    enable_platform_llm=False,
+                    enable_conversation_title_llm=False,
+                    enable_conversation_memory=False,
+                    runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+                )
 
     def test_runtime_store_enforce_fails_closed_without_migration_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
@@ -468,7 +456,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     master_key_bytes=b"r" * 32,
                     mcp_config={"enabled": False},
                     enable_platform_llm=False,
-                    enable_llm_planner=False,
                     enable_conversation_title_llm=False,
                     enable_conversation_memory=False,
                     runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
@@ -515,7 +502,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                         master_key_bytes=b"r" * 32,
                         mcp_config={"enabled": False},
                         enable_platform_llm=False,
-                        enable_llm_planner=False,
                         enable_conversation_title_llm=False,
                         enable_conversation_memory=False,
                         runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
@@ -542,7 +528,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 master_key_bytes=b"r" * 32,
                 mcp_config={"enabled": False},
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
                 runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
@@ -553,12 +538,12 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 await runtime.shutdown()
 
     async def test_custom_server_percent_miss_is_unavailable_without_legacy_fallback(self) -> None:
-        planner_prompts: list[str] = []
+        agent_prompts: list[str] = []
         legacy_client = _LegacyMCPClient()
 
-        def planner(prompt, **_kwargs):
-            planner_prompts.append(prompt)
-            return '{"nodes":[]}'
+        def agent_generator(prompt, **_kwargs):
+            agent_prompts.append(prompt)
+            return "done"
 
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ,
@@ -590,8 +575,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 master_key_bytes=b"a" * 32,
                 mcp_config=_LEGACY_MCP_CONFIG,
                 mcp_client_factory=lambda _server: legacy_client,
-                planner_text_generator=planner,
-                main_agent_stream_generator=lambda _prompt, **_kwargs: "done",
+                main_agent_stream_generator=agent_generator,
                 main_agent_llm_config={
                     "model_editions": {
                         "default": "test",
@@ -659,8 +643,8 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     "user_server_rollout_unavailable",
                 )
                 self.assertEqual(legacy_client.calls, [])
-                self.assertTrue(planner_prompts)
-                self.assertNotIn("mcp.crm.search_customer", planner_prompts[-1])
+                self.assertTrue(agent_prompts)
+                self.assertNotIn("mcp.crm.search_customer", agent_prompts[-1])
                 automatic_events = await runtime.storage.list_events_for_task(
                     automatic.task_id
                 )
@@ -734,7 +718,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     ],
                 },
                 mcp_client_factory=forbidden_client_factory,
-                planner_text_generator=lambda _prompt, **_kwargs: '{"action":"finish"}',
+                main_agent_stream_generator=lambda _prompt, **_kwargs: '{"action":"finish"}',
                 enable_platform_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
@@ -790,7 +774,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 audit_log_path=root / "audit.jsonl",
                 master_key_bytes=b"a" * 32,
                 mcp_config={"enabled": False},
-                planner_text_generator=lambda _prompt, **_kwargs: '{"nodes":[]}',
                 main_agent_stream_generator=lambda _prompt, **_kwargs: "done",
                 main_agent_llm_config={
                     "model_editions": {
@@ -872,7 +855,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     audit_log_path=Path(directory) / "audit.jsonl",
                     enable_user_mcp=True,
                     enable_platform_llm=False,
-                    enable_llm_planner=False,
                     enable_conversation_title_llm=False,
                     enable_conversation_memory=False,
                 )
@@ -909,7 +891,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                         audit_log_path=Path(directory) / "audit.jsonl",
                         master_key_bytes=b"a" * 32,
                         enable_platform_llm=False,
-                        enable_llm_planner=False,
                         enable_conversation_title_llm=False,
                         enable_conversation_memory=False,
                     )
@@ -928,7 +909,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     master_key_file=Path(directory) / "master.key",
                     master_key_bytes=b"a" * 32,
                     enable_platform_llm=False,
-                    enable_llm_planner=False,
                     enable_conversation_title_llm=False,
                     enable_conversation_memory=False,
                 )
@@ -953,7 +933,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 enable_user_mcp=True,
                 master_key_bytes=b"a" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
             )
@@ -990,7 +969,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 audit_log_path=root / "first-audit.jsonl",
                 master_key_bytes=b"a" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
                 skill_roots=(),
@@ -1004,7 +982,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 audit_log_path=root / "second-audit.jsonl",
                 master_key_bytes=b"a" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
                 skill_roots=(),
@@ -1024,7 +1001,6 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 audit_log_path=root / "wrong-audit.jsonl",
                 master_key_bytes=b"b" * 32,
                 enable_platform_llm=False,
-                enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
                 skill_roots=(),
@@ -1058,7 +1034,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 enable_user_mcp=True,
                 enable_user_mcp_routing=True,
                 master_key_bytes=b"a" * 32,
-                planner_text_generator=lambda _prompt, **_kwargs: '{"action":"finish","reason":"done"}',
+                main_agent_stream_generator=lambda _prompt, **_kwargs: '{"action":"finish","reason":"done"}',
                 enable_platform_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
@@ -1100,13 +1076,11 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(profiles), 1)
                 self.assertEqual(profiles[0].display_name, "CRM")
                 self.assertNotIn("secret.invalid", repr(profiles[0]))
-                visible = runtime.capability_registry.list_for_request(
-                    OrchestrationRequest(
-                        task_id="task-a",
-                        conversation_id="conv-a",
-                        root_message_id="msg-a",
-                        user_message="查客户",
-                        available_mcp_servers=profiles,
+                visible = runtime.capability_registry.list_for_visibility(
+                    CapabilityVisibilityContext(
+                        "owner:test",
+                        execution_path="user_scoped",
+                        safe_mcp_server_profiles=profiles,
                     ),
                     public_only=True,
                 )
