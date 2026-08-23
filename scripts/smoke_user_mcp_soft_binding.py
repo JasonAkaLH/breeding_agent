@@ -15,8 +15,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.api.app import create_app
-from src.core.enums import UserMCPHealthStatus
+from src.api.app import create_app  # noqa: E402
+from src.core.enums import TaskStatus, UserMCPHealthStatus  # noqa: E402
+from src.core.models import Conversation, Task  # noqa: E402
 
 
 OWNER_ENV = "MAF_MCP_SMOKE_OWNER_USER_ID"
@@ -38,9 +39,25 @@ async def build_report(runtime, *, owner_user_id: str, server_id: str) -> dict[s
     ):
         raise RuntimeError("mcp_bound_server_unavailable")
     task_id = f"mcp-soft-binding-smoke-{uuid4().hex}"
+    conversation_id = f"mcp-soft-binding-smoke-conversation-{uuid4().hex}"
     scope = None
     closed = False
+    await runtime.storage.save_conversation(
+        Conversation(
+            conversation_id=conversation_id,
+            username=owner_user_id,
+            current_task_id=task_id,
+        )
+    )
     try:
+        await runtime.storage.save_task(
+            Task(
+                task_id=task_id,
+                conversation_id=conversation_id,
+                root_message_id=f"mcp-soft-binding-smoke-message-{uuid4().hex}",
+                status=TaskStatus.RUNNING,
+            )
+        )
         scope = await gateway.open_scope(
             SimpleNamespace(username=owner_user_id),
             task_id,
@@ -50,9 +67,12 @@ async def build_report(runtime, *, owner_user_id: str, server_id: str) -> dict[s
         protocol_version = str(catalog.effective_protocol_version)
         tool_count = len(catalog.tools)
     finally:
-        if scope is not None:
-            await gateway.close_scope(scope, "soft_binding_discover_only_smoke")
-            closed = True
+        try:
+            if scope is not None:
+                await gateway.close_scope(scope, "soft_binding_discover_only_smoke")
+                closed = True
+        finally:
+            await runtime.storage.delete_conversation(conversation_id)
     return {
         "safe_server_ref": signer.safe_reference(
             server_id,

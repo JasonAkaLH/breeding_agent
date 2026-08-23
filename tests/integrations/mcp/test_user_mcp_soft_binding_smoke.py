@@ -29,6 +29,11 @@ class _Gateway:
 
 
 class _Storage:
+    def __init__(self) -> None:
+        self.conversations = []
+        self.tasks = []
+        self.deleted = []
+
     async def get_user_mcp_server(self, owner_user_id, server_id):
         return SimpleNamespace(
             owner_user_id=owner_user_id,
@@ -38,6 +43,18 @@ class _Storage:
             deletion_pending=False,
             deleted_at=None,
         )
+
+    async def save_conversation(self, conversation):
+        self.conversations.append(conversation)
+        return conversation
+
+    async def save_task(self, task):
+        self.tasks.append(task)
+        return task
+
+    async def delete_conversation(self, conversation_id):
+        self.deleted.append(conversation_id)
+        return {"conversation": 1}
 
 
 class _Signer:
@@ -77,6 +94,13 @@ class UserMCPSoftBindingSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(signer.args, ("mcp-ocr", "mcp-server-binding-v1"))
         self.assertEqual(len(gateway.opened), 1)
         self.assertEqual(gateway.closed, [("scope-1", "soft_binding_discover_only_smoke")])
+        self.assertEqual(len(runtime.storage.conversations), 1)
+        self.assertEqual(len(runtime.storage.tasks), 1)
+        self.assertEqual(
+            runtime.storage.tasks[0].conversation_id,
+            runtime.storage.conversations[0].conversation_id,
+        )
+        self.assertEqual(runtime.storage.deleted, [runtime.storage.conversations[0].conversation_id])
         self.assertNotIn("alice", repr(report))
         self.assertNotIn("mcp-ocr", repr(report))
 
