@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -29,21 +30,13 @@ from src.integrations.master_key import (
     MasterKeyError,
 )
 from src.capabilities.main_agent import (
-    MAIN_AGENT_CAPABILITY_DESCRIPTORS,
-    MAIN_AGENT_PLANNER_PAYLOAD_POLICIES,
-    MainAgentExecutor,
-    MainAgentRuntimeReplanner,
-    MainAgentWorkflowProvider,
     SkillOutputArtifactManager,
     StreamGenerator,
-    build_local_main_agent_instance,
 )
 from src.capabilities.main_agent.prompt_builder import MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT
 from src.capabilities.mcp_dispatch import (
     MCP_DISPATCH_CAPABILITY_DESCRIPTOR,
-    MCP_DISPATCH_PLANNER_PAYLOAD_POLICY,
     MCPDispatchExecutor,
-    MCPDispatchWorkflowProvider,
     MCPServerRouter,
     MCPToolSelector,
     build_local_mcp_dispatch_instance,
@@ -89,12 +82,14 @@ from src.integrations.agent_skills import (
     SlotExtractionResult,
     apply_extraction_result_to_collection,
     build_backend_slot_extraction,
+    build_public_skill_profile,
     build_history_recall_prompt,
     build_normal_extraction_prompt,
     initialize_input_collection,
     load_input_schemas_for_contract,
     merge_slot_extraction_results,
     parse_slot_extraction_response,
+    resolve_skill_execution_config,
     schema_from_snapshot,
     select_input_schema,
     should_trigger_history_recall,
@@ -131,6 +126,7 @@ from src.integrations.llm_request_options import (
     resolve_llm_thinking_enabled,
 )
 from src.integrations.llm_runtime import SharedLLMRuntime
+from src.integrations.stream_agent_model_adapter import StreamAgentModelAdapter
 from src.integrations.model_editions import (
     config_for_model_edition,
     default_model_edition,
@@ -294,6 +290,10 @@ from src.integrations.mcp.user_config import UserMCPConfigService
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.integrations.rust_safety_contract import configure_safety_shadow_sink
 from src.lifecycle.cancellation_service import CancellationService
+from src.lifecycle.agent_run_recovery import (
+    AgentAuthorityResolution,
+    AgentRunRecoveryCoordinator,
+)
 from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.interrupt_service import InterruptService
 from src.lifecycle.mcp_presence import MCPTaskPresenceService
@@ -306,29 +306,42 @@ from src.orchestration.capability_fallback import (
     sanitize_capability_missing_fallback_metadata,
 )
 from src.orchestration.backpressure import DEFAULT_MAX_ACTIVE_TASKS, BackpressureGuard
-from src.orchestration.completion_policy import CompletionPolicy
-from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
-from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig, ResolutionGenerator
-from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
-from src.orchestration.models import (
-    CapabilityDescriptor,
-    OrchestrationRequest,
-    OrchestrationRunResult,
-    UserMCPServerProfile,
-    WorkflowPlan,
-    WorkflowNodePlan,
+from src.orchestration.agent_loop import (
+    AgentCallExecution,
+    AgentContextBuilder,
+    AgentContextRules,
+    AgentCancellationToken,
+    AgentCallOutcomeStatus,
+    AgentContinuationLocatorService,
+    AgentExecutionRequest,
+    AgentFinalOutputPublisher,
+    AgentLoopOrchestrator,
+    AgentLoopRunner,
+    AgentModelBinding,
+    AgentRunStatus,
+    AgentStorageConflict,
+    RunBoundMCPTextGenerator,
+    AgentToolCatalogBuilder,
+    CapabilityInvocationService,
+    CapabilityVisibilityContext,
+    DelegatedSkillActivationService,
+    default_agent_invocation_policy,
 )
-from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
-from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
+from src.orchestration.agent_loop.lease import AgentLeaseController
+from src.orchestration.agent_loop.capability_invoker import (
+    AgentCapabilityInvoker,
+    AgentInvocationContextStore,
+)
+from src.orchestration.agent_loop.task_projection import (
+    AgentTaskInvocationCommitPort,
+)
+from src.orchestration.agent_loop.repository import AgentRunRepository
+from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig, ResolutionGenerator
+from src.orchestration.models import CapabilityDescriptor, UserMCPServerProfile
 from src.orchestration.visible_message_history import INTERRUPT_VISIBLE_STREAM_STATUS, persist_interrupt_question_message
 from src.orchestration.composite_executor import CompositeExecutor
 from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
-from src.orchestration.runtime_replanner import CompositeRuntimeReplanner, RuntimeReplanner
-from src.orchestration.scheduler import Scheduler
-from src.orchestration.service import OrchestrationService
-from src.orchestration.soft_skill_replanner import SoftSkillBindingReplanner
-from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
-from src.orchestration.workflow_router import WorkflowRouter
+from src.orchestration.instance_selector import InstanceSelector
 from src.storage import StoragePort
 from src.storage.rust_contract import (
     error_policy,
@@ -343,8 +356,9 @@ from src.storage.runtime_sidecar_facade import (
 )
 from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
 from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write_sync
-from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
-from src.storage.postgres import PostgreSQLStorage, bootstrap_postgres_database, create_postgres_engine, create_postgres_session_factory
+from src.storage.sqlite import SQLiteAgentRepository, SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
+from src.storage.postgres import PostgreSQLAgentRepository, PostgreSQLStorage, bootstrap_postgres_database, create_postgres_engine, create_postgres_session_factory
+from src.storage.runtime_sidecar_agent_repository import RuntimeSidecarAgentRepository
 from src.storage.postgres.session import validate_mcp_rollout_connection_role
 from src.auth.postgres_invalidation_bus import PostgresAuthInvalidationBus
 from src.state.runtime_factory import StatePlatformBackend, build_state_platform_runtime_config
@@ -367,6 +381,7 @@ from .conversation_titles import (
     normalize_generated_conversation_title,
     validate_conversation_title,
 )
+from .agent_projection import AgentTaskProjectionService
 from .dto import SubmitMessageRequest
 from .mcp_binding import (
     MCP_BINDING_MODE_EXPLICIT_COMMAND,
@@ -406,7 +421,6 @@ PENDING_SKILL_METADATA_KEYS = frozenset(
         "defer_task_completed_until_pending_skill_context_processed",
     }
 )
-SOFT_SKILL_BINDING_METADATA_KEY = "soft_skill_binding"
 SOFT_SKILL_INTERNAL_METADATA_KEYS = frozenset(
     {
         "forced_skill_name",
@@ -424,7 +438,6 @@ SOFT_SKILL_INTERNAL_METADATA_KEYS = frozenset(
 RESUME_SKILL_INTERNAL_METADATA_KEYS = frozenset(
     {
         "resume_interrupted_node_id",
-        "resume_finalizer_node_id",
         "mcp_dispatch_server_id",
     }
 )
@@ -471,40 +484,6 @@ async def _mark_remote_continuation_dispatched(
     return dispatched
 
 
-def _deserialize_mcp_continuation_plan(payload: Mapping[str, Any]) -> WorkflowPlan:
-    raw_nodes = payload.get("nodes")
-    if not isinstance(raw_nodes, list) or not raw_nodes:
-        raise RuntimeError("mcp_continuation_plan_missing")
-    nodes: list[WorkflowNodePlan] = []
-    for raw in raw_nodes:
-        if not isinstance(raw, Mapping):
-            raise RuntimeError("mcp_continuation_plan_invalid")
-        nodes.append(
-            WorkflowNodePlan(
-                node_id=str(raw.get("node_id") or ""),
-                capability_id=str(raw.get("capability_id") or ""),
-                input_payload=dict(raw.get("input_payload") or {}),
-                metadata=dict(raw.get("metadata") or {}),
-                depends_on=tuple(str(item) for item in raw.get("depends_on") or ()),
-                criticality=NodeCriticality(
-                    str(raw.get("criticality") or NodeCriticality.REQUIRED.value)
-                ),
-                retry_policy=dict(raw.get("retry_policy") or {}),
-                timeout_policy=dict(raw.get("timeout_policy") or {}),
-                resource_class=(
-                    str(raw["resource_class"])
-                    if raw.get("resource_class") is not None
-                    else None
-                ),
-            )
-        )
-    return WorkflowPlan(
-        task_id=str(payload.get("task_id") or ""),
-        nodes=tuple(nodes),
-        metadata=dict(payload.get("metadata") or {}),
-        max_replans=int(payload.get("max_replans") or 0),
-        max_dynamic_nodes=int(payload.get("max_dynamic_nodes") or 0),
-    )
 USER_SUPPLIED_METADATA_DENYLIST = frozenset(
     {
         *PENDING_SKILL_METADATA_KEYS,
@@ -618,21 +597,15 @@ class _MCPRolloutInstanceAdmission:
 
 
 @dataclass(frozen=True, slots=True)
-class _MCPShadowNodeObservation:
+class _MCPShadowInvocationHandle:
+    task: Task
     node_id: str
+    owner_user_id: str
+    user_request: str
     scenario: ShadowScenario
     binding: Any
-    legacy_transport: str
-    mapping_resolution: RuntimeShadowMappingResolution
-    task: asyncio.Task[Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _MCPShadowExecutionHandle:
-    request: OrchestrationRequest
-    owner_user_id: str
     approved_mappings: tuple[Any, ...]
-    observations: tuple[_MCPShadowNodeObservation, ...]
+    observer_task: asyncio.Task[Any]
 
 
 class ApiRuntime(ConversationFileSelectionRuntimeMixin):
@@ -646,8 +619,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         event_broker: InMemoryEventBroker,
         cancellation_service: CancellationService,
         interrupt_service: InterruptService,
-        orchestration_service: OrchestrationService,
-        workflow_provider: WorkflowRouter,
+        agent_loop_orchestrator: AgentLoopOrchestrator,
+        agent_run_repository: AgentRunRepository,
+        agent_task_projection: AgentTaskProjectionService,
+        agent_capability_invoker: AgentCapabilityInvoker,
+        agent_invocation_contexts: AgentInvocationContextStore,
+        agent_run_recovery: AgentRunRecoveryCoordinator,
+        main_agent_llm_runtime: SharedLLMRuntime,
         mysql_adapter: MySQLReadonlyAdapter | None = None,
         username_token_service: UsernameTokenService | None = None,
         master_key_sentinel_cipher: MasterKeySentinelCipher,
@@ -722,8 +700,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self.event_broker = event_broker
         self.cancellation_service = cancellation_service
         self.interrupt_service = interrupt_service
-        self.orchestration_service = orchestration_service
-        self.workflow_provider = workflow_provider
+        self.agent_loop_orchestrator = agent_loop_orchestrator
+        self.agent_run_repository = agent_run_repository
+        self.agent_task_projection = agent_task_projection
+        self._agent_capability_invoker = agent_capability_invoker
+        self._agent_invocation_contexts = agent_invocation_contexts
+        self._agent_run_recovery = agent_run_recovery
+        self._main_agent_llm_runtime = main_agent_llm_runtime
         self._mysql_adapter = mysql_adapter
         self.username_token_service = username_token_service
         self._master_key_sentinel_cipher = master_key_sentinel_cipher
@@ -823,6 +806,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._execution_wait_timeout_seconds = 30.0
         self._conversation_delete_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
         self._locally_cancelled_task_ids = local_cancelled_task_ids if local_cancelled_task_ids is not None else set()
+        self._agent_cancellation_tokens: dict[str, AgentCancellationToken] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
         self._running_mcp_shadow_tasks: set[asyncio.Task[None]] = set()
         self._task_skill_bundle_revisions: dict[str, str] = {}
@@ -857,6 +841,19 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
     def _make_id(self, prefix: str) -> str:
         return f"{prefix}-{uuid4().hex[:12]}"
+
+    @staticmethod
+    def _agent_owner_scope(username: str) -> str:
+        return hashlib.sha256(
+            f"agent-owner-scope-v1\0{username}".encode("utf-8")
+        ).hexdigest()
+
+    def _agent_cancellation_token(self, task_id: str) -> AgentCancellationToken:
+        token = self._agent_cancellation_tokens.get(task_id)
+        if token is None:
+            token = AgentCancellationToken()
+            self._agent_cancellation_tokens[task_id] = token
+        return token
 
     def _make_event(
         self,
@@ -1275,27 +1272,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if routing_mode == RoutingMode.FORCE_CAPABILITY and not request.capability_id:
             raise ValueError("capability_id is required when routing_mode is force_capability")
         requested_capability_id = self._canonical_capability_id(request.capability_id)
-        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
-            self._record_direct_skill_execution_rejected(
-                capability_id=requested_capability_id,
-                routing_mode=str(routing_mode),
-                conversation_id=conversation_id,
-            )
-            raise ValueError(
-                "direct_skill_execution_disabled: Direct skill execution is disabled; "
-                "submit main_agent.respond with metadata.soft_skill_binding instead."
-            )
-        soft_skill_binding = self._normalize_soft_skill_binding(request.metadata)
-        if soft_skill_binding is not None:
-            requested_capability_id = "main_agent.respond"
         self._ensure_supported_capability(requested_capability_id)
         explicit_force_capability = routing_mode == RoutingMode.FORCE_CAPABILITY and requested_capability_id is not None
         continued_pending_context: PendingSkillContext | None = None
         superseded_pending_count = 0
         if resolved_mcp_binding is not None:
             pass
-        elif soft_skill_binding is not None:
-            superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
         elif explicit_force_capability:
             superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
         elif requested_capability_id is None:
@@ -1517,16 +1499,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             metadata.update(
                 self._mcp_resolved_binding_runtime_metadata(resolved_mcp_binding)
             )
-        if soft_skill_binding is not None:
-            metadata[SOFT_SKILL_BINDING_METADATA_KEY] = soft_skill_binding
-            metadata["soft_skill_binding_source"] = "slash_command"
-            metadata["soft_skill_binding_requested_capability_id"] = requested_capability_id
-            fallback_metadata = sanitize_capability_missing_fallback_metadata(
-                soft_skill_binding.get(CAPABILITY_MISSING_FALLBACK_KEY),
-                mode="history",
-            )
-            if fallback_metadata is not None:
-                metadata[CAPABILITY_MISSING_FALLBACK_KEY] = fallback_metadata
         if selected_model_edition:
             metadata["model_edition"] = selected_model_edition
         else:
@@ -1542,11 +1514,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             execution_user_message = self._format_pending_skill_continuation_message(continued_pending_context, request.content)
             current_user_message = request.content
             resolved_user_message = execution_user_message
-        if (
-            soft_skill_binding is None
-            and requested_capability_id is not None
-            and requested_capability_id.startswith("skill.")
-        ):
+        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
             metadata["defer_task_completed_until_pending_skill_context_processed"] = True
         if self._skill_runtime_state is not None:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
@@ -1605,23 +1573,35 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
             return message, task
 
-        orchestration_request = OrchestrationRequest(
+        visible_mcp_servers = await self.available_user_mcp_server_profiles(
+            authenticated_username,
+            execution_mode=task.mcp_execution_mode,
+        )
+        available_mcp_servers = (
+            tuple(
+                profile
+                for profile in visible_mcp_servers
+                if profile.server_id == resolved_mcp_binding.server_id
+            )
+            if resolved_mcp_binding is not None
+            else visible_mcp_servers
+        )
+        if resolved_mcp_binding is not None and len(available_mcp_servers) != 1:
+            raise MCPBoundServerUnavailableError("mcp_bound_server_unavailable")
+        metadata["available_mcp_server_ids"] = [
+            profile.server_id for profile in available_mcp_servers
+        ]
+        orchestration_request = AgentExecutionRequest(
             task_id=task_id,
             conversation_id=conversation_id,
             root_message_id=message_id,
             user_message=execution_user_message,
+            owner_scope=self._agent_owner_scope(authenticated_username),
             requested_capability_id=requested_capability_id,
             metadata=metadata,
             current_user_message=current_user_message,
             resolved_user_message=resolved_user_message,
-            available_mcp_servers=(
-                ()
-                if resolved_mcp_binding is not None
-                else await self.available_user_mcp_server_profiles(
-                    authenticated_username,
-                    execution_mode=task.mcp_execution_mode,
-                )
-            ),
+            available_mcp_servers=available_mcp_servers,
         )
         await self._schedule_execution(orchestration_request)
         return message, task
@@ -1705,84 +1685,53 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             and not server.deletion_pending
         )
 
-    async def _begin_mcp_shadow_observation(
-        self,
-        *,
-        request: OrchestrationRequest,
-        plan: WorkflowPlan,
-    ) -> _MCPShadowExecutionHandle | None:
+    async def _mcp_invocation_shadow_hook(self, *, phase: str, **values: Any):
+        if phase == "finish":
+            handle = values.get("handle")
+            if isinstance(handle, _MCPShadowInvocationHandle):
+                await self._finish_mcp_invocation_shadow(
+                    handle,
+                    values.get("result"),
+                )
+            return None
+        task = values.get("task")
+        node = values.get("node")
+        capability_id = str(values.get("capability_id") or "")
+        metadata = values.get("metadata")
         if (
-            request.metadata.get("mcp_shadow_enabled") is not True
-            or request.metadata.get("mcp_execution_mode")
-            != MCPExecutionPath.LEGACY.value
+            not isinstance(task, Task)
+            or not isinstance(node, TaskNode)
+            or not isinstance(metadata, Mapping)
+            or task.mcp_shadow_enabled is not True
+            or task.mcp_execution_mode != MCPExecutionPath.LEGACY.value
+            or task.mcp_rollout_mode != MCPRoutingMode.SHADOW.value
         ):
             return None
-        if self._mcp_shadow_manifest is None:
-            await self._record_mcp_shadow_setup_failure(
-                request,
-                reason_code=(
-                    self._mcp_shadow_manifest_gap_reason
-                    or "shadow_verified_manifest_missing"
-                ),
-            )
-            return None
-        if (
-            self.mcp_shadow_observer is None
-            or self._mcp_runtime_state is None
-            or self.user_mcp_config_service is None
-        ):
-            await self._record_mcp_shadow_setup_failure(
-                request,
-                reason_code="shadow_runtime_unavailable",
-            )
-            return None
-        revision = str(
-            request.metadata.get("mcp_bundle_revision") or ""
-        ).strip()
-        if not revision:
-            await self._record_mcp_shadow_setup_failure(
-                request,
-                reason_code="shadow_pinned_revision_missing",
-            )
-            return None
         try:
-            bundle = self._mcp_runtime_state.bundle_for_revision(revision)
-            selected_nodes = tuple(
-                node for node in plan.nodes if node.capability_id in bundle.bindings
-            )
-            if not selected_nodes:
-                return None
-            legacy_server_configs = tuple(self._mcp_runtime_state.config.servers)
-        except Exception:
-            await self._record_mcp_shadow_setup_failure(
-                request,
-                reason_code="shadow_pinned_revision_unavailable",
-            )
-            return None
-        try:
-            task = await self.storage.get_task(request.task_id)
-            conversation = await self.storage.get_conversation(
-                request.conversation_id
-            )
             if (
-                task is None
-                or task.conversation_id != request.conversation_id
-                or task.mcp_shadow_enabled is not True
-                or task.mcp_execution_mode != MCPExecutionPath.LEGACY.value
-                or task.mcp_rollout_mode != MCPRoutingMode.SHADOW.value
-                or request.metadata.get("mcp_rollout_config_version")
-                != task.mcp_rollout_config_version
-                or conversation is None
-                or not conversation.username
+                self.mcp_shadow_observer is None
+                or self._mcp_shadow_manifest is None
+                or self._mcp_runtime_state is None
+                or self.user_mcp_config_service is None
             ):
-                return None
+                raise RuntimeError("shadow_runtime_unavailable")
+            revision = str(metadata.get("mcp_bundle_revision") or "").strip()
+            if not revision:
+                raise RuntimeError("shadow_pinned_revision_missing")
+            bundle = self._mcp_runtime_state.bundle_for_revision(revision)
+            binding = bundle.bindings.get(capability_id)
+            if binding is None:
+                raise RuntimeError("shadow_invocation_binding_missing")
+            scenario = self._mcp_shadow_scenario_bindings.get(capability_id)
+            if not isinstance(scenario, ShadowScenario):
+                raise RuntimeError("shadow_scenario_binding_missing")
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is None or not conversation.username:
+                raise RuntimeError("shadow_conversation_owner_missing")
             user_servers = tuple(
                 await self.user_mcp_config_service.list_servers(
                     conversation.username
                 )
-            )
-            target_credential_digests = await self._mcp_shadow_credential_digests(
-                user_servers
             )
             profiles = tuple(
                 UserMCPServerProfile(
@@ -1796,269 +1745,184 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 and str(server.health_status) == "available"
                 and not server.deletion_pending
             )
+            target_digests = await self._mcp_shadow_credential_digests(
+                user_servers
+            )
             legacy_servers = {
                 server.server_id: server
-                for server in legacy_server_configs
+                for server in self._mcp_runtime_state.config.servers
             }
-            config_fingerprint = self._mcp_shadow_manifest.manifest.config_fingerprint
-            all_mapping_resolutions: dict[str, RuntimeShadowMappingResolution] = {}
-            for legacy_server in legacy_server_configs:
-                all_mapping_resolutions[legacy_server.server_id] = (
-                    resolve_approved_migration_mapping(
-                        legacy_server_id=legacy_server.server_id,
-                        owner_user_id=conversation.username,
-                        legacy_server=legacy_server,
-                        user_servers=user_servers,
-                        target_credential_digests=target_credential_digests,
-                        config_fingerprint=config_fingerprint,
-                    )
+            config_fingerprint = (
+                self._mcp_shadow_manifest.manifest.config_fingerprint
+            )
+            resolutions = {
+                server.server_id: resolve_approved_migration_mapping(
+                    legacy_server_id=server.server_id,
+                    owner_user_id=conversation.username,
+                    legacy_server=server,
+                    user_servers=user_servers,
+                    target_credential_digests=target_digests,
+                    config_fingerprint=config_fingerprint,
                 )
+                for server in self._mcp_runtime_state.config.servers
+            }
             approved_mappings = tuple(
                 resolution.mapping
-                for resolution in all_mapping_resolutions.values()
+                for resolution in resolutions.values()
                 if resolution.mapping is not None
             )
             if (
                 approved_shadow_mapping_set_fingerprint(approved_mappings)
                 != self._mcp_shadow_manifest.manifest.mapping_fingerprint
             ):
-                await self._record_mcp_shadow_setup_failure(
-                    request,
-                    reason_code="shadow_mapping_set_fingerprint_mismatch",
-                )
-                return None
-            observations: list[_MCPShadowNodeObservation] = []
-            for node in selected_nodes:
-                scenario = self._mcp_shadow_scenario_bindings.get(
-                    node.capability_id
-                )
-                if not isinstance(scenario, ShadowScenario):
-                    await self._record_mcp_shadow_setup_failure(
-                        request,
-                        reason_code="shadow_scenario_binding_missing",
-                    )
-                    continue
-                binding = bundle.bindings[node.capability_id]
-                legacy_server = legacy_servers.get(binding.server_id)
-                mapping_resolution = all_mapping_resolutions.get(
-                    binding.server_id,
-                    RuntimeShadowMappingResolution(
-                        None,
-                        ("legacy_source_config_missing",),
+                raise RuntimeError("shadow_mapping_set_fingerprint_mismatch")
+            resolution = resolutions.get(
+                binding.server_id,
+                RuntimeShadowMappingResolution(
+                    None,
+                    ("legacy_source_config_missing",),
+                ),
+            )
+            legacy_server = legacy_servers.get(binding.server_id)
+            observer_task = asyncio.create_task(
+                self.mcp_shadow_observer.compare_task(
+                    owner_user_id=conversation.username,
+                    task_id=task.task_id,
+                    user_request=str(
+                        self._agent_invocation_contexts.current_user_input(
+                            values["run"]
+                        )
+                        or task.summary
+                        or ""
                     ),
-                )
-                legacy_transport = (
-                    legacy_server.transport
-                    if legacy_server is not None
-                    else "not_applicable"
-                )
-                observer_task = asyncio.create_task(
-                    self.mcp_shadow_observer.compare_task(
-                        owner_user_id=conversation.username,
-                        task_id=task.task_id,
-                        user_request=request.effective_user_message,
-                        profiles=profiles,
-                        legacy_binding=binding,
-                        legacy_server_bindings=tuple(
-                            candidate
-                            for candidate in bundle.bindings.values()
-                            if candidate.server_id == binding.server_id
-                        ),
-                        legacy_transport=legacy_transport,
-                        legacy_endpoint_url=(
-                            legacy_server.endpoint
-                            if legacy_server is not None
-                            else None
-                        ),
-                        mapping=mapping_resolution.mapping,
-                        config_fingerprint=config_fingerprint,
-                        mapping_blockers=mapping_resolution.blockers,
+                    profiles=profiles,
+                    legacy_binding=binding,
+                    legacy_server_bindings=tuple(
+                        candidate
+                        for candidate in bundle.bindings.values()
+                        if candidate.server_id == binding.server_id
                     ),
-                    name=f"mcp-shadow-observe:{request.task_id}:{node.node_id}",
-                )
-                self._running_mcp_shadow_tasks.add(observer_task)
-                observer_task.add_done_callback(
-                    self._running_mcp_shadow_tasks.discard
-                )
-                observations.append(
-                    _MCPShadowNodeObservation(
-                        node_id=node.node_id,
-                        scenario=scenario,
-                        binding=binding,
-                        legacy_transport=legacy_transport,
-                        mapping_resolution=mapping_resolution,
-                        task=observer_task,
-                    )
-                )
-            if not observations:
-                return None
-            await asyncio.sleep(0)
-            return _MCPShadowExecutionHandle(
-                request=request,
+                    legacy_transport=(
+                        legacy_server.transport
+                        if legacy_server is not None
+                        else "not_applicable"
+                    ),
+                    legacy_endpoint_url=(
+                        legacy_server.endpoint
+                        if legacy_server is not None
+                        else None
+                    ),
+                    mapping=resolution.mapping,
+                    config_fingerprint=config_fingerprint,
+                    mapping_blockers=resolution.blockers,
+                ),
+                name=f"mcp-shadow-invocation:{task.task_id}:{node.node_id}",
+            )
+            self._running_mcp_shadow_tasks.add(observer_task)
+            observer_task.add_done_callback(self._running_mcp_shadow_tasks.discard)
+            return _MCPShadowInvocationHandle(
+                task=task,
+                node_id=node.node_id,
                 owner_user_id=conversation.username,
+                user_request=str(task.summary or ""),
+                scenario=scenario,
+                binding=binding,
                 approved_mappings=approved_mappings,
-                observations=tuple(observations),
+                observer_task=observer_task,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._record_mcp_shadow_metric_gap(
+                reason_code=str(exc)
+                if re.fullmatch(r"[a-z0-9_.-]+", str(exc))
+                else "shadow_observation_setup_failed"
+            )
+            return None
+
+    async def _finish_mcp_invocation_shadow(
+        self,
+        handle: _MCPShadowInvocationHandle,
+        invocation_result: Any,
+    ) -> None:
+        try:
+            shadow_result = await asyncio.wait_for(
+                handle.observer_task,
+                timeout=self._mcp_shadow_terminal_timeout_seconds,
             )
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Shadow is observational: planner/executor output remains authoritative.
-            await self._record_mcp_shadow_setup_failure(
-                request,
-                reason_code="shadow_observation_setup_failed",
-            )
-            return None
-
-    async def _finish_mcp_shadow_observation(
-        self,
-        handle: _MCPShadowExecutionHandle | None,
-        result: OrchestrationRunResult | None,
-    ) -> None:
-        if handle is None:
-            return
-        tasks = tuple(item.task for item in handle.observations)
-        try:
-            observed = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=self._mcp_shadow_terminal_timeout_seconds,
-            )
-        except TimeoutError:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await self._record_mcp_shadow_setup_failure(
-                handle.request,
-                reason_code="shadow_observation_timeout",
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_observer_failed"
             )
             return
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-
-        terminal_nodes = {
-            str(getattr(node, "node_id", "")): node
-            for node in (() if result is None else result.nodes)
-        }
-        for context, shadow_result in zip(
-            handle.observations, observed, strict=True
-        ):
-            if isinstance(shadow_result, BaseException):
-                await self._record_mcp_shadow_setup_failure(
-                    handle.request,
-                    reason_code="shadow_observer_failed",
-                )
-                continue
-            await self._record_terminal_mcp_shadow_sample(
-                handle=handle,
-                context=context,
-                shadow_result=shadow_result,
-                terminal_node=terminal_nodes.get(context.node_id),
-            )
-
-    async def _record_terminal_mcp_shadow_sample(
-        self,
-        *,
-        handle: _MCPShadowExecutionHandle,
-        context: _MCPShadowNodeObservation,
-        shadow_result: Any,
-        terminal_node: Any | None,
-    ) -> None:
+        comparison = shadow_result.comparison
+        blockers = tuple(shadow_result.blockers)
+        observation = shadow_result.observation
+        await self._record_mcp_shadow_comparison_event(
+            handle,
+            comparison=comparison,
+            blockers=blockers,
+            result_category=(
+                observation.outcome.value
+                if observation is not None
+                else comparison.value
+            ),
+        )
         manifest = self._mcp_shadow_manifest
-        audit_service = self.user_mcp_audit_service
-        observation = getattr(shadow_result, "observation", None)
-        legacy_summary = getattr(shadow_result, "legacy_summary", None)
         if (
             manifest is None
-            or audit_service is None
+            or self.user_mcp_audit_service is None
+            or observation is None
+            or shadow_result.legacy_summary is None
         ):
-            await self._record_mcp_shadow_setup_failure(
-                handle.request,
-                reason_code="shadow_terminal_evidence_incomplete",
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_terminal_evidence_incomplete"
             )
             return
-        if observation is None or legacy_summary is None:
-            comparison = getattr(
-                shadow_result,
-                "comparison",
-                ShadowComparison.NOT_COMPARABLE,
-            )
-            blockers = tuple(getattr(shadow_result, "blockers", ()))
-            await self._record_mcp_shadow_terminal_comparison_event(
-                handle.request,
-                node_id=context.node_id,
-                comparison=comparison,
-                blockers=blockers,
-                result_category=comparison.value,
-            )
-            await self._record_mcp_shadow_setup_failure(
-                handle.request,
-                reason_code="shadow_terminal_evidence_incomplete",
-            )
-            return
-
-        expected = manifest.manifest.expectation_for(context.scenario)
+        terminal_node = getattr(invocation_result, "node", None)
+        expected = manifest.manifest.expectation_for(handle.scenario)
         legacy_outcome, terminal = await self._mcp_shadow_legacy_outcome(
-            handle.request.task_id,
-            context.node_id,
+            handle.task.task_id,
+            handle.node_id,
             terminal_node,
             excluded_fallback=expected.legacy_outcome,
         )
         nonce = hashlib.sha256(
-            (
-                f"{manifest.fingerprint}:{handle.request.task_id}:"
-                f"{context.node_id}"
-            ).encode("utf-8")
+            f"{manifest.fingerprint}:{handle.task.task_id}:{handle.node_id}".encode()
         ).hexdigest()
         try:
             compared = compare_live_shadow_sample(
                 verified_manifest=manifest,
-                scenario=context.scenario,
+                scenario=handle.scenario,
                 nonce=nonce,
                 legacy_outcome=legacy_outcome,
                 observation=observation,
-                legacy_summary=legacy_summary,
-                legacy_route=str(
-                    getattr(context.binding, "server_id", "") or ""
-                ),
-                mapping=getattr(shadow_result, "mapping", None),
+                legacy_summary=shadow_result.legacy_summary,
+                legacy_route=str(getattr(handle.binding, "server_id", "") or ""),
+                mapping=shadow_result.mapping,
                 approved_mappings=handle.approved_mappings,
                 terminal=terminal,
             )
         except Exception:
-            await self._record_mcp_shadow_setup_failure(
-                handle.request,
-                reason_code="shadow_terminal_comparison_failed",
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_terminal_comparison_failed"
             )
             return
-
-        observed_at = datetime.now(timezone.utc)
-        sample_id = "mcp-shadow-" + hashlib.sha256(
-            (
-                f"{manifest.fingerprint}:{handle.request.task_id}:"
-                f"{context.node_id}:{nonce}"
-            ).encode("utf-8")
-        ).hexdigest()[:32]
         admission = self._mcp_rollout_instance_admission
-        transport = str(observation.summary.transport or "").strip()
-        endpoint_policy = str(
-            observation.summary.endpoint_policy or ""
-        ).strip()
-        if (
-            admission is None
-            or admission.stage != "internal_shadow"
-            or not transport
-            or not endpoint_policy
-        ):
-            await self._record_mcp_shadow_setup_failure(
-                handle.request,
-                reason_code="shadow_audit_scope_unavailable",
+        if admission is None or admission.stage != "internal_shadow":
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_audit_scope_unavailable"
             )
             return
+        observed_at = datetime.now(timezone.utc)
         sample = seal_shadow_audit_sample(
             MCPShadowAuditSample(
-                sample_id=sample_id,
+                sample_id="mcp-shadow-"
+                + hashlib.sha256(
+                    f"{manifest.fingerprint}:{handle.task.task_id}:{handle.node_id}:{nonce}".encode()
+                ).hexdigest()[:32],
                 environment_id=admission.environment_id,
                 deployment_id=admission.deployment_id,
                 stage=admission.stage,
@@ -2066,37 +1930,26 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 manifest_fingerprint=manifest.fingerprint,
                 fixture_fingerprint=manifest.manifest.fixture_fingerprint,
                 mapping_fingerprint=manifest.manifest.mapping_fingerprint,
-                scenario=context.scenario.value,
+                scenario=handle.scenario.value,
                 nonce=nonce,
                 legacy_outcome=legacy_outcome.value,
                 shadow_outcome=observation.outcome.value,
-                transport=transport,
-                endpoint_policy=endpoint_policy,
+                transport=str(observation.summary.transport or ""),
+                endpoint_policy=str(observation.summary.endpoint_policy or ""),
                 comparison=compared.result.comparison.value,
                 blockers=compared.result.blockers,
                 payload_digest="",
                 observed_at=observed_at,
                 recorded_at=observed_at,
                 expires_at=observed_at + MCP_SHADOW_SAMPLE_RETENTION,
-                safe_owner_ref=None,
-                safe_task_ref=None,
             )
-        )
-        await self._record_mcp_shadow_terminal_comparison_event(
-            handle.request,
-            node_id=context.node_id,
-            comparison=compared.result.comparison,
-            blockers=compared.result.blockers,
-            result_category=observation.outcome.value,
         )
         try:
-            await audit_service.record_shadow_sample(sample)
+            await self.user_mcp_audit_service.record_shadow_sample(sample)
         except Exception:
-            await self._record_mcp_shadow_setup_failure(
-                handle.request,
-                reason_code="shadow_sample_persistence_failed",
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_sample_persistence_failed"
             )
-            return
 
     async def _mcp_shadow_legacy_outcome(
         self,
@@ -2108,250 +1961,102 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     ) -> tuple[ShadowOutcome, bool]:
         if terminal_node is None:
             return excluded_fallback, False
-        status = getattr(terminal_node, "status", None)
-        try:
-            events = await self.storage.list_events_for_task_filtered(
-                task_id,
-                event_types={
-                    "mcp.tool_call_completed",
-                    "mcp.tool_call_failed",
-                },
-                node_id=node_id,
-                visibility=EventVisibility.AUDIT_ONLY,
-            )
-        except Exception:
-            return excluded_fallback, False
+        events = await self.storage.list_events_for_task_filtered(
+            task_id,
+            event_types={"mcp.tool_call_completed", "mcp.tool_call_failed"},
+            node_id=node_id,
+            visibility=EventVisibility.AUDIT_ONLY,
+        )
         if len(events) != 1:
             return excluded_fallback, False
         event = events[0]
-        if status == NodeStatus.COMPLETED and event.event_type == "mcp.tool_call_completed":
-            output_size = event.payload.get("output_size_bytes")
-            truncated = event.payload.get("truncated")
-            if (
-                isinstance(output_size, int)
-                and output_size >= 0
-                and truncated is True
-            ):
+        if terminal_node.status == NodeStatus.COMPLETED and event.event_type == "mcp.tool_call_completed":
+            if event.payload.get("truncated") is True:
                 return ShadowOutcome.TOOL_CALL_SUCCEEDED_LARGE_RESULT, True
             return ShadowOutcome.TOOL_CALL_SUCCEEDED, True
-        if status != NodeStatus.FAILED:
+        if terminal_node.status != NodeStatus.FAILED:
             return excluded_fallback, False
-        error_code = str(event.payload.get("error_code") or "").strip()
-        closed_errors = {
-            "mcp_auth_required": ShadowOutcome.AUTHENTICATION_FAILED,
-            "mcp_timeout": ShadowOutcome.TIMEOUT,
-            "mcp_permission_denied": ShadowOutcome.PERMISSION_DENIED_SUPPRESSED,
-        }
-        outcome = closed_errors.get(error_code)
-        if outcome is not None:
-            return outcome, True
-        # Generic error_type/status values are not closed terminal evidence.
-        return excluded_fallback, False
+        return (
+            {
+                "mcp_auth_required": ShadowOutcome.AUTHENTICATION_FAILED,
+                "mcp_timeout": ShadowOutcome.TIMEOUT,
+                "mcp_permission_denied": ShadowOutcome.PERMISSION_DENIED_SUPPRESSED,
+            }.get(str(event.payload.get("error_code") or ""), excluded_fallback),
+            str(event.payload.get("error_code") or "")
+            in {"mcp_auth_required", "mcp_timeout", "mcp_permission_denied"},
+        )
 
-    async def _record_mcp_shadow_terminal_comparison_event(
+    async def _record_mcp_shadow_comparison_event(
         self,
-        request: OrchestrationRequest,
+        handle: _MCPShadowInvocationHandle,
         *,
-        node_id: str,
         comparison: ShadowComparison,
         blockers: tuple[str, ...],
         result_category: str,
     ) -> None:
-        metric_recorded = True
         if comparison is ShadowComparison.MISMATCHED:
-            metric_recorded = await self._record_mcp_shadow_mismatch_metric()
-        payload: dict[str, Any] = {
-            "safe_task_ref": hashlib.sha256(
-                f"{self.mcp_rollout_config.fingerprint}:{request.task_id}".encode(
-                    "utf-8"
-                )
-            ).hexdigest(),
-            "config_version": self.mcp_rollout_config.fingerprint,
-            "rollout_mode": MCPRoutingMode.SHADOW.value,
-            "diff_category": comparison.value,
-            "result_category": result_category,
-            "status": comparison.value,
-        }
-        if blockers:
-            payload["reason_code"] = blockers[0]
-        try:
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    node_id=node_id,
-                    event_type="mcp.rollout.shadow_compared",
-                    payload=payload,
-                    visibility=EventVisibility.AUDIT_ONLY,
-                )
+            recorder = self._mcp_rollout_metric_recorder
+            if recorder is not None:
+                try:
+                    await recorder.record_shadow_mismatch()
+                except Exception:
+                    await self._record_mcp_shadow_metric_gap(
+                        reason_code="shadow_mismatch_recording_failed"
+                    )
+        await self._record_event(
+            self._make_event(
+                task_id=handle.task.task_id,
+                conversation_id=handle.task.conversation_id,
+                node_id=handle.node_id,
+                event_type="mcp.rollout.shadow_compared",
+                payload={
+                    "safe_task_ref": hashlib.sha256(
+                        f"{self.mcp_rollout_config.fingerprint}:{handle.task.task_id}".encode()
+                    ).hexdigest(),
+                    "config_version": self.mcp_rollout_config.fingerprint,
+                    "rollout_mode": MCPRoutingMode.SHADOW.value,
+                    "diff_category": comparison.value,
+                    "result_category": result_category,
+                    "status": comparison.value,
+                    **({"reason_code": blockers[0]} if blockers else {}),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
             )
-        except Exception:
-            self._record_mcp_shadow_audit_fallback(payload)
-        if comparison is ShadowComparison.MISMATCHED and not metric_recorded:
-            await self._record_mcp_shadow_metric_gap(
-                reason_code="shadow_mismatch_recording_failed"
-            )
+        )
 
     async def _mcp_shadow_credential_digests(
         self,
         user_servers: tuple[Any, ...],
     ) -> dict[str, str]:
-        cipher = self.mcp_credential_cipher
-        if cipher is None:
+        if self.mcp_credential_cipher is None:
             return {}
         digests: dict[str, str] = {}
         for server in user_servers:
-            metadata = getattr(server, "auth_metadata", {})
             provenance = (
-                metadata.get("migration_provenance")
-                if isinstance(metadata, Mapping)
+                server.auth_metadata.get("migration_provenance")
+                if isinstance(server.auth_metadata, Mapping)
                 else None
             )
             if not isinstance(provenance, Mapping):
                 continue
-            source_fingerprint = str(
-                provenance.get("source_fingerprint") or ""
-            ).strip()
-            try:
-                credential = await self.storage.get_user_mcp_credential(
-                    server.owner_user_id,
-                    server.server_id,
-                )
-            except Exception:
+            credential = await self.storage.get_user_mcp_credential(
+                server.owner_user_id,
+                server.server_id,
+            )
+            if credential is None:
                 continue
             digest = migration_target_credential_digest(
-                cipher,
+                self.mcp_credential_cipher,
                 self._mcp_audit_reference_signer,
                 server=server,
                 credential_record=credential,
-                source_fingerprint=source_fingerprint,
+                source_fingerprint=str(
+                    provenance.get("source_fingerprint") or ""
+                ).strip(),
             )
             if digest is not None:
                 digests[server.server_id] = digest
         return digests
-
-    async def _compare_and_record_mcp_shadow_route(
-        self,
-        *,
-        request: OrchestrationRequest,
-        task: Task,
-        node_id: str,
-        owner_user_id: str,
-        profiles: tuple[UserMCPServerProfile, ...],
-        binding: Any,
-        server_bindings: tuple[Any, ...],
-        legacy_transport: str,
-        legacy_endpoint_url: str | None = None,
-        mapping_resolution: RuntimeShadowMappingResolution,
-        config_fingerprint: str,
-    ) -> None:
-        try:
-            result = await self.mcp_shadow_observer.compare_task(
-                owner_user_id=owner_user_id,
-                task_id=task.task_id,
-                user_request=request.effective_user_message,
-                profiles=profiles,
-                legacy_binding=binding,
-                legacy_server_bindings=server_bindings,
-                legacy_transport=legacy_transport,
-                legacy_endpoint_url=legacy_endpoint_url,
-                mapping=mapping_resolution.mapping,
-                config_fingerprint=config_fingerprint,
-                mapping_blockers=mapping_resolution.blockers,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            await self._record_mcp_shadow_metric_gap(
-                reason_code="shadow_observer_failed"
-            )
-            return
-
-        metric_recorded = True
-        if result.comparison is ShadowComparison.MISMATCHED:
-            metric_recorded = await self._record_mcp_shadow_mismatch_metric()
-        observation = result.observation
-        result_category = (
-            observation.outcome.value
-            if observation is not None
-            else result.comparison.value
-        )
-        reason_code = result.blockers[0] if result.blockers else None
-        error_code = (
-            observation.error_code
-            if observation is not None and observation.error_code
-            else reason_code
-        )
-        payload: dict[str, Any] = {
-            "safe_task_ref": hashlib.sha256(
-                f"{config_fingerprint}:{task.task_id}".encode("utf-8")
-            ).hexdigest(),
-            "config_version": config_fingerprint,
-            "rollout_mode": task.mcp_rollout_mode,
-            "diff_category": result.comparison.value,
-            "result_category": result_category,
-            "status": result.comparison.value,
-        }
-        if reason_code:
-            payload["reason_code"] = reason_code
-        if error_code:
-            payload["error_code"] = error_code
-        try:
-            await self._record_event(
-                self._make_event(
-                    task_id=task.task_id,
-                    conversation_id=task.conversation_id,
-                    node_id=node_id,
-                    event_type="mcp.rollout.shadow_compared",
-                    payload=payload,
-                    visibility=EventVisibility.AUDIT_ONLY,
-                )
-            )
-        except Exception:
-            self._record_mcp_shadow_audit_fallback(
-                payload,
-            )
-            await self._record_mcp_shadow_metric_gap(
-                reason_code="shadow_comparison_event_recording_failed"
-            )
-        if result.comparison is ShadowComparison.MISMATCHED and not metric_recorded:
-            await self._record_mcp_shadow_metric_gap(
-                reason_code="shadow_mismatch_recording_failed"
-            )
-
-    async def _record_mcp_shadow_setup_failure(
-        self,
-        request: OrchestrationRequest,
-        *,
-        reason_code: str,
-    ) -> None:
-        del request
-        await self._record_mcp_shadow_metric_gap(reason_code=reason_code)
-
-    async def _record_mcp_shadow_mismatch_metric(self) -> bool:
-        recorder = self._mcp_rollout_metric_recorder
-        if recorder is None:
-            return False
-        try:
-            await recorder.record_shadow_mismatch()
-        except Exception:
-            return False
-        return True
-
-    def _record_mcp_shadow_audit_fallback(
-        self,
-        payload: Mapping[str, Any],
-    ) -> None:
-        if self._audit_sink is None:
-            return
-        fallback = dict(payload)
-        try:
-            self._audit_sink.record_sync(
-                "mcp.rollout.shadow_compared",
-                fallback,
-            )
-        except Exception:
-            return
 
     async def _record_mcp_shadow_metric_gap(self, *, reason_code: str) -> None:
         if self._audit_sink is None:
@@ -2635,47 +2340,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             metadata.update(self._llm_request_metadata(request_metadata, include_defaults=True))
         return metadata
 
-    def _normalize_soft_skill_binding(self, metadata: Mapping[str, Any]) -> dict[str, Any] | None:
-        raw = metadata.get(SOFT_SKILL_BINDING_METADATA_KEY)
-        if raw in (None, ""):
-            return None
-        if not isinstance(raw, Mapping):
-            raise ValueError("metadata.soft_skill_binding must be an object")
-        capability_id = self._canonical_capability_id(self._metadata_text(raw.get("capability_id")))
-        if not capability_id or not capability_id.startswith("skill."):
-            raise ValueError("metadata.soft_skill_binding.capability_id must be a public skill capability")
-        descriptor = self.capability_registry.get(capability_id)
-        unavailable = descriptor is None or not descriptor.public or not _is_skill_descriptor(descriptor)
-        contract = None
-        revision = ""
-        if self._skill_runtime_state is not None:
-            bundle = self._skill_runtime_state.active_bundle
-            revision = bundle.revision
-            if capability_id not in bundle.skill_capabilities.skill_name_by_capability_id:
-                unavailable = True
-            else:
-                contract = bundle.contract_by_capability_id.get(capability_id)
-        command = self._metadata_text(raw.get("command")) or self._metadata_text(metadata.get("slash_command")) or ""
-        normalized = {
-            "capability_id": capability_id,
-        }
-        if unavailable:
-            normalized[CAPABILITY_MISSING_FALLBACK_KEY] = build_capability_missing_fallback_metadata(
-                reason_code="skill_missing",
-                scope="full",
-                missing_capability_summary=f"点名的 Skill 当前未注册或不可用：{capability_id}",
-                fallback_content_scope="仅说明该 Skill 缺口并给出可手工复核的通用建议，不执行 Skill 或生成下载文件。",
-            )
-        if contract is not None:
-            normalized.update(self._soft_skill_file_selection_metadata(contract))
-        if command:
-            normalized["command"] = command
-        if revision:
-            normalized["skill_bundle_revision"] = revision
-        return normalized
-
     @staticmethod
-    def _soft_skill_file_selection_metadata(contract: Any, *, source: str = "soft_skill_binding") -> dict[str, Any]:
+    def _skill_file_selection_metadata(contract: Any, *, source: str = "skill_contract") -> dict[str, Any]:
         file_selection: dict[str, Any] = {}
         context_notes: list[str] = []
         contract_selection = getattr(contract, "file_selection", None)
@@ -2745,25 +2411,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if file_selection:
             file_selection["source"] = source
         return {"file_selection": file_selection} if file_selection else {}
-
-    def _record_direct_skill_execution_rejected(
-        self,
-        *,
-        capability_id: str,
-        routing_mode: str,
-        conversation_id: str,
-    ) -> None:
-        if self._audit_sink is None:
-            return
-        self._audit_sink.record_sync(
-            "skill.direct_execution_rejected",
-            {
-                "capability_id": capability_id,
-                "routing_mode": routing_mode,
-                "conversation_id": conversation_id,
-                "reason": "direct_skill_execution_disabled",
-            },
-        )
 
     @staticmethod
     def _pending_skill_continuation_metadata(context: PendingSkillContext) -> dict[str, Any]:
@@ -3175,7 +2822,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         node = TaskNode(
             node_id=node_id,
             task_id=task.task_id,
-            capability_id=task.requested_capability_id or "main_agent.respond",
+            capability_id=task.requested_capability_id or "agent.sheet_selection",
             status=NodeStatus.RUNNING,
             criticality=NodeCriticality.REQUIRED,
             started_at=now,
@@ -3220,7 +2867,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             conversation_id=task.conversation_id,
             task_id=task.task_id,
             node_id=node_id,
-            source_agent=task.requested_capability_id or "main_agent.respond",
+            source_agent=task.requested_capability_id or "agent.sheet_selection",
             source_message_id=task.root_message_id,
             question=self._sheet_selection_question(labels_by_upload_id, options_by_upload_id),
             reason_code="sheet_selection_required",
@@ -3324,7 +2971,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
 
     async def _schedule_execution(
-        self, request: OrchestrationRequest
+        self, request: AgentExecutionRequest
     ) -> asyncio.Task[None]:
         self._retain_task_skill_revision(request)
         self._retain_task_mcp_revision(request)
@@ -3351,49 +2998,27 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
     async def _run_execution(
         self,
-        request: OrchestrationRequest,
+        request: AgentExecutionRequest,
         *,
         active_task_count: int,
         execution_generation: int | None = None,
     ) -> None:
-        shadow_handle: _MCPShadowExecutionHandle | None = None
-        shadow_finalize_cancelled: asyncio.CancelledError | None = None
-        result: OrchestrationRunResult | None = None
         try:
             request = await self._scrub_deleted_file_context_for_execution(request)
             request = await self._attach_conversation_memory(request)
-            persisted_continuation_plan = request.metadata.get(
-                "mcp_remote_task_continuation_plan"
+            BackpressureGuard(
+                max_active_tasks=DEFAULT_MAX_ACTIVE_TASKS
+            ).ensure_can_accept(active_task_count=active_task_count)
+            await self.agent_loop_orchestrator.start_or_resume(
+                request,
+                cancellation=self._agent_cancellation_token(request.task_id),
             )
-            if isinstance(persisted_continuation_plan, Mapping):
-                plan = _deserialize_mcp_continuation_plan(
-                    persisted_continuation_plan
-                )
-            else:
-                plan_result = self.workflow_provider.build_plan(request)
-                plan = (
-                    await plan_result
-                    if inspect.isawaitable(plan_result)
-                    else plan_result
-                )
-            await self._record_plan_built(request, plan)
-            shadow_handle = await self._begin_mcp_shadow_observation(
-                request=request,
-                plan=plan,
-            )
-            result = await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
             restored_cancelled_task = await self._restore_cancelled_task_if_requested(
                 request.task_id,
                 request.conversation_id,
             )
             if restored_cancelled_task is not None:
                 return
-            await self._handle_pending_skill_context_after_execution(request, result)
-            if result.completion_status == str(TaskStatus.COMPLETED):
-                try:
-                    await self._persist_assistant_history_message(request.task_id, request.conversation_id)
-                except Exception as exc:
-                    await self._record_assistant_history_sync_failure(request.task_id, request.conversation_id, exc)
         except Exception as exc:
             restored_cancelled_task = await self._restore_cancelled_task_if_requested(
                 request.task_id,
@@ -3404,46 +3029,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             await self._mark_task_failed(request, exc)
         finally:
             try:
-                try:
-                    await self._finish_mcp_shadow_observation(
-                        shadow_handle,
-                        result,
-                    )
-                except asyncio.CancelledError as exc:
-                    shadow_finalize_cancelled = exc
-                    if shadow_handle is not None:
-                        pending = tuple(
-                            item.task
-                            for item in shadow_handle.observations
-                            if not item.task.done()
-                        )
-                        for pending_task in pending:
-                            pending_task.cancel()
-                        if pending:
-                            await asyncio.gather(
-                                *pending,
-                                return_exceptions=True,
-                            )
-                except Exception:
-                    await self._record_mcp_shadow_setup_failure(
-                        request,
-                        reason_code="shadow_terminal_finalize_failed",
-                    )
-                    # Shadow is fail-open, but its readonly sessions must finish
-                    # before gateway task scope and pinned revisions are released.
-                    if shadow_handle is not None:
-                        pending = tuple(
-                            item.task
-                            for item in shadow_handle.observations
-                            if not item.task.done()
-                        )
-                        for pending_task in pending:
-                            pending_task.cancel()
-                        if pending:
-                            await asyncio.gather(
-                                *pending,
-                                return_exceptions=True,
-                            )
                 await self._clear_conversation_current_task(request.conversation_id, request.task_id)
                 if self.user_mcp_gateway is not None:
                     try:
@@ -3474,10 +3059,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         )
                     ):
                         self._running_tasks.pop(request.task_id, None)
-        if shadow_finalize_cancelled is not None:
-            raise shadow_finalize_cancelled
-
-    async def _scrub_deleted_file_context_for_execution(self, request: OrchestrationRequest) -> OrchestrationRequest:
+    async def _scrub_deleted_file_context_for_execution(self, request: AgentExecutionRequest) -> AgentExecutionRequest:
         await self._fail_if_effective_uploads_inactive_for_execution(request)
         metadata = dict(request.metadata)
         changed = False
@@ -3528,7 +3110,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             filtered.append(item)
         return filtered, changed or len(filtered) != len(raw_items)
 
-    async def _fail_if_effective_uploads_inactive_for_execution(self, request: OrchestrationRequest) -> None:
+    async def _fail_if_effective_uploads_inactive_for_execution(self, request: AgentExecutionRequest) -> None:
         upload_ids = set(self._normalize_upload_ids(request.metadata.get("upload_ids") or ()))
         inactive_upload_ids: set[str] = set()
         for attachment in await self.storage.list_task_input_attachments_for_task(request.task_id):
@@ -3599,7 +3181,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         )
         return restored
 
-    async def _attach_conversation_memory(self, request: OrchestrationRequest) -> OrchestrationRequest:
+    async def _attach_conversation_memory(self, request: AgentExecutionRequest) -> AgentExecutionRequest:
         if self._conversation_memory_builder is None:
             return request
         try:
@@ -3639,24 +3221,26 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             metadata={**dict(request.metadata), "conversation_memory": memory_payload},
         )
 
-    async def _mark_task_failed(self, request: OrchestrationRequest, exc: Exception) -> None:
+    async def _mark_task_failed(self, request: AgentExecutionRequest, exc: Exception) -> None:
         task = await self.storage.get_task(request.task_id)
         if task is None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED} or task.cancel_requested_at is not None:
             return
-        failed = replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive())
-        await self.storage.save_task(failed)
+        failed_run = await self.agent_loop_orchestrator.fail(
+            request.task_id,
+            error_code="execution_crash",
+        )
+        if failed_run is None:
+            failed = replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive())
+            await self.storage.save_task(failed)
         payload: dict[str, Any] = {
             "code": "execution_crash",
             "message": "Task execution failed safely.",
+            "error_type": type(exc).__name__,
         }
-        if isinstance(exc, WorkflowPlanningError):
-            payload = {
-                "code": "planning_failed",
-                "message": str(exc),
-                "planner_reason": exc.reason,
-                "planner_diagnostic": exc.diagnostic[:200],
-                "planner_attempts": exc.attempts,
-            }
+        if isinstance(exc, AgentStorageConflict) and re.fullmatch(
+            r"[a-z0-9][a-z0-9_.-]{0,127}", str(exc)
+        ):
+            payload["agent_error_code"] = str(exc)
         await self._record_event(
             self._make_event(
                 task_id=request.task_id,
@@ -3769,7 +3353,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             return ()
         return await filtered_reader(
             task_id,
-            event_types={"main_agent.output_final"},
+            event_types={"agent.final_output"},
             visibility=EventVisibility.FRONTEND,
             limit=32,
         )
@@ -3813,214 +3397,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             return False
         return bool(events)
 
-    async def _handle_pending_skill_context_after_execution(
-        self,
-        request: OrchestrationRequest,
-        result: OrchestrationRunResult,
-    ) -> None:
-        missing_input = await self._extract_pending_skill_missing_input(request)
-        continued_context_id = self._metadata_text(request.metadata.get("continued_from_pending_skill_context"))
-        if missing_input is not None:
-            await self._create_pending_skill_context(request, missing_input)
-            if result.completion_status != str(TaskStatus.COMPLETED):
-                await self._mark_task_completed_for_pending_skill_context(request, reason="pending_skill_context_created")
-            return
-        if result.completion_status == str(TaskStatus.COMPLETED) and continued_context_id:
-            consumed = await self.storage.mark_pending_skill_context_consumed(continued_context_id)
-            if consumed is not None:
-                await self._record_event(
-                    self._make_event(
-                        task_id=request.task_id,
-                        conversation_id=request.conversation_id,
-                        event_type="pending_skill_context.consumed",
-                        payload={
-                            "context_id": consumed.context_id,
-                            "capability_id": consumed.capability_id,
-                        },
-                        visibility=EventVisibility.AUDIT_ONLY,
-                    )
-                )
-            if request.metadata.get("defer_task_completed_until_pending_skill_context_processed") is True:
-                await self._mark_task_completed_for_pending_skill_context(request, reason="pending_skill_context_consumed")
-            return
-        if (
-            result.completion_status == str(TaskStatus.COMPLETED)
-            and request.metadata.get("defer_task_completed_until_pending_skill_context_processed") is True
-        ):
-            await self._mark_task_completed_for_pending_skill_context(request, reason="pending_skill_context_processed")
-
-    async def _extract_pending_skill_missing_input(
-        self,
-        request: OrchestrationRequest,
-    ) -> _PendingSkillMissingInput | None:
-        capability_id = request.requested_capability_id or ""
-        if not capability_id.startswith("skill."):
-            return None
-        interrupts = await self.storage.list_interrupts_for_task(request.task_id)
-        if interrupts:
-            return None
-
-        events = await self.storage.list_events_for_task(request.task_id)
-        for event in reversed(events):
-            if event.event_type != "skill.input_missing":
-                continue
-            missing = self._missing_requirements_from_payload(event.payload)
-            if not missing:
-                continue
-            skill_name = self._metadata_text(event.payload.get("skill_name")) or capability_id.removeprefix("skill.")
-            return _PendingSkillMissingInput(
-                capability_id=capability_id,
-                skill_name=skill_name,
-                missing_requirements=missing,
-                assistant_message=self._format_pending_skill_missing_message(missing),
-                source_node_id=event.node_id,
-            )
-        return None
-
-    @staticmethod
-    def _missing_requirements_from_payload(payload: Mapping[str, Any]) -> tuple[str, ...]:
-        raw_missing = payload.get("missing")
-        if isinstance(raw_missing, str):
-            values = [raw_missing]
-        elif isinstance(raw_missing, Iterable):
-            values = list(raw_missing)
-        else:
-            values = []
-        seen: set[str] = set()
-        missing: list[str] = []
-        for value in values:
-            item = str(value).strip()
-            if not item or item in seen:
-                continue
-            seen.add(item)
-            missing.append(item)
-        return tuple(missing)
-
-    @staticmethod
-    def _format_pending_skill_missing_message(missing_requirements: tuple[str, ...]) -> str:
-        missing = "、".join(missing_requirements) or "必需信息"
-        return f"缺少 Skill 必需信息：{missing}。请补充后继续。"
-
-    async def _create_pending_skill_context(
-        self,
-        request: OrchestrationRequest,
-        missing_input: _PendingSkillMissingInput,
-    ) -> PendingSkillContext:
-        now = self._utcnow_naive()
-        conversation = await self.storage.get_conversation(request.conversation_id)
-        root_message = await self.storage.get_message(request.root_message_id)
-        original_user_message = (
-            self._metadata_text(request.metadata.get("pending_skill_original_user_message"))
-            or (root_message.content if root_message is not None else "")
-            or request.current_user_message
-            or request.user_message
-        )
-        context = PendingSkillContext(
-            context_id=self._make_id("pending-skill-context"),
-            conversation_id=request.conversation_id,
-            username=conversation.username if conversation is not None else None,
-            capability_id=missing_input.capability_id,
-            skill_name=missing_input.skill_name,
-            source_task_id=request.task_id,
-            source_message_id=request.root_message_id,
-            original_user_message=original_user_message,
-            missing_requirements=missing_input.missing_requirements,
-            assistant_message=missing_input.assistant_message,
-            status="pending_user_input",
-            created_at=now,
-            updated_at=now,
-        )
-        saved = await self.storage.save_pending_skill_context(context)
-        await self._save_pending_skill_assistant_message(request, missing_input.assistant_message, created_at=now)
-        await self._record_event(
-            self._make_event(
-                task_id=request.task_id,
-                conversation_id=request.conversation_id,
-                node_id=missing_input.source_node_id,
-                event_type="pending_skill_context.created",
-                payload={
-                    "context_id": saved.context_id,
-                    "capability_id": saved.capability_id,
-                    "skill_name": saved.skill_name,
-                    "missing_requirements": list(saved.missing_requirements),
-                },
-                visibility=EventVisibility.AUDIT_ONLY,
-                created_at=now,
-            )
-        )
-        return saved
-
-    async def _save_pending_skill_assistant_message(
-        self,
-        request: OrchestrationRequest,
-        content: str,
-        *,
-        created_at: datetime,
-    ) -> None:
-        message_id = f"{request.task_id}:assistant"
-        if await self.storage.get_message(message_id) is not None:
-            return
-        await self.storage.save_message(
-            Message(
-                message_id=message_id,
-                conversation_id=request.conversation_id,
-                role=MessageRole.ASSISTANT,
-                content=content,
-                task_id=request.task_id,
-                stream_status="complete",
-                created_at=created_at,
-            )
-        )
-
-    async def _mark_task_completed_for_pending_skill_context(self, request: OrchestrationRequest, *, reason: str) -> None:
-        task = await self.storage.get_task(request.task_id)
-        if task is None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
-            return
-        completed = replace(task, status=TaskStatus.COMPLETED, updated_at=self._utcnow_naive())
-        await self.storage.save_task(completed)
-        await self._record_event(
-            self._make_event(
-                task_id=request.task_id,
-                conversation_id=request.conversation_id,
-                event_type="task.completed",
-                payload={"completion_reason": reason},
-            )
-        )
-
     @staticmethod
     def _metadata_text(value: Any) -> str | None:
         if not isinstance(value, str):
             return None
         value = value.strip()
         return value or None
-
-    async def _record_plan_built(self, request: OrchestrationRequest, plan: WorkflowPlan) -> None:
-        await self._record_event(
-            self._make_event(
-                task_id=request.task_id,
-                conversation_id=request.conversation_id,
-                event_type="workflow.plan_built",
-                payload={
-                    "node_count": len(plan.nodes),
-                    "metadata": self._plan_audit_metadata(request, plan),
-                },
-                visibility=EventVisibility.AUDIT_ONLY,
-            )
-        )
-
-    def _plan_audit_metadata(self, request: OrchestrationRequest, plan: WorkflowPlan) -> dict[str, Any]:
-        metadata = dict(plan.metadata)
-        revision = request.metadata.get("skill_bundle_revision")
-        if revision:
-            metadata["skill_bundle_revision"] = revision
-        for key in PENDING_SKILL_METADATA_KEYS:
-            if key in request.metadata:
-                metadata[key] = request.metadata[key]
-        return self._json_safe_mapping(metadata)
-
-    @staticmethod
-    def _json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
-        return json.loads(json.dumps(dict(value), ensure_ascii=False, default=str))
 
     async def _clear_conversation_current_task(self, conversation_id: str, task_id: str) -> None:
         conversation = await self.storage.get_conversation(conversation_id)
@@ -4046,6 +3428,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         existing_task = await self.storage.get_task(task_id)
         if existing_task is not None and existing_task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
             self._locally_cancelled_task_ids.add(task_id)
+            self._agent_cancellation_token(task_id).cancel()
         if (
             existing_task is not None
             and existing_task.mcp_execution_mode == MCPExecutionPath.LEGACY.value
@@ -4064,6 +3447,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             except Exception:
                 pass
         task = await self.cancellation_service.cancel_task_context(task_id)
+        await self.agent_loop_orchestrator.cancel(
+            task_id,
+            reason_code="user_cancelled",
+        )
         if (
             existing_task is not None
             and existing_task.mcp_execution_mode == MCPExecutionPath.USER_SCOPED.value
@@ -4168,6 +3555,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                                     answered_at=self._utcnow_naive(),
                                 )
                             )
+                        recovery_fields = slot_collection_required_fields_ref(
+                            scheduled_collection
+                        )
+                        if latest_interrupt is not None:
+                            raw_locator = latest_interrupt.required_fields.get(
+                                "_agent_continuation"
+                            )
+                            if isinstance(raw_locator, Mapping):
+                                recovery_fields["_agent_continuation"] = dict(raw_locator)
                         recovery_interrupt = Interrupt(
                             interrupt_id=f"{collection.collection_id}:interrupt:ready_recovery",
                             conversation_id=collection.conversation_id,
@@ -4177,7 +3573,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                             source_message_id="",
                             question=collection.last_question or "",
                             reason_code="ready_v2_slot_recovered",
-                            required_fields=slot_collection_required_fields_ref(scheduled_collection),
+                            required_fields=recovery_fields,
                             status=InterruptStatus.ANSWERED,
                             created_at=self._utcnow_naive(),
                             answered_at=self._utcnow_naive(),
@@ -4808,6 +4204,20 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 "source_message_id": answer.source_message_id,
             }
 
+        if await self._resume_agent_interrupt(
+            task=task,
+            interrupt=interrupt,
+            answer_payload=answer_payload,
+            resume_metadata=resume_metadata,
+        ):
+            return {
+                "interrupt_id": saved_interrupt.interrupt_id,
+                "status": str(saved_interrupt.status),
+                "node_id": saved_interrupt.node_id,
+                "answer_payload": dict(answer_payload),
+                "source_message_id": answer.source_message_id,
+            }
+
         await self._await_existing_execution(task.task_id)
         resume_capability_id = task.requested_capability_id
         interrupted_node = await self.storage.get_task_node(interrupt.node_id)
@@ -4829,18 +4239,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 server_id = str(interrupt.required_fields.get("server_id") or "").strip()
                 if server_id:
                     resume_metadata["mcp_dispatch_server_id"] = server_id
-            resume_finalizer_node_id = await self._resume_finalizer_node_id(
-                task.task_id,
-                interrupted_node.node_id,
-            )
-            if resume_finalizer_node_id:
-                resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
         elif interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
             resume_capability_id = interrupted_node.capability_id
             resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
-            resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupted_node.node_id)
-            if resume_finalizer_node_id:
-                resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
         elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
             resume_capability_id = interrupt.source_agent
         owner_conversation = await self.storage.get_conversation(task.conversation_id)
@@ -4848,12 +4249,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             raise ValueError(f"Unknown conversation: {task.conversation_id}")
         resume_metadata.update(self._mcp_task_assignment_metadata(task))
         await self._schedule_execution(
-            OrchestrationRequest(
+            AgentExecutionRequest(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 root_message_id=task.root_message_id,
                 user_message=combined_message,
-                requested_capability_id=resume_capability_id,
+                owner_scope=self._agent_owner_scope(owner_conversation.username),
+                requested_capability_id=None,
                 metadata=resume_metadata,
                 available_mcp_servers=await self.available_user_mcp_server_profiles(
                     owner_conversation.username,
@@ -4870,6 +4272,147 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             "answer_payload": dict(answer_payload),
             "source_message_id": answer.source_message_id,
         }
+
+    async def _resume_agent_interrupt(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        answer_payload: Mapping[str, Any],
+        resume_metadata: Mapping[str, Any] | None = None,
+    ) -> bool:
+        raw_locator = interrupt.required_fields.get("_agent_continuation")
+        if isinstance(raw_locator, Mapping):
+            locator = AgentContinuationLocatorService().from_safe_dict(raw_locator)
+        else:
+            if await self.agent_run_repository.get_run_for_task(task.task_id) is None:
+                return False
+            try:
+                locator = await self._agent_locator_for_node(
+                    task_id=task.task_id,
+                    node_id=interrupt.node_id,
+                )
+            except RuntimeError:
+                return False
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        if conversation is None:
+            raise ValueError(f"Unknown conversation: {task.conversation_id}")
+        answer_digest = hashlib.sha256(
+            json.dumps(
+                dict(answer_payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        self._agent_invocation_contexts.merge(
+            locator.run_id,
+            metadata=dict(resume_metadata or {}),
+            current_user_input=self._format_answer_message(answer_payload),
+        )
+
+        async def resolve(_locator):
+            execution = await self._agent_capability_invoker.resume(locator)
+            return AgentAuthorityResolution(
+                authority_digest=locator.authority_digest,
+                status=execution.status,
+                safe_result_payload=execution.safe_result_payload,
+                safe_continuation_facts={"answer_digest": answer_digest},
+                safe_error_code=execution.safe_error_code,
+                staged_artifacts=execution.staged_artifacts,
+            )
+
+        await self.interrupt_service.record_agent_continuation(
+            locator,
+            owner_scope=self._agent_owner_scope(conversation.username),
+            authority_digest=locator.authority_digest,
+            resolve_authority=resolve,
+        )
+        return True
+
+    async def _agent_locator_for_node(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+    ):
+        for interrupt in await self.storage.list_interrupts_for_task(task_id):
+            if interrupt.node_id != node_id:
+                continue
+            raw = interrupt.required_fields.get("_agent_continuation")
+            if isinstance(raw, Mapping):
+                return AgentContinuationLocatorService().from_safe_dict(raw)
+        run = await self.agent_run_repository.get_run_for_task(task_id)
+        if run is not None:
+            items = await self.agent_run_repository.list_items(run.run_id)
+            call_ids = {
+                item.item_id
+                for item in items
+                if item.item_id in run.waiting_call_item_ids
+                and json.loads(item.payload_json).get("node_id") == node_id
+            }
+            for item in items:
+                if item.source_call_item_id not in call_ids:
+                    continue
+                payload = json.loads(item.payload_json)
+                safe_result = payload.get("safe_result")
+                raw = (
+                    safe_result.get("continuation_locator")
+                    if isinstance(safe_result, Mapping)
+                    else None
+                )
+                if isinstance(raw, Mapping):
+                    return AgentContinuationLocatorService().from_safe_dict(raw)
+        raise RuntimeError("agent_continuation_locator_missing")
+
+    async def _recover_agent_mcp_dispatch(
+        self,
+        *,
+        task: Task,
+        locator,
+        owner_user_id: str,
+        metadata: Mapping[str, Any],
+        authoritative_payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        root_message = await self.storage.get_message(task.root_message_id)
+        self._agent_invocation_contexts.merge(
+            locator.run_id,
+            metadata=metadata,
+            current_user_input=(
+                root_message.content if root_message is not None else task.summary or ""
+            ),
+        )
+
+        async def resolve(_locator):
+            if authoritative_payload is not None:
+                return AgentAuthorityResolution(
+                    authority_digest=locator.authority_digest,
+                    status=AgentCallOutcomeStatus.COMPLETED,
+                    safe_result_payload=dict(authoritative_payload),
+                    safe_continuation_facts={"mcp_recovery": "authoritative_result"},
+                )
+            execution = await self._agent_capability_invoker.resume(locator)
+            return AgentAuthorityResolution(
+                authority_digest=locator.authority_digest,
+                status=execution.status,
+                safe_result_payload=execution.safe_result_payload,
+                safe_continuation_facts={"mcp_recovery": "continued"},
+                safe_error_code=execution.safe_error_code,
+                staged_artifacts=execution.staged_artifacts,
+            )
+
+        recover = (
+            self.interrupt_service.recover_agent_result
+            if authoritative_payload is not None
+            else self.interrupt_service.record_agent_continuation
+        )
+        await recover(
+            locator,
+            owner_scope=self._agent_owner_scope(owner_user_id),
+            authority_digest=locator.authority_digest,
+            resolve_authority=resolve,
+        )
 
     async def _answer_v2_slot_interrupt(
         self,
@@ -5438,13 +4981,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     kind="ambiguous",
                     text=text,
                     confidence=1.0,
-                    reason="interrupt_open_turn_planner_invalid",
+                    reason="interrupt_open_turn_interpreter_invalid",
                     blocks_resume=True,
                     block_reason="",
                 ),
             ),
             confidence=1.0,
-            reason="interrupt_open_turn_planner_invalid",
+            reason="interrupt_open_turn_interpreter_invalid",
             fallback=True,
             fallback_reason="invalid_llm_output",
         )
@@ -5715,7 +5258,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         return await self._apply_v2_slot_answer(
             collection=collection,
             interrupt=interrupt,
-            planner_part=part,
+            turn_part=part,
             raw_answer=raw_answer,
             client_request_id=client_request_id,
         )
@@ -5806,7 +5349,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         llm_metadata: Mapping[str, Any] | None = None,
     ) -> str:
         resource_context, resource_audits = self._slot_question_resource_context(collection)
-        await self._record_v2_interrupt_soft_binding_audit(
+        await self._record_v2_interrupt_skill_question_audit(
             task=task,
             interrupt=interrupt,
             collection=collection,
@@ -5942,7 +5485,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
         )
 
-    async def _record_v2_interrupt_soft_binding_audit(
+    async def _record_v2_interrupt_skill_question_audit(
         self,
         *,
         task: Task,
@@ -5956,7 +5499,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 node_id=interrupt.node_id,
-                event_type="soft_skill_binding.decision",
+                event_type="skill.question_answered",
                 visibility=EventVisibility.AUDIT_ONLY,
                 payload={
                     "decision": "answer",
@@ -6141,8 +5684,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             current_user_answer=text,
             current_upload_ids=self._v2_answer_upload_ids(raw_answer),
             artifact_summaries=artifact_summaries,
-            planner_target_slots=part.target_slots,
-            planner_reason=part.reason,
+            turn_target_slots=part.target_slots,
+            turn_reason=part.reason,
         )
 
     async def _process_v2_schema_switch_part(
@@ -6560,6 +6103,19 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         request_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         await self._await_existing_execution(task.task_id)
+        if await self._resume_agent_interrupt(
+            task=task,
+            interrupt=interrupt,
+            answer_payload=raw_answer,
+            resume_metadata={
+                **self._resume_skill_revision_metadata(task.task_id),
+                SLOT_COLLECTION_METADATA_KEY: self._slot_collection_resume_metadata(collection),
+                "slot_collection_id": collection.collection_id,
+                "slot_collection_revision": collection.revision,
+                "resume_interrupted_node_id": interrupt.node_id,
+            },
+        ):
+            return
         root_message = await self.storage.get_message(task.root_message_id)
         resume_metadata = {
             **self._resume_skill_revision_metadata(task.task_id),
@@ -6571,9 +6127,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         resume_metadata.update(await self._conversation_file_context_metadata_for_task(task))
         resume_metadata.update(await self._resume_llm_metadata(task, request_metadata))
         resume_metadata.update(self._mcp_task_assignment_metadata(task))
-        resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupt.node_id)
-        if resume_finalizer_node_id:
-            resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
         resume_capability_id = task.requested_capability_id
         interrupted_node = await self.storage.get_task_node(interrupt.node_id)
         if interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
@@ -6584,7 +6137,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if owner_conversation is None:
             raise ValueError(f"Unknown conversation: {task.conversation_id}")
         await self._schedule_execution(
-            OrchestrationRequest(
+            AgentExecutionRequest(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 root_message_id=task.root_message_id,
@@ -6592,7 +6145,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     root_message.content if root_message is not None else task.summary or "",
                     raw_answer,
                 ),
-                requested_capability_id=resume_capability_id,
+                owner_scope=self._agent_owner_scope(owner_conversation.username),
+                requested_capability_id=None,
                 metadata=resume_metadata,
                 available_mcp_servers=await self.available_user_mcp_server_profiles(
                     owner_conversation.username,
@@ -7056,11 +6610,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         }
 
     @staticmethod
-    def _slot_answer_planner_hint(part: InterruptOpenTurnPart | None) -> dict[str, object]:
+    def _slot_answer_turn_hint(part: InterruptOpenTurnPart | None) -> dict[str, object]:
         if part is None:
             return {}
         return {
-            "source": "interrupt_open_turn_planner",
+            "source": "interrupt_open_turn_interpreter",
             "part_id": part.part_id,
             "target_slots": list(part.target_slots),
             "reason": part.reason,
@@ -7073,7 +6627,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         *,
         collection: SlotCollection,
         interrupt: Interrupt,
-        planner_part: InterruptOpenTurnPart | None = None,
+        turn_part: InterruptOpenTurnPart | None = None,
         raw_answer: dict[str, object],
         client_request_id: str,
     ) -> SlotCollection:
@@ -7130,14 +6684,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 validating,
                 current_user_answer=answer_text,
                 accepted_answer_summaries=accepted_answer_summaries,
-                planner_hint=self._slot_answer_planner_hint(planner_part),
+                turn_hint=self._slot_answer_turn_hint(turn_part),
             )
             if history_recall
             else build_normal_extraction_prompt(
                 validating,
                 current_user_answer=answer_text,
                 artifact_summaries=artifact_summaries,
-                planner_hint=self._slot_answer_planner_hint(planner_part),
+                turn_hint=self._slot_answer_turn_hint(turn_part),
             )
         )
         raw_response = ""
@@ -7166,8 +6720,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             artifact_summaries=artifact_summaries,
             accepted_answer_summaries=accepted_answer_summaries,
             history_recall=history_recall,
-            planner_target_slots=planner_part.target_slots if planner_part is not None else (),
-            planner_reason=planner_part.reason if planner_part is not None else None,
+            turn_target_slots=turn_part.target_slots if turn_part is not None else (),
+            turn_reason=turn_part.reason if turn_part is not None else None,
         )
         extraction = merge_slot_extraction_results(extraction, backend_extraction, collection=validating)
         if not extraction.resolved:
@@ -7175,7 +6729,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 validating,
                 schema,
                 raw_answer=raw_answer,
-                planner_part=planner_part,
+                turn_part=turn_part,
             )
         next_collection, event = apply_extraction_result_to_collection(
             validating,
@@ -7615,15 +7169,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         schema,
         *,
         raw_answer: Mapping[str, object],
-        planner_part: InterruptOpenTurnPart | None = None,
+        turn_part: InterruptOpenTurnPart | None = None,
     ) -> dict[str, dict[str, object]]:
         extraction = build_backend_slot_extraction(
             collection,
             schema,
             current_user_answer=self._v2_answer_text(raw_answer),
             current_upload_ids=self._v2_answer_upload_ids(raw_answer),
-            planner_target_slots=planner_part.target_slots if planner_part is not None else (),
-            planner_reason=planner_part.reason if planner_part is not None else None,
+            turn_target_slots=turn_part.target_slots if turn_part is not None else (),
+            turn_reason=turn_part.reason if turn_part is not None else None,
         )
         return {
             field: {
@@ -7640,7 +7194,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         schema,
         *,
         raw_answer: Mapping[str, object],
-        planner_part: InterruptOpenTurnPart | None = None,
+        turn_part: InterruptOpenTurnPart | None = None,
     ) -> SlotExtractionResult:
         candidates = {
             field: SlotExtractionCandidate(
@@ -7653,7 +7207,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 collection,
                 schema,
                 raw_answer=raw_answer,
-                planner_part=planner_part,
+                turn_part=turn_part,
             ).items()
         }
         return SlotExtractionResult(resolved=candidates)
@@ -8400,7 +7954,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             raise ValueError(f"Unknown task: {task_id}")
 
         yielded_event_ids: set[str] = set()
-        terminal_event_types = {"task.completed", "task.failed", "task.cancelled"}
+        terminal_event_types = {
+            "task.completed",
+            "task.failed",
+            "task.cancelled",
+            "agent.run.completed",
+            "agent.run.failed",
+            "agent.run.cancelled",
+        }
         terminal_event_seen = False
         subscription = self.event_broker.subscribe(task_id)
         try:
@@ -8534,88 +8095,42 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
             return
         conversation = await self.storage.get_conversation(task.conversation_id)
-        root_message = await self.storage.get_message(task.root_message_id)
         if conversation is None:
             raise RuntimeError("mcp_continuation_conversation_missing")
-        raw_plan = running.payload.get("continuation_plan")
-        if not isinstance(raw_plan, Mapping):
-            raise RuntimeError("mcp_continuation_plan_missing")
-        persisted_plan = _deserialize_mcp_continuation_plan(raw_plan)
-        if persisted_plan.task_id != task.task_id:
-            raise RuntimeError("mcp_continuation_plan_task_mismatch")
+        raw_locator = running.payload.get("continuation_plan")
+        if not isinstance(raw_locator, Mapping):
+            raise RuntimeError("agent_continuation_locator_missing")
+        try:
+            locator = AgentContinuationLocatorService().from_safe_dict(raw_locator)
+        except ValueError as exc:
+            raise RuntimeError("agent_continuation_locator_invalid") from exc
+        if locator.task_id != task.task_id or locator.node_id != running.node_id:
+            raise RuntimeError("agent_continuation_locator_identity_mismatch")
         if continuation_projection is None:
             raise RuntimeError("mcp_continuation_projection_missing")
-        owned_node_ids = tuple(
-            sorted(
-                node.node_id
-                for node in await self.storage.list_task_nodes_for_task(task.task_id)
-                if node.node_id != running.node_id
-                and node.status
-                not in {
-                    NodeStatus.COMPLETED,
-                    NodeStatus.FAILED,
-                    NodeStatus.CANCELLED,
-                    NodeStatus.BLOCKED_BY_CANCELLATION,
-                    NodeStatus.ORPHANED,
-                }
-            )
-        )
-        scoped = await self.storage.renew_mcp_remote_task_continuation(
-            running.outbox_id,
-            claim_owner=str(running.continuation_claim_owner or ""),
-            claim_token=str(running.continuation_claim_token or ""),
-            expected_revision=running.continuation_revision,
-            lease_expires_at=self._utcnow_naive() + timedelta(seconds=30),
-            node_ids=owned_node_ids,
-            updated_at=self._utcnow_naive(),
-        )
-        if scoped is None:
-            raise RuntimeError("mcp_continuation_scope_claim_lost")
-        running = scoped
-        handle = await self._schedule_execution(
-            OrchestrationRequest(
-                task_id=task.task_id,
-                conversation_id=task.conversation_id,
-                root_message_id=task.root_message_id,
-                user_message=(
-                    root_message.content if root_message is not None else task.summary or ""
-                ),
-                requested_capability_id=task.requested_capability_id,
-                metadata={
-                    **self._mcp_task_assignment_metadata(task),
-                    "mcp_remote_task_continuation_id": running.outbox_id,
-                    "mcp_remote_task_continuation_claim_token": (
-                        running.continuation_claim_token
-                    ),
-                    "mcp_remote_task_source_node_id": running.node_id,
-                    "mcp_remote_task_result_projection": continuation_projection,
-                    "mcp_remote_task_continuation_plan": dict(raw_plan),
+
+        async def resolve_authority(_locator):
+            return AgentAuthorityResolution(
+                authority_digest=locator.authority_digest,
+                status=AgentCallOutcomeStatus.COMPLETED,
+                safe_result_payload={
+                    "status": "completed",
+                    "projection": continuation_projection,
                 },
-                available_mcp_servers=await self.available_user_mcp_server_profiles(
-                    conversation.username,
-                    execution_mode=task.mcp_execution_mode,
-                ),
+                safe_continuation_facts={"mcp_remote_task": "completed"},
             )
-        )
-        while not handle.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(handle), timeout=10)
-            except asyncio.TimeoutError:
-                renewed_at = self._utcnow_naive()
-                renewed = await self.storage.renew_mcp_remote_task_continuation(
-                    running.outbox_id,
-                    claim_owner=str(running.continuation_claim_owner or ""),
-                    claim_token=str(running.continuation_claim_token or ""),
-                    expected_revision=running.continuation_revision,
-                    lease_expires_at=renewed_at + timedelta(seconds=30),
-                    updated_at=renewed_at,
-                )
-                if renewed is None:
-                    raise RuntimeError("mcp_continuation_lease_lost")
-                running = renewed
-        await asyncio.shield(handle)
-        await _mark_remote_continuation_dispatched(
-            self.storage, running, self._utcnow_naive()
+
+        async def acknowledge() -> None:
+            await _mark_remote_continuation_dispatched(
+                self.storage, running, self._utcnow_naive()
+            )
+
+        await self.interrupt_service.record_agent_continuation(
+            locator,
+            owner_scope=self._agent_owner_scope(conversation.username),
+            authority_digest=locator.authority_digest,
+            resolve_authority=resolve_authority,
+            acknowledge=acknowledge,
         )
 
     async def _converge_abandoned_mcp_continuation(self, command, *, now: datetime) -> None:
@@ -8685,6 +8200,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
         )
         await aggregate_reconciler.run()
+        await self._reconcile_mcp_dispatch_recovery()
+        await self._recover_agent_runs()
         if self._mcp_cp7_safety_facade is not None:
             if self._mcp_cp7_open_boundary is None:
                 raise RuntimeError("mcp_cp7_open_boundary_missing")
@@ -8790,6 +8307,84 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if result_manager is not None:
             while await result_manager.repair_incomplete(limit=1000) == 1000:
                 pass
+
+    async def _recover_agent_runs(self) -> None:
+        for run in await self.agent_run_repository.list_recoverable_runs():
+            task = await self.storage.get_task(run.task_id)
+            if task is None or task.conversation_id != run.conversation_id:
+                raise RuntimeError("agent_startup_task_identity_mismatch")
+            conversation = await self.storage.get_conversation(run.conversation_id)
+            if conversation is None:
+                raise RuntimeError("agent_startup_conversation_missing")
+            root_message = await self.storage.get_message(task.root_message_id)
+            user_message = (
+                root_message.content
+                if root_message is not None
+                else task.summary or ""
+            )
+            metadata = {
+                **await self._task_accepted_llm_metadata(task.task_id),
+                **self._mcp_task_assignment_metadata(task),
+            }
+            if self._skill_runtime_state is not None:
+                metadata["skill_bundle_revision"] = (
+                    self._skill_runtime_state.active_revision
+                )
+            profiles = await self.available_user_mcp_server_profiles(
+                conversation.username,
+                execution_mode=task.mcp_execution_mode,
+            )
+            metadata["available_mcp_server_ids"] = [
+                profile.server_id for profile in profiles
+            ]
+            self._agent_invocation_contexts.merge(
+                run.run_id,
+                metadata={
+                    **metadata,
+                    "agent_owner_scope": self._agent_owner_scope(
+                        conversation.username
+                    ),
+                },
+                current_user_input=user_message,
+            )
+            if run.status in {
+                AgentRunStatus.WAITING_FOR_INPUT,
+                AgentRunStatus.WAITING_FOR_DEPENDENCY,
+            }:
+                continue
+            trusted = tuple(
+                json.dumps(
+                    {key: metadata[key]},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                for key in (
+                    "capability_missing_fallback",
+                    "conversation_memory",
+                    "mcp_remote_task_result_projection",
+                    "slot_collection",
+                    "uploaded_artifacts",
+                )
+                if key in metadata
+            )
+            await self._agent_run_recovery.recover_crashed_run(
+                run.run_id,
+                trusted_facts=trusted,
+                visibility_context=CapabilityVisibilityContext(
+                    authenticated_owner_scope=self._agent_owner_scope(
+                        conversation.username
+                    ),
+                    execution_path=str(task.mcp_execution_mode or "default"),
+                    pinned_skill_bundle_revision=str(
+                        metadata.get("skill_bundle_revision") or ""
+                    ).strip()
+                    or None,
+                    safe_mcp_server_profiles=profiles,
+                ),
+                cancellation=self._agent_cancellation_token(task.task_id),
+            )
 
     async def _strict_enumerate_mcp_terminal_candidates(self) -> None:
         root = self._mcp_terminal_result_root
@@ -9097,28 +8692,23 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     if envelope_version == "v2"
                     else dict(envelope.get("metadata") or {})
                 )
-                resume_request = OrchestrationRequest(
-                    task_id=task.task_id,
-                    conversation_id=task.conversation_id,
-                    root_message_id=task.root_message_id,
-                    user_message=user_message,
-                    requested_capability_id="mcp.dispatch",
-                    metadata={
-                        **self._mcp_task_assignment_metadata(task),
-                        **envelope_runtime_metadata,
-                        "mcp_dispatch_resume_envelope": envelope,
-                        "mcp_dispatch_server_id": intent.requested_server_id,
-                        "resume_interrupted_node_id": intent.node_id,
-                        **trusted_binding_metadata,
-                    },
-                )
                 try:
-                    resumed_node, _ = (
-                        await self.orchestration_service.resume_persisted_mcp_dispatch_node(
-                            resume_request,
-                            envelope,
-                            expected_envelope_sha256=envelope_sha,
-                        )
+                    locator = await self._agent_locator_for_node(
+                        task_id=task.task_id,
+                        node_id=str(intent.node_id),
+                    )
+                    await self._recover_agent_mcp_dispatch(
+                        task=task,
+                        locator=locator,
+                        owner_user_id=intent.owner_user_id,
+                        metadata={
+                            **self._mcp_task_assignment_metadata(task),
+                            **envelope_runtime_metadata,
+                            "mcp_dispatch_resume_envelope": envelope,
+                            "mcp_dispatch_server_id": intent.requested_server_id,
+                            "resume_interrupted_node_id": intent.node_id,
+                            **trusted_binding_metadata,
+                        },
                     )
                 except MCPDispatchResumeEnvelopeError as exc:
                     if exc.code not in {
@@ -9139,13 +8729,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                             "mcp_dispatch_resume_no_call_finalize_conflict"
                         ) from exc
                     continue
-                if resumed_node.status in {
-                    NodeStatus.FAILED,
-                    NodeStatus.CANCELLED,
-                    NodeStatus.ORPHANED,
-                    NodeStatus.BLOCKED_BY_CANCELLATION,
-                }:
-                    raise RuntimeError("mcp_dispatch_resume_execution_failed")
                 continue
             if str(intent.status) == "dispatched":
                 candidates = sorted(
@@ -9210,36 +8793,30 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         if envelope_version == "v2"
                         else dict(envelope.get("metadata") or {})
                     )
-                    resume_request = OrchestrationRequest(
+                    locator = await self._agent_locator_for_node(
                         task_id=task.task_id,
-                        conversation_id=task.conversation_id,
-                        root_message_id=task.root_message_id,
-                        user_message=user_message,
-                        requested_capability_id="mcp.dispatch",
+                        node_id=str(intent.node_id),
+                    )
+                    result_refs = [
+                        candidate.safe_result_ref for candidate in candidates
+                    ]
+                    await self._recover_agent_mcp_dispatch(
+                        task=task,
+                        locator=locator,
+                        owner_user_id=intent.owner_user_id,
                         metadata={
                             **self._mcp_task_assignment_metadata(task),
                             **envelope_runtime_metadata,
                             "mcp_dispatch_server_id": intent.requested_server_id,
                             "resume_interrupted_node_id": intent.node_id,
-                            "mcp_recovered_result_receipt_ids": receipt_ids,
-                            "mcp_recovered_result_refs": [
-                                candidate.safe_result_ref for candidate in candidates
-                            ],
                             **trusted_binding_metadata,
                         },
+                        authoritative_payload={
+                            "mcp_status": "completed",
+                            "result_receipt_ids": receipt_ids,
+                            "safe_result_refs": result_refs,
+                        },
                     )
-                    resumed_node, _ = await self.orchestration_service.resume_persisted_mcp_dispatch_node(
-                        resume_request,
-                        envelope,
-                        expected_envelope_sha256=envelope_sha,
-                    )
-                    if resumed_node.status in {
-                        NodeStatus.FAILED,
-                        NodeStatus.CANCELLED,
-                        NodeStatus.ORPHANED,
-                        NodeStatus.BLOCKED_BY_CANCELLATION,
-                    }:
-                        raise RuntimeError("mcp_dispatch_resume_execution_failed")
                     continue
                 outcome = await self.storage.converge_user_mcp_no_server(
                     intent.task_id, self._utcnow_naive()
@@ -10151,6 +9728,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             await self._mcp_runtime_state.aclose()
         if self.postgres_auth_invalidation_bus is not None:
             await self.postgres_auth_invalidation_bus.aclose()
+        await self._main_agent_llm_runtime.aclose()
         if self._mcp_rollout_engine is not None:
             await asyncio.to_thread(self._mcp_rollout_engine.dispose)
         self._engine.dispose()
@@ -10247,7 +9825,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     @staticmethod
     def _canonical_capability_id(capability_id: str | None) -> str | None:
         if capability_id == "main_agent":
-            return "main_agent.respond"
+            return None
         return capability_id
 
     def _ensure_supported_capability(self, capability_id: str | None) -> None:
@@ -10546,7 +10124,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 },
             )
 
-    def _retain_task_skill_revision(self, request: OrchestrationRequest) -> None:
+    def _retain_task_skill_revision(self, request: AgentExecutionRequest) -> None:
         if self._skill_runtime_state is None or request.task_id in self._task_skill_bundle_revisions:
             return
         raw_revision = request.metadata.get("skill_bundle_revision") or self._skill_runtime_state.active_revision
@@ -10568,7 +10146,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             legacy_output={"retained": "true", "task_id": request.task_id},
         )
 
-    def _retain_task_mcp_revision(self, request: OrchestrationRequest) -> None:
+    def _retain_task_mcp_revision(self, request: AgentExecutionRequest) -> None:
         if (
             request.metadata.get("mcp_execution_mode")
             != MCPExecutionPath.LEGACY.value
@@ -10761,17 +10339,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 value = value.get("text")
             metadata[key_text] = value
         return metadata
-
-    async def _resume_finalizer_node_id(self, task_id: str, interrupted_node_id: str) -> str | None:
-        nodes = {node.node_id: node for node in await self.storage.list_task_nodes_for_task(task_id)}
-        edges = await self.storage.list_task_edges(task_id)
-        for edge in edges:
-            if edge.from_node_id != interrupted_node_id:
-                continue
-            node = nodes.get(edge.to_node_id)
-            if node is not None and node.capability_id == "main_agent.respond":
-                return node.node_id
-        return None
 
     @staticmethod
     def _answer_upload_ids(answer_payload: Mapping[str, object]) -> tuple[str, ...]:
@@ -11258,13 +10825,6 @@ def build_api_runtime(
     platform_llm_config_path: str | Path | None = None,
     platform_llm_client_factory: Callable[..., Any] | None = None,
     enable_platform_llm: bool = True,
-    planner_text_generator: PlannerTextGenerator | None = None,
-    planner_llm_config: Mapping[str, Any] | None = None,
-    planner_llm_config_path: str | Path | None = None,
-    planner_llm_client_factory: Callable[..., Any] | None = None,
-    planner_reasoning_effort: ReasoningEffort = "minimal",
-    enable_llm_planner: bool = True,
-    planner_payload_policies: Mapping[str, CapabilityPayloadPolicy] | None = None,
     main_agent_stream_generator: StreamGenerator | None = None,
     main_agent_llm_config: Mapping[str, Any] | None = None,
     main_agent_llm_config_path: str | Path | None = None,
@@ -11286,7 +10846,6 @@ def build_api_runtime(
     mcp_client_factory: Callable[..., Any] | None = None,
     mcp_sidecar_client: Any | None = None,
     mcp_runtime_state: MCPRuntimeState | None = None,
-    runtime_replanner: RuntimeReplanner | None = None,
     master_key_file: str | Path | None = None,
     master_key_bytes: bytes | None = None,
     upload_store: InMemoryUploadStore | None = None,
@@ -11341,11 +10900,6 @@ def build_api_runtime(
         platform_llm_config_path=platform_llm_config_path,
         platform_llm_client_factory=platform_llm_client_factory,
         enable_platform_llm=enable_platform_llm,
-        planner_text_generator=planner_text_generator,
-        planner_llm_config=planner_llm_config,
-        planner_llm_config_path=planner_llm_config_path,
-        planner_llm_client_factory=planner_llm_client_factory,
-        enable_llm_planner=enable_llm_planner,
         main_agent_stream_generator=main_agent_stream_generator,
         main_agent_llm_config=main_agent_llm_config,
         main_agent_llm_config_path=main_agent_llm_config_path,
@@ -11546,6 +11100,7 @@ def build_api_runtime(
     if state_config.backend == StatePlatformBackend.POSTGRESQL:
         engine = create_postgres_engine(state_config.dsn or "")
         bootstrap_postgres_database(engine)
+        primary_session_factory = create_postgres_session_factory(engine)
         mcp_rollout_runtime = (
             _resolve_postgres_mcp_rollout_app_runtime(
                 rollout_ledger_active=_mcp_rollout_ledger_is_active(
@@ -11564,7 +11119,7 @@ def build_api_runtime(
                 "mcp_rollout_role": "app",
             }
         storage = PostgreSQLStorage(
-            create_postgres_session_factory(engine),
+            primary_session_factory,
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
             mcp_task_authority_mode=canonical_task_authority_mode,
@@ -11582,6 +11137,7 @@ def build_api_runtime(
             ),
             **mcp_rollout_storage_kwargs,
         )
+        agent_repository = PostgreSQLAgentRepository(primary_session_factory)
         if isinstance(engine, Engine):
             postgres_auth_invalidation_bus = PostgresAuthInvalidationBus(engine, auth_generation_cache)
             postgres_auth_invalidation_bus.check_permission()
@@ -11593,8 +11149,9 @@ def build_api_runtime(
     else:
         engine = create_sqlite_engine(database_path)
         bootstrap_sqlite_database(engine)
+        primary_session_factory = create_sqlite_session_factory(engine)
         storage = SQLiteStorage(
-            create_sqlite_session_factory(engine),
+            primary_session_factory,
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
             mcp_task_authority_mode=canonical_task_authority_mode,
@@ -11611,9 +11168,29 @@ def build_api_runtime(
                 mcp_request_state_evidence_authority
             ),
         )
+        agent_repository = SQLiteAgentRepository(primary_session_factory)
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
         conversation_file_store = LocalConversationFileStore(
             conversation_file_store_path or (Path(database_path).parent / "conversation_files")
+        )
+
+    if canonical_task_authority_mode == "enforce":
+        required_agent_methods = (
+            "commit_agent_state",
+            "get_agent_run",
+            "get_agent_run_for_task",
+            "list_agent_runs",
+            "list_agent_items",
+        )
+        if resolved_runtime_sidecar_client is None or not all(
+            callable(getattr(resolved_runtime_sidecar_client, method, None))
+            for method in required_agent_methods
+        ):
+            raise RuntimeError(
+                "agent_runtime_store_unavailable: enforce mode requires Runtime Sidecar Agent authority"
+            )
+        agent_repository = RuntimeSidecarAgentRepository(
+            resolved_runtime_sidecar_client
         )
 
     if user_mcp_enabled:
@@ -11838,11 +11415,6 @@ def build_api_runtime(
     )
 
     capability_registry = CapabilityRegistry()
-    _register_capability_descriptors(
-        capability_registry,
-        MAIN_AGENT_CAPABILITY_DESCRIPTORS,
-        planner_payload_policies=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES,
-    )
     skill_runtime_state = SkillRuntimeState(
         skill_roots=roots,
         public_skill_roots=resolved_public_skill_roots,
@@ -11852,7 +11424,6 @@ def build_api_runtime(
     )
 
     instance_registry = InstanceRegistry()
-    instance_registry.register(build_local_main_agent_instance())
     _sync_skill_capability_registry(capability_registry, instance_registry, skill_runtime_state)
 
     _record_skill_capability_startup_audit(audit_sink, skill_runtime_state.active_bundle.skill_capabilities)
@@ -11905,10 +11476,6 @@ def build_api_runtime(
         _register_capability_descriptors(
             capability_registry,
             (MCP_DISPATCH_CAPABILITY_DESCRIPTOR,),
-            planner_payload_policies={
-                MCP_DISPATCH_CAPABILITY_DESCRIPTOR.capability_id:
-                    MCP_DISPATCH_PLANNER_PAYLOAD_POLICY,
-            },
         )
         instance_registry.register(build_local_mcp_dispatch_instance())
     event_broker = InMemoryEventBroker(
@@ -11988,9 +11555,6 @@ def build_api_runtime(
         main_agent_llm_config=main_agent_llm_config,
         main_agent_llm_config_path=main_agent_llm_config_path,
         main_agent_llm_client_factory=main_agent_llm_client_factory,
-        planner_llm_config=planner_llm_config,
-        planner_llm_config_path=planner_llm_config_path,
-        planner_llm_client_factory=planner_llm_client_factory,
     )
 
     resolved_mysql_adapter = mysql_adapter or MySQLReadonlyAdapter()
@@ -12023,6 +11587,15 @@ def build_api_runtime(
         main_agent_stream_generator=main_agent_stream_generator,
         main_agent_llm_runtime=main_agent_llm_runtime,
         main_agent_reasoning_effort=main_agent_reasoning_effort,
+    )
+    agent_model_port = (
+        StreamAgentModelAdapter(main_agent_stream_generator)
+        if main_agent_stream_generator is not None
+        else main_agent_llm_runtime
+    )
+    run_bound_mcp_generator = RunBoundMCPTextGenerator(
+        runs=agent_repository,
+        model=agent_model_port,
     )
     resolved_platform_text_generator = _resolve_platform_text_generator(
         platform_llm_text_generator=platform_llm_text_generator,
@@ -12059,62 +11632,11 @@ def build_api_runtime(
         reasoning_event_publisher=publish_transient_event,
         model_edition_config=_resolve_model_edition_config(
             main_agent_llm_config=main_agent_llm_config,
-            planner_llm_config=planner_llm_config,
             platform_llm_config=platform_llm_config,
         ),
     )
 
-    main_agent_workflow_provider = MainAgentWorkflowProvider()
-
-    def resolve_skill_name(capability_id: str, revision: str | None) -> str | None:
-        try:
-            return skill_runtime_state.skill_name_for_capability(capability_id, revision)
-        except KeyError:
-            return None
-
-    def resolve_skill_manifest(capability_id: str, revision: str | None):
-        skill_name = resolve_skill_name(capability_id, revision)
-        if not skill_name:
-            return None
-        try:
-            return skill_runtime_state.catalog_for_revision(revision).get(skill_name)
-        except KeyError:
-            return None
-
-    skill_workflow_provider = SkillWorkflowProvider(
-        skill_name_resolver=resolve_skill_name,
-        skill_manifest_resolver=resolve_skill_manifest,
-    )
-
-    def resolve_macro_provider(capability_id: str):
-        if capability_id.startswith("skill."):
-            return skill_workflow_provider
-        return None
-
-    def resolve_active_skill_revision(capability_id: str) -> str | None:
-        return (
-            skill_runtime_state.active_revision
-            if capability_id in skill_runtime_state.active_bundle.skill_capabilities.skill_name_by_capability_id
-            else None
-        )
-
-    macro_providers = {}
-
-    auto_workflow_provider = AutoWorkflowProvider(
-        main_agent_provider=main_agent_workflow_provider,
-        macro_providers=macro_providers,
-        macro_provider_resolver=resolve_macro_provider,
-    )
-    resolved_planner_text_generator = _resolve_planner_text_generator(
-        planner_text_generator=planner_text_generator,
-        main_agent_llm_runtime=main_agent_llm_runtime,
-        event_recorder=record_live_event,
-        reasoning_event_publisher=publish_transient_event,
-        planner_reasoning_effort=planner_reasoning_effort,
-        enable_llm_planner=enable_llm_planner,
-    )
     mcp_dispatch_executor = None
-    mcp_dispatch_workflow_provider = None
     mcp_shadow_observer = None
     mcp_rollout_metric_recorder = None
     mcp_dispatch_metric_context = None
@@ -12827,13 +12349,11 @@ def build_api_runtime(
             raise RuntimeError(
                 "User-scoped MCP routing requires durable dispatch authorities"
             )
-        if resolved_planner_text_generator is None:
-            raise RuntimeError("User-scoped MCP routing requires the LLM planner")
         mcp_tool_selector = MCPToolSelector(
-            text_generator=resolved_planner_text_generator
+            run_bound_generator=run_bound_mcp_generator
         )
         mcp_server_router = MCPServerRouter(
-            text_generator=resolved_planner_text_generator
+            run_bound_generator=run_bound_mcp_generator
         )
 
         async def project_mcp_result_with_business_projection(
@@ -12918,7 +12438,6 @@ def build_api_runtime(
         mcp_dispatch_executor = MCPDispatchExecutor(
             coordinator=mcp_dispatch_coordinator
         )
-        mcp_dispatch_workflow_provider = MCPDispatchWorkflowProvider()
         if mcp_rollout_config.routing_mode is MCPRoutingMode.SHADOW:
             assert mcp_credential_cipher is not None
             mcp_shadow_observer = MCPShadowRuntimeObserver(
@@ -12932,92 +12451,263 @@ def build_api_runtime(
                     config_fingerprint=mcp_rollout_config.fingerprint,
                 ),
             )
-    default_workflow_provider = LLMWorkflowProvider(
-        capability_registry=capability_registry,
-        fallback_provider=auto_workflow_provider,
-        macro_providers=macro_providers,
-        macro_provider_resolver=resolve_macro_provider,
-        text_generator=resolved_planner_text_generator,
-        payload_policies=planner_payload_policies,
+    resolved_model_edition_config = _resolve_model_edition_config(
+        main_agent_llm_config=main_agent_llm_config,
+        platform_llm_config=platform_llm_config,
     )
-    default_replanners: list[RuntimeReplanner] = [
-        SoftSkillBindingReplanner(
-            capability_registry=capability_registry,
-            macro_providers=macro_providers,
-            macro_provider_resolver=resolve_macro_provider,
-            active_skill_revision_resolver=resolve_active_skill_revision,
-        ),
-        MainAgentRuntimeReplanner(
-            capability_registry=capability_registry,
-            macro_providers=macro_providers,
-            macro_provider_resolver=resolve_macro_provider,
-            text_generator=resolved_planner_text_generator,
-            payload_policies=planner_payload_policies,
-            replan_claim_store=storage,
-            now_fn=ApiRuntime._utcnow_naive,
-        )
-    ]
-    resolved_runtime_replanner = runtime_replanner or CompositeRuntimeReplanner(default_replanners)
-
     cancellation_service = CancellationService(
         storage,
         event_sink=event_broker,
         audit_sink=audit_sink,
         runtime_sidecar_client=resolved_runtime_sidecar_client,
     )
-    interrupt_service = InterruptService(storage, event_sink=event_broker, audit_sink=audit_sink)
-    orchestration_service = OrchestrationService(
-        storage=storage,
-        capability_registry=capability_registry,
-        instance_registry=instance_registry,
-        scheduler=Scheduler(instance_registry),
-        executor=CompositeExecutor(
-            [
-                MainAgentExecutor(
-                    stream_generator=resolved_main_agent_stream_generator,
-                    stream_metadata=main_agent_stream_metadata,
-                    default_reasoning_effort=main_agent_reasoning_effort,
-                    default_model_edition=default_model_edition(main_agent_llm_runtime.config_snapshot()),
-                    model_reasoning_configs=main_agent_llm_runtime.model_reasoning_configs(),
-                    skill_catalog=skill_runtime_state.active_bundle.catalog,
-                    skill_catalog_resolver=skill_runtime_state.catalog_for_revision,
-                    script_runner=skill_script_runner,
-                    skill_input_text_generator=resolved_skill_input_text_generator,
-                    skill_output_artifact_manager=skill_output_artifact_manager,
-                    transient_event_publisher=publish_transient_event,
-                    cancel_checker=lambda task_id: task_id in runtime_cancelled_task_ids,
-                ),
-                SkillExecutor(
-                    runtime_state=skill_runtime_state,
-                    script_runner=skill_script_runner,
-                    skill_input_text_generator=resolved_skill_input_text_generator,
-                    platform_handler_registry=resolved_skill_platform_handler_registry,
-                    service_registry=resolved_skill_service_registry,
-                ),
-                *([mcp_dispatch_executor] if mcp_dispatch_executor is not None else []),
-                *(
-                    [
-                        MCPToolExecutor(
-                            runtime_state=resolved_mcp_runtime_state,
-                            result_service=mcp_result_service,
-                            live_event_recorder=record_live_event,
-                            metric_recorder=mcp_rollout_metric_recorder,
-                            metric_routing_mode=(
-                                None
-                                if mcp_dispatch_metric_context is None
-                                else mcp_dispatch_metric_context.routing_mode
-                            ),
-                        )
-                    ]
-                    if resolved_mcp_runtime_state is not None
-                    else []
-                ),
-            ]
-        ),
-        completion_policy=CompletionPolicy(),
-        backpressure=BackpressureGuard(max_active_tasks=DEFAULT_MAX_ACTIVE_TASKS),
+    interrupt_service = InterruptService(
+        storage,
         event_sink=event_broker,
-        runtime_replanner=resolved_runtime_replanner,
+        audit_sink=audit_sink,
+    )
+    composite_executor = CompositeExecutor(
+        [
+            SkillExecutor(
+                runtime_state=skill_runtime_state,
+                script_runner=skill_script_runner,
+                skill_input_text_generator=resolved_skill_input_text_generator,
+                platform_handler_registry=resolved_skill_platform_handler_registry,
+                service_registry=resolved_skill_service_registry,
+            ),
+            *([mcp_dispatch_executor] if mcp_dispatch_executor is not None else []),
+        ]
+    )
+
+    def make_agent_event(
+        *,
+        task_id: str,
+        conversation_id: str,
+        event_type: str,
+        node_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        visibility: EventVisibility = EventVisibility.FRONTEND,
+    ) -> EventRecord:
+        return EventRecord(
+            event_id=f"evt-{uuid4().hex[:24]}",
+            conversation_id=conversation_id,
+            task_id=task_id,
+            node_id=node_id,
+            event_type=event_type,
+            payload=payload or {},
+            visibility=visibility,
+            created_at=ApiRuntime._utcnow_naive(),
+        )
+
+    invocation_contexts = AgentInvocationContextStore()
+    invocation_commit_port = AgentTaskInvocationCommitPort(
+        storage=storage,
+        runs=agent_repository,
+        make_event=make_agent_event,
+        record_event=record_live_event,
+    )
+    invocation_service = CapabilityInvocationService(
+        instance_selector=InstanceSelector(instance_registry),
+        executor=composite_executor,
+        commit_port=invocation_commit_port,
+        now_fn=ApiRuntime._utcnow_naive,
+    )
+
+    delegated_skill_activation = DelegatedSkillActivationService(None)
+    runtime_holder: dict[str, ApiRuntime] = {}
+
+    async def agent_invocation_hook(**values: Any):
+        runtime = runtime_holder.get("runtime")
+        if runtime is None:
+            return None
+        return await runtime._mcp_invocation_shadow_hook(**values)
+
+    def activate_delegated_skill(
+        run,
+        capability_id: str,
+        metadata: Mapping[str, Any],
+    ) -> AgentCallExecution | None:
+        pinned_revision = str(metadata.get("skill_bundle_revision") or "").strip()
+        try:
+            bundle = skill_runtime_state.bundle_for_revision(
+                pinned_revision or None
+            )
+        except KeyError:
+            return AgentCallExecution(
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code="skill_bundle_revision_missing",
+            )
+        skill_name = bundle.skill_capabilities.skill_name_by_capability_id.get(
+            capability_id
+        )
+        manifest = next(
+            (skill for skill in bundle.catalog.skills if skill.name == skill_name),
+            None,
+        )
+        if manifest is None:
+            return None
+        try:
+            execution = resolve_skill_execution_config(manifest)
+        except Exception:
+            return AgentCallExecution(
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code="skill_execution_config_invalid",
+            )
+        if execution.mode != "delegated_main_agent":
+            return None
+        if not pinned_revision:
+            return AgentCallExecution(
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code="agent_skill_pinned_revision_missing",
+            )
+        descriptor = bundle.skill_capabilities.descriptors_by_id.get(capability_id)
+        profile = build_public_skill_profile(
+            manifest,
+            capability_id=capability_id,
+            descriptor=descriptor,
+        )
+        try:
+            item, profile_digest = delegated_skill_activation.build_item(
+                run=run,
+                profile=profile,
+                sequence=run.next_item_sequence,
+                pinned_bundle_revision=pinned_revision,
+                resolved_bundle_revision=bundle.revision,
+            )
+        except (TypeError, ValueError):
+            return AgentCallExecution(
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code="agent_skill_activation_invalid",
+            )
+        return AgentCallExecution(
+            AgentCallOutcomeStatus.COMPLETED,
+            safe_result_payload={
+                "activation": "completed",
+                "capability_id": capability_id,
+                "profile_digest": profile_digest,
+            },
+            skill_activation_item=item,
+        )
+
+    async def publish_agent_reasoning(run, delta: str, ordinal: int) -> None:
+        await publish_transient_event(
+            EventRecord(
+                event_id=f"{run.run_id}:reasoning:{run.revision}:{ordinal}",
+                conversation_id=run.conversation_id,
+                task_id=run.task_id,
+                node_id=run.active_sample_item_id,
+                event_type="agent.reasoning_delta",
+                payload={
+                    "delta": delta,
+                    "ordinal": ordinal,
+                    "sample_id": f"agent-sample:{run.run_id}:r{run.revision}",
+                },
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+    agent_invoker = AgentCapabilityInvoker(
+        invocation_service=invocation_service,
+        runs=agent_repository,
+        task_loader=storage.get_task,
+        node_loader=storage.get_task_node,
+        request_metadata_loader=invocation_contexts.request_metadata,
+        current_user_input_loader=invocation_contexts.current_user_input,
+        continuation_loader=invocation_commit_port.continuation_locator_for_call,
+        delegated_skill_activator=activate_delegated_skill,
+        invocation_hook=agent_invocation_hook,
+    )
+    lease_controller = AgentLeaseController(agent_repository, ttl_seconds=30)
+    agent_runner = AgentLoopRunner(
+        runs=agent_repository,
+        writer=agent_repository,
+        model=agent_model_port,
+        context_builder=AgentContextBuilder(
+            AgentContextRules(
+                stable_rules=(
+                    "你是统一同模型Agent。根据用户请求选择公开Tool，观察结果并继续；"
+                    "不需要Tool时直接给出最终回答。"
+                ),
+                safe_tool_rules=(
+                    "只能调用本轮catalog中的Tool；不得伪造Tool结果、凭据、隐藏路径或内部状态。"
+                ),
+                final_guard="最终回答必须面向用户，且不得包含隐藏推理或原始敏感结果。",
+            )
+        ),
+        catalog_builder=AgentToolCatalogBuilder(capability_registry),
+        visibility_context=CapabilityVisibilityContext("runtime-default"),
+        lease_controller=lease_controller,
+        invoker=agent_invoker,
+        owner_id=f"api-agent:{uuid4().hex}",
+        reasoning_delta_sink=publish_agent_reasoning,
+    )
+    final_output_publisher = AgentFinalOutputPublisher(
+        runs=agent_repository,
+        writer=agent_repository,
+        lease_controller=lease_controller,
+    )
+
+    def build_agent_model_binding(
+        request: AgentExecutionRequest,
+    ) -> AgentModelBinding:
+        options = resolve_llm_request_options(
+            request.metadata,
+            fallback_reasoning_effort=main_agent_reasoning_effort,
+            model_reasoning_configs=model_reasoning_effort_configs(
+                resolved_model_edition_config
+            ),
+            default_model_edition=default_model_edition(
+                resolved_model_edition_config
+            ),
+        )
+        if options.model_edition is None:
+            raise ValueError("agent_model_edition_missing")
+        option_payload = json.dumps(
+            {
+                "reasoning_effort": options.reasoning_effort,
+                "thinking_enabled": options.thinking,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return AgentModelBinding(
+            model_edition=options.model_edition,
+            reasoning_effort=options.reasoning_effort,
+            thinking_enabled=options.thinking,
+            option_digests={
+                "model_options": hashlib.sha256(
+                    option_payload.encode("utf-8")
+                ).hexdigest()
+            },
+        )
+
+    agent_loop_orchestrator = AgentLoopOrchestrator(
+        runs=agent_repository,
+        writer=agent_repository,
+        runner=agent_runner,
+        final_output=final_output_publisher,
+        contexts=invocation_contexts,
+        task_loader=storage.get_task,
+        task_cas=storage.compare_and_set_task,
+        binding_factory=build_agent_model_binding,
+        record_event=record_live_event,
+        make_event=make_agent_event,
+    )
+    agent_recovery = AgentRunRecoveryCoordinator(
+        runs=agent_repository,
+        writer=agent_repository,
+        lease_store=agent_repository,
+        resumer=agent_loop_orchestrator,
+        owner_id=f"api-agent-recovery:{uuid4().hex}",
+    )
+    interrupt_service = InterruptService(
+        storage,
+        event_sink=event_broker,
+        audit_sink=audit_sink,
+        agent_recovery=agent_recovery,
+    )
+    agent_task_projection = AgentTaskProjectionService(
+        runs=agent_repository,
+        tasks=storage,
     )
 
     runtime = ApiRuntime(
@@ -13028,13 +12718,13 @@ def build_api_runtime(
         event_broker=event_broker,
         cancellation_service=cancellation_service,
         interrupt_service=interrupt_service,
-        orchestration_service=orchestration_service,
-        workflow_provider=WorkflowRouter(
-            default_provider=default_workflow_provider,
-            main_agent_provider=main_agent_workflow_provider,
-            skill_provider=skill_workflow_provider,
-            mcp_provider=mcp_dispatch_workflow_provider,
-        ),
+        agent_loop_orchestrator=agent_loop_orchestrator,
+        agent_run_repository=agent_repository,
+        agent_task_projection=agent_task_projection,
+        agent_capability_invoker=agent_invoker,
+        agent_invocation_contexts=invocation_contexts,
+        agent_run_recovery=agent_recovery,
+        main_agent_llm_runtime=main_agent_llm_runtime,
         mysql_adapter=resolved_mysql_adapter,
         username_token_service=username_token_service,
         master_key_sentinel_cipher=master_key_sentinel_cipher,
@@ -13050,11 +12740,7 @@ def build_api_runtime(
         mcp_runtime_state=resolved_mcp_runtime_state,
         runtime_sidecar_client=resolved_runtime_sidecar_client,
         local_cancelled_task_ids=runtime_cancelled_task_ids,
-        model_edition_config=_resolve_model_edition_config(
-            main_agent_llm_config=main_agent_llm_config,
-            planner_llm_config=planner_llm_config,
-            platform_llm_config=platform_llm_config,
-        ),
+        model_edition_config=resolved_model_edition_config,
         auth_generation_cache=auth_generation_cache,
         auth_invalidation_bus=auth_invalidation_bus,
         postgres_auth_invalidation_bus=postgres_auth_invalidation_bus,
@@ -13113,6 +12799,7 @@ def build_api_runtime(
         mcp_cp7_maintenance_authorization=mcp_cp7_maintenance_authorization,
         mcp_cp7_maintenance_authorizer=mcp_cp7_maintenance_authorizer,
     )
+    runtime_holder["runtime"] = runtime
     if user_mcp_enabled:
         mcp_runtime_holder["runtime"] = runtime
     return runtime
@@ -13121,10 +12808,9 @@ def build_api_runtime(
 def _resolve_model_edition_config(
     *,
     main_agent_llm_config: Mapping[str, Any] | None,
-    planner_llm_config: Mapping[str, Any] | None,
     platform_llm_config: Mapping[str, Any] | None,
 ) -> Mapping[str, Any]:
-    for config in (main_agent_llm_config, planner_llm_config, platform_llm_config):
+    for config in (main_agent_llm_config, platform_llm_config):
         if config is not None:
             return config
     try:
@@ -13140,11 +12826,6 @@ def _bootstrap_runtime_config_env(
     platform_llm_config_path: str | Path | None,
     platform_llm_client_factory: Callable[..., Any] | None,
     enable_platform_llm: bool,
-    planner_text_generator: PlannerTextGenerator | None,
-    planner_llm_config: Mapping[str, Any] | None,
-    planner_llm_config_path: str | Path | None,
-    planner_llm_client_factory: Callable[..., Any] | None,
-    enable_llm_planner: bool,
     main_agent_stream_generator: StreamGenerator | None,
     main_agent_llm_config: Mapping[str, Any] | None,
     main_agent_llm_config_path: str | Path | None,
@@ -13159,12 +12840,6 @@ def _bootstrap_runtime_config_env(
         if platform_llm_config_path is not None:
             explicit_paths.append(platform_llm_config_path)
         elif enable_platform_llm and platform_llm_text_generator is None and platform_llm_client_factory is None:
-            should_bootstrap_default = True
-
-    if planner_llm_config is None:
-        if planner_llm_config_path is not None:
-            explicit_paths.append(planner_llm_config_path)
-        elif enable_llm_planner and planner_text_generator is None and planner_llm_client_factory is None:
             should_bootstrap_default = True
 
     if main_agent_stream_generator is None and main_agent_llm_config is None:
@@ -13543,22 +13218,15 @@ def _resolve_main_agent_llm_runtime(
     main_agent_llm_config: Mapping[str, Any] | None,
     main_agent_llm_config_path: str | Path | None,
     main_agent_llm_client_factory: Callable[..., Any] | None,
-    planner_llm_config: Mapping[str, Any] | None,
-    planner_llm_config_path: str | Path | None,
-    planner_llm_client_factory: Callable[..., Any] | None,
 ) -> SharedLLMRuntime:
-    config = main_agent_llm_config or planner_llm_config
-    factory = main_agent_llm_client_factory or planner_llm_client_factory or LLMClient
+    config = main_agent_llm_config
+    factory = main_agent_llm_client_factory or LLMClient
     if main_agent_llm_config is not None:
         config_source = "injected_config"
-    elif planner_llm_config is not None:
-        config_source = "injected_config"
-    elif main_agent_llm_config_path is not None or planner_llm_config_path is not None:
+    elif main_agent_llm_config_path is not None:
         config_source = "environment"
     elif main_agent_llm_client_factory is not None:
         config_source = "main_agent_factory_default"
-    elif planner_llm_client_factory is not None:
-        config_source = "planner_factory_default"
     else:
         config_source = "environment"
     return SharedLLMRuntime(client_factory=factory, config=config, config_source=config_source)
@@ -13730,7 +13398,7 @@ def _resolve_conversation_memory_builder(
 
         async def publish_reasoning(delta: str) -> None:
             nonlocal reasoning_ordinal
-            if reasoning_event_publisher is None or not isinstance(request, OrchestrationRequest):
+            if reasoning_event_publisher is None or not isinstance(request, AgentExecutionRequest):
                 return
             if not delta:
                 return
@@ -13761,12 +13429,12 @@ def _resolve_conversation_memory_builder(
             model_edition=options.model_edition,
             on_reasoning_delta=(
                 publish_reasoning
-                if reasoning_event_publisher is not None and isinstance(request, OrchestrationRequest)
+                if reasoning_event_publisher is not None and isinstance(request, AgentExecutionRequest)
                 else None
             ),
         )
 
-    def resolve_memory_config(request: OrchestrationRequest) -> ConversationMemoryConfig:
+    def resolve_memory_config(request: AgentExecutionRequest) -> ConversationMemoryConfig:
         selected_model_edition = _resolve_request_model_edition(request.metadata)
         return ConversationMemoryConfig.from_runtime_config(
             config_for_model_edition(model_edition_config, selected_model_edition)
@@ -13834,14 +13502,11 @@ def _coerce_nonnegative_int(value: Any) -> int | None:
 def _register_capability_descriptors(
     capability_registry: CapabilityRegistry,
     descriptors: Iterable[CapabilityDescriptor],
-    *,
-    planner_payload_policies: Mapping[str, CapabilityPayloadPolicy] | None = None,
 ) -> None:
-    policies = dict(planner_payload_policies or {})
     for descriptor in descriptors:
         capability_registry.register(
             descriptor,
-            planner_payload_policy=policies.get(descriptor.capability_id),
+            invocation_policy=default_agent_invocation_policy(descriptor),
         )
 
 
@@ -13852,17 +13517,13 @@ def _sync_skill_capability_registry(
 ) -> None:
     registry = runtime_state.active_bundle.skill_capabilities
     previous_descriptors = [descriptor for descriptor in capability_registry.list() if _is_skill_descriptor(descriptor)]
-    previous_policies = {
-        descriptor.capability_id: capability_registry.get_planner_payload_policy(descriptor.capability_id)
-        for descriptor in previous_descriptors
-    }
+    previous_invocation_policies = capability_registry.invocation_policies()
     try:
         for descriptor in previous_descriptors:
             capability_registry.unregister(descriptor.capability_id)
         _register_capability_descriptors(
             capability_registry,
             registry.descriptors,
-            planner_payload_policies=registry.payload_policies,
         )
         instance_registry.register(build_local_skill_executor_instance(runtime_state.known_skill_capability_ids()))
     except Exception:
@@ -13872,7 +13533,9 @@ def _sync_skill_capability_registry(
         for descriptor in previous_descriptors:
             capability_registry.register(
                 descriptor,
-                planner_payload_policy=previous_policies.get(descriptor.capability_id),
+                invocation_policy=previous_invocation_policies.get(
+                    descriptor.capability_id
+                ),
             )
         instance_registry.register(build_local_skill_executor_instance(runtime_state.known_skill_capability_ids()))
         raise
@@ -13884,17 +13547,12 @@ def _sync_mcp_capability_registry(
     bundle: MCPRuntimeBundle,
 ) -> None:
     previous_descriptors = [descriptor for descriptor in capability_registry.list() if _is_mcp_descriptor(descriptor)]
-    previous_policies = {
-        descriptor.capability_id: capability_registry.get_planner_payload_policy(descriptor.capability_id)
-        for descriptor in previous_descriptors
-    }
     try:
         for descriptor in previous_descriptors:
             capability_registry.unregister(descriptor.capability_id)
         _register_capability_descriptors(
             capability_registry,
             bundle.descriptors,
-            planner_payload_policies=bundle.payload_policies,
         )
         if bundle.bindings:
             instance_registry.register(build_local_mcp_tool_instance(tuple(bundle.bindings)))
@@ -13905,7 +13563,6 @@ def _sync_mcp_capability_registry(
         for descriptor in previous_descriptors:
             capability_registry.register(
                 descriptor,
-                planner_payload_policy=previous_policies.get(descriptor.capability_id),
             )
         if previous_descriptors:
             instance_registry.register(
@@ -14114,98 +13771,6 @@ def _build_safety_kernel_shadow_diff_sink(
         audit_sink.record_sync("safety.kernel_shadow_diff", payload)
 
     return record_shadow_diff
-
-
-def _resolve_planner_text_generator(
-    *,
-    planner_text_generator: PlannerTextGenerator | None,
-    main_agent_llm_runtime: SharedLLMRuntime,
-    event_recorder: Callable[[EventRecord], Any],
-    reasoning_event_publisher: Callable[[EventRecord], Any] | None,
-    planner_reasoning_effort: ReasoningEffort,
-    enable_llm_planner: bool,
-) -> PlannerTextGenerator | None:
-    if planner_text_generator is not None:
-        return planner_text_generator
-    if not enable_llm_planner:
-        return None
-
-    call_ordinal = 0
-
-    async def generate(
-        prompt: str,
-        *,
-        request: OrchestrationRequest | None = None,
-        stage: str = "orchestration_plan",
-        prompt_profile: Mapping[str, Any] | None = None,
-    ) -> str:
-        nonlocal call_ordinal
-        call_ordinal += 1
-        call_id = call_ordinal
-
-        if request is not None and prompt_profile is not None:
-            maybe_result = event_recorder(
-                EventRecord(
-                    event_id=f"{request.task_id}:main_agent.{stage}.prompt_profile:{call_id}",
-                    conversation_id=request.conversation_id,
-                    task_id=request.task_id,
-                    node_id="main_agent.orchestrator",
-                    event_type="main_agent.prompt_profile_rendered",
-                    payload={**dict(prompt_profile), "stage": stage, "call_id": call_id},
-                    visibility=EventVisibility.AUDIT_ONLY,
-                )
-            )
-            if inspect.isawaitable(maybe_result):
-                await maybe_result
-
-        metadata = dict(request.metadata) if request is not None else {}
-        options = _resolve_runtime_llm_request_options(
-            main_agent_llm_runtime,
-            metadata,
-            fallback_reasoning_effort=planner_reasoning_effort,
-        )
-        reasoning_ordinal = 0
-
-        async def publish_planner_reasoning(delta: str) -> None:
-            nonlocal reasoning_ordinal
-            if request is None or reasoning_event_publisher is None:
-                return
-            if not delta:
-                return
-            reasoning_ordinal += 1
-            maybe_result = reasoning_event_publisher(
-                EventRecord(
-                    event_id=f"{request.task_id}:planner.{stage}.reasoning:{call_id}:{reasoning_ordinal}",
-                    conversation_id=request.conversation_id,
-                    task_id=request.task_id,
-                    node_id="main_agent.orchestrator",
-                    event_type="planner.reasoning_delta",
-                    payload={
-                        "delta": delta,
-                        "ordinal": reasoning_ordinal,
-                        "stage": stage,
-                        "call_id": call_id,
-                        "response_role": "planner",
-                    },
-                    visibility=EventVisibility.FRONTEND,
-                )
-            )
-            if inspect.isawaitable(maybe_result):
-                await maybe_result
-
-        return await main_agent_llm_runtime.generate_text(
-            prompt,
-            thinking=options.thinking,
-            reasoning_effort=options.reasoning_effort,
-            model_edition=options.model_edition,
-            on_reasoning_delta=(
-                publish_planner_reasoning
-                if reasoning_event_publisher is not None and request is not None
-                else None
-            ),
-        )
-
-    return generate
 
 
 def _resolve_request_reasoning_effort(

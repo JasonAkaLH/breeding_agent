@@ -755,7 +755,16 @@ class UserMCPDispatchCoordinator:
                                 0, branch.max_tool_calls - branch.tool_call_count
                             ),
                         )
-                    action = await self._selector.select(selector_context)
+                    if isinstance(self._selector, MCPToolSelector):
+                        action = await self._selector.select(
+                            selector_context,
+                            agent_run_id=str(
+                                request.metadata.get("agent_run_id") or ""
+                            ).strip()
+                            or None,
+                        )
+                    else:
+                        action = await self._selector.select(selector_context)
                     selector_ran = True
                 if (
                     selector_ran
@@ -840,6 +849,10 @@ class UserMCPDispatchCoordinator:
                         owner_user_id=owner_user_id,
                         user_request=_user_request(request),
                         visited_server_ids=visited_server_ids,
+                        agent_run_id=str(
+                            request.metadata.get("agent_run_id") or ""
+                        ).strip()
+                        or None,
                     )
                     if next_server is None:
                         return await self._finalize_no_call_outcome(
@@ -1570,31 +1583,15 @@ class UserMCPDispatchCoordinator:
         node = await self._storage.get_task_node(request.node_id)
         if task is None or node is None:
             raise RuntimeError("mcp_dispatch_resume_snapshot_missing")
-        edges = await self._storage.list_task_edges(request.task_id)
         attachments = await self._storage.list_task_input_attachments_for_task(
             request.task_id
         )
-        dependency_node_ids = sorted(
-            {
-                edge.from_node_id
-                for edge in edges
-                if edge.to_node_id == request.node_id
-            }
-        )
-        dependency_nodes = []
-        for dependency_node_id in dependency_node_ids:
-            dependency = await self._storage.get_task_node(dependency_node_id)
-            if dependency is None or dependency.task_id != request.task_id:
-                raise MCPDispatchResumeEnvelopeError(
-                    "mcp_dispatch_resume_snapshot_missing"
-                )
-            dependency_nodes.append(dependency)
         envelope = build_mcp_dispatch_resume_envelope_v2(
             task=task,
             node=node,
-            edges=edges,
+            edges=(),
             attachments=attachments,
-            dependency_nodes=dependency_nodes,
+            dependency_nodes=(),
             server_id=server_id,
         )
         if (
@@ -1676,40 +1673,7 @@ class UserMCPDispatchCoordinator:
     async def _prefer_durable_dependency_projection(
         self, request: CapabilityExecutionRequest
     ) -> CapabilityExecutionRequest:
-        edges = await self._storage.list_task_edges(request.task_id)
-        dependency_node_ids = sorted(
-            {
-                edge.from_node_id
-                for edge in edges
-                if edge.to_node_id == request.node_id
-            }
-        )
-        if not dependency_node_ids:
-            return request
-        projections: dict[str, dict[str, Any]] = {}
-        for dependency_node_id in dependency_node_ids:
-            dependency = await self._storage.get_task_node(dependency_node_id)
-            if (
-                dependency is None
-                or dependency.task_id != request.task_id
-                or not dependency.output_refs
-            ):
-                return request
-            artifacts = {}
-            for artifact_id in sorted(set(dependency.output_refs)):
-                artifact = await self._storage.get_artifact(artifact_id)
-                if artifact is not None:
-                    artifacts[artifact_id] = artifact
-            try:
-                projections[dependency_node_id] = project_mcp_dependency_artifacts(
-                    task_id=request.task_id,
-                    node_id=dependency_node_id,
-                    artifact_ids=dependency.output_refs,
-                    artifacts_by_id=artifacts,
-                )
-            except MCPDispatchResumeEnvelopeError:
-                return request
-        return replace(request, dependency_outputs=projections)
+        return request
 
     async def _record_resume_envelope_audit(
         self,
@@ -2284,14 +2248,7 @@ class UserMCPDispatchCoordinator:
                     if mrtr_continuation is not None
                     else None
                 ),
-                continuation_plan=(
-                    request.metadata.get("mcp_remote_task_continuation_plan")
-                    if isinstance(
-                        request.metadata.get("mcp_remote_task_continuation_plan"),
-                        Mapping,
-                    )
-                    else None
-                ),
+                continuation_plan=None,
                 pending_action_id=(
                     pending_action.action_id if pending_action is not None else None
                 ),
@@ -3027,6 +2984,7 @@ class UserMCPDispatchCoordinator:
         owner_user_id: str,
         user_request: str,
         visited_server_ids: set[str],
+        agent_run_id: str | None = None,
     ) -> UserMCPServer | None:
         if self._server_router is None:
             return None
@@ -3039,11 +2997,18 @@ class UserMCPDispatchCoordinator:
             and not server.deletion_pending
             and server.deleted_at is None
         ]
-        action = await self._server_router.route(
-            user_request=user_request,
-            remaining_servers=tuple(_server_profile(server) for server in servers),
-            failed_server_ids=frozenset(visited_server_ids),
-        )
+        route_kwargs = {
+            "user_request": user_request,
+            "remaining_servers": tuple(_server_profile(server) for server in servers),
+            "failed_server_ids": frozenset(visited_server_ids),
+        }
+        if isinstance(self._server_router, MCPServerRouter):
+            action = await self._server_router.route(
+                **route_kwargs,
+                agent_run_id=agent_run_id,
+            )
+        else:
+            action = await self._server_router.route(**route_kwargs)
         if action.action is not MCPServerRouteActionType.ROUTE_SERVER or not action.server_id:
             return None
         return await self._available_server(owner_user_id, action.server_id)

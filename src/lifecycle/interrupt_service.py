@@ -161,6 +161,25 @@ class InterruptService:
             acknowledge=acknowledge,
         )
 
+    async def recover_agent_result(
+        self,
+        locator: AgentContinuationLocator,
+        *,
+        owner_scope: str,
+        authority_digest: str,
+        resolve_authority: AuthorityResolver,
+        acknowledge: Acknowledger | None = None,
+    ) -> AgentRecoveryResult:
+        if self._agent_recovery is None:
+            raise RuntimeError("agent_continuation_recovery_not_configured")
+        return await self._agent_recovery.recover_authoritative_result(
+            locator,
+            owner_scope=owner_scope,
+            authority_digest=authority_digest,
+            resolve_authority=resolve_authority,
+            acknowledge=acknowledge,
+        )
+
     async def record_mcp_remote_task_control(
         self,
         answer: InterruptAnswer,

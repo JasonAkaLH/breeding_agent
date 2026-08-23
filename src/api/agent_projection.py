@@ -61,8 +61,6 @@ class AgentTaskProjectionService:
         task = await self._tasks.get_task(task_id)
         if task is None or task.conversation_id != run.conversation_id:
             raise ValueError("agent_task_projection_identity_mismatch")
-        if str(task.status) != str(_TASK_STATUS_BY_RUN[run.status]):
-            raise ValueError("agent_task_projection_status_mismatch")
         return run
 
     async def project_graph(self, task_id: str) -> TaskGraphResponse | None:

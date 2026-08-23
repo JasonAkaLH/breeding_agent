@@ -42,7 +42,7 @@ from .prompt_builder import (
 PromptEnvelopeMode = Literal["off", "shadow", "string", "messages"]
 
 _ENV_MODE_KEY = "MAF_PROMPT_ENVELOPE_MODE"
-_TEMPLATE_ID = "main_agent.respond.prompt_envelope"
+_TEMPLATE_ID = "agent.final.prompt_envelope"
 _TEMPLATE_VERSION = "p4-tool-profile-v1"
 
 
@@ -548,7 +548,7 @@ def _format_required_tool_results_and_artifacts(
     if dependency_context:
         sections.append(
             "## 上游能力结果上下文（已执行完成）\n"
-            "这些内容来自自动 DAG 中已经完成的能力节点。请优先基于这些事实回答用户，并把技术性字段整理成自然语言。\n"
+            "这些内容来自当前 AgentRun 中已完成的能力调用。请优先基于这些事实回答用户，并把技术性字段整理成自然语言。\n"
             + json.dumps(dependency_context, ensure_ascii=False, indent=2, default=str)
         )
     if script_results:

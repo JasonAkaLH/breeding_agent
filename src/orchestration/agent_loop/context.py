@@ -34,6 +34,7 @@ class AgentContextBuilder:
         items: tuple[AgentItem, ...],
         catalog: AgentToolCatalog,
         trusted_facts: tuple[str, ...] = (),
+        current_user_input: str | None = None,
         tool_choice: AgentToolChoice | None = None,
     ) -> AgentModelRequest:
         messages: list[AgentMessage] = [
@@ -70,6 +71,10 @@ class AgentContextBuilder:
                     ),
                 )
             )
+        if current_user_input is not None:
+            if not current_user_input.strip():
+                raise ValueError("agent_current_user_input_empty")
+            messages.append(AgentMessage(role="user", content=current_user_input))
         messages.append(AgentMessage(role="system", content=self._rules.final_guard))
         return AgentModelRequest(
             request_id=f"agent-sample:{run.run_id}:r{run.revision}",

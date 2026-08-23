@@ -156,9 +156,7 @@ export interface TaskEventState {
   assistantText: string;
   reasoningText: string;
   memoryReasoningText: string;
-  plannerReasoningText: string;
   interruptReasoningText: string;
-  skillReasoningText: string;
   answerReasoningText: string;
   errorMessage: string | null;
   fallbackNotice: CapabilityFallbackNotice | null;
@@ -182,9 +180,7 @@ export function createInitialTaskEventState(): TaskEventState {
     assistantText: '',
     reasoningText: '',
     memoryReasoningText: '',
-    plannerReasoningText: '',
     interruptReasoningText: '',
-    skillReasoningText: '',
     answerReasoningText: '',
     errorMessage: null,
     fallbackNotice: null,
@@ -416,30 +412,6 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
       return markNodeResumeProgress(withEvent, event, '补充信息已提交', '准备恢复执行', '已收到补充信息，准备恢复执行');
     case 'node.resuming':
       return markNodeResumeProgress(withEvent, event, '正在恢复执行', '正在恢复执行', '正在恢复执行');
-    case 'main_agent.output_delta': {
-      if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
-      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
-      return { ...withEvent, phase: 'streaming', statusText: '正在生成答案', currentActivityText: null, assistantText: `${state.assistantText}${delta}`, errorMessage: null };
-    }
-    case 'main_agent.reasoning_delta': {
-      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
-      const answerReasoningText = `${state.answerReasoningText}${delta}`;
-      return {
-        ...withEvent,
-        phase: 'streaming',
-        statusText: '正在思考并生成答案',
-        currentActivityText: null,
-        answerReasoningText,
-        reasoningText: composeReasoningText({
-          memory: state.memoryReasoningText,
-          planner: state.plannerReasoningText,
-          interrupt: state.interruptReasoningText,
-          skill: state.skillReasoningText,
-          answer: answerReasoningText,
-        }),
-        errorMessage: null,
-      };
-    }
     case 'agent.reasoning_delta': {
       const delta = event.payload.delta as string;
       const answerReasoningText = `${state.answerReasoningText}${delta}`;
@@ -451,29 +423,8 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         answerReasoningText,
         reasoningText: composeReasoningText({
           memory: state.memoryReasoningText,
-          planner: state.plannerReasoningText,
           interrupt: state.interruptReasoningText,
-          skill: state.skillReasoningText,
           answer: answerReasoningText,
-        }),
-        errorMessage: null,
-      };
-    }
-    case 'planner.reasoning_delta': {
-      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
-      const plannerReasoningText = `${state.plannerReasoningText}${delta}`;
-      return {
-        ...withEvent,
-        phase: 'streaming',
-        statusText: '正在规划并思考',
-        currentActivityText: null,
-        plannerReasoningText,
-        reasoningText: composeReasoningText({
-          memory: state.memoryReasoningText,
-          planner: plannerReasoningText,
-          interrupt: state.interruptReasoningText,
-          skill: state.skillReasoningText,
-          answer: state.answerReasoningText,
         }),
         errorMessage: null,
       };
@@ -489,9 +440,7 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         memoryReasoningText,
         reasoningText: composeReasoningText({
           memory: memoryReasoningText,
-          planner: state.plannerReasoningText,
           interrupt: state.interruptReasoningText,
-          skill: state.skillReasoningText,
           answer: state.answerReasoningText,
         }),
         errorMessage: null,
@@ -508,36 +457,12 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         interruptReasoningText,
         reasoningText: composeReasoningText({
           memory: state.memoryReasoningText,
-          planner: state.plannerReasoningText,
           interrupt: interruptReasoningText,
-          skill: state.skillReasoningText,
           answer: state.answerReasoningText,
         }),
         errorMessage: null,
       };
     }
-    case 'soft_skill.reasoning_delta': {
-      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
-      const skillReasoningText = `${state.skillReasoningText}${delta}`;
-      return {
-        ...withEvent,
-        phase: 'streaming',
-        statusText: '正在判断 Skill 并思考',
-        currentActivityText: null,
-        skillReasoningText,
-        reasoningText: composeReasoningText({
-          memory: state.memoryReasoningText,
-          planner: state.plannerReasoningText,
-          interrupt: state.interruptReasoningText,
-          skill: skillReasoningText,
-          answer: state.answerReasoningText,
-        }),
-        errorMessage: null,
-      };
-    }
-    case 'main_agent.output_final':
-      if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
-      return { ...withEvent, phase: state.phase === 'idle' ? 'running' : state.phase, statusText: '回答生成完成，正在收尾', currentActivityText: null, errorMessage: null };
     case 'capability.missing_fallback': {
       const fallbackNotice = parseCapabilityFallbackNotice(event.payload);
       if (!fallbackNotice) return withEvent;
@@ -688,8 +613,10 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
     case 'agent.run.completed':
       return {
         ...withEvent,
+        phase: 'loading_artifacts',
         statusText: 'Agent 执行完成，正在同步任务结果',
         currentActivityText: null,
+        skillStatuses: markRunningSkillStatusesCompleted(withEvent.skillStatuses),
         agentWaiting: [],
         agentRemainingWaitCount: 0,
         errorMessage: null,
@@ -697,18 +624,26 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
     case 'agent.run.failed':
       return {
         ...withEvent,
+        phase: 'failed',
         statusText: 'Agent 执行未完成，正在同步任务状态',
+        currentCapabilityId: null,
+        currentCapabilityLabel: null,
         currentActivityText: null,
         agentWaiting: [],
         agentRemainingWaitCount: 0,
+        errorMessage: state.errorMessage ?? failureMessage(event.payload, event.node_id),
       };
     case 'agent.run.cancelled':
       return {
         ...withEvent,
+        phase: 'cancelled',
         statusText: 'Agent 已取消，正在同步任务状态',
+        currentCapabilityId: null,
+        currentCapabilityLabel: null,
         currentActivityText: null,
         agentWaiting: [],
         agentRemainingWaitCount: 0,
+        errorMessage: null,
       };
     case 'task.cancellation_requested':
       return { ...withEvent, phase: 'cancelling', statusText: '取消请求已发送', currentActivityText: '正在取消当前任务', errorMessage: null };
@@ -718,8 +653,6 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
       return markNodeInterruptedLine(withEvent, event, 'cancelled', '已取消');
     case 'node.blocked_by_cancellation':
       return markNodeInterruptedLine(withEvent, event, 'blocked', '已被取消阻断');
-    case 'node.orphaned':
-      return markNodeInterruptedLine(withEvent, event, 'blocked', '已被重规划跳过');
     case 'node.failed':
       return {
         ...withEvent,
@@ -776,9 +709,8 @@ const CP7_EVENT_TYPES = new Set([
 const KNOWN_TASK_EVENT_TYPES = new Set([
   'task.accepted', 'task.graph_created', 'node.started', 'node.completed',
   'node.waiting_for_input', 'node.ready_to_resume', 'node.resuming',
-  'main_agent.output_delta', 'main_agent.reasoning_delta', 'planner.reasoning_delta',
-  'memory.reasoning_delta', 'interrupt.reasoning_delta', 'soft_skill.reasoning_delta',
-  'main_agent.output_final', 'capability.missing_fallback', 'mcp.server_routed',
+  'memory.reasoning_delta', 'interrupt.reasoning_delta',
+  'capability.missing_fallback', 'mcp.server_routed',
   'mcp.discovery_started', 'mcp.discovery_completed', 'mcp.discovery_failed',
   'mcp.queue_entered', 'mcp.queue_left', 'mcp.tool_approval_required',
   'mcp.tool_approval_decided', 'mcp.tool_call_started', 'mcp.tool_call_still_running',
@@ -786,7 +718,7 @@ const KNOWN_TASK_EVENT_TYPES = new Set([
   'mcp.input_required', 'mcp.input_submitted', 'mcp.remote_task_status_changed',
   'mcp.result_artifact_projection',
   'task.completed', 'task.cancellation_requested', 'task.cancelled', 'node.cancelled',
-  'node.blocked_by_cancellation', 'node.orphaned', 'node.failed', 'task.failed',
+  'node.blocked_by_cancellation', 'node.failed', 'task.failed',
   'skill.progress',
   'agent.run.waiting', 'agent.run.resumed', 'agent.run.completed',
   'agent.run.failed', 'agent.run.cancelled', 'agent.reasoning_delta',
@@ -1387,20 +1319,16 @@ function safeApprovalDecision(value: unknown): MCPApprovalDecision | null {
 
 function composeReasoningText(parts: {
   memory: string;
-  planner: string;
   interrupt: string;
-  skill: string;
   answer: string;
 }): string {
-  if (!parts.memory && !parts.planner && !parts.interrupt && !parts.skill) {
+  if (!parts.memory && !parts.interrupt) {
     return parts.answer;
   }
   return [
     ['记忆思考', parts.memory],
-    ['规划思考', parts.planner],
     ['补参思考', parts.interrupt],
-    ['Skill思考', parts.skill],
-    ['回答思考', parts.answer],
+    ['Agent思考', parts.answer],
   ]
     .filter(([, text]) => text)
     .map(([label, text]) => `### ${label}\n${text}`)
@@ -1465,11 +1393,6 @@ function markNodeInterruptedLine(
 
 function isSkillCapability(capabilityId: unknown): capabilityId is string {
   return typeof capabilityId === 'string' && capabilityId.startsWith('skill.');
-}
-
-function isVisibleMainAgentResponse(payload: Record<string, unknown>): boolean {
-  const responseRole = typeof payload.response_role === 'string' ? payload.response_role : null;
-  return responseRole === null || responseRole === 'final';
 }
 
 function skillStatusKey(event: TaskEventEnvelope, payload: Record<string, unknown>): string {
@@ -1549,7 +1472,7 @@ function nodeActivity(payload: Record<string, unknown>): { capabilityId: string;
 function capabilityLabel(capabilityId: string, payload: Record<string, unknown> = {}): string {
   const skillName = typeof payload.skill_name === 'string' ? payload.skill_name.trim() : '';
   if (skillName) return skillName;
-  if (capabilityId.startsWith('main_agent.')) return 'SeedPilot';
+  if (capabilityId === 'agent.final_output') return 'SeedPilot';
   if (capabilityId.startsWith('skill.')) return capabilityId;
   return capabilityId || '能力';
 }
@@ -1571,7 +1494,7 @@ function dataQueryStageText(stage: string): string {
 }
 
 function nodeStatusText(capabilityId: string): string {
-  if (capabilityId === 'main_agent.respond') return '正在生成回答';
+  if (capabilityId === 'agent.final_output') return '正在生成回答';
   return '正在处理';
 }
 

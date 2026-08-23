@@ -13,7 +13,7 @@ class FileRequirementProfileError(ValueError):
     pass
 
 
-_PROFILE_SOURCES = {"metadata", "soft_skill_binding", "skill_contract", "input_schema", "user_query", "interrupt"}
+_PROFILE_SOURCES = {"metadata", "skill_contract", "input_schema", "user_query", "interrupt"}
 _PROFILE_FIELDS = {
     "source",
     "required",

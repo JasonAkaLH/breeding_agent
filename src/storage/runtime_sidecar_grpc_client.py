@@ -501,6 +501,31 @@ class RuntimeSidecarGrpcClient:
             _raise_task_identity_invalid("AgentRun response identity differs from requested Task")
         return response
 
+    def list_agent_runs(
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = b"".join(_field_string(1, status) for status in statuses)
+        payload = self._unary(
+            "ListAgentRuns",
+            request,
+            timeout_seconds=timeout_seconds,
+        )
+        fields = _decode_message(payload)
+        runs = [_decode_agent_run_record(value) for value in fields.get(1, [])]
+        response = {
+            "operation": "agent_run_list",
+            "runs": runs,
+            "error": _optional_typed_error(fields, 2),
+        }
+        _consume_response("agent_run_list", response)
+        if len({run["run_id"] for run in runs}) != len(runs):
+            _raise_task_identity_invalid("AgentRun list contains duplicate run_id")
+        return response
+
     def list_agent_items(self, *, run_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
         self._ensure_compatible(timeout_seconds=timeout_seconds)
         payload = self._unary("ListAgentItems", _field_string(1, run_id), timeout_seconds=timeout_seconds)

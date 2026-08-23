@@ -200,7 +200,14 @@ const CANCEL_RECONCILE_MAX_ATTEMPTS = 10;
 const TRANSIENT_NOTICE_DURATION_MS = 5_000;
 const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
-const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
+const TERMINAL_TASK_EVENT_TYPES = new Set([
+  'task.completed',
+  'task.failed',
+  'task.cancelled',
+  'agent.run.completed',
+  'agent.run.failed',
+  'agent.run.cancelled',
+]);
 const TERMINAL_PROJECTION_EVENT_TYPES = new Set([
   'mcp.execution_status_unknown',
   'mcp.execution_status_resolution',
@@ -1837,7 +1844,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       && next.seenEventIds.includes(event.event_id);
     const failedJustConsumed = eventConsumed && previous.phase !== 'failed' && next.phase === 'failed';
     const cancelledJustConsumed = eventConsumed && previous.phase !== 'cancelled' && next.phase === 'cancelled';
-    const completedJustConsumed = eventConsumed && event.event_type === 'task.completed';
+    const completedJustConsumed = eventConsumed
+      && (event.event_type === 'task.completed' || event.event_type === 'agent.run.completed');
     const previousProgressText = taskProgressDisplayText(previous);
     const nextProgressText = taskProgressDisplayText(next);
     if (next.skillStatuses !== previous.skillStatuses) {

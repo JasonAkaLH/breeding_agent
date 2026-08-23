@@ -849,7 +849,7 @@ def legacy_migration_source_fingerprint(server: MCPServerConfig) -> str:
                     "public_name": tool.public_name,
                     "public_description": tool.public_description,
                     "risk_level": tool.risk_level,
-                    "planner_allowed_fields": list(tool.planner_allowed_fields),
+                    "model_allowed_fields": list(tool.model_allowed_fields),
                     "input_schema": (
                         dict(tool.input_schema)
                         if tool.input_schema is not None

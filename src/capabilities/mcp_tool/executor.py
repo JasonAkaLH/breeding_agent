@@ -460,7 +460,7 @@ class MCPToolExecutor(ExecutorPort):
 
     @staticmethod
     def _filter_arguments(payload: Mapping[str, Any], binding: MCPToolBinding) -> dict[str, Any]:
-        allowed = set(binding.planner_allowed_fields)
+        allowed = set(binding.model_allowed_fields)
         return {key: value for key, value in dict(payload).items() if key in allowed}
 
     @staticmethod

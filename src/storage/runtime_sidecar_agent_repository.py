@@ -23,6 +23,8 @@ from src.orchestration.agent_loop.models import (
     AgentSampleCommit,
     AgentSampleCommitResult,
     AgentStorageConflict,
+    AgentUserMessageCommit,
+    AgentUserMessageCommitResult,
 )
 from src.storage.agent_payload import (
     CanonicalAgentPayload,
@@ -75,6 +77,17 @@ class RuntimeSidecarAgentRepository:
     async def get_run_for_task(self, task_id: str) -> AgentRun | None:
         response = await self._call(self._client.get_agent_run_for_task, task_id=task_id)
         return _run_from_wire(response["run"]) if response["found"] else None
+
+    async def list_recoverable_runs(self) -> tuple[AgentRun, ...]:
+        response = await self._call(
+            self._client.list_agent_runs,
+            statuses=(
+                AgentRunStatus.RUNNING.value,
+                AgentRunStatus.WAITING_FOR_INPUT.value,
+                AgentRunStatus.WAITING_FOR_DEPENDENCY.value,
+            ),
+        )
+        return tuple(_run_from_wire(run) for run in response["runs"])
 
     async def list_items(self, run_id: str) -> tuple[AgentItem, ...]:
         response = await self._call(self._client.list_agent_items, run_id=run_id)
@@ -215,6 +228,54 @@ class RuntimeSidecarAgentRepository:
             node_ids=tuple(node["node_id"] for node in nodes),
         )
 
+    async def commit_agent_user_message(
+        self, commit: AgentUserMessageCommit
+    ) -> AgentUserMessageCommitResult:
+        run = await self._require_cas_run(
+            commit.run_id,
+            commit.expected_revision,
+            commit.expected_claim_token,
+        )
+        items = await self.list_items(run.run_id)
+        item_id = f"agent-item:{run.run_id}:user-initial"
+        payload = canonicalize_agent_payload({"text": commit.text})
+        existing = next((item for item in items if item.item_id == item_id), None)
+        if existing is not None:
+            if existing.payload_sha256 != payload.sha256:
+                raise AgentStorageConflict("agent_user_message_conflict")
+            return AgentUserMessageCommitResult(run, existing)
+        if run.next_item_sequence != 1:
+            raise AgentStorageConflict("agent_user_message_sequence_conflict")
+        now = self._now()
+        item = _item(
+            item_id=item_id,
+            run=run,
+            sequence=1,
+            kind=AgentItemKind.USER_MESSAGE,
+            state=AgentItemState.COMMITTED,
+            payload=payload,
+            created_at=now,
+            committed_at=now,
+        )
+        updated_run = replace(
+            run,
+            next_item_sequence=2,
+            revision=run.revision + 1,
+            updated_at=now,
+        )
+        response = await self._commit(
+            operation="commit_user_message",
+            run=updated_run,
+            items=(item,),
+            expected_revision=commit.expected_revision,
+            expected_claim_token=commit.expected_claim_token,
+            idempotency_key=f"agent-user-message:{run.run_id}:{payload.sha256}",
+        )
+        return AgentUserMessageCommitResult(
+            _run_from_wire(response["run"]),
+            item,
+        )
+
     async def commit_agent_call_outcome(self, commit: AgentCallOutcomeCommit) -> AgentItem:
         run = await self._require_cas_run(
             commit.run_id, commit.expected_revision, commit.expected_claim_token
@@ -255,6 +316,22 @@ class RuntimeSidecarAgentRepository:
             if commit.continuation_payload is not None
             else None
         )
+        activation_item = commit.skill_activation_item
+        if activation_item is not None:
+            if continuation_payload is not None:
+                raise AgentStorageConflict("agent_outcome_activation_continuation_conflict")
+            if (
+                activation_item.run_id != run.run_id
+                or activation_item.task_id != run.task_id
+                or activation_item.sequence != run.next_item_sequence
+                or activation_item.kind is not AgentItemKind.SKILL_ACTIVATION
+                or activation_item.state is not AgentItemState.COMMITTED
+                or canonicalize_agent_payload(
+                    json.loads(activation_item.payload_json)
+                ).sha256
+                != activation_item.payload_sha256
+            ):
+                raise AgentStorageConflict("agent_skill_activation_identity_conflict")
         if result.state is not AgentItemState.RESERVED:
             if result.payload_sha256 == payload.sha256:
                 return result
@@ -309,7 +386,7 @@ class RuntimeSidecarAgentRepository:
             waiting_call_item_ids=tuple(waiting),
             next_item_sequence=(
                 run.next_item_sequence + 1
-                if continuation_item is not None
+                if continuation_item is not None or activation_item is not None
                 else run.next_item_sequence
             ),
             revision=run.revision + 1,
@@ -331,14 +408,17 @@ class RuntimeSidecarAgentRepository:
         await self._commit(
             operation="commit_outcome",
             run=updated_run,
-            items=(updated_result,)
-            if continuation_item is None
-            else (updated_result, continuation_item),
+            items=tuple(
+                item
+                for item in (updated_result, continuation_item, activation_item)
+                if item is not None
+            ),
             expected_revision=commit.expected_revision,
             expected_claim_token=commit.expected_claim_token,
             idempotency_key=(
                 f"agent-outcome:{run.run_id}:{result.item_id}:{payload.sha256}:"
-                f"{continuation_payload.sha256 if continuation_payload is not None else 'none'}"
+                f"{continuation_payload.sha256 if continuation_payload is not None else 'none'}:"
+                f"{activation_item.payload_sha256 if activation_item is not None else 'none'}"
             ),
             task_nodes=(node,),
             artifacts=artifacts,

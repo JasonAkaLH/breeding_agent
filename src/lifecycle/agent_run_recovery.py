@@ -20,6 +20,7 @@ from src.orchestration.agent_loop.models import (
     AgentItemState,
     AgentRun,
     AgentRunStatus,
+    AgentStagedArtifact,
     AgentStorageConflict,
 )
 from src.orchestration.agent_loop.repository import (
@@ -44,6 +45,7 @@ class AgentAuthorityResolution:
     safe_result_payload: Any
     safe_continuation_facts: Mapping[str, Any]
     safe_error_code: str | None = None
+    staged_artifacts: tuple[AgentStagedArtifact, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,7 @@ class AgentClaimedRunResumer(Protocol):
         handle: AgentLeaseHandle,
         initial_required_tool_name: str | None = None,
         trusted_facts: tuple[str, ...] = (),
+        visibility_context: Any | None = None,
         cancellation: Any | None = None,
     ) -> Any: ...
 
@@ -75,7 +78,7 @@ Acknowledger = Callable[[], Any | Awaitable[Any]]
 
 
 class AgentRunRecoveryCoordinator:
-    """Test-only Agent continuation/recovery assembly; production routes remain unchanged."""
+    """Production continuation and crash-recovery coordinator for AgentRuns."""
 
     _TERMINAL = frozenset(
         {AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}
@@ -175,6 +178,85 @@ class AgentRunRecoveryCoordinator:
             require_waiting=False,
         )
 
+    async def recover_crashed_run(
+        self,
+        run_id: str,
+        *,
+        trusted_facts: tuple[str, ...] = (),
+        visibility_context: Any | None = None,
+        cancellation: Any | None = None,
+    ) -> AgentRecoveryResult:
+        run = await self._writer.reconcile_agent_run_consistency(run_id)
+        if run.status in self._TERMINAL:
+            return AgentRecoveryResult(run, AgentRecoveryState.TERMINAL)
+        if run.status in {
+            AgentRunStatus.WAITING_FOR_INPUT,
+            AgentRunStatus.WAITING_FOR_DEPENDENCY,
+        }:
+            return AgentRecoveryResult(run, AgentRecoveryState.WAITING)
+
+        handle = await self._leases.acquire(run_id, owner_id=self._owner_id)
+        run = await self._require_run(run_id)
+        items = await self._runs.list_items(run_id)
+        calls = {
+            item.item_id: item
+            for item in items
+            if item.kind is AgentItemKind.TOOL_CALL
+        }
+        reservations = sorted(
+            (
+                item
+                for item in items
+                if item.kind is AgentItemKind.TOOL_RESULT
+                and item.state is AgentItemState.RESERVED
+                and item.source_call_item_id in calls
+                and item.source_call_item_id not in run.waiting_call_item_ids
+            ),
+            key=lambda item: item.call_ordinal or 0,
+        )
+        for reservation in reservations:
+            call_id = reservation.source_call_item_id
+            if call_id is None:
+                raise AgentStorageConflict("agent_recovery_call_identity_missing")
+            latest = await self._require_run(run_id)
+            await self._writer.commit_agent_call_outcome(
+                AgentCallOutcomeCommit(
+                    run_id=run_id,
+                    expected_revision=latest.revision,
+                    expected_claim_token=handle.current.token,
+                    call_item_id=call_id,
+                    safe_result_payload={"status": "aborted"},
+                    status=AgentCallOutcomeStatus.ABORTED,
+                    safe_error_code="side_effect_unknown_no_replay",
+                )
+            )
+
+        loop_result = await self._resumer.run_claimed(
+            run_id,
+            handle=handle,
+            trusted_facts=trusted_facts,
+            visibility_context=visibility_context,
+            cancellation=cancellation,
+        )
+        state = (
+            AgentRecoveryState.FINAL_CANDIDATE
+            if getattr(loop_result, "state", None) == "final_candidate"
+            else AgentRecoveryState.WAITING
+            if getattr(loop_result, "state", None) == "waiting"
+            else AgentRecoveryState.RESUMED
+        )
+        return AgentRecoveryResult(
+            loop_result.run,
+            state,
+            loop_result=loop_result,
+        )
+
+    async def _require_run(self, run_id: str) -> AgentRun:
+        run = await self._runs.get_run(run_id)
+        if run is None:
+            raise AgentStorageConflict("agent_recovery_run_missing")
+        return run
+
     async def _close_call(
         self,
         locator: AgentContinuationLocator,
@@ -247,6 +329,7 @@ class AgentRunRecoveryCoordinator:
                     "resume_kind": locator.resume_kind.value,
                     "schema": "maf.agent.continuation.v1",
                 },
+                staged_artifacts=resolution.staged_artifacts,
                 safe_error_code=resolution.safe_error_code,
             )
         )

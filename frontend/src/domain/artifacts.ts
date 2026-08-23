@@ -171,7 +171,7 @@ export function parseDataQueryArtifacts(artifacts: ArtifactResponse[]): DataQuer
 
 export function parseAssistantTextArtifact(artifacts: ArtifactResponse[]): string | null {
   const textArtifacts = artifacts.filter((artifact) => artifact.artifact_type === 'text');
-  const textArtifact = textArtifacts.find(isMainAgentTextArtifact) ?? textArtifacts[0];
+  const textArtifact = textArtifacts.find(isAgentFinalTextArtifact) ?? textArtifacts[0];
   if (!textArtifact) return null;
   return textArtifact.storage_ref || textArtifact.summary || null;
 }
@@ -223,9 +223,9 @@ function artifactMetadata(artifact: ArtifactResponse): Record<string, unknown> {
   }
 }
 
-function isMainAgentTextArtifact(artifact: ArtifactResponse): boolean {
-  return artifact.artifact_id.includes('main_agent_response')
-    || artifact.artifact_id.includes('main_agent_text');
+function isAgentFinalTextArtifact(artifact: ArtifactResponse): boolean {
+  return artifact.artifact_id.startsWith('agent-artifact:')
+    && artifact.artifact_id.endsWith(':final');
 }
 
 function stringOrFallback(value: string | null | undefined, fallback: string): string {

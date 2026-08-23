@@ -38,6 +38,7 @@ class AgentCallExecution:
     safe_result_payload: Any = None
     staged_artifacts: tuple[AgentStagedArtifact, ...] = ()
     safe_error_code: str | None = None
+    skill_activation_item: AgentItem | None = None
 
 
 class AgentCallInvoker(Protocol):
@@ -63,7 +64,7 @@ class AgentLoopRunResult:
 
 
 class AgentLoopRunner:
-    """Test-only durable Agent loop assembly; no production route may construct it yet."""
+    """Durable provider-neutral Agent loop state machine."""
 
     def __init__(
         self,
@@ -77,6 +78,7 @@ class AgentLoopRunner:
         lease_controller: AgentLeaseController,
         invoker: AgentCallInvoker,
         owner_id: str,
+        reasoning_delta_sink=None,
     ) -> None:
         self._runs = runs
         self._writer = writer
@@ -87,6 +89,7 @@ class AgentLoopRunner:
         self._leases = lease_controller
         self._invoker = invoker
         self._owner_id = owner_id
+        self._reasoning_delta_sink = reasoning_delta_sink
 
     async def run(
         self,
@@ -94,6 +97,8 @@ class AgentLoopRunner:
         *,
         initial_required_tool_name: str | None = None,
         trusted_facts: tuple[str, ...] = (),
+        current_user_input: str | None = None,
+        visibility_context: CapabilityVisibilityContext | None = None,
         cancellation: AgentCancellationToken | None = None,
     ) -> AgentLoopRunResult:
         handle = await self._leases.acquire(run_id, owner_id=self._owner_id)
@@ -102,6 +107,8 @@ class AgentLoopRunner:
             handle=handle,
             initial_required_tool_name=initial_required_tool_name,
             trusted_facts=trusted_facts,
+            current_user_input=current_user_input,
+            visibility_context=visibility_context,
             cancellation=cancellation,
         )
 
@@ -112,6 +119,8 @@ class AgentLoopRunner:
         handle: AgentLeaseHandle,
         initial_required_tool_name: str | None = None,
         trusted_facts: tuple[str, ...] = (),
+        current_user_input: str | None = None,
+        visibility_context: CapabilityVisibilityContext | None = None,
         cancellation: AgentCancellationToken | None = None,
     ) -> AgentLoopRunResult:
         if handle.current.run_id != run_id:
@@ -131,7 +140,8 @@ class AgentLoopRunner:
                     state="waiting",
                     lease_handle=handle,
                 )
-            catalog = self._catalog_builder.build(self._visibility)
+            visibility = visibility_context or self._visibility
+            catalog = self._catalog_builder.build(visibility)
             pending_records = _pending_active_batch(run, items)
             if pending_records:
                 waiting = await self._execute_records(
@@ -144,6 +154,7 @@ class AgentLoopRunner:
                     },
                     handle,
                     cancellation,
+                    visibility,
                 )
                 if waiting is not None:
                     return waiting
@@ -158,9 +169,28 @@ class AgentLoopRunner:
                 items=items,
                 catalog=catalog,
                 trusted_facts=trusted_facts,
+                current_user_input=current_user_input,
                 tool_choice=choice,
             )
             model_request = replace(model_request, cancellation=cancellation)
+            if self._reasoning_delta_sink is not None:
+                reasoning_ordinal = 0
+
+                async def publish_reasoning(delta: str) -> None:
+                    nonlocal reasoning_ordinal
+                    if not delta:
+                        return
+                    reasoning_ordinal += 1
+                    await self._reasoning_delta_sink(
+                        run,
+                        delta,
+                        reasoning_ordinal,
+                    )
+
+                model_request = replace(
+                    model_request,
+                    reasoning_delta_sink=publish_reasoning,
+                )
             sample = await self._leases.run_active_phase(
                 "model_sample",
                 handle,
@@ -197,6 +227,7 @@ class AgentLoopRunner:
         tool_to_capability: Mapping[str, str],
         handle: AgentLeaseHandle,
         cancellation: AgentCancellationToken | None,
+        visibility: CapabilityVisibilityContext,
     ) -> AgentLoopRunResult | None:
         for wave in deterministic_invocation_waves(
             records,
@@ -214,6 +245,7 @@ class AgentLoopRunner:
                     tool_to_capability,
                     policies,
                     cancellation,
+                    visibility,
                 ),
             )
             for (_, call_item, _), outcome in zip(wave, wave_results, strict=True):
@@ -228,6 +260,7 @@ class AgentLoopRunner:
                         status=outcome.status,
                         staged_artifacts=outcome.staged_artifacts,
                         safe_error_code=outcome.safe_error_code,
+                        skill_activation_item=outcome.skill_activation_item,
                     )
                 )
             latest = await self._runs.get_run(run.run_id)
@@ -252,6 +285,7 @@ class AgentLoopRunner:
         tool_to_capability: Mapping[str, str],
         policies: Mapping[str, CapabilityInvocationPolicy],
         cancellation: AgentCancellationToken | None,
+        visibility: CapabilityVisibilityContext,
     ) -> tuple[AgentCallExecution, ...]:
         async def execute(record):
             call, call_item, reservation = record
@@ -265,7 +299,7 @@ class AgentLoopRunner:
             try:
                 effective = policy.effective_payload(
                     json.loads(call.arguments_json),
-                    context=self._visibility,
+                    context=visibility,
                 )
             except (ValueError, json.JSONDecodeError):
                 return AgentCallExecution(

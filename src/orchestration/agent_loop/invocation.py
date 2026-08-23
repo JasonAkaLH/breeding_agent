@@ -8,7 +8,7 @@ from src.core.contracts import CapabilityExecutionRequest, CapabilityExecutionRe
 from src.core.enums import NodeStatus, TaskStatus
 from src.core.models import Task, TaskNode
 from src.orchestration.mcp_route_handoff import normalize_selected_mcp_route
-from src.orchestration.scheduler import Scheduler
+from src.orchestration.instance_selector import InstanceSelector
 
 from .models import AgentCancellationToken, AgentModelBinding
 
@@ -19,12 +19,6 @@ WaveResult = TypeVar("WaveResult")
 
 _SYSTEM_NODE_METADATA_KEYS = frozenset(
     {
-        "forced_skill_capability_id",
-        "forced_skill_name",
-        "forced_skill_source",
-        "soft_skill_binding",
-        "soft_skill_binding_source",
-        "soft_skill_binding_requested_capability_id",
         "mcp_dispatch_server_id",
         "mcp_binding_mode",
         "forced_by_mcp_command",
@@ -61,13 +55,13 @@ class InvocationRequest:
     available_server_ids: frozenset[str] = frozenset()
     pinned_server_id_present: bool = False
     pinned_server_id: Any = None
-    remote_task_continuation_plan: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class InvocationResult:
     node: TaskNode
     output_payload: dict[str, Any]
+    execution_result: CapabilityExecutionResult | None = field(default=None, repr=False)
 
 
 class InvocationCommitPort(Protocol):
@@ -153,12 +147,12 @@ class CapabilityInvocationService:
     def __init__(
         self,
         *,
-        scheduler: Scheduler,
+        instance_selector: InstanceSelector,
         executor: ExecutorPort,
         commit_port: InvocationCommitPort,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
-        self._scheduler = scheduler
+        self._instance_selector = instance_selector
         self._executor = executor
         self._commit_port = commit_port
         self._now = now_fn or self._utcnow_naive
@@ -195,7 +189,7 @@ class CapabilityInvocationService:
             )
             return InvocationResult(rejected, {})
 
-        instance = self._scheduler.select_instance(normalized_request.capability_id)
+        instance = self._instance_selector.select_instance(normalized_request.capability_id)
         running = await self._commit_port.start_node(
             normalized_request,
             task_node,
@@ -239,7 +233,7 @@ class CapabilityInvocationService:
                 result,
                 activity_payload=activity_payload,
             )
-            return InvocationResult(discarded, {})
+            return InvocationResult(discarded, {}, result)
 
         now = self._now()
         if result.interrupt is not None or (
@@ -252,7 +246,7 @@ class CapabilityInvocationService:
                 now=now,
                 activity_payload=activity_payload,
             )
-            return InvocationResult(waiting, dict(result.output_payload))
+            return InvocationResult(waiting, dict(result.output_payload), result)
         if result.error is not None:
             failed = await self._commit_port.commit_failed(
                 normalized_request,
@@ -261,7 +255,7 @@ class CapabilityInvocationService:
                 now=now,
                 activity_payload=activity_payload,
             )
-            return InvocationResult(failed, dict(result.output_payload))
+            return InvocationResult(failed, dict(result.output_payload), result)
         if (
             normalized_request.capability_id == "mcp.dispatch"
             and result.output_payload.get("mcp_status") == "remote_task_created"
@@ -273,7 +267,7 @@ class CapabilityInvocationService:
                 now=now,
                 activity_payload=activity_payload,
             )
-            return InvocationResult(waiting, dict(result.output_payload))
+            return InvocationResult(waiting, dict(result.output_payload), result)
         completed = await self._commit_port.commit_completed(
             normalized_request,
             latest_node,
@@ -281,7 +275,7 @@ class CapabilityInvocationService:
             now=now,
             activity_payload=activity_payload,
         )
-        return InvocationResult(completed, dict(result.output_payload))
+        return InvocationResult(completed, dict(result.output_payload), result)
 
     @staticmethod
     def _utcnow_naive() -> datetime:
@@ -293,7 +287,7 @@ def node_activity_payload(
     metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"capability_id": capability_id}
-    for key in ("skill_name", "forced_skill_name"):
+    for key in ("skill_name",):
         skill_name = metadata.get(key)
         if isinstance(skill_name, str) and skill_name.strip():
             payload["skill_name"] = skill_name.strip()

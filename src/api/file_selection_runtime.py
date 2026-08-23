@@ -23,7 +23,7 @@ from src.api.file_selection import (
 from src.orchestration.visible_message_history import persist_interrupt_question_message
 from src.core.enums import EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, TaskStatus
 from src.core.models import Interrupt, InterruptAnswer, Message, Task, TaskNode
-from src.orchestration.models import OrchestrationRequest
+from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 
 
 class ConversationFileSelectionRuntimeMixin:
@@ -257,20 +257,6 @@ class ConversationFileSelectionRuntimeMixin:
                 profile = FileRequirementProfile.from_mapping(value, source="metadata")
                 if profile.is_meaningful():
                     return profile
-        soft_binding = resolved_metadata.get("soft_skill_binding")
-        if soft_binding is None:
-            soft_binding = self._normalize_soft_skill_binding(request.metadata)
-        if isinstance(soft_binding, Mapping):
-            if "file_intent" in soft_binding:
-                raise FileRequirementProfileError(
-                    "metadata.soft_skill_binding.file_intent is not supported; use final file_selection fields"
-                )
-            for key in ("file_requirement_profile", "file_selection"):
-                value = soft_binding.get(key)
-                if isinstance(value, Mapping):
-                    profile = FileRequirementProfile.from_mapping(value, source="soft_skill_binding")
-                    if profile.is_meaningful():
-                        return profile
         pending_capability_id = self._metadata_text(getattr(continued_pending_context, "capability_id", ""))
         for capability_id, source in (
             (pending_capability_id, "skill_contract"),
@@ -299,7 +285,7 @@ class ConversationFileSelectionRuntimeMixin:
         contract = self._skill_runtime_state.active_bundle.contract_by_capability_id.get(capability_id)
         if contract is None:
             return None
-        metadata = self._soft_skill_file_selection_metadata(contract, source=source)
+        metadata = self._skill_file_selection_metadata(contract, source=source)
         raw_profile = metadata.get("file_selection") if isinstance(metadata, Mapping) else None
         if not isinstance(raw_profile, Mapping):
             return None
@@ -491,7 +477,7 @@ class ConversationFileSelectionRuntimeMixin:
         node = TaskNode(
             node_id=node_id,
             task_id=task.task_id,
-            capability_id=task.requested_capability_id or "main_agent.respond",
+            capability_id=task.requested_capability_id or "agent.file_selection",
             status=NodeStatus.RUNNING,
             criticality=NodeCriticality.REQUIRED,
             started_at=now,
@@ -532,7 +518,7 @@ class ConversationFileSelectionRuntimeMixin:
             conversation_id=task.conversation_id,
             task_id=task.task_id,
             node_id=node_id,
-            source_agent=task.requested_capability_id or "main_agent.respond",
+            source_agent=task.requested_capability_id or "agent.file_selection",
             source_message_id=task.root_message_id,
             question=render_file_selection_question(candidates, reason_code=reason_code),
             reason_code="file_selection_ambiguous",
@@ -648,16 +634,7 @@ class ConversationFileSelectionRuntimeMixin:
                     created_at=self._utcnow_naive(),
                 )
             )
-            await self._schedule_execution(
-                OrchestrationRequest(
-                    task_id=task.task_id,
-                    conversation_id=task.conversation_id,
-                    root_message_id=task.root_message_id,
-                    user_message=task.summary or "",
-                    requested_capability_id=task.requested_capability_id,
-                    metadata=resume_metadata,
-                )
-            )
+            await self._schedule_file_selection_agent_resume(task, resume_metadata)
             self._task_file_selection_resume_metadata.pop(task.task_id, None)
             await self._record_file_selection_audit_event(
                 task=task,
@@ -760,16 +737,7 @@ class ConversationFileSelectionRuntimeMixin:
                 "action": "sheet_selection_required",
                 "source_message_id": answer.source_message_id,
             }
-        await self._schedule_execution(
-            OrchestrationRequest(
-                task_id=task.task_id,
-                conversation_id=task.conversation_id,
-                root_message_id=task.root_message_id,
-                user_message=task.summary or "",
-                requested_capability_id=task.requested_capability_id,
-                metadata=resume_metadata,
-            )
-        )
+        await self._schedule_file_selection_agent_resume(task, resume_metadata)
         self._task_file_selection_resume_metadata.pop(task.task_id, None)
         return {
             "interrupt_id": saved_interrupt.interrupt_id,
@@ -779,3 +747,32 @@ class ConversationFileSelectionRuntimeMixin:
             "action": "resumed",
             "source_message_id": answer.source_message_id,
         }
+
+    async def _schedule_file_selection_agent_resume(
+        self,
+        task: Task,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        if conversation is None:
+            raise ValueError(f"Unknown conversation: {task.conversation_id}")
+        root_message = await self.storage.get_message(task.root_message_id)
+        await self._schedule_execution(
+            AgentExecutionRequest(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                root_message_id=task.root_message_id,
+                user_message=(
+                    root_message.content
+                    if root_message is not None
+                    else task.summary or ""
+                ),
+                owner_scope=self._agent_owner_scope(conversation.username),
+                requested_capability_id=task.requested_capability_id,
+                metadata=dict(metadata),
+                available_mcp_servers=await self.available_user_mcp_server_profiles(
+                    conversation.username,
+                    execution_mode=task.mcp_execution_mode,
+                ),
+            )
+        )

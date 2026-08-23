@@ -6,8 +6,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from typing import Any
 
 from src.core.contracts import CapabilityExecutionRequest
-from src.core.enums import ArtifactType, EventVisibility
-from src.core.models import Artifact, EventRecord
+from src.core.enums import EventVisibility
+from src.core.models import EventRecord
 from src.integrations.llm_stream_events import accepted_options, coerce_stream_event, iter_stream_like
 
 
@@ -34,20 +34,6 @@ def make_event(
         event_type=event_type,
         payload=dict(payload),
         visibility=visibility,
-    )
-
-
-def make_text_artifact(*, task_id: str, node_id: str, text: str, response_role: str | None = None) -> Artifact:
-    digest = hashlib.sha256(f"{node_id}:main_agent_response:{text}".encode("utf-8")).hexdigest()[:12]
-    role_part = f":{response_role}" if response_role else ""
-    return Artifact(
-        artifact_id=f"{node_id}:main_agent_response{role_part}:{digest}",
-        task_id=task_id,
-        producer_node_id=node_id,
-        artifact_type=ArtifactType.TEXT,
-        storage_ref=text,
-        summary=text[:200],
-        is_complete=True,
     )
 
 

@@ -165,6 +165,9 @@ class LLMClient:
             timeout=float(timeout),
         )
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     async def generate_agent_sample(self, request: AgentModelRequest) -> AgentSample:
         if request.binding.model_edition != self.model:
             raise ValueError(

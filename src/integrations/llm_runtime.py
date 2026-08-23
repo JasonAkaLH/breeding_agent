@@ -112,6 +112,23 @@ class SharedLLMRuntime:
         self._clients_by_model_edition[model_edition] = client
         return client
 
+    async def aclose(self) -> None:
+        clients: list[Any] = []
+        for client in (self._client, *self._clients_by_model_edition.values()):
+            if client is not None and all(client is not item for item in clients):
+                clients.append(client)
+        self._client = None
+        self._clients_by_model_edition.clear()
+        for client in clients:
+            close = getattr(client, "aclose", None)
+            if not callable(close):
+                close = getattr(client, "close", None)
+            if not callable(close):
+                continue
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
     def safe_metadata(
         self,
         *,
@@ -174,7 +191,11 @@ class SharedLLMRuntime:
             sampler = getattr(client, "sample_agent", None)
         if not callable(sampler):
             raise TypeError("LLM runtime client must provide generate_agent_sample(request).")
-        result = sampler(request)
+        options = accepted_options(
+            sampler,
+            {"on_reasoning_delta": request.reasoning_delta_sink},
+        )
+        result = sampler(request, **options) if options else sampler(request)
         if inspect.isawaitable(result):
             result = await result
         if not isinstance(result, AgentSample):

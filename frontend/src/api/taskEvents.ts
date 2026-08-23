@@ -20,7 +20,14 @@ export interface FetchTaskEventSourceOptions {
   credentials?: RequestCredentials;
 }
 
-const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
+const TERMINAL_TASK_EVENT_TYPES = new Set([
+  'task.completed',
+  'task.failed',
+  'task.cancelled',
+  'agent.run.completed',
+  'agent.run.failed',
+  'agent.run.cancelled',
+]);
 
 export function parseTaskEventData(data: string): TaskEventEnvelope | null {
   try {
@@ -50,26 +57,18 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
       'auth.invalidated',
       'task.accepted',
       'task.graph_created',
-      'task.graph_updated',
-      'task.replan_started',
-      'task.replan_rejected',
-      'task.replan_available',
       'node.started',
       'node.completed',
       'node.failed',
       'node.waiting_for_input',
       'node.cancelled',
       'node.blocked_by_cancellation',
-      'node.orphaned',
       'node.ready_to_resume',
       'node.resuming',
       'task.completed',
       'task.failed',
       'task.cancelled',
       'task.cancellation_requested',
-      'main_agent.output_delta',
-      'main_agent.output_final',
-      'main_agent.reasoning_delta',
       'agent.reasoning_delta',
       'agent.run.waiting',
       'agent.run.resumed',
@@ -77,9 +76,7 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
       'agent.run.failed',
       'agent.run.cancelled',
       'memory.reasoning_delta',
-      'planner.reasoning_delta',
       'interrupt.reasoning_delta',
-      'soft_skill.reasoning_delta',
       'skill.progress',
       'task.interrupt_answered',
       'task.interrupt_clarification_answered',

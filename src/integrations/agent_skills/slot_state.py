@@ -245,14 +245,14 @@ def build_normal_extraction_prompt(
     *,
     current_user_answer: str,
     artifact_summaries: tuple[Mapping[str, Any], ...] = (),
-    planner_hint: Mapping[str, Any] | None = None,
+    turn_hint: Mapping[str, Any] | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "mode": "normal_extraction",
         "instructions": [
             "Return JSON only.",
             "Resolve only fields declared in slot_collection.missing or slot_collection.invalid.",
-            "Use planner_hint.target_slots and planner_hint.reason only as mapping hints for the current answer.",
+            "Use turn_hint.target_slots and turn_hint.reason only as mapping hints for the current answer.",
             "Preserve raw user text in raw_value/raw and put canonical value in value when possible.",
             "Do not invent artifacts, file paths, schema fields, or internal execution details.",
         ],
@@ -265,9 +265,9 @@ def build_normal_extraction_prompt(
             "invalid": [{"field": "field_name", "reason": "short_code"}],
         },
     }
-    hint = _planner_hint_prompt_payload(planner_hint)
+    hint = _turn_hint_prompt_payload(turn_hint)
     if hint:
-        payload["planner_hint"] = hint
+        payload["turn_hint"] = hint
     return _json_prompt(payload)
 
 
@@ -276,13 +276,13 @@ def build_history_recall_prompt(
     *,
     current_user_answer: str,
     accepted_answer_summaries: tuple[Mapping[str, Any], ...] = (),
-    planner_hint: Mapping[str, Any] | None = None,
+    turn_hint: Mapping[str, Any] | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "mode": "history_recall_extraction",
         "instructions": [
             "Use only bounded user-origin accepted answer summaries.",
-            "Use planner_hint.target_slots and planner_hint.reason only as mapping hints for the current answer.",
+            "Use turn_hint.target_slots and turn_hint.reason only as mapping hints for the current answer.",
             "Return JSON only in the same resolved/missing/invalid shape as normal extraction.",
             "If history does not contain enough evidence, leave the field missing.",
         ],
@@ -290,9 +290,9 @@ def build_history_recall_prompt(
         "accepted_answer_summaries": [dict(item) for item in accepted_answer_summaries],
         "slot_collection": _collection_prompt_snapshot(collection),
     }
-    hint = _planner_hint_prompt_payload(planner_hint)
+    hint = _turn_hint_prompt_payload(turn_hint)
     if hint:
-        payload["planner_hint"] = hint
+        payload["turn_hint"] = hint
     return _json_prompt(payload)
 
 
@@ -378,14 +378,14 @@ def build_backend_slot_extraction(
     artifact_summaries: tuple[Mapping[str, Any], ...] = (),
     accepted_answer_summaries: tuple[Mapping[str, Any], ...] = (),
     history_recall: bool = False,
-    planner_target_slots: tuple[str, ...] = (),
-    planner_reason: str | None = None,
+    turn_target_slots: tuple[str, ...] = (),
+    turn_reason: str | None = None,
 ) -> SlotExtractionResult:
     allowed_fields = _allowed_extraction_fields(collection)
     resolved: dict[str, SlotExtractionCandidate] = {}
     diagnostics: list[str] = []
     target_hint_fields = tuple(
-        dict.fromkeys(str(field).strip() for field in planner_target_slots if str(field).strip() in allowed_fields)
+        dict.fromkeys(str(field).strip() for field in turn_target_slots if str(field).strip() in allowed_fields)
     )
     artifact_fields = [
         field_name
@@ -415,17 +415,17 @@ def build_backend_slot_extraction(
                     confidence=1.0,
                 )
             continue
-        allow_bare_scalar_from_hint = _allow_bare_scalar_from_planner_hint(
+        allow_bare_scalar_from_hint = _allow_bare_scalar_from_turn_hint(
             field_name=field_name,
             allowed_fields=allowed_fields,
-            planner_target_slots=target_hint_fields,
-            planner_reason=planner_reason,
+            turn_target_slots=target_hint_fields,
+            turn_reason=turn_reason,
         )
         value = _match_backend_scalar_field(field, current_user_answer)
-        used_planner_hint_scalar = False
+        used_turn_hint_scalar = False
         if value is None and allow_bare_scalar_from_hint:
             value = _match_backend_bare_scalar_field(field, str(current_user_answer or "").strip())
-            used_planner_hint_scalar = value is not None
+            used_turn_hint_scalar = value is not None
         value_from_history = False
         if value is None and history_recall:
             value = _match_backend_scalar_from_history(field, accepted_answer_summaries)
@@ -435,11 +435,11 @@ def build_backend_slot_extraction(
                 field=field_name,
                 raw_value=current_user_answer if current_user_answer else value,
                 value=value,
-                source="history" if value_from_history else "planner_hint" if used_planner_hint_scalar else "current_answer",
+                source="history" if value_from_history else "turn_hint" if used_turn_hint_scalar else "current_answer",
                 confidence=1.0,
             )
-            if used_planner_hint_scalar:
-                diagnostics.append("backend_planner_hint_scalar_match")
+            if used_turn_hint_scalar:
+                diagnostics.append("backend_turn_hint_scalar_match")
     if artifact_upload_ids:
         diagnostics.append("backend_artifact_ledger_match")
     if resolved:
@@ -683,16 +683,16 @@ def _match_backend_scalar_field(field: SkillInputField, text: str) -> Any | None
     return None
 
 
-def _allow_bare_scalar_from_planner_hint(
+def _allow_bare_scalar_from_turn_hint(
     *,
     field_name: str,
     allowed_fields: set[str],
-    planner_target_slots: tuple[str, ...],
-    planner_reason: str | None,
+    turn_target_slots: tuple[str, ...],
+    turn_reason: str | None,
 ) -> bool:
-    if planner_target_slots:
-        return len(planner_target_slots) == 1 and planner_target_slots[0] == field_name
-    return bool(planner_reason and len(allowed_fields) == 1 and field_name in allowed_fields)
+    if turn_target_slots:
+        return len(turn_target_slots) == 1 and turn_target_slots[0] == field_name
+    return bool(turn_reason and len(allowed_fields) == 1 and field_name in allowed_fields)
 
 
 def _match_backend_bare_scalar_field(field: SkillInputField, stripped: str) -> Any | None:
@@ -916,11 +916,11 @@ def _collection_prompt_snapshot(collection: SlotCollection) -> dict[str, Any]:
     }
 
 
-def _planner_hint_prompt_payload(planner_hint: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(planner_hint, Mapping):
+def _turn_hint_prompt_payload(turn_hint: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(turn_hint, Mapping):
         return {}
     payload: dict[str, Any] = {}
-    target_slots = planner_hint.get("target_slots")
+    target_slots = turn_hint.get("target_slots")
     if isinstance(target_slots, str):
         slots = (target_slots,)
     elif isinstance(target_slots, list | tuple | set):
@@ -931,17 +931,17 @@ def _planner_hint_prompt_payload(planner_hint: Mapping[str, Any] | None) -> dict
     if clean_slots:
         payload["target_slots"] = clean_slots
     for key in ("reason", "part_id", "source"):
-        value = str(planner_hint.get(key) or "").strip()
+        value = str(turn_hint.get(key) or "").strip()
         if value:
             payload[key] = value
-    confidence = planner_hint.get("confidence")
+    confidence = turn_hint.get("confidence")
     if confidence is not None:
         try:
             payload["confidence"] = max(0.0, min(float(confidence), 1.0))
         except (TypeError, ValueError):
             pass
-    if isinstance(planner_hint.get("uses_uploads"), bool):
-        payload["uses_uploads"] = bool(planner_hint["uses_uploads"])
+    if isinstance(turn_hint.get("uses_uploads"), bool):
+        payload["uses_uploads"] = bool(turn_hint["uses_uploads"])
     return payload
 
 

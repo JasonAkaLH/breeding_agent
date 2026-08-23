@@ -408,43 +408,15 @@ class MCPDurableSelectorContextBuilder:
         node_id: str,
         dependency_output_refs: Sequence[Mapping[str, object]],
     ) -> tuple[str, ...]:
-        edges = await self.storage.list_task_edges(task_id)
-        expected_dependencies = sorted(
-            {
-                edge.from_node_id
-                for edge in edges
-                if edge.to_node_id == node_id
-            }
-        )
         refs_by_node = {
             str(item["node_id"]): tuple(str(value) for value in item["artifact_ids"])
             for item in dependency_output_refs
         }
-        if sorted(refs_by_node) != expected_dependencies:
+        if refs_by_node:
             raise MCPSelectorContextAuthorityError(
                 "mcp_selector_context_dependency_conflict"
             )
-        facts: list[str] = []
-        for dependency_node_id in expected_dependencies:
-            artifact_ids = refs_by_node[dependency_node_id]
-            artifacts = {}
-            for artifact_id in artifact_ids:
-                artifact = await self.storage.get_artifact(artifact_id)
-                if artifact is not None:
-                    artifacts[artifact_id] = artifact
-            try:
-                projection = project_mcp_dependency_artifacts(
-                    task_id=task_id,
-                    node_id=dependency_node_id,
-                    artifact_ids=artifact_ids,
-                    artifacts_by_id=artifacts,
-                )
-            except MCPDispatchResumeEnvelopeError as exc:
-                raise MCPSelectorContextAuthorityError(exc.code) from exc
-            facts.append(
-                f"{dependency_node_id}:safe_summary={projection['safe_summary']}"
-            )
-        return tuple(facts)
+        return ()
 
 
 def _binding_from_root_message(

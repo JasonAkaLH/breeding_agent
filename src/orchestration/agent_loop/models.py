@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Awaitable, Callable, Literal, Mapping
 
 
 AgentMessageRole = Literal["system", "developer", "user", "assistant", "tool"]
@@ -220,6 +220,11 @@ class AgentModelRequest:
     tools: tuple[AgentToolDescriptor, ...] = ()
     tool_choice: AgentToolChoice = field(default_factory=AgentToolChoice)
     cancellation: AgentCancellationToken | None = field(default=None, compare=False, repr=False)
+    reasoning_delta_sink: Callable[[str], Awaitable[None]] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not self.request_id.strip():
@@ -344,6 +349,24 @@ class AgentSampleCommitResult:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentUserMessageCommit:
+    run_id: str
+    expected_revision: int
+    expected_claim_token: str | None
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.run_id or not self.text.strip():
+            raise ValueError("Agent user message commit must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentUserMessageCommitResult:
+    run: AgentRun
+    item: AgentItem
+
+
+@dataclass(frozen=True, slots=True)
 class AgentCompactionCommit:
     run_id: str
     expected_revision: int
@@ -391,6 +414,7 @@ class AgentCallOutcomeCommit:
     staged_artifacts: tuple[AgentStagedArtifact, ...] = ()
     safe_error_code: str | None = None
     continuation_payload: Any | None = None
+    skill_activation_item: AgentItem | None = None
 
 
 @dataclass(frozen=True, slots=True)

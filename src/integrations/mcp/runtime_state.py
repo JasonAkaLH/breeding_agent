@@ -14,7 +14,6 @@ from typing import Any
 from jsonschema import Draft202012Validator, Draft7Validator, SchemaError
 
 from src.orchestration.models import CapabilityDescriptor
-from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 
 from .adapter import PythonLegacyMCPClientAdapter
 from .client import MCPClient, MCPClientError
@@ -37,7 +36,7 @@ class MCPToolBinding:
     capability_id: str
     server_id: str
     tool_name: str
-    planner_allowed_fields: tuple[str, ...] = ()
+    model_allowed_fields: tuple[str, ...] = ()
     input_schema: Mapping[str, Any] = field(default_factory=dict)
     output_schema: Mapping[str, Any] | None = None
     output_schema_sha256: str | None = None
@@ -89,7 +88,6 @@ class MCPRuntimeBundle:
     revision: str
     created_at: datetime
     descriptors: tuple[CapabilityDescriptor, ...] = ()
-    payload_policies: Mapping[str, CapabilityPayloadPolicy] = field(default_factory=dict)
     bindings: Mapping[str, MCPToolBinding] = field(default_factory=dict)
     diagnostics: tuple[MCPRuntimeDiagnostic, ...] = ()
 
@@ -149,7 +147,7 @@ class MCPRuntimeState:
         self._bundles: dict[str, MCPRuntimeBundle] = {}
         self._last_refresh_diagnostics: tuple[MCPRuntimeDiagnostic, ...] = ()
         self._inflight_by_platform_task: dict[str, dict[str, MCPInflightRequest]] = {}
-        empty = self._make_bundle(descriptors=(), payload_policies={}, bindings={}, diagnostics=())
+        empty = self._make_bundle(descriptors=(), bindings={}, diagnostics=())
         self._active_revision = empty.revision
         self._bundles[empty.revision] = empty
 
@@ -274,7 +272,6 @@ class MCPRuntimeState:
         next_clients: dict[str, Any] = {}
         diagnostics: list[MCPRuntimeDiagnostic] = []
         descriptors: dict[str, CapabilityDescriptor] = {}
-        policies: dict[str, CapabilityPayloadPolicy] = {}
         bindings: dict[str, MCPToolBinding] = {}
         discovery_failed = False
         fatal_error_type = ""
@@ -346,7 +343,6 @@ class MCPRuntimeState:
                     tool_by_name=tool_by_name,
                     server_capabilities=_server_capabilities(client),
                     descriptors=descriptors,
-                    policies=policies,
                     bindings=bindings,
                     diagnostics=diagnostics,
                     protocol_version=(
@@ -366,7 +362,6 @@ class MCPRuntimeState:
             self._last_refresh_diagnostics = tuple(diagnostics)
             bundle = self._make_bundle(
                 descriptors=previous.descriptors,
-                payload_policies=previous.payload_policies,
                 bindings=previous.bindings,
                 diagnostics=tuple(previous.diagnostics) + tuple(diagnostics),
             )
@@ -389,7 +384,6 @@ class MCPRuntimeState:
                 await _close_client(client)
             bundle = self._make_bundle(
                 descriptors=previous.descriptors,
-                payload_policies=previous.payload_policies,
                 bindings=previous.bindings,
                 diagnostics=tuple(previous.diagnostics) + tuple(diagnostics),
             )
@@ -411,7 +405,6 @@ class MCPRuntimeState:
 
         bundle = self._make_bundle(
             descriptors=tuple(descriptors.values()),
-            payload_policies=policies,
             bindings=bindings,
             diagnostics=tuple(diagnostics),
         )
@@ -550,7 +543,6 @@ class MCPRuntimeState:
         tool_by_name: Mapping[str, Mapping[str, Any]],
         server_capabilities: Mapping[str, Any],
         descriptors: dict[str, CapabilityDescriptor],
-        policies: dict[str, CapabilityPayloadPolicy],
         bindings: dict[str, MCPToolBinding],
         diagnostics: list[MCPRuntimeDiagnostic],
         protocol_version: str,
@@ -655,16 +647,16 @@ class MCPRuntimeState:
                 if output_schema_error:
                     diagnostics.append(_diagnostic(server, tool_config, "unsupported_output_schema", output_schema_error, capability_id))
                     continue
-            allowlist_error = _validate_planner_allowlist(tool_config.planner_allowed_fields, input_schema)
+            allowlist_error = _validate_model_allowlist(tool_config.model_allowed_fields, input_schema)
             if allowlist_error:
-                diagnostics.append(_diagnostic(server, tool_config, "invalid_planner_allowlist", allowlist_error, capability_id))
+                diagnostics.append(_diagnostic(server, tool_config, "invalid_model_allowlist", allowlist_error, capability_id))
                 continue
 
             binding = MCPToolBinding(
                 capability_id=capability_id,
                 server_id=server.server_id,
                 tool_name=tool_name,
-                planner_allowed_fields=tool_config.planner_allowed_fields,
+                model_allowed_fields=tool_config.model_allowed_fields,
                 input_schema=input_schema,
                 output_schema=output_schema,
                 output_schema_sha256=(
@@ -704,7 +696,6 @@ class MCPRuntimeState:
                 source=MCP_CAPABILITY_SOURCE,
                 source_path=f"{server.server_id}/{tool_name}",
             )
-            policies[capability_id] = CapabilityPayloadPolicy(planner_allowed_fields=tool_config.planner_allowed_fields)
             bindings[capability_id] = binding
             reserved.add(capability_id)
 
@@ -720,7 +711,7 @@ class MCPRuntimeState:
         client = self._clients.get(binding.server_id)
         if client is None:
             raise KeyError(f"MCP client is not active for server: {binding.server_id}")
-        allowed = set(binding.planner_allowed_fields)
+        allowed = set(binding.model_allowed_fields)
         filtered_arguments = {
             key: value
             for key, value in dict(arguments).items()
@@ -1035,7 +1026,6 @@ class MCPRuntimeState:
         self,
         *,
         descriptors: tuple[CapabilityDescriptor, ...],
-        payload_policies: Mapping[str, CapabilityPayloadPolicy],
         bindings: Mapping[str, MCPToolBinding],
         diagnostics: tuple[MCPRuntimeDiagnostic, ...],
     ) -> MCPRuntimeBundle:
@@ -1045,7 +1035,6 @@ class MCPRuntimeState:
             revision=f"mcprev-{self._revision_counter:06d}-{digest}",
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
             descriptors=descriptors,
-            payload_policies=dict(payload_policies),
             bindings=dict(bindings),
             diagnostics=diagnostics,
         )
@@ -1173,18 +1162,18 @@ def _validate_supported_schema(schema: Mapping[str, Any]) -> str:
     return ""
 
 
-def _validate_planner_allowlist(fields: tuple[str, ...], schema: Mapping[str, Any]) -> str:
+def _validate_model_allowlist(fields: tuple[str, ...], schema: Mapping[str, Any]) -> str:
     if not fields:
         properties = schema.get("properties")
         if isinstance(properties, Mapping) and properties:
-            return "Public generic MCP tool requires explicit planner_allowed_fields."
+            return "Public generic MCP tool requires explicit model_allowed_fields."
         return ""
     properties = schema.get("properties")
     if not isinstance(properties, Mapping) or not properties:
         return ""
     unknown = sorted(set(fields) - {str(key) for key in properties})
     if unknown:
-        return f"Planner allowlist fields are not present in inputSchema: {', '.join(unknown)}"
+        return f"Model allowlist fields are not present in inputSchema: {', '.join(unknown)}"
     return ""
 
 

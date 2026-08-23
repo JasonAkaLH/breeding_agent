@@ -19,6 +19,7 @@ service RuntimeSidecar {
   rpc CommitAgentState(CommitAgentStateRequest) returns (AgentStateResponse);
   rpc GetAgentRun(GetAgentRunRequest) returns (AgentRunResponse);
   rpc GetAgentRunForTask(GetAgentRunForTaskRequest) returns (AgentRunResponse);
+  rpc ListAgentRuns(ListAgentRunsRequest) returns (ListAgentRunsResponse);
   rpc ListAgentItems(ListAgentItemsRequest) returns (ListAgentItemsResponse);
   rpc GetAgentFinalProjection(GetAgentFinalProjectionRequest) returns (AgentFinalProjectionResponse);
   rpc GetTaskNode(GetTaskNodeRequest) returns (GetTaskNodeResponse);
@@ -262,6 +263,11 @@ message AgentRunResponse {
   AgentRunRecord run = 1;
   bool found = 2;
   maf.common.v1.TypedError error = 3;
+}
+message ListAgentRunsRequest { repeated string statuses = 1; }
+message ListAgentRunsResponse {
+  repeated AgentRunRecord runs = 1;
+  maf.common.v1.TypedError error = 2;
 }
 message ListAgentItemsRequest { string run_id = 1; }
 message ListAgentItemsResponse {

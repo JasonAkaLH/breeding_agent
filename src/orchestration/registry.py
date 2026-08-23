@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .models import CapabilityDescriptor, ExecutionInstance, OrchestrationRequest
-from .planner_payload_policy import CapabilityPayloadPolicy
-
+from .models import CapabilityDescriptor, ExecutionInstance
 if TYPE_CHECKING:
     from .agent_loop.tool_catalog import CapabilityInvocationPolicy
 
@@ -12,21 +10,15 @@ if TYPE_CHECKING:
 class CapabilityRegistry:
     def __init__(self) -> None:
         self._capabilities: dict[str, CapabilityDescriptor] = {}
-        self._planner_payload_policies: dict[str, CapabilityPayloadPolicy] = {}
         self._invocation_policies: dict[str, CapabilityInvocationPolicy] = {}
 
     def register(
         self,
         descriptor: CapabilityDescriptor,
         *,
-        planner_payload_policy: CapabilityPayloadPolicy | None = None,
         invocation_policy: CapabilityInvocationPolicy | None = None,
     ) -> None:
         self._capabilities[descriptor.capability_id] = descriptor
-        if planner_payload_policy is None:
-            self._planner_payload_policies.pop(descriptor.capability_id, None)
-        else:
-            self._planner_payload_policies[descriptor.capability_id] = planner_payload_policy
         if invocation_policy is None:
             self._invocation_policies.pop(descriptor.capability_id, None)
         else:
@@ -34,17 +26,10 @@ class CapabilityRegistry:
 
     def unregister(self, capability_id: str) -> None:
         self._capabilities.pop(capability_id, None)
-        self._planner_payload_policies.pop(capability_id, None)
         self._invocation_policies.pop(capability_id, None)
 
     def get(self, capability_id: str) -> CapabilityDescriptor | None:
         return self._capabilities.get(capability_id)
-
-    def get_planner_payload_policy(self, capability_id: str) -> CapabilityPayloadPolicy | None:
-        return self._planner_payload_policies.get(capability_id)
-
-    def planner_payload_policies(self) -> dict[str, CapabilityPayloadPolicy]:
-        return dict(self._planner_payload_policies)
 
     def invocation_policies(self) -> dict[str, CapabilityInvocationPolicy]:
         return dict(self._invocation_policies)
@@ -54,29 +39,6 @@ class CapabilityRegistry:
         if public_only:
             return [descriptor for descriptor in descriptors if descriptor.public]
         return descriptors
-
-    def list_for_request(
-        self,
-        request: OrchestrationRequest,
-        *,
-        public_only: bool = False,
-    ) -> list[CapabilityDescriptor]:
-        """Return descriptors visible for one trusted orchestration request.
-
-        ``mcp.dispatch`` is intentionally absent unless the API/runtime supplied
-        at least one safe, available server profile for the authenticated user.
-        """
-
-        from .agent_loop.tool_catalog import CapabilityVisibilityContext
-
-        return self.list_for_visibility(
-            CapabilityVisibilityContext(
-                authenticated_owner_scope="legacy_orchestration_request",
-                execution_path=str(request.metadata.get("mcp_execution_mode") or "default"),
-                safe_mcp_server_profiles=request.available_mcp_servers,
-            ),
-            public_only=public_only,
-        )
 
     def list_for_visibility(
         self,

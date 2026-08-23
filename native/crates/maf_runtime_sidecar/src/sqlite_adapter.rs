@@ -296,6 +296,29 @@ impl RuntimeSidecarSqliteAdapter {
             .transpose()
     }
 
+    pub fn list_agent_runs(
+        &self,
+        statuses: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<AgentRunRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare("SELECT run_json FROM agent_runs ORDER BY run_id")
+            .map_err(|error| sqlite_error("prepare AgentRun list failed", error))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| sqlite_error("query AgentRun list failed", error))?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let payload = row.map_err(|error| sqlite_error("read AgentRun failed", error))?;
+            let run: AgentRunRecord = serde_json::from_str(&payload)
+                .map_err(|_| write_failed("decode AgentRun failed"))?;
+            if statuses.is_empty() || statuses.contains(&run.status) {
+                runs.push(run);
+            }
+        }
+        Ok(runs)
+    }
+
     pub fn list_agent_items(
         &self,
         run_id: &str,

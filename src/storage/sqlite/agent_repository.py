@@ -29,6 +29,8 @@ from src.orchestration.agent_loop.models import (
     AgentSampleCommitResult,
     AgentStorageConflict,
     AgentTaskLease,
+    AgentUserMessageCommit,
+    AgentUserMessageCommitResult,
 )
 from src.storage.agent_payload import (
     CanonicalAgentPayload,
@@ -81,6 +83,23 @@ class SQLiteAgentRepository:
             )
         )
 
+    async def list_recoverable_runs(self) -> tuple[AgentRun, ...]:
+        statuses = (
+            AgentRunStatus.RUNNING.value,
+            AgentRunStatus.WAITING_FOR_INPUT.value,
+            AgentRunStatus.WAITING_FOR_DEPENDENCY.value,
+        )
+        return await self._read(
+            lambda session: tuple(
+                _run_from_row(row)
+                for row in session.scalars(
+                    select(AgentRunRow)
+                    .where(AgentRunRow.status.in_(statuses))
+                    .order_by(AgentRunRow.run_id)
+                ).all()
+            )
+        )
+
     async def list_items(self, run_id: str) -> tuple[AgentItem, ...]:
         return await self._read(
             lambda session: tuple(
@@ -95,6 +114,13 @@ class SQLiteAgentRepository:
 
     async def commit_agent_sample(self, commit: AgentSampleCommit) -> AgentSampleCommitResult:
         return await self._write(lambda session: self._commit_sample(session, commit))
+
+    async def commit_agent_user_message(
+        self, commit: AgentUserMessageCommit
+    ) -> AgentUserMessageCommitResult:
+        return await self._write(
+            lambda session: self._commit_user_message(session, commit)
+        )
 
     async def commit_agent_call_outcome(self, commit: AgentCallOutcomeCommit) -> AgentItem:
         return await self._write(lambda session: self._commit_outcome(session, commit))
@@ -365,6 +391,50 @@ class SQLiteAgentRepository:
             node_ids=tuple(node_ids),
         )
 
+    def _commit_user_message(
+        self,
+        session: Session,
+        commit: AgentUserMessageCommit,
+    ) -> AgentUserMessageCommitResult:
+        run = self._locked_run(session, commit.run_id)
+        item_id = f"agent-item:{run.run_id}:user-initial"
+        payload = canonicalize_agent_payload({"text": commit.text})
+        existing = session.get(AgentItemRow, item_id)
+        if existing is not None:
+            if existing.payload_sha256 != payload.sha256:
+                raise AgentStorageConflict("agent_user_message_conflict")
+            return AgentUserMessageCommitResult(
+                _run_from_row(run),
+                _item_from_row(existing),
+            )
+        self._validate_cas(
+            run,
+            commit.expected_revision,
+            commit.expected_claim_token,
+        )
+        if int(run.next_item_sequence) != 1:
+            raise AgentStorageConflict("agent_user_message_sequence_conflict")
+        now = self._now()
+        item = self._add_item(
+            session,
+            item_id=item_id,
+            run=run,
+            sequence=1,
+            kind=AgentItemKind.USER_MESSAGE,
+            state=AgentItemState.COMMITTED,
+            payload=payload,
+            created_at=now,
+            committed_at=now,
+        )
+        run.next_item_sequence = 2
+        run.revision = int(run.revision) + 1
+        run.updated_at = now
+        session.flush()
+        return AgentUserMessageCommitResult(
+            _run_from_row(run),
+            _item_from_row(item),
+        )
+
     def _commit_outcome(self, session: Session, commit: AgentCallOutcomeCommit) -> AgentItem:
         run = self._locked_run(session, commit.run_id)
         self._validate_cas(run, commit.expected_revision, commit.expected_claim_token)
@@ -401,6 +471,25 @@ class SQLiteAgentRepository:
             if commit.continuation_payload is not None
             else None
         )
+        activation = commit.skill_activation_item
+        if activation is not None:
+            if continuation is not None:
+                raise AgentStorageConflict("agent_outcome_activation_continuation_conflict")
+            if (
+                activation.run_id != run.run_id
+                or activation.task_id != run.task_id
+                or activation.sequence != int(run.next_item_sequence)
+                or activation.kind is not AgentItemKind.SKILL_ACTIVATION
+                or activation.state is not AgentItemState.COMMITTED
+            ):
+                raise AgentStorageConflict("agent_skill_activation_identity_conflict")
+            activation_payload = canonicalize_agent_payload(
+                json.loads(activation.payload_json)
+            )
+            if activation_payload.sha256 != activation.payload_sha256:
+                raise AgentStorageConflict("agent_skill_activation_payload_mismatch")
+        else:
+            activation_payload = None
         result.payload_json = payload.json_text
         result.payload_size_bytes = payload.size_bytes
         result.payload_sha256 = payload.sha256
@@ -425,6 +514,16 @@ class SQLiteAgentRepository:
             result.state = AgentItemState.COMMITTED.value
             result.committed_at = now
             for artifact in commit.staged_artifacts:
+                existing_artifact = session.get(ArtifactRow, artifact.artifact_id)
+                if existing_artifact is not None:
+                    if (
+                        existing_artifact.task_id != run.task_id
+                        or existing_artifact.producer_node_id != node_id
+                        or existing_artifact.artifact_type != artifact.artifact_type
+                        or existing_artifact.storage_ref != artifact.storage_ref
+                    ):
+                        raise AgentStorageConflict("agent_outcome_artifact_identity_conflict")
+                    continue
                 session.add(
                     ArtifactRow(
                         artifact_id=artifact.artifact_id,
@@ -457,6 +556,24 @@ class SQLiteAgentRepository:
                 run.next_item_sequence = int(run.next_item_sequence) + 1
             elif existing_continuation.payload_sha256 != continuation.sha256:
                 raise AgentStorageConflict("agent_continuation_item_conflict")
+        if activation is not None and activation_payload is not None:
+            existing_activation = session.get(AgentItemRow, activation.item_id)
+            if existing_activation is None:
+                self._add_item(
+                    session,
+                    item_id=activation.item_id,
+                    run=run,
+                    sequence=int(run.next_item_sequence),
+                    kind=AgentItemKind.SKILL_ACTIVATION,
+                    state=AgentItemState.COMMITTED,
+                    payload=activation_payload,
+                    parent_item_id=call.item_id,
+                    created_at=now,
+                    committed_at=now,
+                )
+                run.next_item_sequence = int(run.next_item_sequence) + 1
+            elif existing_activation.payload_sha256 != activation_payload.sha256:
+                raise AgentStorageConflict("agent_skill_activation_item_conflict")
         self._inject("outcome_after_result")
         run.status = run_status
         run.waiting_call_item_ids = waiting
@@ -1086,7 +1203,7 @@ def _final_ids(task_id: str) -> dict[str, str]:
 
 
 def _utcnow_naive() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _validate_lease_inputs(owner_id: str, ttl_seconds: float) -> None:

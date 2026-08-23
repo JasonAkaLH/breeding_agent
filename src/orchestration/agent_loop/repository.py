@@ -13,6 +13,8 @@ from .models import (
     AgentSampleCommit,
     AgentSampleCommitResult,
     AgentTaskLease,
+    AgentUserMessageCommit,
+    AgentUserMessageCommitResult,
 )
 
 
@@ -23,10 +25,16 @@ class AgentRunRepository(Protocol):
 
     async def get_run_for_task(self, task_id: str) -> AgentRun | None: ...
 
+    async def list_recoverable_runs(self) -> tuple[AgentRun, ...]: ...
+
     async def list_items(self, run_id: str) -> tuple[AgentItem, ...]: ...
 
 
 class AgentAtomicWriter(Protocol):
+    async def commit_agent_user_message(
+        self, commit: AgentUserMessageCommit
+    ) -> AgentUserMessageCommitResult: ...
+
     async def commit_agent_sample(self, commit: AgentSampleCommit) -> AgentSampleCommitResult: ...
 
     async def commit_agent_call_outcome(self, commit: AgentCallOutcomeCommit) -> AgentItem: ...
@@ -46,6 +54,15 @@ class AgentAtomicWriter(Protocol):
         expected_revision: int,
         expected_claim_token: str | None,
         safe_error_code: str,
+    ) -> AgentRun: ...
+
+    async def cancel_agent_run(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_claim_token: str | None,
+        safe_reason_code: str,
     ) -> AgentRun: ...
 
 

@@ -51,9 +51,20 @@ class AgentLeaseController(Generic[T]):
             raise ValueError(f"unsupported Agent lease phase: {phase}")
         operation_task = asyncio.create_task(operation(handle))
         heartbeat_task = asyncio.create_task(self._heartbeat(handle))
-        done, _ = await asyncio.wait(
-            {operation_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED
-        )
+        try:
+            done, _ = await asyncio.wait(
+                {operation_task, heartbeat_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            operation_task.cancel()
+            heartbeat_task.cancel()
+            await asyncio.gather(
+                operation_task,
+                heartbeat_task,
+                return_exceptions=True,
+            )
+            raise
         if operation_task in done:
             heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)

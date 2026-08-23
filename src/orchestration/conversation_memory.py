@@ -7,7 +7,7 @@ import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from src.core.coercion import coerce_positive_int
@@ -18,7 +18,6 @@ from src.integrations.token_counter import get_num_of_tokens_from_messages_async
 from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, safe_file_upload_message_metadata
 
 from .answer_selection import select_final_text_artifact
-from .models import OrchestrationRequest
 from .prompt_envelope import PromptSegment
 from .prompt_profiles import PROMPT_PROFILE_TEMPLATE_VERSION, resolve_profile_prompt_for_mode
 
@@ -27,7 +26,23 @@ COMPRESSION_POLICY_VERSION = "conversation-memory-policy-v1"
 
 SummaryGenerator = Callable[..., str | Awaitable[str]]
 ResolutionGenerator = Callable[..., str | Awaitable[str]]
-MemoryConfigResolver = Callable[["OrchestrationRequest"], "ConversationMemoryConfig"]
+
+class MemoryRequest(Protocol):
+    task_id: str
+    conversation_id: str
+    root_message_id: str
+    user_message: str
+    requested_capability_id: str | None
+    metadata: Mapping[str, Any]
+    current_user_message: str | None
+    resolved_user_message: str | None
+    memory_context: Mapping[str, Any] | None
+
+    @property
+    def effective_user_message(self) -> str: ...
+
+
+MemoryConfigResolver = Callable[[MemoryRequest], "ConversationMemoryConfig"]
 
 _BLOCKING_RESOLUTION_RISK_FLAGS = {
     "ambiguous_parallel_entities",
@@ -575,12 +590,12 @@ class ConversationMemoryBuilder:
         self._config_resolver = config_resolver
         self._now_fn = now_fn or datetime.utcnow
 
-    def _config_for_request(self, request: OrchestrationRequest) -> ConversationMemoryConfig:
+    def _config_for_request(self, request: MemoryRequest) -> ConversationMemoryConfig:
         if self._config_resolver is None:
             return self._config
         return self._config_resolver(request)
 
-    async def build(self, request: OrchestrationRequest, *, username: str | None = None) -> ConversationMemoryContext:
+    async def build(self, request: MemoryRequest, *, username: str | None = None) -> ConversationMemoryContext:
         config = self._config_for_request(request)
         conversation = await self._storage.get_conversation(request.conversation_id)
         if conversation is None:
@@ -705,7 +720,7 @@ class ConversationMemoryBuilder:
         if callable(filtered_reader):
             events = await filtered_reader(
                 task_id,
-                event_types={"main_agent.output_final"},
+                event_types={"agent.final_output"},
                 visibility=EventVisibility.FRONTEND,
                 limit=32,
             )
@@ -741,7 +756,7 @@ class ConversationMemoryBuilder:
     async def _compress(
         self,
         *,
-        request: OrchestrationRequest,
+        request: MemoryRequest,
         username: str,
         current_user_message: str,
         resolved_user_message: str | None,
@@ -936,7 +951,7 @@ class ConversationMemoryBuilder:
     async def _save_summary(
         self,
         *,
-        request: OrchestrationRequest,
+        request: MemoryRequest,
         username: str,
         summary_text: str,
         older_turns: list[_BusinessTurn],
@@ -992,7 +1007,7 @@ class ConversationMemoryBuilder:
         summary_text: str | None = None,
         capability_summaries: tuple[dict[str, Any], ...] = (),
         request_metadata: Mapping[str, Any] | None = None,
-        request: OrchestrationRequest | None = None,
+        request: MemoryRequest | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         llm_invalid_reason: str | None = None
         llm_prompt_profile: Mapping[str, Any] | None = None
@@ -1042,7 +1057,7 @@ class ConversationMemoryBuilder:
         summary_text: str | None,
         capability_summaries: tuple[dict[str, Any], ...],
         request_metadata: Mapping[str, Any] | None = None,
-        request: OrchestrationRequest | None = None,
+        request: MemoryRequest | None = None,
     ) -> tuple[str | None, dict[str, Any]] | _InvalidResolutionAttempt | None:
         if self._resolution_generator is None:
             return None
@@ -1326,7 +1341,7 @@ class ConversationMemoryBuilder:
 
     def _empty_context(
         self,
-        request: OrchestrationRequest,
+        request: MemoryRequest,
         *,
         fallback_reason: str,
         config: ConversationMemoryConfig | None = None,
@@ -1344,7 +1359,7 @@ class ConversationMemoryBuilder:
         )
 
 
-def effective_user_message(request: OrchestrationRequest) -> str:
+def effective_user_message(request: MemoryRequest) -> str:
     resolved = (request.resolved_user_message or "").strip()
     return resolved or (request.current_user_message or request.user_message)
 
@@ -1379,7 +1394,7 @@ def _call_memory_generator(
     *,
     prompt_profile: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
-    request: OrchestrationRequest | None = None,
+    request: MemoryRequest | None = None,
 ):
     kwargs: dict[str, Any] = {}
     try:

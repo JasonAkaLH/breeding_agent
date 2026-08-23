@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
-from src.orchestration.models import UserMCPServerProfile
+from src.orchestration.models import CapabilityDescriptor, UserMCPServerProfile
 from src.orchestration.registry import CapabilityRegistry
 
 from .models import AgentToolDescriptor
@@ -128,6 +128,31 @@ class AgentToolCatalogBuilder:
             policies[descriptor.capability_id] = policy
         tools.sort(key=lambda tool: tool.capability_id.encode("utf-8"))
         return AgentToolCatalog(tuple(tools), MappingProxyType(policies))
+
+
+def default_agent_invocation_policy(
+    descriptor: CapabilityDescriptor,
+) -> CapabilityInvocationPolicy | None:
+    if descriptor.kind == "skill" or descriptor.source == "skill":
+        return CapabilityInvocationPolicy(
+            model_allowed_fields=("query",),
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        )
+    if descriptor.capability_id == "mcp.dispatch":
+        return CapabilityInvocationPolicy(
+            model_allowed_fields=("server_id",),
+            input_schema={
+                "type": "object",
+                "properties": {"server_id": {"type": "string", "minLength": 1}},
+                "required": ["server_id"],
+                "additionalProperties": False,
+            },
+        )
+    return None
 
 
 class CatalogPreflightDecision(StrEnum):

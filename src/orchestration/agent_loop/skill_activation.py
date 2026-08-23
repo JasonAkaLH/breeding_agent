@@ -26,7 +26,7 @@ class DelegatedSkillActivationService:
 
     def __init__(
         self,
-        commit_port: SkillActivationCommitPort,
+        commit_port: SkillActivationCommitPort | None,
         *,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
@@ -42,6 +42,29 @@ class DelegatedSkillActivationService:
         pinned_bundle_revision: str,
         resolved_bundle_revision: str,
     ) -> DelegatedSkillActivation:
+        item, profile_digest = self.build_item(
+            run=run,
+            profile=profile,
+            sequence=sequence,
+            pinned_bundle_revision=pinned_bundle_revision,
+            resolved_bundle_revision=resolved_bundle_revision,
+        )
+        if self._commit_port is None:
+            raise RuntimeError("agent_skill_activation_commit_port_missing")
+        stored = await self._commit_port.commit_skill_activation(item)
+        if stored != item:
+            raise RuntimeError("agent_skill_activation_commit_drift")
+        return DelegatedSkillActivation(item=stored, profile_digest=profile_digest)
+
+    def build_item(
+        self,
+        *,
+        run: AgentRun,
+        profile: PublicSkillProfile,
+        sequence: int,
+        pinned_bundle_revision: str,
+        resolved_bundle_revision: str,
+    ) -> tuple[AgentItem, str]:
         if (
             not pinned_bundle_revision.strip()
             or pinned_bundle_revision != resolved_bundle_revision
@@ -74,10 +97,7 @@ class DelegatedSkillActivationService:
             created_at=now,
             committed_at=now,
         )
-        stored = await self._commit_port.commit_skill_activation(item)
-        if stored != item:
-            raise RuntimeError("agent_skill_activation_commit_drift")
-        return DelegatedSkillActivation(item=stored, profile_digest=profile_payload.sha256)
+        return item, profile_payload.sha256
 
 
 def _safe_profile(profile: PublicSkillProfile) -> dict[str, Any]:

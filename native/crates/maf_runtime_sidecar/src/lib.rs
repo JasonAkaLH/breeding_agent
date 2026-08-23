@@ -1223,6 +1223,18 @@ impl RuntimeSidecarKernel {
     }
 
     #[must_use]
+    pub fn list_agent_runs(&self, statuses: &BTreeSet<String>) -> Vec<AgentRunRecord> {
+        let mut runs: Vec<_> = self
+            .agent_runs
+            .values()
+            .filter(|run| statuses.is_empty() || statuses.contains(&run.status))
+            .cloned()
+            .collect();
+        runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        runs
+    }
+
+    #[must_use]
     pub fn list_agent_items(&self, run_id: &str) -> Vec<AgentItemRecord> {
         let mut items: Vec<_> = self
             .agent_items
@@ -2746,6 +2758,25 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
             found: response.run.is_some(),
             run: response.run.map(agent_run_record_to_pb),
             error: response.error.map(typed_error_to_pb),
+        }))
+    }
+
+    async fn list_agent_runs(
+        &self,
+        request: tonic::Request<runtime_pb::ListAgentRunsRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ListAgentRunsResponse>, tonic::Status> {
+        let statuses: BTreeSet<String> = request.into_inner().statuses.into_iter().collect();
+        let (runs, error) = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.list_agent_runs(&statuses) {
+                Ok(runs) => (runs, None),
+                Err(error) => (Vec::new(), Some(error.into())),
+            }
+        } else {
+            (self.lock()?.kernel.list_agent_runs(&statuses), None)
+        };
+        Ok(tonic::Response::new(runtime_pb::ListAgentRunsResponse {
+            runs: runs.into_iter().map(agent_run_record_to_pb).collect(),
+            error: error.map(typed_error_to_pb),
         }))
     }
 

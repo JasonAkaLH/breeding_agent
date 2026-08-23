@@ -375,7 +375,7 @@
       "schema_hash",
       "provenance_attestation"
     ],
-    "expected_proto_hash": "maf_runtime_proto_v1_20260822_agent_atomic_projection",
+    "expected_proto_hash": "maf_runtime_proto_v1_20260823_agent_startup_recovery",
     "require_schema_hash_match": true,
     "require_checksum_allowlist": true,
     "require_cargo_lock_digest_allowlist": true,

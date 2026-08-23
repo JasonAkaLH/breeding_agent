@@ -26,7 +26,6 @@ from ..dto import (
     CancelTaskResponse,
     InterruptResponse,
     TaskArtifactsResponse,
-    TaskEdgeResponse,
     TaskGraphResponse,
     TaskInterruptsResponse,
     MCPCallControlResponse,
@@ -384,7 +383,6 @@ async def get_task_graph(task_id: str, request: Request) -> TaskGraphResponse:
         if projected is not None:
             return projected
     nodes = await runtime.storage.list_task_nodes_for_task(task_id)
-    edges = await runtime.storage.list_task_edges(task_id)
     return TaskGraphResponse(
         task_id=task_id,
         nodes=[
@@ -400,15 +398,7 @@ async def get_task_graph(task_id: str, request: Request) -> TaskGraphResponse:
             )
             for node in nodes
         ],
-        edges=[
-            TaskEdgeResponse(
-                from_node_id=edge.from_node_id,
-                to_node_id=edge.to_node_id,
-                edge_type=str(edge.edge_type),
-                condition=edge.condition,
-            )
-            for edge in edges
-        ],
+        edges=[],
     )
 
 

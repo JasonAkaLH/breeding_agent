@@ -15,6 +15,7 @@ from .tool_catalog import (
     CapabilityVisibilityContext,
     CatalogPreflightDecision,
     CatalogPreflightResult,
+    default_agent_invocation_policy,
 )
 from .skill_activation import (
     DelegatedSkillActivation,
@@ -35,6 +36,11 @@ from .continuation import (
     AgentContinuationLocator,
     AgentContinuationLocatorService,
     AgentResumeKind,
+)
+from .orchestrator import (
+    AgentExecutionRequest,
+    AgentLoopOrchestrator,
+    AgentOrchestrationResult,
 )
 from .models import (
     AgentCancellationToken,
@@ -66,6 +72,8 @@ from .models import (
     AgentCompactionResult,
     AgentSampleCommit,
     AgentSampleCommitResult,
+    AgentUserMessageCommit,
+    AgentUserMessageCommitResult,
     AgentStagedArtifact,
     AgentStorageConflict,
 )
@@ -101,6 +109,8 @@ __all__ = [
     "AgentCompactionResult",
     "AgentSampleCommit",
     "AgentSampleCommitResult",
+    "AgentUserMessageCommit",
+    "AgentUserMessageCommitResult",
     "AgentStagedArtifact",
     "AgentStorageConflict",
     "CapabilityInvocationService",
@@ -114,6 +124,7 @@ __all__ = [
     "CapabilityVisibilityContext",
     "CatalogPreflightDecision",
     "CatalogPreflightResult",
+    "default_agent_invocation_policy",
     "DelegatedSkillActivation",
     "DelegatedSkillActivationService",
     "SkillActivationCommitPort",
@@ -130,4 +141,7 @@ __all__ = [
     "AgentContinuationLocator",
     "AgentContinuationLocatorService",
     "AgentResumeKind",
+    "AgentExecutionRequest",
+    "AgentLoopOrchestrator",
+    "AgentOrchestrationResult",
 ]
