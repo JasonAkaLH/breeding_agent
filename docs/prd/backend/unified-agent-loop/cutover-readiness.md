@@ -8,7 +8,7 @@
 - **证据边界**：上述双仓检查点是P6-A已测试clean archive authority；本证据的后续docs-only commit不改变已测试runtime、
   frontend或Skill树。P6-B必须以正常commit推进，回滚时成对revert，不得用本文件替代代码、数据或pre-Phase7 schema证明。
 - **schema inventory状态**：closed inventory；只登记Phase 7待删对象，本阶段不执行破坏性迁移。
-- **remaining blocker结论**：P6-A门禁已闭合；P6-B/P6-C与Phase 7的计划工作仍是显式blocker，禁止提前部署、切换authority或删schema。
+- **remaining blocker结论**：P6-A门禁已闭合并完成P6-B/P6-C；当前仅Phase 7 backup/restore、physical schema/proto删除与最终真实环境证明尚未完成。
 
 ## 1. Phase 状态
 
@@ -20,13 +20,13 @@
 | Phase 3 | proof_complete | `8e21e01`～`066f1e6`；durable loop、compaction、atomic final闭合 |
 | Phase 4 | proof_complete | `b982386`、`927e122`；multi-waiting、continuation、recovery、cancel/no-replay闭合 |
 | Phase 5 | proof_complete | P5-A `768dd00`；P5-B tested commit `af5dfd8`；后端、Frontend、可访问性及本readiness闭合 |
-| Phase 6 | in_progress | P6-A clean rollback authority已冻结；下一检查点P6-B，当前正式start仍为DAG |
-| Phase 7 | pending | backup/restore operator、三backend破坏性schema删除和最终真实MCP证明尚未开始 |
+| Phase 6 | cutover_complete | P6-A rollback authority与`dag-runtime-deletion-report.md`的P6-B/C证据闭合 |
+| Phase 7 | in_progress | 下一检查点P7-A；backup/restore operator、三backend破坏性schema删除和最终真实MCP证明尚未完成 |
 
 ## 2. Start、resume、cancel 与 recovery 入口
 
-以下集合与`active-prd-inventory.md`的9行closed inventory双向一致，无未知入口。当前控制面保持DAG；P6-B必须在同一受审
-bundle内全部切换到replacement authority，不得保留请求flag、fallback或双runtime。
+以下表格冻结P6-A切换前快照，用于rollback对照；不是当前runtime authority。当前9个入口已全部切到replacement列，实际状态
+见`active-prd-inventory.md`与`dag-runtime-deletion-report.md`。
 
 | entry_id | 类别 | 当前code anchor/control | Phase 6 replacement | 当前状态 |
 |---|---|---|---|---|
@@ -69,9 +69,8 @@ transient；同event ID同payload幂等、不同payload触发resync；tool resul
 
 - `active-prd-inventory.md`证据状态closed，当前validator发现26份active PRD、55个legacy test和9个执行/恢复入口；均有唯一
   disposition、replacement authority、owner phase和evidence command。
-- Phase 6前所有行保持`registered`是预期状态；P6-C必须更新为rewritten/superseded/historical/removed并重新扫描，未知新增项
-  会被validator拒绝。
-- 当前权威仍为DAG源码与`docs/prd/backend/00-主代理框架PRD.md`；Phase 6完成前本目录不得被解释为已切正式route。
+- P6-A快照中的`registered`已在Phase 6 inventory更新为`rewritten`、`superseded`或`removed`；Phase 7 physical项继续保持`registered`。
+- 当前任务编排authority为本目录；旧源码快照仅用于Phase 7前整体rollback，不用于恢复旧Task。
 
 ## 5. DAG physical schema inventory
 
@@ -145,8 +144,8 @@ P6-A已达到freeze条件。最后DAG代码authority为`7bb8a05f8acdaf05349624db
 ## 7. 验证命令
 
 ```bash
-conda run -n multi_agent python scripts/validate_unified_agent_loop_evidence.py --phase 5 --require-closed
+conda run -n multi_agent python scripts/validate_unified_agent_loop_evidence.py --phase 6 --require-closed
 ```
 
-预期结果：`unified_agent_loop_phase_5_evidence_closed`。任何入口、active文档、旧测试、必需字段或证据状态漂移都必须重新打开
-本报告并阻断P6-A。
+预期结果：`unified_agent_loop_phase_6_evidence_closed`。任何入口、active文档、旧测试、必需字段或证据状态漂移都必须重新打开
+Phase 6并阻断P7-A。

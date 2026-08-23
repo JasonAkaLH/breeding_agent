@@ -1,10 +1,23 @@
 # 主代理框架 PRD（后端总览）
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **项目**：breeding_agent
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至 Rust 化 Runtime 模块评估 PRD；PRD 目录为当前文档基线）
-- **日期**：2026-05-13
-- **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；跨后端与 Rust sidecar 的 MCP 联合实施 Phase PRD 放在 `docs/prd/MCP/`；前端 PRD 放在 `docs/prd/frontend/`。
+- **文档状态**：当前索引（任务编排authority已切换到统一Agent Loop；旧架构段落仅保留历史背景）
+- **日期**：2026-08-23
+- **说明**：本文件为后端专题索引；当前任务编排合同以`docs/prd/backend/unified-agent-loop/`为准。后端专题PRD统一放在`docs/prd/backend/`；跨后端与Rust sidecar的MCP联合实施Phase PRD放在`docs/prd/MCP/`；前端PRD放在`docs/prd/frontend/`。
+
+## 当前架构基线
+
+- 所有普通消息、显式Skill、显式MCP、Interrupt answer、remote completion、取消和startup recovery只进入或恢复唯一`AgentRun`。
+- Provider通过原生Agent message与结构化Tool Call合同采样；Tool outcome按Run revision/claim原子提交，普通Tool失败返回模型继续纠正。
+- `CapabilityInvocationService`是唯一执行生命周期；Skill/MCP继续复用既有安全、审批、Artifact、Result Parser与continuation authority。
+- 成功只由无Tool Call的非空assistant sample触发；唯一`agent.final_output`原子发布Artifact、Message、event与receipt，不存在独立回答finalizer。
+- `/graph`仅返回兼容活动账本且`edges=[]`。旧任务图物理字段在Phase 7前仅为rollback保留，当前runtime不得读取，也不迁移或恢复旧Task。
+- 当前实现、验证命令和Phase状态见`docs/prd/backend/unified-agent-loop/README.md`；Phase 6删除报告见`dag-runtime-deletion-report.md`。
+
+下文2026年5月形成的目标、索引和历史决策用于追溯专题来源；凡涉及旧任务编排、重规划、独立回答能力或依赖图调度的描述，均由上述当前基线和统一Agent Loop PRD取代。
 
 ## 0. 目录定位
 

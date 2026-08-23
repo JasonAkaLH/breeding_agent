@@ -1,5 +1,7 @@
 # Skill Contract 渐进式披露与显式执行总纲 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **状态**：v2-only clean cutover 设计确认，待实施
 - **日期**：2026-06-05
 - **目标模块**：Skill runtime、Skill capability 注册、main-agent soft binding / planner / replanner、SkillExecutor、slot_collection、Skill 资源读取、项目级 `skill/*` bundle

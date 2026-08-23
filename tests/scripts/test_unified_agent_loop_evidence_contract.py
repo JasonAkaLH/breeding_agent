@@ -17,8 +17,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class UnifiedAgentLoopEvidenceContractTest(unittest.TestCase):
-    def test_phase_zero_repository_inventory_is_closed_and_bidirectional(self) -> None:
-        result = validate_phase_evidence(_REPO_ROOT, phase=0, require_closed=True)
+    def test_phase_six_repository_inventory_and_cutover_handoff_are_closed(self) -> None:
+        result = validate_phase_evidence(_REPO_ROOT, phase=6, require_closed=True)
 
         self.assertEqual(result["status"], "closed")
         self.assertEqual(result["active_prd_count"], 26)
@@ -29,7 +29,7 @@ class UnifiedAgentLoopEvidenceContractTest(unittest.TestCase):
             {
                 "active-prd-inventory.md": "closed",
                 "cutover-readiness.md": "closed",
-                "dag-runtime-deletion-report.md": "not_due",
+                "dag-runtime-deletion-report.md": "closed",
                 "destructive-migration-evidence.md": "not_due",
             },
         )

@@ -8,6 +8,14 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-23 增量：统一Agent Loop clean cutover
+
+`POST /api/v1/conversations/chat-messages`点名公开Skill时，客户端直接提交`routing_mode=force_capability`和当前`capability_id=skill.*`；不再提交`main_agent.respond`或`metadata.soft_skill_binding`。点名`mcp.dispatch`仍必须使用已验证的`metadata.mcp_server_binding`，Server authority由后端固定，模型不可改写。
+
+任务SSE以`agent.reasoning_delta`作为统一Agent瞬时reasoning，以`agent.run.completed|failed|cancelled`作为Run终态；旧Planner、soft-Skill、replan和main-agent-output事件已退出正式合同。Reasoning不持久化、不replay；成功最终回答只由唯一`agent.final_output` Artifact/Message/event/receipt原子发布。`GET /api/v1/tasks/{task_id}/graph`保留响应shape，但现在是empty-edge活动账本，`edges=[]`，不表达依赖调度。
+
+HTTP endpoint与顶层请求/响应schema未新增、未删除；这是消息提交、SSE终态和graph语义的breaking behavior cutover。旧Task不迁移、不恢复，旧客户端必须更新Skill提交与Agent事件消费后才能使用新任务路径。
+
 ## 2026-08-20 增量：MCP Result typed业务视图
 
 `GET /api/v1/tasks/{task_id}/artifacts`与Conversation history/message Artifact现在只从已发布且通过owner/Task/Node/Call/raw/schema/source/parser/projection identity复验的task-private projection读取MCP业务结果。公共响应固定为`artifact_type=mcp_result`、`storage_ref=""`和`mcp_business_result.schema=maf.mcp.business_result_view.v1`；`availability=ready`时，`primary`严格为`structured | structured_preview | text | empty`之一，media/resource仅返回闭合metadata，整个视图不超过20,000 code points/80,000 bytes。`availability=unavailable`只允许`safe_hide | projection_missing | historical_authority_invalid | projection_invalid`。

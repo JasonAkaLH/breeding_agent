@@ -1,5 +1,7 @@
 # Skill Executor 实现需求 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **范围**：后端 / Skill capability executor / Skill runtime / service binding / capability 统一执行层
 - **文档状态**：PRD 草案
 - **日期**：2026-05-12

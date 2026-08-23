@@ -1,5 +1,7 @@
 # Skill 运行闭环 Workbench 目录总纲 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **编号**：后端 PRD 22 Umbrella
 - **日期**：2026-06-25
 - **状态**：从 `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` 拆分；按 runtime replan 主线待实施

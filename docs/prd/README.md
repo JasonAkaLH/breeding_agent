@@ -6,10 +6,10 @@
 
 | 目录 | 范围 | 状态 |
 |---|---|---|
-| `docs/prd/backend/` | 后端主代理框架、Skill runtime、LLM runtime、对话记忆、编排与 API 契约 | 当前正式基线 |
+| `docs/prd/backend/` | 后端统一Agent Loop、Skill runtime、LLM runtime、对话记忆、执行与API契约 | 当前正式基线；任务编排authority见`unified-agent-loop/` |
 | `docs/prd/backend/postgresql-state-platform/` | PostgreSQL State Platform 防死锁、写队列、runtime integration 与 SQLite migration/cutover Phase PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/prompt-envelope/` | 大语言模型提示词信封、动态上下文预算、KV Cache 友好组装与多大语言模型调用档案分步 PRD | Phase 拆分已落地；待实施 |
-| `docs/prd/backend/unified-agent-loop/` | 统一同模型Agent Loop总纲与Phase 0～7实施依赖PRD：Model Contract、Agent Storage/Lease、Invocation/Skill/MCP、核心Loop、Continuation、API/Frontend、Clean Cutover和破坏性Schema删除 | Phase 0～5 proof_complete；P6-A proof_complete，下一检查点P6-B |
+| `docs/prd/backend/unified-agent-loop/` | 统一同模型Agent Loop总纲与Phase 0～7实施依赖PRD：Model Contract、Agent Storage/Lease、Invocation/Skill/MCP、核心Loop、Continuation、API/Frontend、Clean Cutover和破坏性Schema删除 | Phase 6 `cutover_complete`；当前任务编排authority；下一阶段P7-A |
 | `docs/prd/backend/table-upload-normalization/` | 表格上传编码兼容、表头技术清洗、Excel sheet 选择与 prompt-safe 摘要上限分步 PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件的本地持久化、`index.md` 物化索引、Skill workspace manifest 与删除清理语义 | MVP 已落地；后续补 LLM/OCR 描述流水线 |
 | `docs/prd/backend/21-对话文件历史与智能选择PRD.md` | 合并上传历史消息与聊天式文件选择的父兼容入口：统一 `file_upload` 历史、active resource 事实源、conversation file context、selector 消歧、recent usage 与 deleted 不可复用语义 | 兼容入口；阶段零至阶段五已实施 |
@@ -26,7 +26,7 @@
 
 ## 后端 PRD 入口
 
-后端 PRD 的总览入口是：`docs/prd/backend/00-主代理框架PRD.md`。
+后端专题总览入口是`docs/prd/backend/00-主代理框架PRD.md`；任务执行、恢复和最终输出的唯一当前authority是`docs/prd/backend/unified-agent-loop/README.md`。
 
 - 对话记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`。
 - Skill 输出文件 Artifact 与下载 PRD：`docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`。

@@ -1,5 +1,7 @@
 # MCP Runtime 实现需求 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **范围**：后端 / MCP client runtime / capability 接入 / 外部工具治理
 - **文档状态**：Phase 1 已实现（2026-05-12）；长任务 / 完整流式 SSE 扩展见 `docs/prd/backend/17-MCP长任务流式SSEPRD.md`
 - **日期**：2026-05-12

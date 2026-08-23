@@ -1,18 +1,17 @@
 # 统一同模型 Agent Loop 分阶段 PRD 索引
 
-- **日期**：2026-08-22
-- **状态**：实现进行中；Phase 0～Phase 5 `proof_complete`；P6-A已冻结clean rollback authority，下一检查点P6-B
+- **日期**：2026-08-23
+- **状态**：Phase 6 `cutover_complete`；当前任务编排authority；下一检查点P7-A
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
-- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（三轮document-perfectization，99/100；Phase 0～Phase 5已完成）
+- **实施计划**：`docs/superpowers/specs/2026-08-22-unified-agent-loop-implementation-plan.md`（三轮document-perfectization，99/100；Phase 0～Phase 6已完成）
 - **总目标**：以同一模型持续完成规划、Tool选择、结果观察、纠错、上下文压缩和最终回答；全部执行与恢复入口最终统一进入同一AgentRun，不保留DAG runtime或旧任务兼容恢复。
 
 ## 目录权威
 
-本文档组描述已批准但尚未实施的未来架构。Phase 6完成前，当前运行时事实仍以源码和
-`docs/prd/backend/00-主代理框架PRD.md`中的已实现DAG基线为准；Phase 6完成后，本目录成为任务编排的当前PRD
-入口，旧DAG文档必须按总纲处置矩阵更新为rewrite、superseded或historical。
+本目录是当前任务执行、恢复、取消与最终输出的唯一PRD authority。Phase 6已经完成全入口cutover并删除旧runtime/wiring；
+旧文档中的历史控制面名词只保留追溯语境，不得用于恢复旧Task或指导当前实现。physical schema/proto删除仍由Phase 7负责。
 
 权威顺序：
 
@@ -36,8 +35,8 @@
 | Phase 3 | `04-阶段三-核心AgentLoop与FinalOutputPRD.md` | 核心Loop、multi-call、compaction、唯一final output | proof_complete |
 | Phase 4 | `05-阶段四-WaitingContinuation与RecoveryPRD.md` | Waiting、Continuation、Crash Recovery、Cancel | proof_complete |
 | Phase 5 | `06-阶段五-APISSEFrontend与Observability适配PRD.md` | API/SSE/history/graph、Frontend、事件指标、可访问性 | proof_complete |
-| Phase 6 | `07-阶段六-全入口CleanCutover与DAGRuntime删除PRD.md` | 全入口切换、DAG runtime/wiring删除、单控制面 | in_progress（P6-A proof_complete；下一检查点P6-B） |
-| Phase 7 | `08-阶段七-破坏性Schema删除与最终门禁PRD.md` | DAG storage/proto物理删除、恢复演练、最终证明 | pending |
+| Phase 6 | `07-阶段六-全入口CleanCutover与DAGRuntime删除PRD.md` | 全入口切换、旧runtime/wiring删除、单控制面 | cutover_complete |
+| Phase 7 | `08-阶段七-破坏性Schema删除与最终门禁PRD.md` | 旧physical storage/proto删除、恢复演练、最终证明 | in_progress（下一检查点P7-A） |
 
 ## 严格依赖
 

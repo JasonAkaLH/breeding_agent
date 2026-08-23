@@ -14,9 +14,9 @@ ACTIVE_INVENTORY_RELATIVE = Path(
 )
 UNIFIED_PRD_RELATIVE = Path("docs/prd/backend/unified-agent-loop")
 ACTIVE_INVENTORY_SCHEMA = "maf.unified_agent_loop.active_prd_inventory.v1"
-PHASE_ZERO_EVIDENCE_COMMAND = (
+CURRENT_EVIDENCE_COMMAND = (
     "conda run -n multi_agent python "
-    "scripts/validate_unified_agent_loop_evidence.py --phase 0 --require-closed"
+    "scripts/validate_unified_agent_loop_evidence.py --phase 6 --require-closed"
 )
 
 PRD_LEGACY_TERMS = (
@@ -374,7 +374,7 @@ def _validate_inventory_metadata(text: str) -> None:
         raise EvidenceContractError("active-prd-inventory.md baseline commit is invalid")
     if not re.fullmatch(r"[0-9a-f]{40}", _metadata_value(text, "基线Tree")):
         raise EvidenceContractError("active-prd-inventory.md baseline tree is invalid")
-    if _metadata_value(text, "验证命令") != PHASE_ZERO_EVIDENCE_COMMAND:
+    if _metadata_value(text, "验证命令") != CURRENT_EVIDENCE_COMMAND:
         raise EvidenceContractError("active-prd-inventory.md validation command drifted")
 
 
@@ -418,7 +418,7 @@ def _require_value(values: dict[str, str], key: str, identity: str) -> None:
 
 
 def _require_evidence_command(value: str, identity: str) -> None:
-    if value != PHASE_ZERO_EVIDENCE_COMMAND:
+    if value != CURRENT_EVIDENCE_COMMAND:
         raise EvidenceContractError(f"{identity}: evidence command is invalid")
 
 

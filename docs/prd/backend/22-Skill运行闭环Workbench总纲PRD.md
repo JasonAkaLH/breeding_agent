@@ -1,5 +1,7 @@
 # Skill 运行闭环 Workbench 总纲 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **项目**：breeding_agent
 - **范围**：后端平台层 Skill 运行闭环、内部 Workbench capability、Skill 执行后验证与受控重编排
 - **文档状态**：总体设计稿；已拆分为 runtime replan 主线阶段实施 PRD，见 `docs/prd/backend/skill-workbench/README.md`

@@ -1,5 +1,7 @@
 # MCP 两级路由、授权与任务执行闭环 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **阶段**：三阶段改造第 2 阶段
 - **范围**：Planner / MCP Tool Selector / 用户授权 / 任务生命周期 / 前端 / 审计
 - **状态**：核心闭环与跨重启恢复已实施；2025 实验 Tasks 恢复只允许 `tasks/get|tasks/result|tasks/cancel`，2026 MRTR / Tasks Extension 的 recovery-only handler 只允许 `tasks/get`

@@ -2,17 +2,16 @@
 
 ## 状态与依据
 
-- 日期：2026-08-22
+- 日期：2026-08-23
 - 分支：`main`
 - 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 5均`proof_complete`；P6-A green并已冻结双仓clean rollback authority；下一检查点P6-B
+- 执行状态：Phase 0～Phase 5均`proof_complete`；Phase 6 `cutover_complete`；下一检查点P7-A
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - 拆分依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
-- 业务代码基线：`f707235`；计划审查起点：`7d929b8`。两者之间只有本计划、索引和CHANGELOG变更；正式运行时仍为
-  DAG；计划起点只有Phase 0 `AgentModelPort`，当前已完成Phase 1 additive Agent storage，仍无正式route可达的
-  `AgentLoopOrchestrator`
+- 历史业务代码基线：`f707235`；计划审查起点：`7d929b8`；最后DAG rollback authority与当前P6 cutover bundle见
+  `cutover-readiness.md`及`dag-runtime-deletion-report.md`。当前正式开发分支任务入口只到达`AgentLoopOrchestrator`。
 - 计划边界：本计划只安排`main`开发仓库实现，不部署`prod`，不迁移或恢复旧DAG Task
 
 本计划把已批准PRD转换为逐文件、逐测试、逐回滚点的green checkpoint。计划不改变同模型、无固定轮次上限、
@@ -125,28 +124,28 @@ Phase 0～5只允许additive schema、行为保持Kernel抽取和test-only Agent
 
 | 阶段 | Checkpoint | 主要交付 | 阶段状态出口 |
 |---|---|---|---|
-| 0 | P0-A | 现状、入口、旧测试与active PRD inventory | `in_progress` |
+| 0 | P0-A | 现状、入口、旧测试与active PRD inventory | `proof_complete` |
 | 0 | P0-B | provider-neutral Agent Model contract、native adapter、edition gate | `proof_complete` |
-| 1 | P1-A | AgentRun/AgentItem/canonical codec/SQLite原子操作 | `in_progress` |
-| 1 | P1-B | PostgreSQL原子操作、单一Task lease与fencing | `in_progress` |
+| 1 | P1-A | AgentRun/AgentItem/canonical codec/SQLite原子操作 | `proof_complete` |
+| 1 | P1-B | PostgreSQL原子操作、单一Task lease与fencing | `proof_complete` |
 | 1 | P1-C | Runtime Sidecar proto/Rust/Python parity | `proof_complete` |
-| 2 | P2-A | 行为保持地提取唯一Invocation Kernel | `in_progress` |
-| 2 | P2-B | Tool Catalog、Policy与完整预算preflight | `in_progress` |
-| 2 | P2-C | delegated activation与executable Skill适配 | `in_progress` |
+| 2 | P2-A | 行为保持地提取唯一Invocation Kernel | `proof_complete` |
+| 2 | P2-B | Tool Catalog、Policy与完整预算preflight | `proof_complete` |
+| 2 | P2-C | delegated activation与executable Skill适配 | `proof_complete` |
 | 2 | P2-D | Run-bound MCP binding与现有安全链回归 | `proof_complete` |
-| 3 | P3-A | Agent Context与核心Loop、multi-call waves | `in_progress` |
-| 3 | P3-B | 同模型compaction与有界上下文 | `in_progress` |
+| 3 | P3-A | Agent Context与核心Loop、multi-call waves | `proof_complete` |
+| 3 | P3-B | 同模型compaction与有界上下文 | `proof_complete` |
 | 3 | P3-C | 唯一final output与长轨迹/fault proof | `proof_complete` |
-| 4 | P4-A | multi-waiting与identity-bound locator | `in_progress` |
+| 4 | P4-A | multi-waiting与identity-bound locator | `proof_complete` |
 | 4 | P4-B | continuation、crash recovery、cancel/no-replay | `proof_complete` |
-| 5 | P5-A | API/SSE/history/graph/events/metrics投影 | `in_progress` |
+| 5 | P5-A | API/SSE/history/graph/events/metrics投影 | `proof_complete` |
 | 5 | P5-B | Frontend恢复、多waiting、可访问性与readiness报告 | `proof_complete` |
 | 6 | P6-A | 最后DAG回滚检查点与cutover预检 | `proof_complete` |
-| 6 | P6-B | 全入口切换、DAG runtime/wiring/config删除 | `in_progress` |
+| 6 | P6-B | 全入口切换、DAG runtime/wiring/config删除 | `proof_complete` |
 | 6 | P6-C | 全量证明、删除报告与文档authority切换 | `cutover_complete` |
 | 7 | P7-A | 三backend仓库外备份及隔离恢复演练 | `in_progress` |
-| 7 | P7-B | TaskEdge/DAG-only schema/proto破坏性删除 | `in_progress` |
-| 7 | P7-C | 全量、真实环境、静态与文档最终证明 | `complete` |
+| 7 | P7-B | TaskEdge/DAG-only schema/proto破坏性删除 | `pending` |
+| 7 | P7-C | 全量、真实环境、静态与文档最终证明 | `pending` |
 
 ## 5. Phase 0：基线与 Agent Model Contract
 

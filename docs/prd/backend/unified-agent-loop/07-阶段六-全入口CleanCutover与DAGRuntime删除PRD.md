@@ -1,8 +1,8 @@
 # Phase 6：全入口 Clean Cutover 与 DAG Runtime 删除 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（P6-A proof_complete；下一检查点P6-B，尚未进入cutover）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P6-A双仓clean archive与Linux零skip证据已冻结
+- **状态**：cutover_complete（P6-A～P6-C全部闭合；下一检查点P7-A）
+- **文档审阅**：document-perfectization复审通过；P6-A rollback authority与P6-B/C删除、替代测试、全量门禁和报告证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 0～5必须`proof_complete`，cutover-readiness无未知入口
 - **主责需求**：FR-1、FR-14

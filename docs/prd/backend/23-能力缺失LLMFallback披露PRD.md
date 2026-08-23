@@ -1,5 +1,7 @@
 # 能力缺失 LLM Fallback 披露 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - Status: Reviewed draft, phase-split ready for implementation
 - Date: 2026-06-25
 - Scope: 后端 Planner/Replanner/Runtime/MainAgent、前端 Workbench/History、审计事件
