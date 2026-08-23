@@ -6,9 +6,11 @@ import fcntl
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +51,7 @@ class StateDescriptor:
     sidecar_path: Path
     postgres_dsn_env: str
     postgres_restore_dsn_env: str
+    sidecar_binary_env: str
     sqlite_agent_tables: tuple[str, ...]
     sidecar_agent_tables: tuple[str, ...]
     postgres_agent_tables: tuple[str, ...]
@@ -97,6 +100,7 @@ def load_state_descriptor(state_root: str | os.PathLike[str]) -> StateDescriptor
         sidecar_path=sidecar_path,
         postgres_dsn_env=_env_name(postgres_config.get("dsn_env")),
         postgres_restore_dsn_env=_env_name(postgres_config.get("restore_dsn_env")),
+        sidecar_binary_env=_env_name(sidecar_config.get("binary_env")),
         sqlite_agent_tables=_table_names(
             sqlite_config.get("agent_tables"), require_nonempty=True
         ),
@@ -334,6 +338,10 @@ def restore_check(
         raise AgentSchemaMigrationError("agent_schema_restore_target_not_empty")
     _restore_sqlite(backup_dir / "sqlite.backup", target / "sqlite.restored")
     _restore_sqlite(backup_dir / "sidecar.backup", target / "sidecar.restored")
+    _probe_restored_sidecar(
+        target / "sidecar.restored",
+        binary_path=_required_executable_env(descriptor.sidecar_binary_env),
+    )
     source_postgres_dsn = _required_secret_env(descriptor.postgres_dsn_env)
     restore_postgres_dsn = _required_secret_env(descriptor.postgres_restore_dsn_env)
     if source_postgres_dsn == restore_postgres_dsn:
@@ -804,6 +812,58 @@ def _restore_sqlite(source: Path, destination: Path, *, replace: bool = False) -
         _fsync_directory(destination.parent)
 
 
+def _probe_restored_sidecar(
+    database_path: Path,
+    *,
+    binary_path: Path,
+    timeout_seconds: float = 10.0,
+) -> None:
+    from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = int(reservation.getsockname()[1])
+    process = subprocess.Popen(
+        [
+            str(binary_path),
+            "--serve",
+            f"127.0.0.1:{port}",
+            "--sqlite",
+            database_path.name,
+        ],
+        cwd=database_path.parent,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    client = RuntimeSidecarGrpcClient(f"http://127.0.0.1:{port}")
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            if process.poll() is not None:
+                raise AgentSchemaMigrationError(
+                    "agent_schema_sidecar_restore_probe_failed"
+                )
+            try:
+                client.version(timeout_seconds=0.25)
+                client.check_compatibility(timeout_seconds=0.25)
+                return
+            except Exception as exc:
+                if time.monotonic() >= deadline:
+                    raise AgentSchemaMigrationError(
+                        "agent_schema_sidecar_restore_probe_failed"
+                    ) from exc
+                time.sleep(0.05)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def _validate_backup_files(root: Path, manifest: Mapping[str, Any]) -> None:
     files = _mapping(manifest, "files")
     for backend, name in {
@@ -1037,6 +1097,19 @@ def _required_secret_env(name: str) -> str:
     if not value:
         raise AgentSchemaMigrationError("agent_schema_dsn_env_missing")
     return value
+
+
+def _required_executable_env(name: str) -> Path:
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        raise AgentSchemaMigrationError("agent_schema_sidecar_binary_env_missing")
+    candidate = Path(value)
+    if not candidate.is_absolute() or candidate.is_symlink():
+        raise AgentSchemaMigrationError("agent_schema_sidecar_binary_invalid")
+    resolved = _secure_file(candidate.resolve(strict=True), require_mode=None)
+    if not os.access(resolved, os.X_OK):
+        raise AgentSchemaMigrationError("agent_schema_sidecar_binary_invalid")
+    return resolved
 
 
 def _require_sha(expected: str, actual: Any, kind: str) -> None:

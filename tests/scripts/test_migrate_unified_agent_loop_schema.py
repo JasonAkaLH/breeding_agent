@@ -57,6 +57,9 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
         self.state_root.mkdir(mode=0o700)
         self.sqlite_path = self.root / "runtime.sqlite3"
         self.sidecar_path = self.root / "sidecar.sqlite3"
+        self.sidecar_binary = self.root / "maf-runtime-sidecar"
+        self.sidecar_binary.write_text("test-only", encoding="utf-8")
+        os.chmod(self.sidecar_binary, 0o700)
         self._create_database(self.sqlite_path, "sqlite-agent")
         self._create_database(self.sidecar_path, "sidecar-agent")
         self.config_path = self.state_root / "agent-schema-state.json"
@@ -74,6 +77,7 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
                     },
                     "sidecar": {
                         "path": str(self.sidecar_path),
+                        "binary_env": "TEST_AGENT_SCHEMA_SIDECAR_BINARY",
                         "agent_tables": ["agent_runs"],
                     },
                     "postgres": {
@@ -92,6 +96,7 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
             {
                 "TEST_AGENT_SCHEMA_SOURCE_DSN": "postgresql://source-secret",
                 "TEST_AGENT_SCHEMA_RESTORE_DSN": "postgresql://restore-secret",
+                "TEST_AGENT_SCHEMA_SIDECAR_BINARY": str(self.sidecar_binary),
             },
         )
         self.environment.start()
@@ -101,8 +106,13 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
             return_value=POSTGRES_INVENTORY,
         )
         self.postgres_report.start()
+        self.sidecar_probe = patch(
+            "src.storage.agent_schema_migration._probe_restored_sidecar"
+        )
+        self.sidecar_probe.start()
 
     def tearDown(self) -> None:
+        self.sidecar_probe.stop()
         self.postgres_report.stop()
         self.environment.stop()
         self.temporary.cleanup()
