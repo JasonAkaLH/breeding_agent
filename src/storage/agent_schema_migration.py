@@ -315,6 +315,8 @@ def restore_check(
         expected_backup_set_sha, manifest.get("backup_set_sha256"), "backup_set"
     )
     current_receipt = _current_receipt(descriptor.state_root)
+    backup_dir = _secure_directory(manifest_path.parent, require_existing=True)
+    _validate_backup_files(backup_dir, manifest)
     if current_receipt.get("backup_set_sha256") == expected_backup_set_sha and (
         current_receipt.get("state") == "restored"
         or _receipt_at_or_after(str(current_receipt.get("state")), "restore_verified")
@@ -325,8 +327,6 @@ def restore_check(
         or current_receipt.get("backup_set_sha256") != expected_backup_set_sha
     ):
         raise AgentSchemaMigrationError("agent_schema_receipt_prefix_missing")
-    backup_dir = _secure_directory(manifest_path.parent, require_existing=True)
-    _validate_backup_files(backup_dir, manifest)
     requested_target = Path(restore_root).expanduser()
     if requested_target.is_symlink():
         raise AgentSchemaMigrationError("agent_schema_restore_target_unsafe")
@@ -420,6 +420,8 @@ def restore_all(
         expected_backup_set_sha, manifest.get("backup_set_sha256"), "backup_set"
     )
     receipt = _current_receipt(descriptor.state_root)
+    backup_dir = _secure_directory(manifest_path.parent, require_existing=True)
+    _validate_backup_files(backup_dir, manifest)
     if (
         receipt.get("state") == "restored"
         and receipt.get("backup_set_sha256") == expected_backup_set_sha
@@ -430,8 +432,6 @@ def restore_all(
         or _receipt_at_or_after(str(receipt.get("state")), "applying_sqlite")
     ):
         raise AgentSchemaMigrationError("agent_schema_receipt_prefix_missing")
-    backup_dir = _secure_directory(manifest_path.parent, require_existing=True)
-    _validate_backup_files(backup_dir, manifest)
     _restore_sqlite(
         backup_dir / "sidecar.backup", descriptor.sidecar_path, replace=True
     )
@@ -482,13 +482,17 @@ def remember_report_path(
     if reference.parent != state_root:
         raise AgentSchemaMigrationError("agent_schema_report_path_not_private")
     value = reference.name
-    receipts = _receipt_chain(state_root)
-    if receipts:
-        if receipts[-1].get("report_sha256") == report.get("report_sha256"):
-            return
-        raise AgentSchemaMigrationError("agent_schema_receipt_input_drift")
     ref_path = state_root / ".agent-schema-report-ref.json"
     ref_payload = {"report_path": value}
+    receipts = _receipt_chain(state_root)
+    if receipts:
+        if (
+            ref_path.exists()
+            and _load_json_secure(ref_path, 0o600) == ref_payload
+            and receipts[-1].get("report_sha256") == report.get("report_sha256")
+        ):
+            return
+        raise AgentSchemaMigrationError("agent_schema_report_reference_drift")
     if ref_path.exists():
         if _load_json_secure(ref_path, 0o600) != ref_payload:
             raise AgentSchemaMigrationError("agent_schema_report_reference_drift")

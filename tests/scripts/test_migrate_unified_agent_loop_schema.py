@@ -278,6 +278,47 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
                 backup_root=self.root / "persistent-backups",
                 command_runner=self._runner,
             )
+
+    def test_exact_retry_revalidates_report_ref_and_backup_files(self) -> None:
+        report_path, report = self._report()
+        ref_path = self.state_root / ".agent-schema-report-ref.json"
+        ref_path.write_text('{"report_path":"other.json"}\n', encoding="utf-8")
+        os.chmod(ref_path, 0o600)
+        with self.assertRaisesRegex(AgentSchemaMigrationError, "reference_drift"):
+            remember_report_path(self.descriptor, report_path, report)
+        ref_path.write_text('{"report_path":"report.json"}\n', encoding="utf-8")
+        os.chmod(ref_path, 0o600)
+
+        manifest = backup_all(
+            self.descriptor,
+            report_path=report_path,
+            expected_report_sha=str(report["report_sha256"]),
+            backup_root=self.root / "persistent-backups",
+            command_runner=self._runner,
+        )
+        manifest_path = (
+            self.root
+            / "persistent-backups"
+            / str(manifest["backup_set_id"])
+            / "manifest.json"
+        )
+        restore_check(
+            self.descriptor,
+            manifest_path=manifest_path,
+            expected_backup_set_sha=str(manifest["backup_set_sha256"]),
+            restore_root=self.root / "isolated-restore",
+            command_runner=self._runner,
+        )
+        sqlite_backup = manifest_path.parent / "sqlite.backup"
+        os.chmod(sqlite_backup, 0o640)
+        with self.assertRaisesRegex(AgentSchemaMigrationError, "file_identity_invalid"):
+            restore_check(
+                self.descriptor,
+                manifest_path=manifest_path,
+                expected_backup_set_sha=str(manifest["backup_set_sha256"]),
+                restore_root=self.root / "isolated-restore",
+                command_runner=self._runner,
+            )
         with self.assertRaisesRegex(AgentSchemaMigrationError, "report_sha_mismatch"):
             backup_all(
                 self.descriptor,
