@@ -21,17 +21,14 @@ from .models import (
 )
 from .selector import MCPSelectorOutputError, MCPToolSelector
 from .server_router import MCPServerRouter, MCPServerRouterOutputError
-from .workflow import (
+from .registration import (
     MCP_DISPATCH_CAPABILITY_DESCRIPTOR,
-    MCP_DISPATCH_PLANNER_PAYLOAD_POLICY,
-    MCPDispatchWorkflowProvider,
     build_local_mcp_dispatch_instance,
 )
 
 __all__ = [
     "MCP_DISPATCH_CAPABILITY_DESCRIPTOR",
     "MCP_DISPATCH_CAPABILITY_ID",
-    "MCP_DISPATCH_PLANNER_PAYLOAD_POLICY",
     "MCPCallBudget",
     "MCPCallBudgetExhausted",
     "MCPCallFingerprintBlocked",
@@ -40,7 +37,6 @@ __all__ = [
     "MCPDispatchCoordinator",
     "MCPDispatchExecutor",
     "MCPDispatchOutcome",
-    "MCPDispatchWorkflowProvider",
     "MCPSelectorAction",
     "MCPSelectorActionType",
     "MCPSelectorContext",
