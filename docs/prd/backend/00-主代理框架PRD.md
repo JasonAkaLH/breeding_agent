@@ -1,6 +1,6 @@
 # 主代理框架 PRD（后端总览）
 
-> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+> **Phase 7 authority notice（2026-08-23）**：统一同模型Agent Loop已`complete`。本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
 
 - **项目**：breeding_agent
 - **范围**：后端主代理框架
@@ -14,7 +14,7 @@
 - Provider通过原生Agent message与结构化Tool Call合同采样；Tool outcome按Run revision/claim原子提交，普通Tool失败返回模型继续纠正。
 - `CapabilityInvocationService`是唯一执行生命周期；Skill/MCP继续复用既有安全、审批、Artifact、Result Parser与continuation authority。
 - 成功只由无Tool Call的非空assistant sample触发；唯一`agent.final_output`原子发布Artifact、Message、event与receipt，不存在独立回答finalizer。
-- `/graph`仅返回兼容活动账本且`edges=[]`。旧任务图物理字段在Phase 7前仅为rollback保留，当前runtime不得读取，也不迁移或恢复旧Task。
+- `/graph`仅返回兼容活动账本且`edges=[]`。P7-B已删除旧任务图物理字段，当前runtime不得读取，也不迁移或恢复旧Task。
 - 当前实现、验证命令和Phase状态见`docs/prd/backend/unified-agent-loop/README.md`；Phase 6删除报告见`dag-runtime-deletion-report.md`，Phase 7备份/迁移证据见`destructive-migration-evidence.md`。
 
 下文2026年5月形成的目标、索引和历史决策用于追溯专题来源；凡涉及旧任务编排、重规划、独立回答能力或依赖图调度的描述，均由上述当前基线和统一Agent Loop PRD取代。
@@ -300,7 +300,7 @@
 - Skill 运行闭环 Workbench 分步 PRD：`docs/prd/backend/skill-workbench/README.md`。
 - 能力缺失 LLM fallback 披露兼容入口：`docs/prd/backend/23-能力缺失LLMFallback披露PRD.md`。
 - 能力缺失 LLM fallback 披露分步 PRD：`docs/prd/backend/capability-missing-fallback/README.md`。
-- 统一同模型 Agent Loop 分阶段 PRD：`docs/prd/backend/unified-agent-loop/README.md`（Phase 0～5已`proof_complete`；Phase 6已`cutover_complete`且当前执行控制面只剩Agent Loop；P7-A三backend实际备份恢复已`restore_proof_complete`，下一检查点P7-B physical schema/proto删除）。
+- 统一同模型 Agent Loop 分阶段 PRD：`docs/prd/backend/unified-agent-loop/README.md`（Phase 0～5已`proof_complete`；Phase 6已`cutover_complete`且当前执行控制面只剩Agent Loop；Phase 7备份恢复、physical schema/proto删除和最终证明已`complete`）。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`
 - MCP Runtime 联合改造 Phase PRD：`docs/prd/MCP/README.md`

@@ -4,8 +4,8 @@
 
 - 日期：2026-08-23
 - 分支：`main`
-- 状态：document-perfectization三轮自主审查99/100通过；按检查点实施中
-- 执行状态：Phase 0～Phase 5均`proof_complete`；Phase 6 `cutover_complete`；P7-A `restore_proof_complete`；下一检查点P7-B
+- 状态：document-perfectization最终全量审查100/100通过；实施完成
+- 执行状态：Phase 0～Phase 5均`proof_complete`；Phase 6 `cutover_complete`；P7-A `restore_proof_complete`；P7-B `migration_complete`；P7-C `complete`
 - 总纲：`docs/prd/backend/unified-agent-loop/00-统一同模型AgentLoop总纲PRD.md`
 - 阶段依据：`docs/prd/backend/unified-agent-loop/README.md`及Phase 0～7八份阶段PRD
 - 架构依据：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
@@ -36,7 +36,7 @@ Skill manifest业务input/output合同。
 | 发布/安全审查者 | P6 clean cutover、P7 destructive boundary | 当前分支、证据commit、回滚工件、required gate无skip |
 | 最终用户 | 批准改变产品方向、风险容忍或真实MCP waiver | 不负责补齐自动门禁或替代真实PG/Rust证据 |
 
-当前仓库证据：
+计划审查起点仓库证据（历史基线，不描述完成后的当前实现）：
 
 | 锚点 | 审查事实 | 计划约束 |
 |---|---|---|
@@ -144,8 +144,8 @@ Phase 0～5只允许additive schema、行为保持Kernel抽取和test-only Agent
 | 6 | P6-B | 全入口切换、DAG runtime/wiring/config删除 | `proof_complete` |
 | 6 | P6-C | 全量证明、删除报告与文档authority切换 | `cutover_complete` |
 | 7 | P7-A | 三backend仓库外备份及隔离恢复演练 | `restore_proof_complete` |
-| 7 | P7-B | TaskEdge/DAG-only schema/proto破坏性删除 | `in_progress` |
-| 7 | P7-C | 全量、真实环境、静态与文档最终证明 | `pending` |
+| 7 | P7-B | TaskEdge/DAG-only schema/proto破坏性删除 | `migration_complete` |
+| 7 | P7-C | 全量、真实环境、静态与文档最终证明 | `complete` |
 
 ## 5. Phase 0：基线与 Agent Model Contract
 
@@ -758,6 +758,16 @@ Green gate：AL-P7-02～06通过；SQLite、真实PG、Sidecar/Rust migration与
 
 建议commit：`refactor(storage): remove dag physical contracts`。
 
+执行结果（2026-08-23）：`0df2645`/tree `b0b41c3`删除Python/SQLite/PostgreSQL/Proto/Rust/Sidecar中的
+TaskEdge、Planner replan claim、Task root与TaskNode五个DAG-only持久合同；API继续固定返回`root_node_id=null`、
+`required/hard`与`edges=[]`。针对该精确commit/tree重新生成r4 report
+`sha256:8079aedec551fa4036699b691fb093017cee543df2ce2d314781ead354ee82c7`，完成三backend持久备份和隔离restore，
+随后按SQLite→PostgreSQL→Sidecar实际apply；11段receipt链最终以
+`sha256:714cb91ce601c67fc1d954c7f1b2ccea6d870b67f766c24bb4b68a2101f442a7`闭合`completed`，相同输入exact retry
+重新验证三backend target inventory和Sidecar readiness后返回同一SHA。三backend均报告`agent-only-v1`且DAG inventory为空；
+真实PostgreSQL post-schema conformance 4项、P7-B聚焦88项、Storage 399项和Rust workspace门禁通过。P7-B状态为
+`migration_complete`，备份继续保留，下一步P7-C完整门禁与真实MCP/文档收口。
+
 ### P7-C：最终全量、真实MCP与文档收口
 
 运行并记录：
@@ -782,6 +792,13 @@ Green gate：AL-P7-01～10、FR-1～26和全部NFR无未批准缺口，目录才
 Phase 6代码，禁止只回退单一backend或只修改完成状态文档。
 
 建议commit：`docs(agent): close unified loop proof`。
+
+执行结果（2026-08-23）：README canonical Backend全集、7个隔离真实PostgreSQL目标、Frontend 21 files/307 tests加
+typecheck/build、Rust `cargo_fmt/cargo_clippy/cargo_test/cargo_deny`、Linux资源隔离用例、全入口7项E2E和两组生产源码零引用
+扫描全部通过。受控真实MCP以协议`2025-11-25`完成5-Tool discovery、`call_tool -> approval -> resume -> finish`、ordinary
+Tool、durable Result Parser和1个Artifact投影；没有raw result或credential输出。最终FR-1～26、12类NFR和AL-P7-01～10
+映射在`destructive-migration-evidence.md`闭合，evidence validator以Phase 7 `--require-closed`通过。最终代码检查点为
+`0babd50`/tree `fb50b02`；r3/r4备份继续保留到用户明确结束rollback窗口，`prod`未修改。P7-C状态为`complete`。
 
 ## 13. FR、阶段验收与 Checkpoint 追踪
 

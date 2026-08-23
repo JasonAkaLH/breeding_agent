@@ -1,8 +1,8 @@
 # Phase 7：破坏性 Schema 删除与最终门禁 PRD
 
 - **日期**：2026-08-22
-- **状态**：in_progress（Phase 6 cutover_complete；P7-A restore_proof_complete；下一检查点P7-B）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；P7-A真实备份恢复证据已闭合
+- **状态**：complete（P7-A restore_proof_complete；P7-B migration_complete；P7-C complete）
+- **文档审阅**：document-perfectization最终全量审计100/100通过；P7-A～P7-C证据已闭合
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **上游**：Phase 6必须`cutover_complete`
 - **主责需求**：FR-25
@@ -29,9 +29,9 @@ Phase 6已经删除可执行DAG控制面，但旧TaskEdge和DAG-only字段仍增
 
 | 锚点 | 当前事实 | 本阶段影响 |
 |---|---|---|
-| `src/core/models.py` | Task含root_node_id，TaskNode含DAG policy字段，TaskEdge存在 | 删除physical core contract，保留invocation字段 |
-| `src/storage/sqlite/`、`src/storage/postgres/` | 表、row、repository和manifest保存DAG字段/Edge | 执行受控destructive migration和permission更新 |
-| `native/proto/maf/runtime/v1/runtime.proto`、`maf_core_types`、`maf_runtime_sidecar` | Proto/Rust model/SQLite adapter仍声明DAG字段 | 同版本删除并更新contract vectors/client/facade |
+| `src/core/models.py` | P7-B后Task/TaskNode只保留Agent invocation字段，TaskEdge已删除 | P7-C已复验静态零引用与行为兼容 |
+| `src/storage/sqlite/`、`src/storage/postgres/` | P7-B已删除DAG字段/Edge并完成实际三backend迁移 | P7-C已复验schema、权限、事务与并发门禁 |
+| `native/proto/maf/runtime/v1/runtime.proto`、`maf_core_types`、`maf_runtime_sidecar` | P7-B已同版本删除DAG proto/Rust/adapter合同 | P7-C统一Rust required gates已通过 |
 | `src/api/dto.py`、Frontend graph types | 客户端仍要求criticality/dependency字段 | DTO固定投影，storage不再保存 |
 | storage/Rust/API/Frontend migration tests | 保护当前schema和graph兼容 | 更新为删除/restore/parity和empty-edge证明 |
 
@@ -258,3 +258,6 @@ Phase 7后只允许：
 AL-P7-01～10全部通过；FR-1～FR-26和全部NFR最终集成证明闭合；`destructive-migration-evidence.md`绑定当前commit且
 字段完整；三backend、Backend、Frontend、Rust、static/docs和真实MCP门禁无未批准缺口；工作树/提交范围可审查。
 满足后目录状态才能标记`complete`。
+
+执行结论（2026-08-23）：上述条件全部满足；最终代码检查点、三backend迁移/恢复、完整门禁、真实MCP、FR/NFR映射和
+本地非`prod`边界统一见`destructive-migration-evidence.md`。r3/r4备份继续保留到用户明确结束rollback窗口。
