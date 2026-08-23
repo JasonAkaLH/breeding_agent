@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 
 from httpx_sse import aconnect_sse
@@ -287,7 +288,8 @@ class AuthIsolationAPITest(APITestCase):
         await self.wait_for_condition(physically_deleted)
 
     async def test_delete_conversation_auto_cancels_running_task_before_purge(self) -> None:
-        blocking_adapter, release = blocking_mysql_adapter()
+        query_started = threading.Event()
+        blocking_adapter, release = blocking_mysql_adapter(started=query_started)
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
 
         await self.login("alice")
@@ -297,7 +299,11 @@ class AuthIsolationAPITest(APITestCase):
 
         async def task_running() -> bool:
             task = await self.runtime.storage.get_task(task_id)
-            return task is not None and str(task.status) == "running"
+            return (
+                task is not None
+                and str(task.status) == "running"
+                and query_started.is_set()
+            )
 
         await self.wait_for_condition(task_running)
 
@@ -314,7 +320,8 @@ class AuthIsolationAPITest(APITestCase):
         self.assertEqual(await self.runtime.storage.list_events_for_task(task_id), [])
 
     async def test_non_owner_cannot_subscribe_to_sse_or_cancel_other_users_task(self) -> None:
-        blocking_adapter, release = blocking_mysql_adapter()
+        query_started = threading.Event()
+        blocking_adapter, release = blocking_mysql_adapter(started=query_started)
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
 
         await self.login("alice")
@@ -324,7 +331,11 @@ class AuthIsolationAPITest(APITestCase):
 
         async def task_running() -> bool:
             task = await self.runtime.storage.get_task(task_id)
-            return task is not None and str(task.status) == "running"
+            return (
+                task is not None
+                and str(task.status) == "running"
+                and query_started.is_set()
+            )
 
         await self.wait_for_condition(task_running)
 

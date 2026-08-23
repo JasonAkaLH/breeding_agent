@@ -88,6 +88,7 @@ class UsernameTokenServiceConfigTest(unittest.TestCase):
                     database_path=Path(tmpdir) / "api.sqlite3",
                     audit_log_path=Path(tmpdir) / "audit.jsonl",
                     master_key_bytes=b"a" * 32,
+                    skill_roots=(),
                 )
                 self.assertIsNotNone(runtime.username_token_service)
                 runtime._engine.dispose()

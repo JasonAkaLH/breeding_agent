@@ -175,6 +175,7 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
                 enable_skill_input_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
+                skill_roots=(),
             )
 
         self.assertIs(runtime.storage, storage)
@@ -239,6 +240,7 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
                 enable_skill_input_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
+                skill_roots=(),
             )
 
         self.assertIs(runtime.storage, storage)

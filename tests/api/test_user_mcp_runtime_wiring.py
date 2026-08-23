@@ -993,6 +993,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
+                skill_roots=(),
             )
             await first.start()
             token = (await first.username_token_service.login_username("alice"))[1]
@@ -1006,6 +1007,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
+                skill_roots=(),
             )
             await same_key.start()
             try:
@@ -1025,6 +1027,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 enable_llm_planner=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
+                skill_roots=(),
             )
             with self.assertRaisesRegex(
                 CredentialSecurityError,

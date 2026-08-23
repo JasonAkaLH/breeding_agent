@@ -58,6 +58,7 @@ class StatePlatformRuntimeAssemblyTest(unittest.TestCase):
                 enable_skill_input_llm=False,
                 enable_conversation_title_llm=False,
                 enable_conversation_memory=False,
+                skill_roots=(),
             )
         create_engine.assert_called_once_with("postgresql_fixture_dsn")
         bootstrap.assert_called_once_with(fake_engine)
