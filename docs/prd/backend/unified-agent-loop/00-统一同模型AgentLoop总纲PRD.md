@@ -1,7 +1,9 @@
 # 统一同模型 Agent Loop 总纲 PRD
 
 - **日期**：2026-08-22
-- **状态**：已批准未来架构；document-perfectization第二次全量审计100/100通过；Phase 0～Phase 5已`proof_complete`
+- **终态更新**：2026-08-23
+- **文档状态**：已批准；document-perfectization第二次全量审计100/100通过
+- **实施状态**：`complete`；Phase 0～Phase 5已`proof_complete`，Phase 6已`cutover_complete`，Phase 7已`complete`
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`
@@ -9,11 +11,11 @@
 
 ## 1. 问题与目标
 
-当前默认路径先生成完整`WorkflowPlan`，再由DAG executor按依赖执行，必要时由Runtime Replanner修改计划，最后由
+在Phase 0进入基线上，默认路径先生成完整`WorkflowPlan`，再由DAG executor按依赖执行，必要时由Runtime Replanner修改计划，最后由
 独立`main_agent.respond`节点生成回答。这种方式无法自然支持根据每次Tool result持续选择下一步、同一sample多调用、
 多waiting恢复和模型自然结束。
 
-目标是把全部普通、显式Skill、显式MCP、补充输入、审批和remote continuation统一为在线循环：
+本项目目标是把全部普通、显式Skill、显式MCP、补充输入、审批和remote continuation统一为在线循环；该目标已在`main`的Phase 6/7闭合：
 
 ```text
 same model sample

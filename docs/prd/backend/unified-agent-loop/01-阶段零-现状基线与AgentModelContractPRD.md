@@ -1,13 +1,19 @@
 # Phase 0：现状基线与 Agent Model Contract PRD
 
 - **日期**：2026-08-22
+- **终态复验**：2026-08-23
 - **状态**：proof_complete（P0-A、P0-B green checkpoint均已完成）
-- **文档审阅**：document-perfectization第二次全量审计100/100通过；实现按批准计划推进
+- **文档审阅**：document-perfectization第二次全量审计100/100通过；Phase 0实现已完成并被Phase 1～7消费
 - **父总纲**：`00-统一同模型AgentLoop总纲PRD.md`
 - **主责需求**：FR-2、FR-3、FR-19
 - **主责NFR**：Provider兼容与同模型
 - **直接参与者**：Agent/LLM Runtime维护者、模型配置维护者、MCP Router/Selector维护者、测试与发布审查者
-- **目标结果**：建立provider-neutral原生Agent采样合同、公开model edition启动门禁和现状/PRD inventory；不创建AgentRun，不接入真实执行入口。
+- **Phase 0目标结果**：建立provider-neutral原生Agent采样合同、公开model edition启动门禁和现状/PRD inventory；不创建AgentRun，不接入真实执行入口。
+
+> **阶段语境与当前终态**：本文同时保留Phase 0的前瞻要求和检查点证据。第2～4节的进入条件、非范围和基线事实，以
+> `f4d6425`到`5d3c82d`的pre-cutover实施边界为语境，不描述当前HEAD。当前`main`已完成Phase 6全入口cutover和Phase 7 physical
+> schema/proto删除；不得据本阶段的历史非范围、入口基线或回滚条款重新引入DAG控制面。当前authority、验证和回滚口径以本目录`README.md`及
+> Phase 6/7的closed证据为准。
 
 ## 1. 目标与价值
 
@@ -46,9 +52,9 @@ Agent Loop必须把assistant text、零到多个tool calls、流式arguments和u
 - 不切换任何用户请求入口；
 - 不连接或部署`prod`。
 
-## 4. 当前证据与受影响系统
+## 4. Phase 0进入证据与受影响系统
 
-| 证据 | 当前事实 | 本阶段要求 |
+| 证据 | Phase 0基线事实 | 本阶段要求 |
 |---|---|---|
 | `src/integrations/llm_client.py` | `generate_text`/messages调用存在，`_messages_payload`会做role fallback | Agent path禁止assistant/tool role fallback；非Agent text兼容保留 |
 | `src/integrations/llm_runtime.py` | `SharedLLMRuntime`提供text/stream text能力 | 新增Agent sampling port，不删除现有text接口 |
@@ -162,6 +168,9 @@ evidence command；扫描发现集与inventory行集必须双向一致。
 
 同时分类旧测试：行为/安全合同必须迁移；只断言DAG实现形状的测试登记为Phase 6候选删除。此阶段只登记，不删除。
 
+上述“只登记，不删除”是Phase 0实施边界。当前inventory已在Phase 6按cutover结果更新为`rewritten`/
+`superseded`/`removed`，不得为重现Phase 0扫描集而恢复已删除的DAG测试。
+
 ## 10. 测试计划
 
 最低现有入口：
@@ -202,6 +211,15 @@ binding。运行`compileall`并记录未运行的真实Provider项；本阶段�
 - 扩大运行六个非canonical API模块时，70项通过、3项失败：1项等待本地配置指向的真实`/tokenization`超过fixture
   5秒，2项为既有动态Skill fixture未进入临时catalog/同类等待；P0-B未修改这些执行路径，不把该扩展运行记为green。
 
+### 10.3 Phase 7终态复验与命令口径
+
+- 2026-08-23在`main@a7fc467`的相关Agent Model/inventory/API聚焦套件共71项通过，`compileall`和`git diff --check`通过；
+- 当前post-cutover工作树的inventory closed命令为
+  `conda run -n multi_agent python scripts/validate_unified_agent_loop_evidence.py --phase 6 --require-closed`，整组最终证据也可以
+  `conda run -n multi_agent python scripts/validate_unified_agent_loop_evidence.py --phase 7 --require-closed`复验；两者均返回`closed`；
+- `--phase 0 --require-closed`只用于Phase 0 pre-cutover发现集或对应历史检查点。Phase 6删除旧DAG shape测试后，不得在当前HEAD
+  上将Phase 0参数的inventory mismatch解释为Agent Model回归失败。
+
 ## 11. 风险、假设与开放问题
 
 | 风险 | 缓解/阻断条件 |
@@ -215,10 +233,15 @@ binding。运行`compileall`并记录未运行的真实Provider项；本阶段�
 
 ## 12. Git检查点与回滚
 
+以下是仅在Phase 0完成、Phase 1尚未开始时有效的历史检查点回滚边界：
+
 - 本阶段只增加合同、adapter、门禁和测试；不接用户流量；
 - 若门禁导致现有公开edition不合格，Runtime必须fail closed，不得自动弱化要求；
 - 回滚删除新增Agent-only合同/测试即可恢复旧text路径；
 - 不得添加长期feature flag。
+
+当前`main`的Phase 1～7已依赖该合同且旧DAG physical contract已删除，因此禁止单独删除Phase 0合同或尝试恢复旧text/DAG控制面。
+当前回滚必须遵守目录`README.md`和`destructive-migration-evidence.md`：成对恢复Phase 7前代码与数据备份，或forward fix。
 
 ## 13. 完成与交接
 
