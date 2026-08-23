@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- Rust quality CI的两个确定性阻断已修复：MCP official SDK diagnostics将`peer_info()`统一借用为不消费的视图，同时兼容主workspace锁定的`rmcp 1.7`与fuzz workspace解析的`rmcp 1.8`；`quinn-proto`从命中`RUSTSEC-2026-0185`的0.11.14升级到安全patch版本。重新闭合`native/fuzz/Cargo.lock`并在stable harness compile和bounded fuzz job前强制`--locked`/metadata漂移检查，避免独立fuzz workspace在CI静默升级依赖。License Requirement：未新增依赖种类；仅更新已有Rust依赖的安全patch/锁文件，许可策略不变。
+
 - 统一同模型Agent Loop PRD终态语境已校准：总纲状态同步为Phase 0～5 `proof_complete`、Phase 6 `cutover_complete`、Phase 7 `complete`，并将旧DAG问题明确标记为Phase 0进入基线。Phase 0 PRD保持`proof_complete`，新增pre-cutover历史边界、post-cutover验证参数和Phase 7后回滚权威说明，禁止据历史非范围或单阶段回滚条款重建DAG控制面。当前聚焦71项、Phase 6/7 evidence validator、compileall与diff检查通过；本次仅文档校准，无业务代码、依赖或许可变更。License Requirement：无新增依赖或许可变更。
 
 - 统一同模型Agent Loop Phase 7已`complete`：`0df2645`删除Python/SQLite/PostgreSQL、Runtime Sidecar proto/Rust/gRPC/facade中的TaskEdge、Planner replan claim、Task root及TaskNode五个DAG-only持久字段；r4三backend备份经实际隔离恢复后按SQLite→PostgreSQL→Sidecar完成真实开发数据apply，11段不可变receipt闭合且exact retry返回同一SHA，三backend均为`agent-only-v1`、DAG inventory为空。P7-C在7个隔离真实PostgreSQL目标运行Storage 439项零skip，Backend其余canonical套件、Frontend 21 files/307 tests加typecheck/build、Rust fmt/clippy/test/deny、Linux资源隔离用例与生产源码零引用扫描全部通过；`06398b3`将`h2`更新到0.4.16以闭合`RUSTSEC-2026-0258`。受控真实MCP完成协议2025-11-25 discovery、`call_tool -> approval -> resume -> finish`、ordinary Tool、durable Result Parser和Artifact投影；`0babd50`同时修正smoke的owner-bound Task准备。FR-1～26、12类NFR和AL-P7-01～10证据closed；r4/r3备份保留到用户结束rollback窗口，`prod`未修改。License Requirement：未新增依赖种类；Rust仅更新既有`h2`安全patch，许可门禁通过。

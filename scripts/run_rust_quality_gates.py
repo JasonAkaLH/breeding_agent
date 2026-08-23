@@ -99,7 +99,14 @@ def build_gates() -> list[Gate]:
         ),
         Gate(
             name="fuzz_cargo_check",
-            command=["cargo", "check", "--manifest-path", "native/fuzz/Cargo.toml", "--bins"],
+            command=[
+                "cargo",
+                "check",
+                "--locked",
+                "--manifest-path",
+                "native/fuzz/Cargo.toml",
+                "--bins",
+            ],
             cwd=REPO_ROOT,
             required_tools=("cargo",),
             description="Compile all PRD01 fuzz harnesses without executing libFuzzer.",

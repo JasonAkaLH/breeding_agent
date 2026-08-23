@@ -380,10 +380,16 @@ impl OfficialRustSdkClientSession {
             transport: self.transport.clone(),
             endpoint_fingerprint: self.endpoint_fingerprint.clone(),
             negotiated_protocol_version: server_info
+                .as_ref()
                 .map(|info| info.protocol_version.as_str().to_owned()),
-            server_name: server_info.map(|info| info.server_info.name.clone()),
-            server_version: server_info.map(|info| info.server_info.version.clone()),
+            server_name: server_info
+                .as_ref()
+                .map(|info| info.server_info.name.clone()),
+            server_version: server_info
+                .as_ref()
+                .map(|info| info.server_info.version.clone()),
             server_capabilities_shape: server_info
+                .as_ref()
                 .map(|info| {
                     json_object_shape(&serde_json::to_value(&info.capabilities).unwrap_or_default())
                 })
@@ -1819,6 +1825,7 @@ mod tests {
                 Some(protocol_version)
             );
             assert_eq!(diagnostics.server_name.as_deref(), Some("fake-rmcp-server"));
+            assert_eq!(diagnostics.server_version.as_deref(), Some("0.1.0"));
             assert!(
                 diagnostics
                     .server_capabilities_shape

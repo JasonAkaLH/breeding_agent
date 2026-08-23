@@ -64,7 +64,17 @@ class RustQualityGateTest(unittest.TestCase):
             gates["rust_coverage_thresholds"]["command"],
             [sys.executable, "scripts/run_rust_coverage_thresholds.py", "--run"],
         )
-        self.assertIn("native/fuzz/Cargo.toml", gates["fuzz_cargo_check"]["command"])
+        self.assertEqual(
+            gates["fuzz_cargo_check"]["command"],
+            [
+                "cargo",
+                "check",
+                "--locked",
+                "--manifest-path",
+                "native/fuzz/Cargo.toml",
+                "--bins",
+            ],
+        )
         self.assertEqual(
             gates["cargo_fuzz_smoke"]["command"],
             ["cargo", "+nightly", "fuzz", "run", "skill_runtime_policy", "--", "-max_total_time=30"],
@@ -106,6 +116,9 @@ class RustQualityGateTest(unittest.TestCase):
             "cargo deny check",
             "cargo llvm-cov --workspace --all-features --summary-only",
             "cargo install cargo-fuzz --version 0.13.1",
+            "cargo check --locked --manifest-path native/fuzz/Cargo.toml --bins",
+            "Check fuzz Cargo.lock is current",
+            "cargo metadata --locked --format-version 1 > /dev/null",
             "cargo +nightly fuzz run skill_runtime_policy",
             "cargo +nightly fuzz run auth_core",
             "cargo +nightly fuzz run audit_sanitizer",

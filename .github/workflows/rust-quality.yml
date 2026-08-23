@@ -103,7 +103,7 @@ jobs:
         run: python scripts/run_rust_quality_gates.py --check-fuzz-targets
 
       - name: Compile PRD01 fuzz harnesses
-        run: cargo check --manifest-path native/fuzz/Cargo.toml --bins
+        run: cargo check --locked --manifest-path native/fuzz/Cargo.toml --bins
 
       - name: Check PRD06 safety kernel evidence manifest remains fail-closed
         run: python scripts/validate_prd06_safety_kernel_evidence.py --allow-pending
@@ -325,6 +325,10 @@ jobs:
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.1
+
+      - name: Check fuzz Cargo.lock is current
+        working-directory: native/fuzz
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
       - name: cargo +nightly fuzz run skill_runtime_policy
         working-directory: native/fuzz
