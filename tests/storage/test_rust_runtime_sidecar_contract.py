@@ -21,7 +21,6 @@ from src.core.models import (
     MCPCallRecord,
     MCPRemoteTaskBinding,
     Task,
-    TaskEdge,
     TaskNode,
 )
 from src.lifecycle.cancellation_service import CancellationService
@@ -94,10 +93,8 @@ class _RecordingRuntimeSidecarClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.tasks: dict[str, dict[str, object]] = {}
-        self.edges: dict[str, list[dict[str, object]]] = {}
         self.artifacts: dict[str, dict[str, object]] = {}
         self.nodes: dict[str, dict[str, object]] = {}
-        self.planner_replan_claims: dict[tuple[str, str], dict[str, object]] = {}
 
     async def submit_task(
         self,
@@ -203,79 +200,6 @@ class _RecordingRuntimeSidecarClient:
             "error": None,
         }
 
-    async def claim_planner_replan(
-        self,
-        *,
-        task_id: str,
-        decision_digest: str,
-        now: str,
-    ) -> dict[str, object]:
-        self.calls.append(
-            (
-                "planner_replan_claim",
-                {"task_id": task_id, "decision_digest": decision_digest, "now": now},
-            )
-        )
-        key = (task_id, decision_digest)
-        claim = self.planner_replan_claims.get(key)
-        if claim is None:
-            revision = 1 + sum(1 for stored in self.planner_replan_claims.values() if stored["task_id"] == task_id)
-            claim = {
-                "task_id": task_id,
-                "decision_digest": decision_digest,
-                "planning_revision": revision,
-                "planning_epoch": f"r{revision}",
-                "status": "claimed",
-                "created_at": now,
-                "updated_at": now,
-            }
-            self.planner_replan_claims[key] = claim
-        return {"operation": "planner_replan_claim", "claim": claim, "found": True, "error": None}
-
-    async def get_planner_replan_claim(
-        self,
-        *,
-        task_id: str,
-        decision_digest: str,
-    ) -> dict[str, object]:
-        self.calls.append(
-            (
-                "planner_replan_claim_get",
-                {"task_id": task_id, "decision_digest": decision_digest},
-            )
-        )
-        claim = self.planner_replan_claims.get((task_id, decision_digest))
-        return {
-            "operation": "planner_replan_claim_get",
-            "claim": claim,
-            "found": claim is not None,
-            "error": None,
-        }
-
-    async def mark_planner_replan_claim(
-        self,
-        *,
-        task_id: str,
-        decision_digest: str,
-        status: str,
-        now: str,
-    ) -> dict[str, object]:
-        self.calls.append(
-            (
-                "planner_replan_claim_mark",
-                {
-                    "task_id": task_id,
-                    "decision_digest": decision_digest,
-                    "status": status,
-                    "now": now,
-                },
-            )
-        )
-        claim = self.planner_replan_claims[(task_id, decision_digest)]
-        claim = {**claim, "status": status, "updated_at": now}
-        self.planner_replan_claims[(task_id, decision_digest)] = claim
-        return {"operation": "planner_replan_claim_mark", "claim": claim, "found": True, "error": None}
-
     async def transition_node(
         self,
         *,
@@ -337,48 +261,6 @@ class _RecordingRuntimeSidecarClient:
             key=lambda node: str(node["node_id"]),
         )
         return {"operation": "task_node_list", "nodes": nodes, "error": None}
-
-    async def save_task_edge(
-        self,
-        *,
-        task_id: str,
-        from_node_id: str,
-        to_node_id: str,
-        edge_type: str,
-        condition: str,
-        idempotency_key: str,
-    ) -> dict[str, object]:
-        self.calls.append(
-            (
-                "task_edge_save",
-                {
-                    "edge_type": edge_type,
-                    "from_node_id": from_node_id,
-                    "idempotency_key": idempotency_key,
-                    "task_id": task_id,
-                    "to_node_id": to_node_id,
-                },
-            )
-        )
-        edge = {
-            "task_id": task_id,
-            "from_node_id": from_node_id,
-            "to_node_id": to_node_id,
-            "edge_type": edge_type,
-            "condition": condition,
-        }
-        self.edges.setdefault(task_id, [])
-        self.edges[task_id] = [
-            existing
-            for existing in self.edges[task_id]
-            if not (existing["from_node_id"] == from_node_id and existing["to_node_id"] == to_node_id)
-        ]
-        self.edges[task_id].append(edge)
-        return {"operation": "task_edge_save", "edge": edge, "error": None}
-
-    async def list_task_edges(self, *, task_id: str) -> dict[str, object]:
-        self.calls.append(("task_edge_list", {"task_id": task_id}))
-        return {"operation": "task_edge_list", "edges": list(self.edges.get(task_id, [])), "error": None}
 
     async def save_artifact(
         self,
@@ -663,7 +545,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         for name in [
             "task_submit",
             "node_state_transition",
-            "task_edge_save",
             "artifact_save",
             "event_append",
             "lease_acquire",
@@ -697,11 +578,11 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertFalse(conflict["retriable"])
         self.assertEqual(
             contract["schema_hash"],
-            "maf_runtime_v1_schema_20260822_agent_atomic_projection",
+            "maf_runtime_v1_schema_20260823_agent_only",
         )
         self.assertEqual(
             contract["artifact_policy"]["expected_proto_hash"],
-            "maf_runtime_proto_v1_20260823_agent_startup_recovery",
+            "maf_runtime_proto_v1_20260823_agent_only",
         )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:
@@ -978,75 +859,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task(task.task_id)))
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
 
-    def test_runtime_store_enforce_routes_planner_replan_claims_to_sidecar(self) -> None:
-        sidecar = _RecordingRuntimeSidecarClient()
-        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
-        task = Task(
-            task_id="task-sidecar-replan",
-            conversation_id="conv-sidecar-replan",
-            root_message_id="msg-sidecar-replan",
-            status=TaskStatus.RUNNING,
-        )
-        first_digest = "a" * 64
-        second_digest = "b" * 64
-
-        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
-            asyncio.run(storage.save_task(task))
-            first = asyncio.run(
-                storage.claim_planner_replan(
-                    task.task_id,
-                    first_digest,
-                    now=datetime(2026, 8, 18, 10, 0, 0),
-                )
-            )
-            retry = asyncio.run(
-                storage.claim_planner_replan(
-                    task.task_id,
-                    first_digest,
-                    now=datetime(2026, 8, 18, 10, 1, 0),
-                )
-            )
-            second = asyncio.run(
-                storage.claim_planner_replan(
-                    task.task_id,
-                    second_digest,
-                    now=datetime(2026, 8, 18, 10, 2, 0),
-                )
-            )
-            applied = asyncio.run(
-                storage.mark_planner_replan_claim(
-                    task.task_id,
-                    first_digest,
-                    status="applied",
-                    now=datetime(2026, 8, 18, 10, 3, 0),
-                )
-            )
-            loaded = asyncio.run(storage.get_planner_replan_claim(task.task_id, first_digest))
-
-        self.assertEqual(first, retry)
-        self.assertEqual(first.planning_epoch, "r1")
-        self.assertEqual(second.planning_epoch, "r2")
-        self.assertEqual(applied.status, "applied")
-        self.assertEqual(loaded, applied)
-        self.assertEqual(
-            [call[0] for call in sidecar.calls[-5:]],
-            [
-                "planner_replan_claim",
-                "planner_replan_claim",
-                "planner_replan_claim",
-                "planner_replan_claim_mark",
-                "planner_replan_claim_get",
-            ],
-        )
-        self.assertIsNone(
-            asyncio.run(
-                SQLiteStorage(self.session_factory).get_planner_replan_claim(
-                    task.task_id,
-                    first_digest,
-                )
-            )
-        )
-
     def test_remote_terminal_outbox_transitions_authoritative_sidecar_node_in_enforce(self) -> None:
         now = datetime(2026, 8, 13, 12, 0, 0)
         sidecar = _RecordingRuntimeSidecarClient()
@@ -1184,11 +996,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                 "capability_id": node.capability_id,
                 "assigned_instance_id": None,
                 "status": str(node.status),
-                "criticality": str(node.criticality),
-                "dependency_type": str(node.dependency_type),
-                "retry_policy": {},
-                "timeout_policy": {},
-                "resource_class": None,
                 "input_refs": [],
                 "output_refs": [],
                 "started_at": None,
@@ -1404,9 +1211,8 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         self.assertTrue(all(event["rust_status"] == "ok" for event in audit_events))
 
-    def test_runtime_store_enforce_mode_rejects_python_legacy_graph_writes_without_sidecar(self) -> None:
+    def test_runtime_store_enforce_mode_rejects_python_artifact_write_without_sidecar(self) -> None:
         storage = SQLiteStorage(self.session_factory)
-        edge = TaskEdge(from_node_id="node-from", to_node_id="node-to")
         artifact = Artifact(
             artifact_id="artifact-enforce-store",
             task_id="task-enforce-store",
@@ -1420,20 +1226,13 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                 RuntimeError,
                 "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
             ):
-                asyncio.run(storage.save_task_edge("task-enforce-store", edge))
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
-            ):
                 asyncio.run(storage.save_artifact(artifact))
 
-        self.assertEqual(asyncio.run(storage.list_task_edges("task-enforce-store")), [])
         self.assertIsNone(asyncio.run(storage.get_artifact(artifact.artifact_id)))
 
-    def test_runtime_store_enforce_routes_graph_writes_to_configured_sidecar_without_python_sqlite_write(self) -> None:
+    def test_runtime_store_enforce_routes_artifact_writes_to_configured_sidecar(self) -> None:
         sidecar = _RecordingRuntimeSidecarClient()
         storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
-        edge = TaskEdge(from_node_id="node-from", to_node_id="node-to")
         artifact = Artifact(
             artifact_id="artifact-sidecar-store",
             task_id="task-sidecar-store",
@@ -1445,25 +1244,20 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
 
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
-            saved_edge = asyncio.run(storage.save_task_edge("task-sidecar-store", edge))
             saved_artifact = asyncio.run(storage.save_artifact(artifact))
-            listed_edges = asyncio.run(storage.list_task_edges("task-sidecar-store"))
             loaded_artifact = asyncio.run(storage.get_artifact(artifact.artifact_id))
             listed_artifacts = asyncio.run(storage.list_artifacts_for_task(artifact.task_id))
 
-        self.assertEqual(saved_edge, edge)
         self.assertEqual(saved_artifact, artifact)
-        self.assertEqual(listed_edges, [edge])
         self.assertEqual(loaded_artifact, artifact)
         self.assertEqual(listed_artifacts, [artifact])
         self.assertEqual(
             [call[0] for call in sidecar.calls],
-            ["task_edge_save", "artifact_save", "task_edge_list", "artifact_get", "artifact_list"],
+            ["artifact_save", "artifact_get", "artifact_list"],
         )
-        self.assertEqual(asyncio.run(SQLiteStorage(self.session_factory).list_task_edges("task-sidecar-store")), [])
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_artifact(artifact.artifact_id)))
 
-    def test_runtime_store_shadow_records_graph_sidecar_audit_without_leaking_artifact_ref(self) -> None:
+    def test_runtime_store_shadow_records_artifact_audit_without_leaking_ref(self) -> None:
         audit_events: list[dict[str, str]] = []
         sidecar = _RecordingRuntimeSidecarClient()
         storage = SQLiteStorage(
@@ -1471,7 +1265,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             runtime_sidecar_client=sidecar,
             runtime_sidecar_shadow_sink=audit_events.append,
         )
-        edge = TaskEdge(from_node_id="node-shadow-from", to_node_id="node-shadow-to")
         artifact = Artifact(
             artifact_id="artifact-shadow-store",
             task_id="task-shadow-graph",
@@ -1483,15 +1276,12 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
 
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
-            saved_edge = asyncio.run(storage.save_task_edge(artifact.task_id, edge))
             saved_artifact = asyncio.run(storage.save_artifact(artifact))
 
-        self.assertEqual(saved_edge, edge)
         self.assertEqual(saved_artifact, artifact)
-        self.assertEqual(asyncio.run(storage.list_task_edges(artifact.task_id)), [edge])
         self.assertEqual(asyncio.run(storage.get_artifact(artifact.artifact_id)), artifact)
-        self.assertEqual([call[0] for call in sidecar.calls], ["task_edge_save", "artifact_save"])
-        self.assertEqual([event["operation"] for event in audit_events], ["task_edge_save", "artifact_save"])
+        self.assertEqual([call[0] for call in sidecar.calls], ["artifact_save"])
+        self.assertEqual([event["operation"] for event in audit_events], ["artifact_save"])
         self.assertTrue(all(event["rust_status"] == "ok" for event in audit_events))
         self.assertNotIn("memory://artifact/do-not-log", str(audit_events))
 
@@ -1756,22 +1546,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         self.assertEqual(accepted["cursor"]["sequence"], 1)
 
-        edge_accepted = validate_runtime_sidecar_response(
-            "task_edge_save",
-            {
-                "operation": "task_edge_save",
-                "edge": {
-                    "task_id": "task-response",
-                    "from_node_id": "node-a",
-                    "to_node_id": "node-b",
-                    "edge_type": "data",
-                    "condition": "",
-                },
-                "error": None,
-            },
-        )
-        self.assertEqual(edge_accepted["edge"]["from_node_id"], "node-a")
-
         artifact_accepted = validate_runtime_sidecar_response(
             "artifact_save",
             {
@@ -1809,7 +1583,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         for invalid_response in [
             {"operation": "lease_acquire", "cursor": {"task_id": "task-response", "sequence": 1}},
             {"operation": "event_append", "cursor": {"task_id": "task-response", "sequence": 1}},
-            {"operation": "task_edge_save", "edge": {"task_id": "task-response"}},
             {"operation": "artifact_save", "artifact": {"artifact_id": "artifact-response"}},
             {
                 "operation": "event_append",
@@ -1903,7 +1676,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
 
         self.assertEqual(resource_limit("task_submit_deadline_ms"), 3000)
         self.assertEqual(resource_limit("state_transition_deadline_ms"), 2000)
-        self.assertEqual(resource_limit("task_edge_deadline_ms"), 2000)
         self.assertEqual(resource_limit("artifact_metadata_deadline_ms"), 2000)
         self.assertEqual(resource_limit("event_append_deadline_ms"), 2000)
         self.assertEqual(resource_limit("lease_deadline_ms"), 1000)
@@ -2029,7 +1801,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             [
                 "task_submit",
                 "node_state_transition",
-                "task_edge_save",
                 "artifact_save",
                 "event_append",
                 "lease_acquire",
@@ -2121,7 +1892,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                 "event_log",
                 "lease",
                 "cursor",
-                "task_edge",
                 "artifact_metadata",
                 "bundle_pin",
             ],
@@ -2266,7 +2036,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             [
                 "python_storage_task_write",
                 "python_storage_node_write",
-                "python_storage_task_edge_write",
                 "python_storage_artifact_write",
                 "python_event_append_write",
                 "python_bundle_pin_write",

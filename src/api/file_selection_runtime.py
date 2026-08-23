@@ -21,7 +21,7 @@ from src.api.file_selection import (
     render_file_selection_question,
 )
 from src.orchestration.visible_message_history import persist_interrupt_question_message
-from src.core.enums import EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, TaskStatus
+from src.core.enums import EventVisibility, InterruptStatus, MessageRole, NodeStatus, TaskStatus
 from src.core.models import Interrupt, InterruptAnswer, Message, Task, TaskNode
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 
@@ -479,12 +479,11 @@ class ConversationFileSelectionRuntimeMixin:
             task_id=task.task_id,
             capability_id=task.requested_capability_id or "agent.file_selection",
             status=NodeStatus.RUNNING,
-            criticality=NodeCriticality.REQUIRED,
             started_at=now,
         )
         await self.storage.save_task_node(node)
         await self.storage.save_task(
-            replace(task, status=TaskStatus.RUNNING, root_node_id=task.root_node_id or node_id, updated_at=now)
+            replace(task, status=TaskStatus.RUNNING, updated_at=now)
         )
         required_fields = {
             "_file_selection": {

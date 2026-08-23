@@ -9,7 +9,7 @@ from typing import Any, Mapping
 from .contracts import StateCommand
 
 CONVERSATION_COMMANDS = frozenset({"conversation.create", "conversation.update", "message.append", "pending_skill_context.save"})
-TASK_COMMANDS = frozenset({"task.create", "task.update", "task_node.save", "task_edge.save", "event.append", "artifact.save", "interrupt.save", "cancel.request", "mailbox.deliver"})
+TASK_COMMANDS = frozenset({"task.create", "task.update", "task_node.save", "event.append", "artifact.save", "interrupt.save", "cancel.request", "mailbox.deliver"})
 AUTH_COMMANDS = frozenset({"auth.login", "auth.rotate_token", "auth.logout"})
 MIGRATION_COMMANDS = frozenset({"migration.cutover", "migration.rollback"})
 

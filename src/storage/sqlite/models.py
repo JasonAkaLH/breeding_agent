@@ -1850,7 +1850,6 @@ class TaskRow(SQLiteBase):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     routing_mode: Mapped[str] = mapped_column(Text, nullable=False)
     requested_capability_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    root_node_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
@@ -1950,39 +1949,6 @@ class AgentFinalReceiptRow(SQLiteBase):
     created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
 
 
-class PlannerReplanClaimRow(SQLiteBase):
-    __tablename__ = "planner_replan_claim"
-    __table_args__ = (
-        UniqueConstraint(
-            "task_id",
-            "planning_revision",
-            name="uq_planner_replan_claim_task_revision",
-        ),
-        CheckConstraint(
-            "planning_revision >= 1",
-            name="planner_replan_claim_positive_revision",
-        ),
-        CheckConstraint(
-            "status IN ('claimed', 'applied', 'rejected')",
-            name="planner_replan_claim_status",
-        ),
-        Index(
-            "idx_planner_replan_claim_task_status",
-            "task_id",
-            "status",
-            "updated_at",
-        ),
-    )
-
-    task_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    decision_digest: Mapped[str] = mapped_column(Text, primary_key=True)
-    planning_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    planning_epoch: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-
-
 class TaskNodeRow(SQLiteBase):
     __tablename__ = "task_node"
     __table_args__ = (
@@ -1996,30 +1962,10 @@ class TaskNodeRow(SQLiteBase):
     capability_id: Mapped[str] = mapped_column(Text, nullable=False)
     assigned_instance_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
-    criticality: Mapped[str] = mapped_column(Text, nullable=False)
-    dependency_type: Mapped[str] = mapped_column(Text, nullable=False)
-    retry_policy: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
-    timeout_policy: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
-    resource_class: Mapped[str | None] = mapped_column(Text, nullable=True)
     input_refs: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
     output_refs: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
     started_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     finished_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
-
-
-class TaskEdgeRow(SQLiteBase):
-    __tablename__ = "task_edge"
-    __table_args__ = (
-        UniqueConstraint("task_id", "from_node_id", "to_node_id"),
-        Index("idx_task_edge_to_node", "task_id", "to_node_id"),
-    )
-
-    edge_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    task_id: Mapped[str] = mapped_column(Text, nullable=False)
-    from_node_id: Mapped[str] = mapped_column(Text, nullable=False)
-    to_node_id: Mapped[str] = mapped_column(Text, nullable=False)
-    edge_type: Mapped[str] = mapped_column(Text, nullable=False)
-    condition: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ArtifactRow(SQLiteBase):

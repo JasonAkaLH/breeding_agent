@@ -100,7 +100,6 @@ from src.integrations.mcp.resume_envelope import (
     MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2,
     MCPDispatchResumeEnvelopeError,
     build_mcp_dispatch_resume_envelope_v2,
-    project_mcp_dependency_artifacts,
 )
 from src.integrations.mcp.selector_context import (
     MCPSelectorContextAuthorityError,
@@ -1589,9 +1588,7 @@ class UserMCPDispatchCoordinator:
         envelope = build_mcp_dispatch_resume_envelope_v2(
             task=task,
             node=node,
-            edges=(),
             attachments=attachments,
-            dependency_nodes=(),
             server_id=server_id,
         )
         if (
@@ -1684,14 +1681,6 @@ class UserMCPDispatchCoordinator:
         envelope: Mapping[str, Any] | None = None,
     ) -> None:
         value = dict(envelope or {})
-        dependencies = value.get("dependency_output_refs")
-        dependency_items = dependencies if isinstance(dependencies, list) else []
-        artifact_ref_count = sum(
-            len(item.get("artifact_ids", ()))
-            for item in dependency_items
-            if isinstance(item, Mapping)
-            and isinstance(item.get("artifact_ids"), list)
-        )
         payload = {
             "schema": MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2,
             "canonical_size_bytes": (
@@ -1700,8 +1689,8 @@ class UserMCPDispatchCoordinator:
             "attachment_count": len(value.get("input_attachment_ids", ()))
             if isinstance(value.get("input_attachment_ids"), list)
             else 0,
-            "dependency_count": len(dependency_items),
-            "artifact_ref_count": artifact_ref_count,
+            "dependency_count": 0,
+            "artifact_ref_count": 0,
             "result": result,
             "reason_code": reason_code,
         }

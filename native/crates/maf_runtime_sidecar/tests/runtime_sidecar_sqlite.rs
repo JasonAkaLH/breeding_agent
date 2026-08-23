@@ -1,6 +1,6 @@
 use maf_runtime_sidecar::{
     AgentItemRecord, AgentRunRecord, ArtifactRecord, CommitAgentStateRequest, Idempotency,
-    RuntimeSidecarSqliteAdapter, TaskEdgeRecord, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
+    RuntimeSidecarSqliteAdapter, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
 };
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -63,11 +63,6 @@ fn agent_node() -> TaskNodeRecord {
         capability_id: "agent.final_output".to_owned(),
         assigned_instance_id: None,
         status: "completed".to_owned(),
-        criticality: "required".to_owned(),
-        dependency_type: "hard".to_owned(),
-        retry_policy_json: b"{}".to_vec(),
-        timeout_policy_json: b"{}".to_vec(),
-        resource_class: None,
         input_refs: vec!["item-agent-1".to_owned()],
         output_refs: vec!["agent-artifact".to_owned()],
         started_at: Some("1".to_owned()),
@@ -96,7 +91,6 @@ fn agent_task() -> TaskRecord {
         status: "completed".to_owned(),
         routing_mode: "auto".to_owned(),
         requested_capability_id: None,
-        root_node_id: Some("agent-node".to_owned()),
         summary: None,
         cancel_requested_at: None,
         created_at: Some("1".to_owned()),
@@ -258,7 +252,6 @@ fn authority_task(status: &str) -> TaskRecord {
         status: status.to_owned(),
         routing_mode: "auto".to_owned(),
         requested_capability_id: None,
-        root_node_id: None,
         summary: None,
         cancel_requested_at: None,
         created_at: Some("created".to_owned()),
@@ -283,11 +276,6 @@ fn authority_node(node_id: &str, status: &str) -> TaskNodeRecord {
         capability_id: "main_agent.respond".to_owned(),
         assigned_instance_id: Some("instance".to_owned()),
         status: status.to_owned(),
-        criticality: "required".to_owned(),
-        dependency_type: "hard".to_owned(),
-        retry_policy_json: b"{\"max_attempts\":2}".to_vec(),
-        timeout_policy_json: b"{\"seconds\":30}".to_vec(),
-        resource_class: Some("default".to_owned()),
         input_refs: vec!["input".to_owned()],
         output_refs: vec!["output".to_owned()],
         started_at: Some("2026-08-13T10:00:00Z".to_owned()),
@@ -333,45 +321,6 @@ fn sqlite_adapter_persists_complete_task_record_and_does_not_invent_legacy_rows(
         .expect("found");
     assert_eq!(stored.assignment.unwrap().config_version, "v1");
     assert_eq!(reopened.get_task("missing").expect("missing read"), None);
-    let _ = std::fs::remove_file(db_path);
-}
-
-#[test]
-fn sqlite_adapter_persists_planner_replan_claims_across_reopen() {
-    let db_path = temp_db_path("planner-replan-claim");
-    {
-        let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter");
-        adapter
-            .submit_task_record(authority_task("running"), "task-replan", None)
-            .expect("store task");
-        let first = adapter
-            .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:00:00Z")
-            .expect("claim first replan");
-        let retry = adapter
-            .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:01:00Z")
-            .expect("retry first replan");
-        let second = adapter
-            .claim_planner_replan("task-authority", &"b".repeat(64), "2026-08-18T10:02:00Z")
-            .expect("claim second replan");
-        assert_eq!(first, retry);
-        assert_eq!(first.planning_epoch, "r1");
-        assert_eq!(second.planning_epoch, "r2");
-        adapter
-            .mark_planner_replan_claim(
-                "task-authority",
-                &"a".repeat(64),
-                "applied",
-                "2026-08-18T10:03:00Z",
-            )
-            .expect("mark claim applied");
-    }
-    let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen sqlite adapter");
-    let claim = reopened
-        .get_planner_replan_claim("task-authority", &"a".repeat(64))
-        .expect("read claim")
-        .expect("claim exists");
-    assert_eq!(claim.status, "applied");
-    assert_eq!(claim.planning_revision, 1);
     let _ = std::fs::remove_file(db_path);
 }
 
@@ -725,39 +674,11 @@ fn sqlite_adapter_persists_task_node_cancellation_and_bundle_across_reopen() {
 }
 
 #[test]
-fn sqlite_adapter_persists_task_edges_and_artifacts_across_reopen() {
-    let db_path = temp_db_path("edge-artifact");
+fn sqlite_adapter_persists_artifacts_across_reopen() {
+    let db_path = temp_db_path("artifact");
 
     {
         let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter");
-        let edge = adapter
-            .save_task_edge(
-                TaskEdgeRecord {
-                    task_id: "task".to_owned(),
-                    from_node_id: "node-a".to_owned(),
-                    to_node_id: "node-b".to_owned(),
-                    edge_type: "data".to_owned(),
-                    condition: "ok".to_owned(),
-                },
-                "edge-1",
-            )
-            .expect("save task edge");
-        assert_eq!(edge.from_node_id, "node-a");
-
-        let duplicate_edge = adapter
-            .save_task_edge(
-                TaskEdgeRecord {
-                    task_id: "task".to_owned(),
-                    from_node_id: "changed".to_owned(),
-                    to_node_id: "node-b".to_owned(),
-                    edge_type: "control".to_owned(),
-                    condition: "changed".to_owned(),
-                },
-                "edge-1",
-            )
-            .expect("idempotent task edge");
-        assert_eq!(duplicate_edge, edge);
-
         let artifact = adapter
             .save_artifact(
                 ArtifactRecord {
@@ -794,10 +715,6 @@ fn sqlite_adapter_persists_task_edges_and_artifacts_across_reopen() {
     }
 
     let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen sqlite adapter");
-    let edges = reopened.list_task_edges("task").expect("list task edges");
-    assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].to_node_id, "node-b");
-
     let artifact = reopened
         .get_artifact("artifact")
         .expect("get artifact")

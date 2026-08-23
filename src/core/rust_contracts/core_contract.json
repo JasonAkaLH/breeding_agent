@@ -122,30 +122,6 @@
         "value": "deleting_failed"
       }
     ],
-    "DependencyType": [
-      {
-        "name": "HARD",
-        "value": "hard"
-      },
-      {
-        "name": "SOFT",
-        "value": "soft"
-      }
-    ],
-    "EdgeType": [
-      {
-        "name": "DATA",
-        "value": "data"
-      },
-      {
-        "name": "CONTROL",
-        "value": "control"
-      },
-      {
-        "name": "FALLBACK",
-        "value": "fallback"
-      }
-    ],
     "EventVisibility": [
       {
         "name": "FRONTEND",
@@ -230,20 +206,6 @@
       {
         "name": "SYSTEM",
         "value": "system"
-      }
-    ],
-    "NodeCriticality": [
-      {
-        "name": "REQUIRED",
-        "value": "required"
-      },
-      {
-        "name": "OPTIONAL",
-        "value": "optional"
-      },
-      {
-        "name": "FALLBACK",
-        "value": "fallback"
       }
     ],
     "NodeStatus": [
@@ -592,7 +554,6 @@
       "status",
       "routing_mode",
       "requested_capability_id",
-      "root_node_id",
       "summary",
       "cancel_requested_at",
       "created_at",
@@ -603,23 +564,12 @@
       "mcp_route_reason_code",
       "mcp_rollout_mode"
     ],
-    "TaskEdge": [
-      "from_node_id",
-      "to_node_id",
-      "edge_type",
-      "condition"
-    ],
     "TaskNode": [
       "node_id",
       "task_id",
       "capability_id",
       "assigned_instance_id",
       "status",
-      "criticality",
-      "dependency_type",
-      "retry_policy",
-      "timeout_policy",
-      "resource_class",
       "input_refs",
       "output_refs",
       "started_at",

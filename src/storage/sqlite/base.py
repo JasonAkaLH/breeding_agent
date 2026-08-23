@@ -69,7 +69,3 @@ class DateTimeText(TypeDecorator):
         if isinstance(value, datetime):
             return value
         return datetime.fromisoformat(value)
-
-
-def build_task_edge_id(task_id: str, from_node_id: str, to_node_id: str) -> str:
-    return f"{task_id}:{from_node_id}->{to_node_id}"

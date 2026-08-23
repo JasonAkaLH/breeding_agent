@@ -6,14 +6,11 @@ from src.core.enums import (
     AckPolicy,
     ArtifactType,
     ConversationStatus,
-    DependencyType,
-    EdgeType,
     EventVisibility,
     InterruptStatus,
     MailboxChannel,
     MailboxDeliveryStatus,
     MessageRole,
-    NodeCriticality,
     NodeStatus,
     RoutingMode,
     TaskStatus,
@@ -59,15 +56,6 @@ class CoreEnumDefinitionTest(unittest.TestCase):
                 "orphaned",
             ],
         )
-
-    def test_node_criticality_values(self) -> None:
-        self.assert_str_enum_values(NodeCriticality, ["required", "optional", "fallback"])
-
-    def test_dependency_type_values(self) -> None:
-        self.assert_str_enum_values(DependencyType, ["hard", "soft"])
-
-    def test_edge_type_values(self) -> None:
-        self.assert_str_enum_values(EdgeType, ["data", "control", "fallback"])
 
     def test_artifact_type_values(self) -> None:
         self.assert_str_enum_values(ArtifactType, ["text", "json", "file", "dataset", "summary"])

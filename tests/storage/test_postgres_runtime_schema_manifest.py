@@ -87,27 +87,23 @@ class PostgresRuntimeSchemaManifestTest(unittest.TestCase):
         self.assertIn("idx_task_input_attachment_conversation_task", index_ddl)
         self.assertIn("idx_task_input_attachment_upload", index_ddl)
 
-    def test_planner_replan_claim_is_bootstrapped_with_closed_constraints(self) -> None:
+    def test_dag_only_schema_is_absent_from_fresh_manifest(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
-        self.assertIn("planner_replan_claim", manifest.runtime_table_names)
-        self.assertEqual(
-            manifest.table_columns["planner_replan_claim"],
+        self.assertNotIn("planner_replan_claim", manifest.runtime_table_names)
+        self.assertNotIn("task_edge", manifest.runtime_table_names)
+        self.assertNotIn("root_node_id", manifest.table_columns["task"])
+        self.assertTrue(
             {
-                "task_id": "text",
-                "decision_digest": "text",
-                "planning_revision": "bigint",
-                "planning_epoch": "text",
-                "status": "text",
-                "created_at": "timestamp with time zone",
-                "updated_at": "timestamp with time zone",
-            },
+                "criticality",
+                "dependency_type",
+                "retry_policy",
+                "timeout_policy",
+                "resource_class",
+            }.isdisjoint(manifest.table_columns["task_node"])
         )
-        constraints = manifest.check_constraints["planner_replan_claim"]
-        self.assertIn("planning_revision >= 1", constraints["ck_planner_replan_claim_planner_replan_claim_positive_revision"])
-        self.assertIn("'claimed'", constraints["ck_planner_replan_claim_planner_replan_claim_status"])
         ddl = build_runtime_table_schema_ddl()
-        self.assertIn("CREATE TABLE IF NOT EXISTS planner_replan_claim", ddl)
-        self.assertIn("uq_planner_replan_claim_task_revision", ddl)
+        self.assertNotIn("planner_replan_claim", ddl)
+        self.assertNotIn("task_edge", ddl)
 
     def test_manifest_checksum_changes_when_table_spec_changes(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()

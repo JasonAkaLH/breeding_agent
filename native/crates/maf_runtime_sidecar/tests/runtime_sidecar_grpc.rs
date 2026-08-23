@@ -25,7 +25,6 @@ fn pb_task(status: &str) -> runtime_pb::TaskRecord {
         status: status.to_owned(),
         routing_mode: "auto".to_owned(),
         requested_capability_id: None,
-        root_node_id: None,
         summary: None,
         cancel_requested_at: None,
         created_at: Some("created".to_owned()),
@@ -250,27 +249,6 @@ async fn sqlite_backed_tonic_service_rejects_writes_after_shutdown_drain() {
     assert_runtime_unavailable(submit.error);
     assert!(submit.task_id.is_empty());
 
-    let edge = service
-        .save_task_edge(Request::new(runtime_pb::SaveTaskEdgeRequest {
-            edge: Some(runtime_pb::TaskEdgeRecord {
-                task_id: "task".to_owned(),
-                from_node_id: "node-a".to_owned(),
-                to_node_id: "node-b".to_owned(),
-                edge_type: "data".to_owned(),
-                condition: "".to_owned(),
-            }),
-            idempotency: Some(runtime_pb::Idempotency {
-                key: "edge-after-drain".to_owned(),
-                owner: "python-runtime".to_owned(),
-                deadline_ms: 2_000,
-            }),
-        }))
-        .await
-        .expect("edge rejected in envelope")
-        .into_inner();
-    assert_runtime_unavailable(edge.error);
-    assert!(edge.edge.is_none());
-
     let artifact = service
         .save_artifact(Request::new(runtime_pb::SaveArtifactRequest {
             artifact: Some(runtime_pb::ArtifactRecord {
@@ -341,26 +319,6 @@ async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
             .into_inner();
         assert_eq!(append.cursor.expect("cursor").sequence, 1);
 
-        let edge = service
-            .save_task_edge(Request::new(runtime_pb::SaveTaskEdgeRequest {
-                edge: Some(runtime_pb::TaskEdgeRecord {
-                    task_id: "task".to_owned(),
-                    from_node_id: "node-a".to_owned(),
-                    to_node_id: "node-b".to_owned(),
-                    edge_type: "data".to_owned(),
-                    condition: "".to_owned(),
-                }),
-                idempotency: Some(runtime_pb::Idempotency {
-                    key: "edge-1".to_owned(),
-                    owner: "python-runtime".to_owned(),
-                    deadline_ms: 2_000,
-                }),
-            }))
-            .await
-            .expect("save edge")
-            .into_inner();
-        assert_eq!(edge.edge.expect("edge").from_node_id, "node-a");
-
         let artifact = service
             .save_artifact(Request::new(runtime_pb::SaveArtifactRequest {
                 artifact: Some(runtime_pb::ArtifactRecord {
@@ -401,15 +359,6 @@ async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
         .into_inner();
     assert_eq!(replay.cursors.len(), 1);
     assert_eq!(replay.cursors[0].sequence, 1);
-    let edges = reopened
-        .list_task_edges(Request::new(runtime_pb::ListTaskEdgesRequest {
-            task_id: "task".to_owned(),
-        }))
-        .await
-        .expect("list edges")
-        .into_inner();
-    assert_eq!(edges.edges.len(), 1);
-    assert_eq!(edges.edges[0].to_node_id, "node-b");
     let artifact = reopened
         .get_artifact(Request::new(runtime_pb::GetArtifactRequest {
             artifact_id: "artifact".to_owned(),

@@ -207,7 +207,7 @@ class AgentLoopCutoverE2ETest(E2EAPITestCase):
             1,
         )
 
-    async def test_graph_projection_never_reads_task_edges(self) -> None:
+    async def test_graph_projection_returns_compatibility_empty_edges(self) -> None:
         response = await self.submit_message(
             conversation_id="conv-agent-cutover-graph",
             content="直接回答。",
@@ -216,10 +216,6 @@ class AgentLoopCutoverE2ETest(E2EAPITestCase):
         task_id = response.json()["task_id"]
         await self.wait_for_terminal_task(task_id)
 
-        async def fail_task_edge_read(_task_id: str):
-            raise AssertionError("Agent graph projection must not read TaskEdge")
-
-        self.runtime.storage.list_task_edges_for_task = fail_task_edge_read
         graph = await self.client.get(f"/api/v1/tasks/{task_id}/graph")
 
         self.assertEqual(graph.status_code, 200, graph.text)

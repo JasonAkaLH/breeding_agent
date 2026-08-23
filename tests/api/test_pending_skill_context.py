@@ -240,13 +240,6 @@ entrypoints: {run: {path: scripts/fail.py}}
         task_id = first.json()["task_id"]
         interrupt = await self._wait_for_open_interrupt(task_id)
         interrupted_node_id = str(interrupt["node_id"])
-        original_task = await self.runtime.storage.get_task(task_id)
-        self.assertIsNotNone(original_task)
-        assert original_task is not None
-        original_root_node_id = original_task.root_node_id
-        edges_before_answer = await self.runtime.storage.list_task_edges(task_id)
-        self.assertEqual(edges_before_answer, [])
-
         answer = await self.answer_interrupt_with_chat(
             conversation_id="conv-pending",
             interrupt_id=interrupt["interrupt_id"],
@@ -264,8 +257,7 @@ entrypoints: {run: {path: scripts/fail.py}}
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["active_node_count"], 0)
-        self.assertNotEqual(terminal["root_node_id"], original_root_node_id)
-        self.assertTrue(str(terminal["root_node_id"]).endswith(":final"))
+        self.assertIsNone(terminal["root_node_id"])
 
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         skill_nodes = [node for node in nodes if node.capability_id == "skill.need_variety"]
@@ -275,8 +267,6 @@ entrypoints: {run: {path: scripts/fail.py}}
             any(node.node_id == f"{task_id}:skill_execute" for node in nodes if node.node_id != interrupted_node_id),
             "interrupt resume must reuse the interrupted dynamic Skill node instead of creating a second direct Skill node",
         )
-        self.assertEqual(await self.runtime.storage.list_task_edges(task_id), [])
-
         task = await self.runtime.storage.get_task(task_id)
         self.assertEqual(task.routing_mode, RoutingMode.FORCE_CAPABILITY)
         self.assertEqual(task.requested_capability_id, "skill.need_variety")

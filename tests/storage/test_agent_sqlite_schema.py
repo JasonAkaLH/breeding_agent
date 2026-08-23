@@ -10,7 +10,7 @@ from src.storage.sqlite import bootstrap_sqlite_database, create_sqlite_engine
 
 
 class AgentSQLiteSchemaTest(unittest.TestCase):
-    def test_agent_tables_are_additive_and_old_task_tables_remain(self) -> None:
+    def test_agent_tables_and_agent_only_task_tables_are_created(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             engine = create_sqlite_engine(Path(directory) / "schema.sqlite3")
             try:
@@ -19,4 +19,6 @@ class AgentSQLiteSchemaTest(unittest.TestCase):
             finally:
                 engine.dispose()
         self.assertTrue({"agent_run", "agent_item", "agent_final_receipt"}.issubset(tables))
-        self.assertTrue({"task", "task_node", "task_edge"}.issubset(tables))
+        self.assertTrue({"task", "task_node"}.issubset(tables))
+        self.assertNotIn("task_edge", tables)
+        self.assertNotIn("planner_replan_claim", tables)

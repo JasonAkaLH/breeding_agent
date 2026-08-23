@@ -207,7 +207,6 @@ fn agent_state_commit_is_atomic_cas_idempotent_and_ordered() {
     let mut agent_task = task_record("completed");
     agent_task.task_id = "task-agent".to_owned();
     agent_task.conversation_id = "conv-agent".to_owned();
-    agent_task.root_node_id = Some("agent-node".to_owned());
     let mut final_run = agent_run(1);
     final_run.status = "completed".to_owned();
     final_run.terminal_at_ms = Some(2);
@@ -266,11 +265,6 @@ fn task_node(status: &str) -> TaskNodeRecord {
         capability_id: "main_agent.respond".to_owned(),
         assigned_instance_id: None,
         status: status.to_owned(),
-        criticality: "required".to_owned(),
-        dependency_type: "hard".to_owned(),
-        retry_policy_json: b"{}".to_vec(),
-        timeout_policy_json: b"{}".to_vec(),
-        resource_class: None,
         input_refs: Vec::new(),
         output_refs: Vec::new(),
         started_at: None,
@@ -286,7 +280,6 @@ fn task_record(status: &str) -> TaskRecord {
         status: status.to_owned(),
         routing_mode: "auto".to_owned(),
         requested_capability_id: None,
-        root_node_id: None,
         summary: None,
         cancel_requested_at: None,
         created_at: Some("2026-08-12T00:00:00Z".to_owned()),
@@ -338,54 +331,6 @@ fn task_record_is_authoritative_idempotent_and_assignment_is_write_once() {
         assignment_conflict.code,
         "runtime_store_idempotency_conflict"
     );
-}
-
-#[test]
-fn planner_replan_claim_is_task_scoped_monotonic_and_idempotent() {
-    let mut kernel = RuntimeSidecarKernel::new();
-    kernel
-        .submit_task_record(task_record("running"), "task-replan", None)
-        .expect("store task before claiming a replan epoch");
-    let first = kernel
-        .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:00:00Z")
-        .expect("claim first replan");
-    let retry = kernel
-        .claim_planner_replan("task-authority", &"a".repeat(64), "2026-08-18T10:01:00Z")
-        .expect("retry same replan claim");
-    let second = kernel
-        .claim_planner_replan("task-authority", &"b".repeat(64), "2026-08-18T10:02:00Z")
-        .expect("claim second replan");
-
-    assert_eq!(first, retry);
-    assert_eq!(first.planning_revision, 1);
-    assert_eq!(first.planning_epoch, "r1");
-    assert_eq!(second.planning_revision, 2);
-    assert_eq!(second.planning_epoch, "r2");
-
-    let applied = kernel
-        .mark_planner_replan_claim(
-            "task-authority",
-            &"a".repeat(64),
-            "applied",
-            "2026-08-18T10:03:00Z",
-        )
-        .expect("mark first claim applied");
-    assert_eq!(applied.status, "applied");
-    assert_eq!(
-        kernel
-            .get_planner_replan_claim("task-authority", &"a".repeat(64))
-            .expect("claim remains readable"),
-        applied
-    );
-    let terminal_error = kernel
-        .mark_planner_replan_claim(
-            "task-authority",
-            &"a".repeat(64),
-            "rejected",
-            "2026-08-18T10:04:00Z",
-        )
-        .expect_err("terminal claim cannot change outcome");
-    assert_eq!(terminal_error.code, "runtime_store_write_failed");
 }
 
 #[test]

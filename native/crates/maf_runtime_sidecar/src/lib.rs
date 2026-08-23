@@ -7,10 +7,10 @@
 use maf_event_log::EventLog;
 use maf_runtime_store::{
     ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_AGENT_STATE,
-    FEATURE_ARTIFACT_METADATA, FEATURE_EVENT_LOG, FEATURE_PLANNER_REPLAN_CLAIM,
-    FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER, FEATURE_TASK_GRAPH, FEATURE_TASK_READ,
-    LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError,
-    RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
+    FEATURE_ARTIFACT_METADATA, FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER,
+    FEATURE_TASK_READ, LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION,
+    RuntimeSidecarError, RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease,
+    runtime_sidecar_contract_artifact,
 };
 use maf_task_dispatcher::{
     TaskDispatcher, TaskSubmitRequest as DispatcherTaskSubmitRequest, TaskSubmitResult,
@@ -174,7 +174,6 @@ pub struct TaskRecord {
     pub status: String,
     pub routing_mode: String,
     pub requested_capability_id: Option<String>,
-    pub root_node_id: Option<String>,
     pub summary: Option<String>,
     pub cancel_requested_at: Option<String>,
     pub created_at: Option<String>,
@@ -198,24 +197,6 @@ pub struct ListTasksForConversationResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetActiveTaskForConversationResponse {
     pub task: Option<TaskRecord>,
-    pub found: bool,
-    pub error: Option<TypedErrorEnvelope>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannerReplanClaimRecord {
-    pub task_id: String,
-    pub decision_digest: String,
-    pub planning_revision: u64,
-    pub planning_epoch: String,
-    pub status: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannerReplanClaimResponse {
-    pub claim: Option<PlannerReplanClaimRecord>,
     pub found: bool,
     pub error: Option<TypedErrorEnvelope>,
 }
@@ -322,11 +303,6 @@ pub struct TaskNodeRecord {
     pub capability_id: String,
     pub assigned_instance_id: Option<String>,
     pub status: String,
-    pub criticality: String,
-    pub dependency_type: String,
-    pub retry_policy_json: Vec<u8>,
-    pub timeout_policy_json: Vec<u8>,
-    pub resource_class: Option<String>,
     pub input_refs: Vec<String>,
     pub output_refs: Vec<String>,
     pub started_at: Option<String>,
@@ -343,38 +319,6 @@ pub struct GetTaskNodeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListTaskNodesForTaskResponse {
     pub nodes: Vec<TaskNodeRecord>,
-    pub error: Option<TypedErrorEnvelope>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskEdgeRecord {
-    pub task_id: String,
-    pub from_node_id: String,
-    pub to_node_id: String,
-    pub edge_type: String,
-    pub condition: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaveTaskEdgeRequest {
-    pub edge: TaskEdgeRecord,
-    pub idempotency: Option<Idempotency>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskEdgeResponse {
-    pub edge: Option<TaskEdgeRecord>,
-    pub error: Option<TypedErrorEnvelope>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListTaskEdgesRequest {
-    pub task_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListTaskEdgesResponse {
-    pub edges: Vec<TaskEdgeRecord>,
     pub error: Option<TypedErrorEnvelope>,
 }
 
@@ -787,7 +731,6 @@ pub struct RuntimeSidecarKernel {
     leases: LeaseRegistry,
     node_statuses: BTreeMap<(String, String), String>,
     task_nodes: BTreeMap<String, TaskNodeRecord>,
-    task_edges: BTreeMap<(String, String, String), TaskEdgeRecord>,
     artifacts: BTreeMap<String, ArtifactRecord>,
     cancellation_tokens: BTreeMap<String, CancellationToken>,
     bundle_pins: BTreeMap<(String, String), BundlePin>,
@@ -796,7 +739,6 @@ pub struct RuntimeSidecarKernel {
     task_submit_idempotency: BTreeMap<String, TaskSubmitResult>,
     task_record_idempotency: BTreeMap<String, TaskRecord>,
     tasks: BTreeMap<String, TaskRecord>,
-    planner_replan_claims: BTreeMap<(String, String), PlannerReplanClaimRecord>,
     agent_runs: BTreeMap<String, AgentRunRecord>,
     agent_task_runs: BTreeMap<String, String>,
     agent_items: BTreeMap<String, AgentItemRecord>,
@@ -804,7 +746,6 @@ pub struct RuntimeSidecarKernel {
     agent_state_idempotency: BTreeMap<String, AgentStateReceipt>,
     dispatched_task_ids: BTreeSet<String>,
     node_transition_idempotency: BTreeMap<String, NodeTransitionReceipt>,
-    task_edge_idempotency: BTreeMap<String, TaskEdgeRecord>,
     artifact_idempotency: BTreeMap<String, ArtifactRecord>,
     cancellation_idempotency: BTreeMap<String, bool>,
     bundle_revision_idempotency: BTreeMap<String, BundleRevisionResult>,
@@ -827,7 +768,6 @@ impl RuntimeSidecarKernel {
             leases: LeaseRegistry::new(),
             node_statuses: BTreeMap::new(),
             task_nodes: BTreeMap::new(),
-            task_edges: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             cancellation_tokens: BTreeMap::new(),
             bundle_pins: BTreeMap::new(),
@@ -836,7 +776,6 @@ impl RuntimeSidecarKernel {
             task_submit_idempotency: BTreeMap::new(),
             task_record_idempotency: BTreeMap::new(),
             tasks: BTreeMap::new(),
-            planner_replan_claims: BTreeMap::new(),
             agent_runs: BTreeMap::new(),
             agent_task_runs: BTreeMap::new(),
             agent_items: BTreeMap::new(),
@@ -844,7 +783,6 @@ impl RuntimeSidecarKernel {
             agent_state_idempotency: BTreeMap::new(),
             dispatched_task_ids: BTreeSet::new(),
             node_transition_idempotency: BTreeMap::new(),
-            task_edge_idempotency: BTreeMap::new(),
             artifact_idempotency: BTreeMap::new(),
             cancellation_idempotency: BTreeMap::new(),
             bundle_revision_idempotency: BTreeMap::new(),
@@ -1286,82 +1224,6 @@ impl RuntimeSidecarKernel {
         .next()
     }
 
-    pub fn claim_planner_replan(
-        &mut self,
-        task_id: &str,
-        decision_digest: &str,
-        now: &str,
-    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
-        self.ensure_accepting_writes()?;
-        validate_planner_replan_identity(task_id, decision_digest, now)?;
-        let key = (task_id.to_owned(), decision_digest.to_owned());
-        if let Some(existing) = self.planner_replan_claims.get(&key) {
-            return Ok(existing.clone());
-        }
-        if !self.tasks.contains_key(task_id) {
-            return Err(write_failed("planner replan claim task was not found"));
-        }
-        let planning_revision = self
-            .planner_replan_claims
-            .values()
-            .filter(|claim| claim.task_id == task_id)
-            .map(|claim| claim.planning_revision)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let claim = PlannerReplanClaimRecord {
-            task_id: task_id.to_owned(),
-            decision_digest: decision_digest.to_owned(),
-            planning_revision,
-            planning_epoch: format!("r{planning_revision}"),
-            status: "claimed".to_owned(),
-            created_at: now.to_owned(),
-            updated_at: now.to_owned(),
-        };
-        self.planner_replan_claims.insert(key, claim.clone());
-        Ok(claim)
-    }
-
-    #[must_use]
-    pub fn get_planner_replan_claim(
-        &self,
-        task_id: &str,
-        decision_digest: &str,
-    ) -> Option<PlannerReplanClaimRecord> {
-        self.planner_replan_claims
-            .get(&(task_id.to_owned(), decision_digest.to_owned()))
-            .cloned()
-    }
-
-    pub fn mark_planner_replan_claim(
-        &mut self,
-        task_id: &str,
-        decision_digest: &str,
-        status: &str,
-        now: &str,
-    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
-        self.ensure_accepting_writes()?;
-        validate_planner_replan_identity(task_id, decision_digest, now)?;
-        if !matches!(status, "applied" | "rejected") {
-            return Err(write_failed("planner replan claim status is invalid"));
-        }
-        let claim = self
-            .planner_replan_claims
-            .get_mut(&(task_id.to_owned(), decision_digest.to_owned()))
-            .ok_or_else(|| write_failed("planner replan claim was not found"))?;
-        if claim.status == status {
-            return Ok(claim.clone());
-        }
-        if claim.status != "claimed" {
-            return Err(write_failed(
-                "terminal planner replan claim cannot be changed",
-            ));
-        }
-        claim.status = status.to_owned();
-        claim.updated_at = now.to_owned();
-        Ok(claim.clone())
-    }
-
     pub fn transition_node(
         &mut self,
         task_id: impl Into<String>,
@@ -1455,36 +1317,6 @@ impl RuntimeSidecarKernel {
         self.task_nodes
             .values()
             .filter(|node| node.task_id == task_id)
-            .cloned()
-            .collect()
-    }
-
-    pub fn save_task_edge(
-        &mut self,
-        edge: TaskEdgeRecord,
-        idempotency_key: impl Into<String>,
-    ) -> Result<TaskEdgeRecord, RuntimeSidecarError> {
-        self.ensure_accepting_writes()?;
-        let idempotency_key = require_idempotency_key(idempotency_key)?;
-        if let Some(result) = self.task_edge_idempotency.get(&idempotency_key) {
-            return Ok(result.clone());
-        }
-        let key = (
-            edge.task_id.clone(),
-            edge.from_node_id.clone(),
-            edge.to_node_id.clone(),
-        );
-        self.task_edges.insert(key, edge.clone());
-        self.task_edge_idempotency
-            .insert(idempotency_key, edge.clone());
-        Ok(edge)
-    }
-
-    #[must_use]
-    pub fn list_task_edges(&self, task_id: &str) -> Vec<TaskEdgeRecord> {
-        self.task_edges
-            .values()
-            .filter(|edge| edge.task_id == task_id)
             .cloned()
             .collect()
     }
@@ -1862,69 +1694,6 @@ impl RuntimeSidecarService {
         }
     }
 
-    pub fn claim_planner_replan(
-        &mut self,
-        task_id: &str,
-        decision_digest: &str,
-        now: &str,
-    ) -> PlannerReplanClaimResponse {
-        match self
-            .kernel
-            .claim_planner_replan(task_id, decision_digest, now)
-        {
-            Ok(claim) => PlannerReplanClaimResponse {
-                claim: Some(claim),
-                found: true,
-                error: None,
-            },
-            Err(error) => PlannerReplanClaimResponse {
-                claim: None,
-                found: false,
-                error: Some(error.into()),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn get_planner_replan_claim(
-        &self,
-        task_id: &str,
-        decision_digest: &str,
-    ) -> PlannerReplanClaimResponse {
-        let claim = self
-            .kernel
-            .get_planner_replan_claim(task_id, decision_digest);
-        PlannerReplanClaimResponse {
-            found: claim.is_some(),
-            claim,
-            error: None,
-        }
-    }
-
-    pub fn mark_planner_replan_claim(
-        &mut self,
-        task_id: &str,
-        decision_digest: &str,
-        status: &str,
-        now: &str,
-    ) -> PlannerReplanClaimResponse {
-        match self
-            .kernel
-            .mark_planner_replan_claim(task_id, decision_digest, status, now)
-        {
-            Ok(claim) => PlannerReplanClaimResponse {
-                claim: Some(claim),
-                found: true,
-                error: None,
-            },
-            Err(error) => PlannerReplanClaimResponse {
-                claim: None,
-                found: false,
-                error: Some(error.into()),
-            },
-        }
-    }
-
     pub fn commit_agent_state(&mut self, request: CommitAgentStateRequest) -> AgentStateResponse {
         match self.kernel.commit_agent_state(request) {
             Ok((run, items, duplicate)) => AgentStateResponse {
@@ -2001,29 +1770,6 @@ impl RuntimeSidecarService {
     pub fn list_task_nodes_for_task(&self, task_id: &str) -> ListTaskNodesForTaskResponse {
         ListTaskNodesForTaskResponse {
             nodes: self.kernel.list_task_nodes_for_task(task_id),
-            error: None,
-        }
-    }
-
-    pub fn save_task_edge(&mut self, request: SaveTaskEdgeRequest) -> TaskEdgeResponse {
-        match self
-            .kernel
-            .save_task_edge(request.edge, idempotency_key(request.idempotency))
-        {
-            Ok(edge) => TaskEdgeResponse {
-                edge: Some(edge),
-                error: None,
-            },
-            Err(error) => TaskEdgeResponse {
-                edge: None,
-                error: Some(TypedErrorEnvelope::from(error)),
-            },
-        }
-    }
-
-    pub fn list_task_edges(&self, request: ListTaskEdgesRequest) -> ListTaskEdgesResponse {
-        ListTaskEdgesResponse {
-            edges: self.kernel.list_task_edges(&request.task_id),
             error: None,
         }
     }
@@ -2495,119 +2241,6 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         ))
     }
 
-    async fn claim_planner_replan(
-        &self,
-        request: tonic::Request<runtime_pb::ClaimPlannerReplanRequest>,
-    ) -> Result<tonic::Response<runtime_pb::PlannerReplanClaimResponse>, tonic::Status> {
-        let request = request.into_inner();
-        let response = if let Some(adapter) = &self.sqlite_adapter {
-            match self.run_sqlite_write(|| {
-                adapter.claim_planner_replan(
-                    &request.task_id,
-                    &request.decision_digest,
-                    &request.now,
-                )
-            })? {
-                Ok(claim) => PlannerReplanClaimResponse {
-                    claim: Some(claim),
-                    found: true,
-                    error: None,
-                },
-                Err(error) => PlannerReplanClaimResponse {
-                    claim: None,
-                    found: false,
-                    error: Some(error.into()),
-                },
-            }
-        } else {
-            self.lock()?.claim_planner_replan(
-                &request.task_id,
-                &request.decision_digest,
-                &request.now,
-            )
-        };
-        Ok(tonic::Response::new(
-            runtime_pb::PlannerReplanClaimResponse {
-                claim: response.claim.map(planner_replan_claim_to_pb),
-                found: response.found,
-                error: response.error.map(typed_error_to_pb),
-            },
-        ))
-    }
-
-    async fn get_planner_replan_claim(
-        &self,
-        request: tonic::Request<runtime_pb::GetPlannerReplanClaimRequest>,
-    ) -> Result<tonic::Response<runtime_pb::PlannerReplanClaimResponse>, tonic::Status> {
-        let request = request.into_inner();
-        let response = if let Some(adapter) = &self.sqlite_adapter {
-            match adapter.get_planner_replan_claim(&request.task_id, &request.decision_digest) {
-                Ok(claim) => PlannerReplanClaimResponse {
-                    found: claim.is_some(),
-                    claim,
-                    error: None,
-                },
-                Err(error) => PlannerReplanClaimResponse {
-                    claim: None,
-                    found: false,
-                    error: Some(error.into()),
-                },
-            }
-        } else {
-            self.lock()?
-                .get_planner_replan_claim(&request.task_id, &request.decision_digest)
-        };
-        Ok(tonic::Response::new(
-            runtime_pb::PlannerReplanClaimResponse {
-                claim: response.claim.map(planner_replan_claim_to_pb),
-                found: response.found,
-                error: response.error.map(typed_error_to_pb),
-            },
-        ))
-    }
-
-    async fn mark_planner_replan_claim(
-        &self,
-        request: tonic::Request<runtime_pb::MarkPlannerReplanClaimRequest>,
-    ) -> Result<tonic::Response<runtime_pb::PlannerReplanClaimResponse>, tonic::Status> {
-        let request = request.into_inner();
-        let response = if let Some(adapter) = &self.sqlite_adapter {
-            match self.run_sqlite_write(|| {
-                adapter.mark_planner_replan_claim(
-                    &request.task_id,
-                    &request.decision_digest,
-                    &request.status,
-                    &request.now,
-                )
-            })? {
-                Ok(claim) => PlannerReplanClaimResponse {
-                    claim: Some(claim),
-                    found: true,
-                    error: None,
-                },
-                Err(error) => PlannerReplanClaimResponse {
-                    claim: None,
-                    found: false,
-                    error: Some(error.into()),
-                },
-            }
-        } else {
-            self.lock()?.mark_planner_replan_claim(
-                &request.task_id,
-                &request.decision_digest,
-                &request.status,
-                &request.now,
-            )
-        };
-        Ok(tonic::Response::new(
-            runtime_pb::PlannerReplanClaimResponse {
-                claim: response.claim.map(planner_replan_claim_to_pb),
-                found: response.found,
-                error: response.error.map(typed_error_to_pb),
-            },
-        ))
-    }
-
     async fn commit_agent_state(
         &self,
         request: tonic::Request<runtime_pb::CommitAgentStateRequest>,
@@ -2944,62 +2577,6 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                 error: response.error.map(typed_error_to_pb),
             },
         ))
-    }
-
-    async fn save_task_edge(
-        &self,
-        request: tonic::Request<runtime_pb::SaveTaskEdgeRequest>,
-    ) -> Result<tonic::Response<runtime_pb::TaskEdgeResponse>, tonic::Status> {
-        let request = request.into_inner();
-        let edge = request.edge.map(task_edge_from_pb).unwrap_or_default();
-        if let Some(adapter) = &self.sqlite_adapter {
-            let response = match self.run_sqlite_write(|| {
-                adapter.save_task_edge(
-                    edge.clone(),
-                    &pb_idempotency_key(request.idempotency.clone()),
-                )
-            })? {
-                Ok(edge) => TaskEdgeResponse {
-                    edge: Some(edge),
-                    error: None,
-                },
-                Err(error) => TaskEdgeResponse {
-                    edge: None,
-                    error: Some(TypedErrorEnvelope::from(error)),
-                },
-            };
-            return Ok(tonic::Response::new(task_edge_response_to_pb(response)));
-        }
-        let response = self.lock()?.save_task_edge(SaveTaskEdgeRequest {
-            edge,
-            idempotency: request.idempotency.map(idempotency_from_pb),
-        });
-        Ok(tonic::Response::new(task_edge_response_to_pb(response)))
-    }
-
-    async fn list_task_edges(
-        &self,
-        request: tonic::Request<runtime_pb::ListTaskEdgesRequest>,
-    ) -> Result<tonic::Response<runtime_pb::ListTaskEdgesResponse>, tonic::Status> {
-        let request = request.into_inner();
-        if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.list_task_edges(&request.task_id) {
-                Ok(edges) => ListTaskEdgesResponse { edges, error: None },
-                Err(error) => ListTaskEdgesResponse {
-                    edges: Vec::new(),
-                    error: Some(TypedErrorEnvelope::from(error)),
-                },
-            };
-            return Ok(tonic::Response::new(list_task_edges_response_to_pb(
-                response,
-            )));
-        }
-        let response = self.lock()?.list_task_edges(ListTaskEdgesRequest {
-            task_id: request.task_id,
-        });
-        Ok(tonic::Response::new(list_task_edges_response_to_pb(
-            response,
-        )))
     }
 
     async fn save_artifact(
@@ -3561,10 +3138,8 @@ pub fn supported_features() -> Vec<String> {
         FEATURE_RUNTIME_STORE.to_owned(),
         FEATURE_EVENT_LOG.to_owned(),
         FEATURE_TASK_DISPATCHER.to_owned(),
-        FEATURE_TASK_GRAPH.to_owned(),
         FEATURE_ARTIFACT_METADATA.to_owned(),
         FEATURE_TASK_READ.to_owned(),
-        FEATURE_PLANNER_REPLAN_CLAIM.to_owned(),
         FEATURE_AGENT_STATE.to_owned(),
     ]
 }
@@ -3659,16 +3234,6 @@ fn cursor_to_pb(cursor: EventCursor) -> runtime_pb::EventCursor {
     }
 }
 
-fn task_edge_from_pb(edge: runtime_pb::TaskEdgeRecord) -> TaskEdgeRecord {
-    TaskEdgeRecord {
-        task_id: edge.task_id,
-        from_node_id: edge.from_node_id,
-        to_node_id: edge.to_node_id,
-        edge_type: edge.edge_type,
-        condition: edge.condition,
-    }
-}
-
 fn task_assignment_from_pb(assignment: runtime_pb::TaskRouteAssignment) -> TaskRouteAssignment {
     TaskRouteAssignment {
         route_mode: assignment.route_mode,
@@ -3703,7 +3268,6 @@ fn task_record_from_pb(task: runtime_pb::TaskRecord) -> TaskRecord {
         status: task.status,
         routing_mode: task.routing_mode,
         requested_capability_id: task.requested_capability_id,
-        root_node_id: task.root_node_id,
         summary: task.summary,
         cancel_requested_at: task.cancel_requested_at,
         created_at: task.created_at,
@@ -3720,26 +3284,11 @@ fn task_record_to_pb(task: TaskRecord) -> runtime_pb::TaskRecord {
         status: task.status,
         routing_mode: task.routing_mode,
         requested_capability_id: task.requested_capability_id,
-        root_node_id: task.root_node_id,
         summary: task.summary,
         cancel_requested_at: task.cancel_requested_at,
         created_at: task.created_at,
         updated_at: task.updated_at,
         assignment: task.assignment.map(task_assignment_to_pb),
-    }
-}
-
-fn planner_replan_claim_to_pb(
-    claim: PlannerReplanClaimRecord,
-) -> runtime_pb::PlannerReplanClaimRecord {
-    runtime_pb::PlannerReplanClaimRecord {
-        task_id: claim.task_id,
-        decision_digest: claim.decision_digest,
-        planning_revision: claim.planning_revision,
-        planning_epoch: claim.planning_epoch,
-        status: claim.status,
-        created_at: claim.created_at,
-        updated_at: claim.updated_at,
     }
 }
 
@@ -3855,11 +3404,6 @@ fn task_node_record_from_pb(node: runtime_pb::TaskNodeRecord) -> TaskNodeRecord 
         capability_id: node.capability_id,
         assigned_instance_id: node.assigned_instance_id,
         status: node.status,
-        criticality: node.criticality,
-        dependency_type: node.dependency_type,
-        retry_policy_json: node.retry_policy_json,
-        timeout_policy_json: node.timeout_policy_json,
-        resource_class: node.resource_class,
         input_refs: node.input_refs,
         output_refs: node.output_refs,
         started_at: node.started_at,
@@ -3874,41 +3418,10 @@ fn task_node_record_to_pb(node: TaskNodeRecord) -> runtime_pb::TaskNodeRecord {
         capability_id: node.capability_id,
         assigned_instance_id: node.assigned_instance_id,
         status: node.status,
-        criticality: node.criticality,
-        dependency_type: node.dependency_type,
-        retry_policy_json: node.retry_policy_json,
-        timeout_policy_json: node.timeout_policy_json,
-        resource_class: node.resource_class,
         input_refs: node.input_refs,
         output_refs: node.output_refs,
         started_at: node.started_at,
         finished_at: node.finished_at,
-    }
-}
-
-fn task_edge_to_pb(edge: TaskEdgeRecord) -> runtime_pb::TaskEdgeRecord {
-    runtime_pb::TaskEdgeRecord {
-        task_id: edge.task_id,
-        from_node_id: edge.from_node_id,
-        to_node_id: edge.to_node_id,
-        edge_type: edge.edge_type,
-        condition: edge.condition,
-    }
-}
-
-fn task_edge_response_to_pb(response: TaskEdgeResponse) -> runtime_pb::TaskEdgeResponse {
-    runtime_pb::TaskEdgeResponse {
-        edge: response.edge.map(task_edge_to_pb),
-        error: response.error.map(typed_error_to_pb),
-    }
-}
-
-fn list_task_edges_response_to_pb(
-    response: ListTaskEdgesResponse,
-) -> runtime_pb::ListTaskEdgesResponse {
-    runtime_pb::ListTaskEdgesResponse {
-        edges: response.edges.into_iter().map(task_edge_to_pb).collect(),
-        error: response.error.map(typed_error_to_pb),
     }
 }
 
@@ -4015,8 +3528,6 @@ pub(crate) fn validate_task_node_record(node: &TaskNodeRecord) -> Result<(), Run
         || node.task_id.trim().is_empty()
         || node.capability_id.trim().is_empty()
         || node.status.trim().is_empty()
-        || node.criticality.trim().is_empty()
-        || node.dependency_type.trim().is_empty()
     {
         return Err(write_failed("TaskNodeRecord required fields are missing"));
     }
@@ -4036,35 +3547,10 @@ pub(crate) fn validate_task_node_record(node: &TaskNodeRecord) -> Result<(), Run
         "orphaned",
     ]
     .contains(&node.status.as_str())
-        || !["required", "optional", "fallback"].contains(&node.criticality.as_str())
-        || !["hard", "soft"].contains(&node.dependency_type.as_str())
     {
         return Err(write_failed(
             "TaskNodeRecord enum value is not in the closed contract",
         ));
-    }
-    for payload in [&node.retry_policy_json, &node.timeout_policy_json] {
-        if serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(payload).is_err() {
-            return Err(write_failed("TaskNodeRecord policy JSON must be an object"));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_planner_replan_identity(
-    task_id: &str,
-    decision_digest: &str,
-    now: &str,
-) -> Result<(), RuntimeSidecarError> {
-    if task_id.trim().is_empty() || now.trim().is_empty() {
-        return Err(write_failed("planner replan claim identity is incomplete"));
-    }
-    if decision_digest.len() != 64
-        || !decision_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(write_failed("planner replan decision digest is invalid"));
     }
     Ok(())
 }
@@ -4482,7 +3968,6 @@ pub(crate) fn validate_agent_final_commit_shape(
         || nodes[0].status != "completed"
         || artifacts[0].producer_node_id != nodes[0].node_id
         || task.status != "completed"
-        || task.root_node_id.as_deref() != Some(nodes[0].node_id.as_str())
     {
         return Err(write_failed("Agent final commit shape is invalid"));
     }

@@ -407,9 +407,7 @@ class MCPServerExplicitAgentLoopAPITest(APITestCase):
         envelope = build_mcp_dispatch_resume_envelope_v2(
             task=task,
             node=node,
-            edges=(),
             attachments=(),
-            dependency_nodes=(),
             server_id="mcp-available",
         )
         self.assertNotIn("metadata", envelope)

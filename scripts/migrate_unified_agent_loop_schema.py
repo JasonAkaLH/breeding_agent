@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from src.storage.agent_schema_migration import (  # noqa: E402
     AgentSchemaMigrationError,
+    apply_all,
     backup_all,
     build_report,
     load_state_descriptor,
@@ -26,7 +27,7 @@ from src.storage.agent_schema_migration import (  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Closed backup/restore operator for unified Agent schema migration."
+        description="Closed backup/apply/restore operator for unified Agent schema migration."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -110,7 +111,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "result": "restored",
                 "backup_set_sha256": receipt["backup_set_sha256"],
             }
-        raise AgentSchemaMigrationError("agent_schema_apply_not_available_before_p7b")
+        if args.command == "apply":
+            receipt = apply_all(
+                descriptor,
+                report_path=args.report,
+                expected_report_sha=args.expected_report_sha,
+                manifest_path=args.backup_manifest,
+                expected_backup_set_sha=args.expected_backup_set_sha,
+                restore_receipt_path=args.restore_receipt,
+            )
+            return {
+                "result": "completed",
+                "backup_set_sha256": receipt["backup_set_sha256"],
+                "receipt_sha256": receipt["receipt_sha256"],
+            }
+        raise AgentSchemaMigrationError("agent_schema_command_invalid")
 
 
 def main(argv: list[str] | None = None) -> int:

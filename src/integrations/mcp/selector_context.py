@@ -27,7 +27,6 @@ from src.storage.artifact_files import parse_file_storage_ref
 from src.integrations.mcp.resume_envelope import (
     MCPDispatchResumeEnvelopeError,
     mcp_dispatch_resume_envelope_version,
-    project_mcp_dependency_artifacts,
     validate_mcp_dispatch_resume_envelope_v2,
 )
 from src.orchestration.models import UserMCPServerProfile
@@ -216,11 +215,7 @@ class MCPDurableSelectorContextBuilder:
             root_message_id=task.root_message_id,
             expected_attachment_ids=envelope["input_attachment_ids"],
         )
-        upstream_facts = await self._dependency_facts(
-            task_id=task_id,
-            node_id=node_id,
-            dependency_output_refs=envelope["dependency_output_refs"],
-        )
+        upstream_facts: tuple[str, ...] = ()
 
         calls = sorted(
             await self.storage.list_mcp_call_records(
@@ -400,24 +395,6 @@ class MCPDurableSelectorContextBuilder:
             projections.append((call.call_sequence, projection))
             last_receipt_id = receipt.result_receipt_id
         return _budget_agent_projections(projections), last_receipt_id
-
-    async def _dependency_facts(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        dependency_output_refs: Sequence[Mapping[str, object]],
-    ) -> tuple[str, ...]:
-        refs_by_node = {
-            str(item["node_id"]): tuple(str(value) for value in item["artifact_ids"])
-            for item in dependency_output_refs
-        }
-        if refs_by_node:
-            raise MCPSelectorContextAuthorityError(
-                "mcp_selector_context_dependency_conflict"
-            )
-        return ()
-
 
 def _binding_from_root_message(
     metadata: Mapping[str, object],

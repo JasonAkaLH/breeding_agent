@@ -2617,7 +2617,6 @@ class PostgreSQLStorage(SQLiteStorage):
             "mcp_branch_record": 0,
             "mcp_connection_lease": 0,
             "mcp_audit_event": 0,
-            "task_edge": 0,
             "task_node": 0,
             "message": 0,
             "task": 0,
@@ -2809,15 +2808,6 @@ class PostgreSQLStorage(SQLiteStorage):
                 DELETE FROM mcp_audit_event a
                 USING task t
                 WHERE a.task_id = t.task_id
-                  AND t.conversation_id = :conversation_id
-                """,
-            ),
-            (
-                "task_edge",
-                """
-                DELETE FROM task_edge e
-                USING task t
-                WHERE e.task_id = t.task_id
                   AND t.conversation_id = :conversation_id
                 """,
             ),

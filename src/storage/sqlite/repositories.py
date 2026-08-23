@@ -22,11 +22,8 @@ from src.core.contracts import StoragePort
 from src.core.enums import (
     ArtifactType,
     ConversationStatus,
-    EdgeType,
     EventVisibility,
     MessageRole,
-    DependencyType,
-    NodeCriticality,
     NodeStatus,
     RoutingMode,
     TaskStatus,
@@ -111,11 +108,9 @@ from src.core.models import (
     MCPSealedState,
     Message,
     PendingSkillContext,
-    PlannerReplanClaim,
     SlotCollection,
     SlotEvent,
     Task,
-    TaskEdge,
     TaskInputAttachment,
     TaskNode,
     UserMCPCredentialRecord,
@@ -170,7 +165,6 @@ from src.storage.mcp_dispatch_aggregate import (
     TerminalCandidateSnapshotReader,
 )
 
-from .base import build_task_edge_id
 from .models import (
     ArtifactRow,
     AuthUserTokenRow,
@@ -217,11 +211,9 @@ from .models import (
     MCPTerminalCandidateLifecycleRow,
     MessageRow,
     PendingSkillContextRow,
-    PlannerReplanClaimRow,
     SlotCollectionRow,
     SlotEventRow,
     TaskInputAttachmentRow,
-    TaskEdgeRow,
     TaskNodeRow,
     TaskRow,
     UserMCPHealthAttemptRow,
@@ -239,7 +231,6 @@ MCP_ROLLOUT_ATTESTATION_KEY_ID_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
 )
 MCP_ROLLOUT_ATTESTATION_SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
-PLANNER_REPLAN_DECISION_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 MCP_ROLLOUT_STAGES = frozenset(
     {
         "off",
@@ -1662,24 +1653,11 @@ def _row_to_task(row: TaskRow) -> Task:
         status=row.status,
         routing_mode=row.routing_mode,
         requested_capability_id=row.requested_capability_id,
-        root_node_id=row.root_node_id,
         summary=row.summary,
         cancel_requested_at=row.cancel_requested_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
         **assignment,
-    )
-
-
-def _row_to_planner_replan_claim(row: PlannerReplanClaimRow) -> PlannerReplanClaim:
-    return PlannerReplanClaim(
-        task_id=row.task_id,
-        decision_digest=row.decision_digest,
-        planning_revision=row.planning_revision,
-        planning_epoch=row.planning_epoch,
-        status=row.status,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
     )
 
 
@@ -1690,20 +1668,11 @@ def _row_to_task_node(row: TaskNodeRow) -> TaskNode:
         capability_id=row.capability_id,
         assigned_instance_id=row.assigned_instance_id,
         status=row.status,
-        criticality=row.criticality,
-        dependency_type=row.dependency_type,
-        retry_policy=row.retry_policy or {},
-        timeout_policy=row.timeout_policy or {},
-        resource_class=row.resource_class,
         input_refs=tuple(row.input_refs or ()),
         output_refs=tuple(row.output_refs or ()),
         started_at=row.started_at,
         finished_at=row.finished_at,
     )
-
-
-def _row_to_task_edge(row: TaskEdgeRow) -> TaskEdge:
-    return TaskEdge(from_node_id=row.from_node_id, to_node_id=row.to_node_id, edge_type=row.edge_type, condition=row.condition)
 
 
 def _row_to_artifact(row: ArtifactRow) -> Artifact:
@@ -2619,9 +2588,7 @@ class SQLiteStateRepository:
             "mcp_branch_record": 0,
             "mcp_connection_lease": 0,
             "mcp_audit_event": 0,
-            "task_edge": 0,
             "task_node": 0,
-            "planner_replan_claim": 0,
             "message": 0,
             "task": 0,
             "conversation": 0,
@@ -2690,14 +2657,7 @@ class SQLiteStateRepository:
                 delete(MCPConnectionLeaseRow).where(MCPConnectionLeaseRow.task_id.in_(task_ids)),
             )
             _delete("mcp_audit_event", delete(MCPAuditEventRow).where(MCPAuditEventRow.task_id.in_(task_ids)))
-            _delete("task_edge", delete(TaskEdgeRow).where(TaskEdgeRow.task_id.in_(task_ids)))
             _delete("task_node", delete(TaskNodeRow).where(TaskNodeRow.task_id.in_(task_ids)))
-            _delete(
-                "planner_replan_claim",
-                delete(PlannerReplanClaimRow).where(
-                    PlannerReplanClaimRow.task_id.in_(task_ids)
-                ),
-            )
         _delete(
             "conversation_file_resource",
             delete(ConversationFileResourceRow).where(ConversationFileResourceRow.conversation_id == conversation_id),
@@ -3301,7 +3261,6 @@ class SQLiteStateRepository:
             status=task.status,
             routing_mode=task.routing_mode,
             requested_capability_id=task.requested_capability_id,
-            root_node_id=task.root_node_id,
             summary=task.summary,
             cancel_requested_at=task.cancel_requested_at,
             created_at=task.created_at,
@@ -3315,83 +3274,6 @@ class SQLiteStateRepository:
     def get_task(self, task_id: str) -> Task | None:
         row = self._session.get(TaskRow, task_id)
         return None if row is None else _row_to_task(row)
-
-    def claim_planner_replan(
-        self,
-        task_id: str,
-        decision_digest: str,
-        *,
-        now: datetime,
-    ) -> PlannerReplanClaim:
-        if PLANNER_REPLAN_DECISION_DIGEST_RE.fullmatch(decision_digest) is None:
-            raise ValueError("planner_replan_decision_digest_invalid: decision_digest must be 64 lowercase hex characters")
-        task_exists = self._session.scalar(
-            select(TaskRow.task_id)
-            .where(TaskRow.task_id == task_id)
-            .with_for_update()
-        )
-        if task_exists is None:
-            raise ValueError("planner_replan_task_not_found: task not found")
-        existing = self._session.get(
-            PlannerReplanClaimRow,
-            {"task_id": task_id, "decision_digest": decision_digest},
-        )
-        if existing is not None:
-            return _row_to_planner_replan_claim(existing)
-        current_revision = self._session.scalar(
-            select(func.max(PlannerReplanClaimRow.planning_revision)).where(
-                PlannerReplanClaimRow.task_id == task_id
-            )
-        )
-        planning_revision = int(current_revision or 0) + 1
-        row = PlannerReplanClaimRow(
-            task_id=task_id,
-            decision_digest=decision_digest,
-            planning_revision=planning_revision,
-            planning_epoch=f"r{planning_revision}",
-            status="claimed",
-            created_at=now,
-            updated_at=now,
-        )
-        self._session.add(row)
-        self._session.flush()
-        return _row_to_planner_replan_claim(row)
-
-    def get_planner_replan_claim(
-        self,
-        task_id: str,
-        decision_digest: str,
-    ) -> PlannerReplanClaim | None:
-        row = self._session.get(
-            PlannerReplanClaimRow,
-            {"task_id": task_id, "decision_digest": decision_digest},
-        )
-        return None if row is None else _row_to_planner_replan_claim(row)
-
-    def mark_planner_replan_claim(
-        self,
-        task_id: str,
-        decision_digest: str,
-        *,
-        status: str,
-        now: datetime,
-    ) -> PlannerReplanClaim:
-        if status not in {"applied", "rejected"}:
-            raise ValueError("planner_replan_claim_status_invalid: status must be applied or rejected")
-        row = self._session.get(
-            PlannerReplanClaimRow,
-            {"task_id": task_id, "decision_digest": decision_digest},
-        )
-        if row is None:
-            raise ValueError("planner_replan_claim_not_found")
-        if row.status == status:
-            return _row_to_planner_replan_claim(row)
-        if row.status != "claimed":
-            raise ValueError("planner_replan_claim_terminal: terminal claim status cannot be changed")
-        row.status = status
-        row.updated_at = now
-        self._session.flush()
-        return _row_to_planner_replan_claim(row)
 
     def compare_and_set_task(
         self, task: Task, *, expected_from_status: TaskStatus
@@ -3444,7 +3326,6 @@ class SQLiteStateRepository:
                 status=str(task.status),
                 routing_mode=str(task.routing_mode),
                 requested_capability_id=task.requested_capability_id,
-                root_node_id=task.root_node_id,
                 summary=task.summary,
                 cancel_requested_at=task.cancel_requested_at,
                 created_at=task.created_at,
@@ -3500,11 +3381,6 @@ class SQLiteStateRepository:
             capability_id=node.capability_id,
             assigned_instance_id=node.assigned_instance_id,
             status=node.status,
-            criticality=node.criticality,
-            dependency_type=node.dependency_type,
-            retry_policy=dict(node.retry_policy),
-            timeout_policy=dict(node.timeout_policy),
-            resource_class=node.resource_class,
             input_refs=list(node.input_refs),
             output_refs=list(node.output_refs),
             started_at=node.started_at,
@@ -3537,11 +3413,6 @@ class SQLiteStateRepository:
             .values(
                 assigned_instance_id=node.assigned_instance_id,
                 status=str(node.status),
-                criticality=str(node.criticality),
-                dependency_type=str(node.dependency_type),
-                retry_policy=dict(node.retry_policy),
-                timeout_policy=dict(node.timeout_policy),
-                resource_class=node.resource_class,
                 input_refs=list(node.input_refs),
                 output_refs=list(node.output_refs),
                 started_at=node.started_at,
@@ -3559,26 +3430,6 @@ class SQLiteStateRepository:
             select(TaskNodeRow).where(TaskNodeRow.task_id == task_id).order_by(TaskNodeRow.node_id)
         ).all()
         return [_row_to_task_node(row) for row in rows]
-
-    def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
-        _ensure_runtime_store_write_allowed_by_rust_contract("task_edge_save")
-        row = TaskEdgeRow(
-            edge_id=build_task_edge_id(task_id, edge.from_node_id, edge.to_node_id),
-            task_id=task_id,
-            from_node_id=edge.from_node_id,
-            to_node_id=edge.to_node_id,
-            edge_type=edge.edge_type,
-            condition=edge.condition,
-        )
-        merged = self._session.merge(row)
-        self._session.flush()
-        return _row_to_task_edge(merged)
-
-    def list_task_edges(self, task_id: str) -> list[TaskEdge]:
-        rows = self._session.scalars(
-            select(TaskEdgeRow).where(TaskEdgeRow.task_id == task_id).order_by(TaskEdgeRow.from_node_id, TaskEdgeRow.to_node_id)
-        ).all()
-        return [_row_to_task_edge(row) for row in rows]
 
     def save_artifact(self, artifact: Artifact) -> Artifact:
         _ensure_runtime_store_write_allowed_by_rust_contract("artifact_save")
@@ -4932,12 +4783,7 @@ class SQLiteStateRepository:
                 raise ValueError("mcp_target_intent_task_assignment_invalid")
             if envelope["node_snapshot"] != {
                 "capability_id": node.capability_id,
-                "criticality": str(node.criticality),
-                "dependency_type": str(node.dependency_type),
                 "input_refs": sorted(set(node.input_refs)),
-                "resource_class": node.resource_class,
-                "retry_policy": dict(node.retry_policy),
-                "timeout_policy": dict(node.timeout_policy),
             }:
                 raise ValueError("mcp_target_intent_node_snapshot_invalid")
         rendered = canonical_json_bytes(envelope)
@@ -7543,16 +7389,6 @@ class SQLiteStateRepository:
         if node is not None and node.status not in _TERMINAL_NODE_STATUSES:
             node.status = str(NodeStatus.FAILED)
             node.finished_at = occurred_at
-            downstream = self._session.scalars(
-                select(TaskNodeRow)
-                .join(TaskEdgeRow, TaskEdgeRow.to_node_id == TaskNodeRow.node_id)
-                .where(TaskEdgeRow.task_id == task_id, TaskEdgeRow.from_node_id == node.node_id)
-                .with_for_update()
-            ).all()
-            for dependent in downstream:
-                if dependent.status not in _TERMINAL_NODE_STATUSES:
-                    dependent.status = str(NodeStatus.BLOCKED_BY_CANCELLATION)
-                    dependent.finished_at = occurred_at
         for outbox in outboxes:
             if outbox.status in {"pending", "claimed"}:
                 outbox.status = "aborted"
@@ -9229,9 +9065,8 @@ class SQLiteStateRepository:
             task.updated_at = occurred_at
         else:
             node.status = str(NodeStatus.FAILED)
-            if node.criticality == "required":
-                task.status = str(TaskStatus.FAILED)
-                task.updated_at = occurred_at
+            task.status = str(TaskStatus.FAILED)
+            task.updated_at = occurred_at
         node.finished_at = occurred_at
         result_rows = self._session.scalars(
             select(MCPDurableResultLifecycleRow)
@@ -16152,161 +15987,6 @@ class SQLiteStorage(StoragePort):
         )
         return loaded
 
-    async def claim_planner_replan(
-        self,
-        task_id: str,
-        decision_digest: str,
-        *,
-        now: datetime,
-    ) -> PlannerReplanClaim:
-        sidecar_client = self._runtime_sidecar_client_for(
-            component="runtime_store",
-            operation_name="planner_replan_claim",
-            unavailable_error_code="runtime_store_unavailable",
-            task_authority=True,
-        )
-        now_text = now.isoformat()
-        if sidecar_client is not None:
-            envelope = _consume_runtime_sidecar_response(
-                "planner_replan_claim",
-                await _resolve_runtime_sidecar_call(
-                    sidecar_client.claim_planner_replan(
-                        task_id=task_id,
-                        decision_digest=decision_digest,
-                        now=now_text,
-                    )
-                ),
-            )
-            return _validated_planner_replan_claim_from_sidecar_record(envelope.get("claim"))
-        claim = await self._run(
-            lambda state, collab: state.claim_planner_replan(
-                task_id,
-                decision_digest,
-                now=now,
-            )
-        )
-        await record_runtime_sidecar_shadow_write(
-            component="runtime_store",
-            operation_name="planner_replan_claim",
-            runtime_sidecar_client=self._runtime_sidecar_client,
-            shadow_sink=self._runtime_sidecar_shadow_sink,
-            input_payload={"task_id": task_id, "decision_digest": decision_digest},
-            legacy_output={"claim": _planner_replan_claim_to_sidecar_record(claim)},
-            rust_call=lambda: self._runtime_sidecar_client.claim_planner_replan(
-                task_id=task_id,
-                decision_digest=decision_digest,
-                now=now_text,
-            ),
-            rust_output=lambda envelope: {"claim": envelope.get("claim")},
-            mode=self._task_authority_mode(),
-        )
-        return claim
-
-    async def get_planner_replan_claim(
-        self,
-        task_id: str,
-        decision_digest: str,
-    ) -> PlannerReplanClaim | None:
-        sidecar_client = self._runtime_sidecar_client_for(
-            component="runtime_store",
-            operation_name="planner_replan_claim_get",
-            unavailable_error_code="runtime_store_unavailable",
-            task_authority=True,
-        )
-        if sidecar_client is not None:
-            envelope = _consume_runtime_sidecar_response(
-                "planner_replan_claim_get",
-                await _resolve_runtime_sidecar_call(
-                    sidecar_client.get_planner_replan_claim(
-                        task_id=task_id,
-                        decision_digest=decision_digest,
-                    )
-                ),
-            )
-            record = envelope.get("claim")
-            return None if record is None else _validated_planner_replan_claim_from_sidecar_record(record)
-        claim = await self._run(
-            lambda state, collab: state.get_planner_replan_claim(
-                task_id,
-                decision_digest,
-            )
-        )
-        await record_runtime_sidecar_shadow_write(
-            component="runtime_store",
-            operation_name="planner_replan_claim_get",
-            runtime_sidecar_client=self._runtime_sidecar_client,
-            shadow_sink=self._runtime_sidecar_shadow_sink,
-            input_payload={"task_id": task_id, "decision_digest": decision_digest},
-            legacy_output={
-                "claim": None if claim is None else _planner_replan_claim_to_sidecar_record(claim)
-            },
-            rust_call=lambda: self._runtime_sidecar_client.get_planner_replan_claim(
-                task_id=task_id,
-                decision_digest=decision_digest,
-            ),
-            rust_output=lambda envelope: {"claim": envelope.get("claim")},
-            mode=self._task_authority_mode(),
-        )
-        return claim
-
-    async def mark_planner_replan_claim(
-        self,
-        task_id: str,
-        decision_digest: str,
-        *,
-        status: str,
-        now: datetime,
-    ) -> PlannerReplanClaim:
-        sidecar_client = self._runtime_sidecar_client_for(
-            component="runtime_store",
-            operation_name="planner_replan_claim_mark",
-            unavailable_error_code="runtime_store_unavailable",
-            task_authority=True,
-        )
-        now_text = now.isoformat()
-        if sidecar_client is not None:
-            envelope = _consume_runtime_sidecar_response(
-                "planner_replan_claim_mark",
-                await _resolve_runtime_sidecar_call(
-                    sidecar_client.mark_planner_replan_claim(
-                        task_id=task_id,
-                        decision_digest=decision_digest,
-                        status=status,
-                        now=now_text,
-                    )
-                ),
-            )
-            return _validated_planner_replan_claim_from_sidecar_record(envelope.get("claim"))
-        claim = await self._run(
-            lambda state, collab: state.mark_planner_replan_claim(
-                task_id,
-                decision_digest,
-                status=status,
-                now=now,
-            )
-        )
-        await record_runtime_sidecar_shadow_write(
-            component="runtime_store",
-            operation_name="planner_replan_claim_mark",
-            runtime_sidecar_client=self._runtime_sidecar_client,
-            shadow_sink=self._runtime_sidecar_shadow_sink,
-            input_payload={
-                "task_id": task_id,
-                "decision_digest": decision_digest,
-                "status": status,
-            },
-            legacy_output={"claim": _planner_replan_claim_to_sidecar_record(claim)},
-            rust_call=lambda: self._runtime_sidecar_client.mark_planner_replan_claim(
-                task_id=task_id,
-                decision_digest=decision_digest,
-                status=status,
-                now=now_text,
-            ),
-            rust_output=lambda envelope: {"claim": envelope.get("claim")},
-            mode=self._task_authority_mode(),
-        )
-        return claim
-
     async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None:
         sidecar_client = self._runtime_sidecar_client_for(
             component="runtime_store",
@@ -16633,58 +16313,6 @@ class SQLiteStorage(StoragePort):
         )
         return loaded
 
-    async def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
-        sidecar_client = self._runtime_sidecar_client_for(
-            component="runtime_store",
-            operation_name="task_edge_save",
-            unavailable_error_code="runtime_store_unavailable",
-        )
-        idempotency_key = build_task_edge_id(task_id, edge.from_node_id, edge.to_node_id)
-        if sidecar_client is not None:
-            response = await _resolve_runtime_sidecar_call(
-                sidecar_client.save_task_edge(
-                    task_id=task_id,
-                    from_node_id=edge.from_node_id,
-                    to_node_id=edge.to_node_id,
-                    edge_type=str(edge.edge_type),
-                    condition=edge.condition or "",
-                    idempotency_key=idempotency_key,
-                )
-            )
-            _consume_runtime_sidecar_response("task_edge_save", response)
-            return edge
-        saved = await self._run(lambda state, collab: state.save_task_edge(task_id, edge))
-        await record_runtime_sidecar_shadow_write(
-            component="runtime_store",
-            operation_name="task_edge_save",
-            runtime_sidecar_client=self._runtime_sidecar_client,
-            shadow_sink=self._runtime_sidecar_shadow_sink,
-            input_payload=_task_edge_shadow_payload(task_id, edge),
-            legacy_output=_task_edge_shadow_payload(task_id, saved),
-            rust_call=lambda: self._runtime_sidecar_client.save_task_edge(
-                task_id=task_id,
-                from_node_id=edge.from_node_id,
-                to_node_id=edge.to_node_id,
-                edge_type=str(edge.edge_type),
-                condition=edge.condition or "",
-                idempotency_key=idempotency_key,
-            ),
-            rust_output=lambda envelope: _task_edge_shadow_payload_from_record(envelope["edge"]),
-        )
-        return saved
-
-    async def list_task_edges(self, task_id: str) -> list[TaskEdge]:
-        if runtime_mode_for_component("runtime_store") == "enforce" and self._runtime_sidecar_client is not None:
-            response = await _resolve_runtime_sidecar_call(
-                self._runtime_sidecar_client.list_task_edges(task_id=task_id)
-            )
-            envelope = validate_runtime_sidecar_response(
-                "task_edge_list",
-                normalize_runtime_sidecar_response("task_edge_list", response),
-            )
-            return [_task_edge_from_sidecar_record(record) for record in envelope["edges"]]
-        return await self._run(lambda state, collab: state.list_task_edges(task_id))
-
     async def save_artifact(self, artifact: Artifact) -> Artifact:
         sidecar_client = self._runtime_sidecar_client_for(
             component="runtime_store",
@@ -17004,7 +16632,6 @@ class SQLiteStorage(StoragePort):
                 "task_get_active_for_conversation",
                 "task_node_get",
                 "task_node_list",
-                "planner_replan_claim_get",
             }:
                 error_code = runtime_error_policy(unavailable_error_code)["code"]
                 raise RuntimeError(
@@ -17046,7 +16673,6 @@ def _task_to_sidecar_record(task: Task) -> dict[str, Any]:
         "status": str(task.status),
         "routing_mode": str(task.routing_mode),
         "requested_capability_id": task.requested_capability_id,
-        "root_node_id": task.root_node_id,
         "summary": task.summary,
         "cancel_requested_at": _optional_datetime_text(task.cancel_requested_at),
         "created_at": _optional_datetime_text(task.created_at),
@@ -17101,7 +16727,6 @@ def _task_from_sidecar_record(record: Mapping[str, Any]) -> Task:
         status=TaskStatus(str(record["status"])),
         routing_mode=RoutingMode(str(record["routing_mode"])),
         requested_capability_id=_optional_task_string(record, "requested_capability_id"),
-        root_node_id=_optional_task_string(record, "root_node_id"),
         summary=_optional_task_string(record, "summary"),
         cancel_requested_at=_optional_task_datetime(record, "cancel_requested_at"),
         created_at=_optional_task_datetime(record, "created_at"),
@@ -17126,56 +16751,6 @@ def _task_get_shadow_payload(task: Task | None) -> dict[str, Any]:
     }
 
 
-def _planner_replan_claim_to_sidecar_record(
-    claim: PlannerReplanClaim,
-) -> dict[str, Any]:
-    return {
-        "task_id": claim.task_id,
-        "decision_digest": claim.decision_digest,
-        "planning_revision": claim.planning_revision,
-        "planning_epoch": claim.planning_epoch,
-        "status": claim.status,
-        "created_at": _optional_datetime_text(claim.created_at) or "",
-        "updated_at": _optional_datetime_text(claim.updated_at) or "",
-    }
-
-
-def _validated_planner_replan_claim_from_sidecar_record(
-    record: Any,
-) -> PlannerReplanClaim:
-    if not isinstance(record, Mapping):
-        _raise_task_snapshot_response_invalid(
-            "sidecar PlannerReplanClaim snapshot is not a mapping"
-        )
-    try:
-        task_id = str(record["task_id"])
-        decision_digest = str(record["decision_digest"])
-        planning_revision = int(record["planning_revision"])
-        planning_epoch = str(record["planning_epoch"])
-        status = str(record["status"])
-        created_at = datetime.fromisoformat(str(record["created_at"]).replace("Z", "+00:00"))
-        updated_at = datetime.fromisoformat(str(record["updated_at"]).replace("Z", "+00:00"))
-    except (KeyError, TypeError, ValueError) as exc:
-        _raise_task_snapshot_response_invalid(
-            f"invalid PlannerReplanClaim snapshot: {type(exc).__name__}"
-        )
-    if not task_id or PLANNER_REPLAN_DECISION_DIGEST_RE.fullmatch(decision_digest) is None:
-        _raise_task_snapshot_response_invalid("PlannerReplanClaim identity is invalid")
-    if planning_revision < 1 or planning_epoch != f"r{planning_revision}":
-        _raise_task_snapshot_response_invalid("PlannerReplanClaim epoch is invalid")
-    if status not in {"claimed", "applied", "rejected"}:
-        _raise_task_snapshot_response_invalid("PlannerReplanClaim status is invalid")
-    return PlannerReplanClaim(
-        task_id=task_id,
-        decision_digest=decision_digest,
-        planning_revision=planning_revision,
-        planning_epoch=planning_epoch,
-        status=status,
-        created_at=created_at,
-        updated_at=updated_at,
-    )
-
-
 def _task_node_to_sidecar_record(node: TaskNode) -> dict[str, Any]:
     return {
         "node_id": node.node_id,
@@ -17183,11 +16758,6 @@ def _task_node_to_sidecar_record(node: TaskNode) -> dict[str, Any]:
         "capability_id": node.capability_id,
         "assigned_instance_id": node.assigned_instance_id,
         "status": str(node.status),
-        "criticality": str(node.criticality),
-        "dependency_type": str(node.dependency_type),
-        "retry_policy": dict(node.retry_policy),
-        "timeout_policy": dict(node.timeout_policy),
-        "resource_class": node.resource_class,
         "input_refs": list(node.input_refs),
         "output_refs": list(node.output_refs),
         "started_at": _optional_datetime_text(node.started_at),
@@ -17210,11 +16780,6 @@ def _validated_task_node_from_sidecar_record(record: Any) -> TaskNode:
             capability_id=str(record["capability_id"]),
             assigned_instance_id=_optional_task_string(record, "assigned_instance_id"),
             status=NodeStatus(str(record["status"])),
-            criticality=NodeCriticality(str(record["criticality"])),
-            dependency_type=DependencyType(str(record["dependency_type"])),
-            retry_policy=dict(record["retry_policy"]),
-            timeout_policy=dict(record["timeout_policy"]),
-            resource_class=_optional_task_string(record, "resource_class"),
             input_refs=tuple(str(value) for value in record["input_refs"]),
             output_refs=tuple(str(value) for value in record["output_refs"]),
             started_at=_optional_task_datetime(record, "started_at"),
@@ -17250,36 +16815,6 @@ def _optional_task_datetime(record: Mapping[str, Any], name: str) -> datetime | 
 def _raise_task_snapshot_response_invalid(message: str) -> NoReturn:
     error_code = runtime_error_policy("runtime_store_response_invalid")["code"]
     raise RuntimeError(f"{error_code}: {message}")
-
-
-def _task_edge_from_sidecar_record(record: Mapping[str, Any]) -> TaskEdge:
-    condition = str(record.get("condition", ""))
-    return TaskEdge(
-        from_node_id=str(record["from_node_id"]),
-        to_node_id=str(record["to_node_id"]),
-        edge_type=EdgeType(str(record["edge_type"])),
-        condition=condition or None,
-    )
-
-
-def _task_edge_shadow_payload(task_id: str, edge: TaskEdge) -> dict[str, str]:
-    return {
-        "task_id": task_id,
-        "from_node_id": edge.from_node_id,
-        "to_node_id": edge.to_node_id,
-        "edge_type": str(edge.edge_type),
-        "condition_sha256": hashlib.sha256((edge.condition or "").encode("utf-8")).hexdigest(),
-    }
-
-
-def _task_edge_shadow_payload_from_record(record: Mapping[str, Any]) -> dict[str, str]:
-    return {
-        "task_id": str(record.get("task_id", "")),
-        "from_node_id": str(record.get("from_node_id", "")),
-        "to_node_id": str(record.get("to_node_id", "")),
-        "edge_type": str(record.get("edge_type", "")),
-        "condition_sha256": hashlib.sha256(str(record.get("condition", "")).encode("utf-8")).hexdigest(),
-    }
 
 
 def _artifact_to_sidecar_record(artifact: Artifact) -> dict[str, Any]:

@@ -134,9 +134,7 @@ class _ProjectionStorage:
         envelope = build_mcp_dispatch_resume_envelope_v2(
             task=self.task,
             node=self.node,
-            edges=(),
             attachments=(self.attachment,),
-            dependency_nodes=(),
             server_id=self.server.server_id,
         )
         self.intent = SimpleNamespace(
@@ -236,9 +234,6 @@ class _ProjectionStorage:
 
     async def list_task_input_attachments_for_task(self, task_id):
         return [self.attachment] if task_id == self.task.task_id else []
-
-    async def list_task_edges(self, task_id):
-        return []
 
     async def get_artifact(self, artifact_id):
         return None

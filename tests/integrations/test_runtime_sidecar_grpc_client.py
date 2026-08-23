@@ -122,7 +122,6 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                         "status": "accepted",
                         "routing_mode": "auto",
                         "requested_capability_id": None,
-                        "root_node_id": None,
                         "summary": None,
                         "cancel_requested_at": None,
                         "created_at": "2026-08-12T00:00:00Z",
@@ -225,38 +224,6 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     self.assertFalse(
                         client.get_active_task_for_conversation(conversation_id="missing")["found"]
                     )
-                    first_claim = client.claim_planner_replan(
-                        task_id="task-authority",
-                        decision_digest="a" * 64,
-                        now="2026-08-18T10:00:00Z",
-                    )["claim"]
-                    retry_claim = client.claim_planner_replan(
-                        task_id="task-authority",
-                        decision_digest="a" * 64,
-                        now="2026-08-18T10:01:00Z",
-                    )["claim"]
-                    second_claim = client.claim_planner_replan(
-                        task_id="task-authority",
-                        decision_digest="b" * 64,
-                        now="2026-08-18T10:02:00Z",
-                    )["claim"]
-                    self.assertEqual(first_claim, retry_claim)
-                    self.assertEqual(first_claim["planning_epoch"], "r1")
-                    self.assertEqual(second_claim["planning_epoch"], "r2")
-                    applied_claim = client.mark_planner_replan_claim(
-                        task_id="task-authority",
-                        decision_digest="a" * 64,
-                        status="applied",
-                        now="2026-08-18T10:03:00Z",
-                    )["claim"]
-                    self.assertEqual(applied_claim["status"], "applied")
-                    self.assertEqual(
-                        client.get_planner_replan_claim(
-                            task_id="task-authority",
-                            decision_digest="a" * 64,
-                        )["claim"],
-                        applied_claim,
-                    )
                     conflicting = {**task_record, "status": "running"}
                     with self.assertRaisesRegex(RuntimeError, "runtime_store_idempotency_conflict"):
                         client.submit_task(
@@ -272,11 +239,6 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                         "capability_id": "main_agent.respond",
                         "assigned_instance_id": "instance",
                         "status": "running",
-                        "criticality": "required",
-                        "dependency_type": "hard",
-                        "retry_policy": {"max_attempts": 2},
-                        "timeout_policy": {"seconds": 30},
-                        "resource_class": "default",
                         "input_refs": ["input"],
                         "output_refs": ["output"],
                         "started_at": "2026-08-13T10:00:00Z",
@@ -295,18 +257,6 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     self.assertEqual(transitioned["node"], node_record)
                     self.assertEqual(client.get_task_node(node_id="node")["node"], node_record)
                     self.assertEqual(client.list_task_nodes_for_task(task_id="task")["nodes"], [node_record])
-
-                    edge = client.save_task_edge(
-                        task_id="task",
-                        from_node_id="node",
-                        to_node_id="node-next",
-                        edge_type="data",
-                        condition="",
-                        idempotency_key="edge-1",
-                        owner="python-runtime",
-                    )
-                    self.assertEqual(edge["from_node_id"], "node")
-                    self.assertEqual(client.list_task_edges(task_id="task")["edges"], [edge])
 
                     artifact = client.save_artifact(
                         artifact_id="artifact",

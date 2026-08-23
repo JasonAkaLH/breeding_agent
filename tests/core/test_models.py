@@ -7,11 +7,9 @@ from src.core.enums import (
     AckPolicy,
     ArtifactType,
     ConversationStatus,
-    DependencyType,
     EventVisibility,
     MailboxChannel,
     MailboxDeliveryStatus,
-    NodeCriticality,
     NodeStatus,
     RoutingMode,
     TaskStatus,
@@ -29,7 +27,6 @@ from src.core.models import (
     MailboxMessage,
     Message,
     Task,
-    TaskEdge,
     TaskNode,
 )
 
@@ -127,7 +124,6 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "status",
                 "routing_mode",
                 "requested_capability_id",
-                "root_node_id",
                 "summary",
                 "cancel_requested_at",
                 "created_at",
@@ -149,22 +145,11 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "capability_id",
                 "assigned_instance_id",
                 "status",
-                "criticality",
-                "dependency_type",
-                "retry_policy",
-                "timeout_policy",
-                "resource_class",
                 "input_refs",
                 "output_refs",
                 "started_at",
                 "finished_at",
             ],
-        )
-
-    def test_task_edge_fields_match_prd(self) -> None:
-        self.assert_dataclass_contract(
-            TaskEdge,
-            ["from_node_id", "to_node_id", "edge_type", "condition"],
         )
 
     def test_artifact_fields_match_prd(self) -> None:
@@ -363,8 +348,6 @@ class CoreModelDefaultValueTest(unittest.TestCase):
         self.assertEqual(task.status, TaskStatus.ACCEPTED)
         self.assertEqual(task.routing_mode, RoutingMode.AUTO)
         self.assertEqual(node.status, NodeStatus.PENDING)
-        self.assertEqual(node.criticality, NodeCriticality.REQUIRED)
-        self.assertEqual(node.dependency_type, DependencyType.HARD)
         self.assertEqual(artifact.summary, None)
         self.assertEqual(event.visibility, EventVisibility.INTERNAL)
         self.assertEqual(mailbox.ack_policy, AckPolicy.LIGHT)

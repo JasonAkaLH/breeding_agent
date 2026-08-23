@@ -1,16 +1,14 @@
 {
   "component": "maf_runtime_sidecar",
   "protocol_version": "maf.runtime.v1",
-  "schema_hash": "maf_runtime_v1_schema_20260822_agent_atomic_projection",
+  "schema_hash": "maf_runtime_v1_schema_20260823_agent_only",
   "error_code_table_hash": "maf_runtime_error_table_v1_idempotency_conflict_20260812",
   "supported_features": [
     "runtime_store",
     "event_log",
     "task_dispatcher",
-    "task_graph",
     "artifact_metadata",
     "task_read",
-    "planner_replan_claim",
     "agent_state"
   ],
   "modes": [
@@ -33,13 +31,6 @@
     },
     {
       "name": "node_state_transition",
-      "kind": "write",
-      "enforce_failure": "fail_closed",
-      "python_legacy_write_fallback": false,
-      "idempotency_required": true
-    },
-    {
-      "name": "task_edge_save",
       "kind": "write",
       "enforce_failure": "fail_closed",
       "python_legacy_write_fallback": false,
@@ -109,20 +100,6 @@
       "idempotency_required": true
     },
     {
-      "name": "planner_replan_claim",
-      "kind": "write",
-      "enforce_failure": "fail_closed",
-      "python_legacy_write_fallback": false,
-      "idempotency_required": true
-    },
-    {
-      "name": "planner_replan_claim_mark",
-      "kind": "write",
-      "enforce_failure": "fail_closed",
-      "python_legacy_write_fallback": false,
-      "idempotency_required": true
-    },
-    {
       "name": "task_get",
       "kind": "read",
       "enforce_failure": "read_only_degraded_error",
@@ -144,13 +121,6 @@
       "idempotency_required": false
     },
     {
-      "name": "planner_replan_claim_get",
-      "kind": "read",
-      "enforce_failure": "read_only_degraded_error",
-      "python_legacy_write_fallback": false,
-      "idempotency_required": false
-    },
-    {
       "name": "task_node_get",
       "kind": "read",
       "enforce_failure": "read_only_degraded_error",
@@ -159,13 +129,6 @@
     },
     {
       "name": "task_node_list",
-      "kind": "read",
-      "enforce_failure": "read_only_degraded_error",
-      "python_legacy_write_fallback": false,
-      "idempotency_required": false
-    },
-    {
-      "name": "task_edge_list",
       "kind": "read",
       "enforce_failure": "read_only_degraded_error",
       "python_legacy_write_fallback": false,
@@ -331,7 +294,6 @@
     "replay_page_events": 1000,
     "shutdown_drain_ms": 30000,
     "state_transition_deadline_ms": 2000,
-    "task_edge_deadline_ms": 2000,
     "task_submit_deadline_ms": 3000
   },
   "retry_policy": {
@@ -375,7 +337,7 @@
       "schema_hash",
       "provenance_attestation"
     ],
-    "expected_proto_hash": "maf_runtime_proto_v1_20260823_agent_startup_recovery",
+    "expected_proto_hash": "maf_runtime_proto_v1_20260823_agent_only",
     "require_schema_hash_match": true,
     "require_checksum_allowlist": true,
     "require_cargo_lock_digest_allowlist": true,
@@ -390,7 +352,6 @@
     "required_operations": [
       "task_submit",
       "node_state_transition",
-      "task_edge_save",
       "artifact_save",
       "event_append",
       "lease_acquire",
@@ -438,7 +399,6 @@
       "event_log",
       "lease",
       "cursor",
-      "task_edge",
       "artifact_metadata",
       "bundle_pin"
     ],
@@ -486,7 +446,6 @@
     "required_removed_legacy_paths": [
       "python_storage_task_write",
       "python_storage_node_write",
-      "python_storage_task_edge_write",
       "python_storage_artifact_write",
       "python_event_append_write",
       "python_bundle_pin_write",

@@ -39,6 +39,18 @@ RECEIPT_ORDER = (
     "completed",
 )
 
+AGENT_ONLY_SCHEMA_VERSION = "agent-only-v1"
+_DAG_NODE_FIELDS = frozenset(
+    {
+        "criticality",
+        "dependency_type",
+        "retry_policy",
+        "timeout_policy",
+        "resource_class",
+    }
+)
+_POSTGRES_ADVISORY_LOCK_KEY = int.from_bytes(b"MAFP7AGT", "big", signed=True)
+
 
 class AgentSchemaMigrationError(RuntimeError):
     pass
@@ -457,6 +469,17 @@ def restore_all(
     if result.returncode != 0:
         raise AgentSchemaMigrationError("agent_schema_postgres_restore_all_failed")
     _restore_sqlite(backup_dir / "sqlite.backup", descriptor.sqlite_path, replace=True)
+    _probe_restored_sidecar(
+        descriptor.sidecar_path,
+        binary_path=_required_executable_env(descriptor.sidecar_binary_env),
+    )
+    report = _load_json_secure(_receipt_input_report(descriptor.state_root), 0o600)
+    _validate_report_sha(report)
+    restored = build_report(descriptor)
+    if _semantic_backends(restored["backends"]) != _semantic_backends(
+        report["backends"]
+    ):
+        raise AgentSchemaMigrationError("agent_schema_restore_inventory_mismatch")
     return _write_receipt(
         descriptor.state_root,
         state="restored",
@@ -470,6 +493,445 @@ def restore_all(
             "restored_backends": ["sidecar", "postgres", "sqlite"],
         },
     )
+
+
+def apply_all(
+    descriptor: StateDescriptor,
+    *,
+    report_path: str | os.PathLike[str],
+    expected_report_sha: str,
+    manifest_path: str | os.PathLike[str],
+    expected_backup_set_sha: str,
+    restore_receipt_path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    report = _load_json_secure(Path(report_path), 0o600)
+    _validate_report_sha(report)
+    _require_sha(expected_report_sha, report.get("report_sha256"), "report")
+    if (
+        report.get("tested_commit") != descriptor.tested_commit
+        or report.get("tested_tree") != descriptor.tested_tree
+    ):
+        raise AgentSchemaMigrationError("agent_schema_tested_revision_drift")
+
+    manifest_path = Path(manifest_path)
+    manifest = _load_json_secure(manifest_path, 0o600)
+    _validate_manifest(manifest, expected_report_sha=expected_report_sha)
+    _validate_manifest_descriptor(manifest, descriptor)
+    _require_sha(
+        expected_backup_set_sha, manifest.get("backup_set_sha256"), "backup_set"
+    )
+    backup_dir = _secure_directory(manifest_path.parent, require_existing=True)
+    _validate_backup_files(backup_dir, manifest)
+    _validate_restore_receipt(
+        descriptor,
+        Path(restore_receipt_path),
+        expected_report_sha=expected_report_sha,
+        expected_backup_set_sha=expected_backup_set_sha,
+    )
+    pre_versions = _schema_versions(report)
+
+    receipt = _current_receipt(descriptor.state_root)
+    _verify_applied_prefix(descriptor, report, str(receipt.get("state") or ""))
+    if receipt.get("state") == "completed":
+        return receipt
+    if receipt.get("backup_set_sha256") != expected_backup_set_sha:
+        raise AgentSchemaMigrationError("agent_schema_receipt_input_drift")
+    if receipt.get("state") == "restore_verified":
+        current = build_report(descriptor)
+        _require_backend_inventory(report, current)
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="applying_sqlite",
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+        )
+        _apply_sqlite_schema(descriptor.sqlite_path, sidecar=False)
+    if receipt.get("state") == "applying_sqlite":
+        _require_backend_post_inventory(
+            "sqlite",
+            _mapping(_mapping(report, "backends"), "sqlite"),
+            _sqlite_report(descriptor.sqlite_path, descriptor.sqlite_agent_tables),
+        )
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="sqlite_applied",
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+        )
+    if receipt.get("state") == "sqlite_applied":
+        receipt = _apply_postgres_locked(
+            descriptor,
+            report=report,
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+        )
+    if receipt.get("state") == "applying_postgres":
+        with _postgres_lock(_required_secret_env(descriptor.postgres_dsn_env)):
+            _require_backend_post_inventory(
+                "postgres",
+                _mapping(_mapping(report, "backends"), "postgres"),
+                _postgres_report(
+                    _required_secret_env(descriptor.postgres_dsn_env),
+                    descriptor.postgres_agent_tables,
+                ),
+            )
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="postgres_applied",
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+        )
+    if receipt.get("state") == "postgres_applied":
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="applying_sidecar",
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+        )
+        _apply_sqlite_schema(descriptor.sidecar_path, sidecar=True)
+    if receipt.get("state") == "applying_sidecar":
+        sidecar_inventory = _sqlite_report(
+            descriptor.sidecar_path, descriptor.sidecar_agent_tables
+        )
+        _require_backend_post_inventory(
+            "sidecar",
+            _mapping(_mapping(report, "backends"), "sidecar"),
+            sidecar_inventory,
+        )
+        _probe_restored_sidecar(
+            descriptor.sidecar_path,
+            binary_path=_required_executable_env(descriptor.sidecar_binary_env),
+        )
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="sidecar_applied",
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+        )
+    if receipt.get("state") == "sidecar_applied":
+        post = build_report(descriptor)
+        for backend in ("sqlite", "postgres", "sidecar"):
+            _require_backend_post_inventory(
+                backend,
+                _mapping(_mapping(report, "backends"), backend),
+                _mapping(_mapping(post, "backends"), backend),
+            )
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="verified",
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+            checks={
+                "agent_storage": True,
+                "backend_readiness": True,
+                "dag_objects_removed": True,
+                "preserved_table_counts": True,
+            },
+        )
+    if receipt.get("state") == "verified":
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="completed",
+            report_sha=expected_report_sha,
+            backup_set_sha=expected_backup_set_sha,
+            pre_versions=pre_versions,
+        )
+    if receipt.get("state") != "completed":
+        raise AgentSchemaMigrationError("agent_schema_partial_apply_requires_restore")
+    return receipt
+
+
+def _verify_applied_prefix(
+    descriptor: StateDescriptor,
+    report: Mapping[str, Any],
+    state: str,
+) -> None:
+    before = _mapping(report, "backends")
+    if _receipt_at_or_after(state, "sqlite_applied"):
+        _require_backend_post_inventory(
+            "sqlite",
+            _mapping(before, "sqlite"),
+            _sqlite_report(descriptor.sqlite_path, descriptor.sqlite_agent_tables),
+        )
+    if _receipt_at_or_after(state, "postgres_applied"):
+        dsn = _required_secret_env(descriptor.postgres_dsn_env)
+        with _postgres_lock(dsn):
+            _require_backend_post_inventory(
+                "postgres",
+                _mapping(before, "postgres"),
+                _postgres_report(dsn, descriptor.postgres_agent_tables),
+            )
+    if _receipt_at_or_after(state, "sidecar_applied"):
+        _require_backend_post_inventory(
+            "sidecar",
+            _mapping(before, "sidecar"),
+            _sqlite_report(descriptor.sidecar_path, descriptor.sidecar_agent_tables),
+        )
+        _probe_restored_sidecar(
+            descriptor.sidecar_path,
+            binary_path=_required_executable_env(descriptor.sidecar_binary_env),
+        )
+
+
+def _validate_restore_receipt(
+    descriptor: StateDescriptor,
+    path: Path,
+    *,
+    expected_report_sha: str,
+    expected_backup_set_sha: str,
+) -> None:
+    receipt = _load_json_secure(path, 0o600)
+    chain = _receipt_chain(descriptor.state_root)
+    if (
+        path.resolve().parent != (descriptor.state_root / RECEIPT_DIRECTORY).resolve()
+        or receipt not in chain
+        or receipt.get("state") != "restore_verified"
+        or receipt.get("report_sha256") != expected_report_sha
+        or receipt.get("backup_set_sha256") != expected_backup_set_sha
+    ):
+        raise AgentSchemaMigrationError("agent_schema_restore_receipt_invalid")
+
+
+def _write_apply_receipt(
+    descriptor: StateDescriptor,
+    *,
+    state: str,
+    report_sha: str,
+    backup_set_sha: str,
+    pre_versions: Mapping[str, str],
+    checks: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    versions = dict(pre_versions)
+    if state in {
+        "sqlite_applied",
+        "applying_postgres",
+        "postgres_applied",
+        "applying_sidecar",
+        "sidecar_applied",
+        "verified",
+        "completed",
+    }:
+        versions["sqlite"] = AGENT_ONLY_SCHEMA_VERSION
+    if state in {
+        "postgres_applied",
+        "applying_sidecar",
+        "sidecar_applied",
+        "verified",
+        "completed",
+    }:
+        versions["postgres"] = AGENT_ONLY_SCHEMA_VERSION
+    if state in {"sidecar_applied", "verified", "completed"}:
+        versions["sidecar"] = AGENT_ONLY_SCHEMA_VERSION
+    payload: dict[str, Any] = {
+        "report_sha256": report_sha,
+        "backup_set_sha256": backup_set_sha,
+        "tested_commit": descriptor.tested_commit,
+        "tested_tree": descriptor.tested_tree,
+        "schema_versions": versions,
+    }
+    if checks is not None:
+        payload["checks"] = dict(checks)
+    return _write_receipt(
+        descriptor.state_root,
+        state=state,
+        input_sha=backup_set_sha,
+        payload=payload,
+    )
+
+
+def _apply_sqlite_schema(path: Path, *, sidecar: bool) -> None:
+    _secure_file(path, require_mode=None)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        tables = _sqlite_tables(connection)
+        if sidecar:
+            for table in (
+                "task_edges",
+                "task_edge_idempotency",
+                "planner_replan_claims",
+            ):
+                if table in tables:
+                    connection.execute(f'DROP TABLE "{table}"')
+            for table in ("submitted_tasks", "task_submit_idempotency"):
+                _sqlite_drop_columns(connection, table, {"root_node_id"})
+            for table in ("task_nodes", "node_transition_idempotency"):
+                _strip_json_fields(connection, table, "node_json", _DAG_NODE_FIELDS)
+        else:
+            for table in ("task_edge", "planner_replan_claim"):
+                if table in tables:
+                    connection.execute(f'DROP TABLE "{table}"')
+            _sqlite_drop_columns(connection, "task", {"root_node_id"})
+            _sqlite_drop_columns(connection, "task_node", _DAG_NODE_FIELDS)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    _fsync_file(path)
+
+
+def _sqlite_tables(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+
+def _sqlite_drop_columns(
+    connection: sqlite3.Connection, table: str, fields: set[str] | frozenset[str]
+) -> None:
+    if table not in _sqlite_tables(connection):
+        return
+    columns = {
+        str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')
+    }
+    for field in sorted(fields & columns):
+        connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{field}"')
+
+
+def _strip_json_fields(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    fields: frozenset[str],
+) -> None:
+    if table not in _sqlite_tables(connection):
+        return
+    columns = {
+        str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')
+    }
+    if column not in columns:
+        return
+    rows = connection.execute(
+        f'SELECT rowid, "{column}" FROM "{table}" ORDER BY rowid'
+    ).fetchall()
+    for rowid, raw in rows:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise AgentSchemaMigrationError("agent_schema_sidecar_node_json_invalid") from exc
+        if not isinstance(payload, dict):
+            raise AgentSchemaMigrationError("agent_schema_sidecar_node_json_invalid")
+        if not fields.intersection(payload):
+            continue
+        for field in fields:
+            payload.pop(field, None)
+        encoded = canonical_bytes(payload)
+        value: bytes | str = encoded if isinstance(raw, bytes) else encoded.decode("utf-8")
+        connection.execute(
+            f'UPDATE "{table}" SET "{column}"=? WHERE rowid=?', (value, rowid)
+        )
+
+
+@contextlib.contextmanager
+def _postgres_lock(dsn: str):
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_try_advisory_lock(%s)", (_POSTGRES_ADVISORY_LOCK_KEY,)
+            )
+            locked = bool(cursor.fetchone()[0])
+        if not locked:
+            raise AgentSchemaMigrationError("agent_schema_postgres_operator_locked")
+        try:
+            yield connection
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_unlock(%s)", (_POSTGRES_ADVISORY_LOCK_KEY,)
+                )
+
+
+def _apply_postgres_locked(
+    descriptor: StateDescriptor,
+    *,
+    report: Mapping[str, Any],
+    report_sha: str,
+    backup_set_sha: str,
+    pre_versions: Mapping[str, str],
+) -> dict[str, Any]:
+    dsn = _required_secret_env(descriptor.postgres_dsn_env)
+    with _postgres_lock(dsn) as connection:
+        receipt = _write_apply_receipt(
+            descriptor,
+            state="applying_postgres",
+            report_sha=report_sha,
+            backup_set_sha=backup_set_sha,
+            pre_versions=pre_versions,
+        )
+        with connection.transaction(), connection.cursor() as cursor:
+            cursor.execute("DROP TABLE IF EXISTS public.task_edge")
+            cursor.execute("DROP TABLE IF EXISTS public.planner_replan_claim")
+            cursor.execute(
+                "ALTER TABLE IF EXISTS public.task DROP COLUMN IF EXISTS root_node_id"
+            )
+            for field in sorted(_DAG_NODE_FIELDS):
+                cursor.execute(
+                    f'ALTER TABLE IF EXISTS public.task_node DROP COLUMN IF EXISTS "{field}"'
+                )
+        _require_backend_post_inventory(
+            "postgres",
+            _mapping(_mapping(report, "backends"), "postgres"),
+            _postgres_report(dsn, descriptor.postgres_agent_tables),
+        )
+    return receipt
+
+
+def _require_backend_post_inventory(
+    backend: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    if after.get("schema_version") != AGENT_ONLY_SCHEMA_VERSION:
+        raise AgentSchemaMigrationError(
+            f"agent_schema_{backend}_partial_apply_requires_restore"
+        )
+    if after.get("dag_objects") != {
+        "task_edge_table": False,
+        "task_root_node_id": False,
+        "task_node_fields": [],
+        "planner_replan_claim_table": False,
+    }:
+        raise AgentSchemaMigrationError(
+            f"agent_schema_{backend}_partial_apply_requires_restore"
+        )
+    if (
+        before.get("agent_row_counts") != after.get("agent_row_counts")
+        or before.get("agent_data_digests") != after.get("agent_data_digests")
+    ):
+        raise AgentSchemaMigrationError(f"agent_schema_{backend}_agent_data_drift")
+    before_counts = before.get("table_row_counts")
+    after_counts = after.get("table_row_counts")
+    if not isinstance(before_counts, Mapping) or not isinstance(after_counts, Mapping):
+        raise AgentSchemaMigrationError("agent_schema_backend_inventory_invalid")
+    deleted_tables = {
+        "task_edge",
+        "task_edges",
+        "task_edge_idempotency",
+        "planner_replan_claim",
+        "planner_replan_claims",
+    }
+    expected_counts = {
+        str(table): count
+        for table, count in before_counts.items()
+        if str(table) not in deleted_tables
+    }
+    if dict(after_counts) != expected_counts:
+        raise AgentSchemaMigrationError(f"agent_schema_{backend}_row_count_drift")
 
 
 def remember_report_path(
@@ -666,10 +1128,11 @@ def _sqlite_report(path: Path, agent_tables: Sequence[str]) -> dict[str, Any]:
             ]
             for table in sorted(tables)
         }
+        dag_objects = _dag_objects(columns, tables, connection=connection)
     finally:
         connection.close()
     return {
-        "schema_version": "pre-p7",
+        "schema_version": _inventory_schema_version(dag_objects),
         "file_sha256": _file_descriptor(path)["sha256"],
         "agent_row_counts": counts,
         "agent_data_digests": digests,
@@ -682,7 +1145,7 @@ def _sqlite_report(path: Path, agent_tables: Sequence[str]) -> dict[str, Any]:
                 }
             )
         ),
-        "dag_objects": _dag_objects(columns, tables),
+        "dag_objects": dag_objects,
     }
 
 
@@ -727,13 +1190,14 @@ def _postgres_report(dsn: str, agent_tables: Sequence[str]) -> dict[str, Any]:
                 cursor.execute(f'SELECT COUNT(*) FROM "{table}"')
                 table_counts[table] = int(cursor.fetchone()[0])
     tables = set(columns)
+    dag_objects = _dag_objects(columns, tables)
     return {
-        "schema_version": "pre-p7",
+        "schema_version": _inventory_schema_version(dag_objects),
         "agent_row_counts": counts,
         "agent_data_digests": digests,
         "table_row_counts": table_counts,
         "schema_digest": sha256_bytes(canonical_bytes({"columns": columns})),
-        "dag_objects": _dag_objects(columns, tables),
+        "dag_objects": dag_objects,
     }
 
 
@@ -759,27 +1223,64 @@ def _json_scalar(value: Any) -> Any:
 
 
 def _dag_objects(
-    columns: Mapping[str, Sequence[str]], tables: set[str]
+    columns: Mapping[str, Sequence[str]],
+    tables: set[str],
+    *,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
-    task_columns = set(columns.get("submitted_tasks", ())) | set(
-        columns.get("tasks", ())
-    )
-    node_columns = set(columns.get("task_nodes", ()))
+    task_columns: set[str] = set()
+    for table in ("task", "tasks", "submitted_tasks", "task_submit_idempotency"):
+        task_columns.update(columns.get(table, ()))
+    node_columns: set[str] = set()
+    for table in ("task_node", "task_nodes"):
+        node_columns.update(columns.get(table, ()))
+    node_fields = node_columns & _DAG_NODE_FIELDS
+    if connection is not None:
+        for table in ("task_nodes", "node_transition_idempotency"):
+            if table in tables and "node_json" in columns.get(table, ()):
+                node_fields.update(
+                    _sqlite_json_fields(connection, table, "node_json")
+                    & _DAG_NODE_FIELDS
+                )
     return {
-        "task_edge_table": "task_edges" in tables,
-        "task_root_node_id": "root_node_id" in task_columns,
-        "task_node_fields": sorted(
-            node_columns
-            & {
-                "criticality",
-                "dependency_type",
-                "retry_policy",
-                "timeout_policy",
-                "resource_class",
-            }
+        "task_edge_table": bool(
+            {"task_edge", "task_edges", "task_edge_idempotency"} & tables
         ),
-        "planner_replan_claim_table": "planner_replan_claims" in tables,
+        "task_root_node_id": "root_node_id" in task_columns,
+        "task_node_fields": sorted(node_fields),
+        "planner_replan_claim_table": bool(
+            {"planner_replan_claim", "planner_replan_claims"} & tables
+        ),
     }
+
+
+def _sqlite_json_fields(
+    connection: sqlite3.Connection, table: str, column: str
+) -> set[str]:
+    fields: set[str] = set()
+    for (raw,) in connection.execute(f'SELECT "{column}" FROM "{table}"'):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise AgentSchemaMigrationError("agent_schema_sidecar_node_json_invalid") from exc
+        if not isinstance(payload, dict):
+            raise AgentSchemaMigrationError("agent_schema_sidecar_node_json_invalid")
+        fields.update(str(key) for key in payload)
+    return fields
+
+
+def _inventory_schema_version(dag_objects: Mapping[str, Any]) -> str:
+    return (
+        AGENT_ONLY_SCHEMA_VERSION
+        if dag_objects
+        == {
+            "task_edge_table": False,
+            "task_root_node_id": False,
+            "task_node_fields": [],
+            "planner_replan_claim_table": False,
+        }
+        else "pre-p7"
+    )
 
 
 def _backup_sqlite(source: Path, destination: Path) -> dict[str, Any]:
@@ -1161,6 +1662,7 @@ __all__ = [
     "STATE_FILE",
     "STATE_SCHEMA",
     "StateDescriptor",
+    "apply_all",
     "backup_all",
     "build_report",
     "load_state_descriptor",

@@ -10,14 +10,11 @@ from .enums import (
     AckPolicy,
     ArtifactType,
     ConversationStatus,
-    DependencyType,
-    EdgeType,
     EventVisibility,
     InterruptStatus,
     MailboxChannel,
     MailboxDeliveryStatus,
     MessageRole,
-    NodeCriticality,
     NodeStatus,
     RoutingMode,
     StrEnum,
@@ -1303,17 +1300,6 @@ class FileUploadMessageProjection:
 
 
 @dataclass(slots=True, frozen=True)
-class PlannerReplanClaim:
-    task_id: str
-    decision_digest: str
-    planning_revision: int
-    planning_epoch: str
-    status: str = "claimed"
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-
-@dataclass(slots=True, frozen=True)
 class Task:
     task_id: str
     conversation_id: str
@@ -1321,7 +1307,6 @@ class Task:
     status: TaskStatus = TaskStatus.ACCEPTED
     routing_mode: RoutingMode = RoutingMode.AUTO
     requested_capability_id: str | None = None
-    root_node_id: str | None = None
     summary: str | None = None
     cancel_requested_at: datetime | None = None
     created_at: datetime | None = None
@@ -1357,23 +1342,10 @@ class TaskNode:
     capability_id: str
     assigned_instance_id: str | None = None
     status: NodeStatus = NodeStatus.PENDING
-    criticality: NodeCriticality = NodeCriticality.REQUIRED
-    dependency_type: DependencyType = DependencyType.HARD
-    retry_policy: JsonMapping = field(default_factory=dict)
-    timeout_policy: JsonMapping = field(default_factory=dict)
-    resource_class: str | None = None
     input_refs: tuple[str, ...] = ()
     output_refs: tuple[str, ...] = ()
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-
-@dataclass(slots=True, frozen=True)
-class TaskEdge:
-    from_node_id: str
-    to_node_id: str
-    edge_type: EdgeType = EdgeType.DATA
-    condition: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

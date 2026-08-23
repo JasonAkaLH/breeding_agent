@@ -295,7 +295,7 @@ class AgentEventProjector:
             conversation_id=_bounded_id(conversation_id),
             task_id=_bounded_id(task_id),
             event_type="task.graph_created",
-            payload={"edge_count": 0, "node_count": 0, "root_node_id": None},
+            payload={"edge_count": 0, "node_count": 0},
             visibility=EventVisibility.FRONTEND,
         )
 

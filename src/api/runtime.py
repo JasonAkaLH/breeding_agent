@@ -43,7 +43,7 @@ from src.capabilities.mcp_dispatch import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
+from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import (
     Conversation,
     ConversationFileResource,
@@ -2824,7 +2824,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             task_id=task.task_id,
             capability_id=task.requested_capability_id or "agent.sheet_selection",
             status=NodeStatus.RUNNING,
-            criticality=NodeCriticality.REQUIRED,
             started_at=now,
         )
         await self.storage.save_task_node(node)
@@ -2832,7 +2831,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             replace(
                 task,
                 status=TaskStatus.RUNNING,
-                root_node_id=task.root_node_id or node_id,
                 updated_at=now,
             )
         )

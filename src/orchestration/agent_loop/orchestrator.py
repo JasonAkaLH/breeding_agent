@@ -142,7 +142,6 @@ class AgentLoopOrchestrator:
                     payload={
                         "edge_count": 0,
                         "node_count": 0,
-                        "root_node_id": None,
                     },
                 )
             )

@@ -118,8 +118,6 @@ def normalize_runtime_sidecar_response(operation_name: str, response: Any) -> An
         return response
     if operation_name == "event_append":
         return {"operation": operation_name, "cursor": response, "error": None}
-    if operation_name == "task_edge_save":
-        return {"operation": operation_name, "edge": response, "error": None}
     if operation_name == "artifact_save":
         return {"operation": operation_name, "artifact": response, "error": None}
     return response

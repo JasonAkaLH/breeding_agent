@@ -167,18 +167,6 @@ pub fn enum_contracts() -> BTreeMap<String, Vec<NamedValue>> {
             ]),
         ),
         (
-            "DependencyType".to_owned(),
-            named(&[("HARD", "hard"), ("SOFT", "soft")]),
-        ),
-        (
-            "EdgeType".to_owned(),
-            named(&[
-                ("DATA", "data"),
-                ("CONTROL", "control"),
-                ("FALLBACK", "fallback"),
-            ]),
-        ),
-        (
             "EventVisibility".to_owned(),
             named(&[
                 ("FRONTEND", "frontend"),
@@ -220,14 +208,6 @@ pub fn enum_contracts() -> BTreeMap<String, Vec<NamedValue>> {
                 ("USER", "user"),
                 ("ASSISTANT", "assistant"),
                 ("SYSTEM", "system"),
-            ]),
-        ),
-        (
-            "NodeCriticality".to_owned(),
-            named(&[
-                ("REQUIRED", "required"),
-                ("OPTIONAL", "optional"),
-                ("FALLBACK", "fallback"),
             ]),
         ),
         (
@@ -546,7 +526,6 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "status",
                 "routing_mode",
                 "requested_capability_id",
-                "root_node_id",
                 "summary",
                 "cancel_requested_at",
                 "created_at",
@@ -559,10 +538,6 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
             ]),
         ),
         (
-            "TaskEdge".to_owned(),
-            fields(&["from_node_id", "to_node_id", "edge_type", "condition"]),
-        ),
-        (
             "TaskNode".to_owned(),
             fields(&[
                 "node_id",
@@ -570,11 +545,6 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "capability_id",
                 "assigned_instance_id",
                 "status",
-                "criticality",
-                "dependency_type",
-                "retry_policy",
-                "timeout_policy",
-                "resource_class",
                 "input_refs",
                 "output_refs",
                 "started_at",

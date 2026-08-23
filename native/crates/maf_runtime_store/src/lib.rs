@@ -6,16 +6,14 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260822_agent_atomic_projection";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260823_agent_only";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260823_agent_startup_recovery";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260823_agent_only";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
-pub const FEATURE_TASK_GRAPH: &str = "task_graph";
 pub const FEATURE_ARTIFACT_METADATA: &str = "artifact_metadata";
 pub const FEATURE_TASK_READ: &str = "task_read";
-pub const FEATURE_PLANNER_REPLAN_CLAIM: &str = "planner_replan_claim";
 pub const FEATURE_AGENT_STATE: &str = "agent_state";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
@@ -358,7 +356,6 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
     [
         "task_submit",
         "node_state_transition",
-        "task_edge_save",
         "artifact_save",
         "event_append",
         "lease_acquire",
@@ -372,25 +369,12 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
     .into_iter()
     .map(write_operation)
     .chain(
-        ["planner_replan_claim", "planner_replan_claim_mark"]
-            .into_iter()
-            .map(|name| OperationPolicy {
-                name: name.to_owned(),
-                kind: "write".to_owned(),
-                enforce_failure: "fail_closed".to_owned(),
-                python_legacy_write_fallback: false,
-                idempotency_required: true,
-            }),
-    )
-    .chain(
         [
             "task_get",
             "task_list_for_conversation",
             "task_get_active_for_conversation",
-            "planner_replan_claim_get",
             "task_node_get",
             "task_node_list",
-            "task_edge_list",
             "artifact_get",
             "artifact_list",
             "event_replay",
@@ -533,7 +517,6 @@ pub fn benchmark_policy() -> BenchmarkPolicy {
         required_operations: [
             "task_submit",
             "node_state_transition",
-            "task_edge_save",
             "artifact_save",
             "event_append",
             "lease_acquire",
@@ -597,7 +580,6 @@ pub fn migration_policy() -> MigrationPolicy {
             "event_log",
             "lease",
             "cursor",
-            "task_edge",
             "artifact_metadata",
             "bundle_pin",
         ]
@@ -660,7 +642,6 @@ pub fn decommission_policy() -> DecommissionPolicy {
         required_removed_legacy_paths: [
             "python_storage_task_write",
             "python_storage_node_write",
-            "python_storage_task_edge_write",
             "python_storage_artifact_write",
             "python_event_append_write",
             "python_bundle_pin_write",
@@ -707,10 +688,8 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             FEATURE_RUNTIME_STORE.to_owned(),
             FEATURE_EVENT_LOG.to_owned(),
             FEATURE_TASK_DISPATCHER.to_owned(),
-            FEATURE_TASK_GRAPH.to_owned(),
             FEATURE_ARTIFACT_METADATA.to_owned(),
             FEATURE_TASK_READ.to_owned(),
-            FEATURE_PLANNER_REPLAN_CLAIM.to_owned(),
             FEATURE_AGENT_STATE.to_owned(),
         ],
         modes: vec!["off".to_owned(), "shadow".to_owned(), "enforce".to_owned()],
@@ -738,7 +717,6 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             ("queue_wait_ms".to_owned(), 2_000),
             ("task_submit_deadline_ms".to_owned(), 3_000),
             ("state_transition_deadline_ms".to_owned(), 2_000),
-            ("task_edge_deadline_ms".to_owned(), 2_000),
             ("artifact_metadata_deadline_ms".to_owned(), 2_000),
             ("event_append_deadline_ms".to_owned(), 2_000),
             ("lease_deadline_ms".to_owned(), 1_000),
@@ -828,7 +806,6 @@ mod tests {
             artifact.resource_limits["state_transition_deadline_ms"],
             2_000
         );
-        assert_eq!(artifact.resource_limits["task_edge_deadline_ms"], 2_000);
         assert_eq!(
             artifact.resource_limits["artifact_metadata_deadline_ms"],
             2_000
@@ -917,11 +894,6 @@ mod tests {
         assert!(
             policy
                 .required_operations
-                .contains(&"task_edge_save".to_owned())
-        );
-        assert!(
-            policy
-                .required_operations
                 .contains(&"artifact_save".to_owned())
         );
         assert!(
@@ -996,7 +968,6 @@ mod tests {
                 "event_log".to_owned(),
                 "lease".to_owned(),
                 "cursor".to_owned(),
-                "task_edge".to_owned(),
                 "artifact_metadata".to_owned(),
                 "bundle_pin".to_owned(),
             ]
@@ -1104,7 +1075,6 @@ mod tests {
             vec![
                 "python_storage_task_write".to_owned(),
                 "python_storage_node_write".to_owned(),
-                "python_storage_task_edge_write".to_owned(),
                 "python_storage_artifact_write".to_owned(),
                 "python_event_append_write".to_owned(),
                 "python_bundle_pin_write".to_owned(),

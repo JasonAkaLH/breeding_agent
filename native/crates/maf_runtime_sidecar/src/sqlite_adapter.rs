@@ -1,11 +1,10 @@
 use crate::{
     AgentItemRecord, AgentRunRecord, AgentStateReceipt, ArtifactRecord, BundleRevisionResult,
-    CancellationToken, CommitAgentStateRequest, EventCursor, NodeTransitionResult,
-    PlannerReplanClaimRecord, TaskEdgeRecord, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
-    idempotency_conflict, idempotency_key, migration_blocked, require_idempotency_key,
-    validate_agent_final_commit_shape, validate_agent_final_projection, validate_agent_item_record,
-    validate_agent_item_relationships, validate_agent_item_update, validate_agent_run_record,
-    validate_planner_replan_identity, validate_task_node_record, validate_task_node_update,
+    CancellationToken, CommitAgentStateRequest, EventCursor, NodeTransitionResult, TaskNodeRecord,
+    TaskRecord, TaskRouteAssignment, idempotency_conflict, idempotency_key, migration_blocked,
+    require_idempotency_key, validate_agent_final_commit_shape, validate_agent_final_projection,
+    validate_agent_item_record, validate_agent_item_relationships, validate_agent_item_update,
+    validate_agent_run_record, validate_task_node_record, validate_task_node_update,
     validate_task_record, validate_task_update,
 };
 use maf_runtime_store::{RuntimeSidecarError, RuntimeSidecarErrorCode, TaskLease};
@@ -521,99 +520,6 @@ impl RuntimeSidecarSqliteAdapter {
             .next())
     }
 
-    pub fn claim_planner_replan(
-        &self,
-        task_id: &str,
-        decision_digest: &str,
-        now: &str,
-    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
-        validate_planner_replan_identity(task_id, decision_digest, now)?;
-        let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(|error| {
-            sqlite_error("begin planner replan claim transaction failed", error)
-        })?;
-        if let Some(existing) =
-            planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
-        {
-            transaction.commit().map_err(|error| {
-                sqlite_error("commit idempotent planner replan claim failed", error)
-            })?;
-            return Ok(existing);
-        }
-        if task_record_by_id(&transaction, task_id)?.is_none() {
-            return Err(write_failed("planner replan claim task was not found"));
-        }
-        let planning_revision_i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(planning_revision), 0) + 1 FROM planner_replan_claims WHERE task_id = ?1",
-                rusqlite::params![task_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|error| sqlite_error("select planner replan revision failed", error))?;
-        let planning_revision = u64::try_from(planning_revision_i64)
-            .map_err(|_| write_failed("planner replan revision is invalid"))?;
-        let planning_epoch = format!("r{planning_revision}");
-        transaction
-            .execute(
-                "INSERT INTO planner_replan_claims (task_id, decision_digest, planning_revision, planning_epoch, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'claimed', ?5, ?5)",
-                rusqlite::params![task_id, decision_digest, planning_revision_i64, planning_epoch, now],
-            )
-            .map_err(|error| sqlite_error("insert planner replan claim failed", error))?;
-        let claim = planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
-            .ok_or_else(|| write_failed("inserted planner replan claim was not found"))?;
-        transaction
-            .commit()
-            .map_err(|error| sqlite_error("commit planner replan claim failed", error))?;
-        Ok(claim)
-    }
-
-    pub fn get_planner_replan_claim(
-        &self,
-        task_id: &str,
-        decision_digest: &str,
-    ) -> Result<Option<PlannerReplanClaimRecord>, RuntimeSidecarError> {
-        let connection = self.lock_connection()?;
-        planner_replan_claim_by_identity(&connection, task_id, decision_digest)
-    }
-
-    pub fn mark_planner_replan_claim(
-        &self,
-        task_id: &str,
-        decision_digest: &str,
-        status: &str,
-        now: &str,
-    ) -> Result<PlannerReplanClaimRecord, RuntimeSidecarError> {
-        validate_planner_replan_identity(task_id, decision_digest, now)?;
-        if !matches!(status, "applied" | "rejected") {
-            return Err(write_failed("planner replan claim status is invalid"));
-        }
-        let mut connection = self.lock_connection()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| sqlite_error("begin planner replan mark transaction failed", error))?;
-        let existing = planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
-            .ok_or_else(|| write_failed("planner replan claim was not found"))?;
-        if existing.status != status {
-            if existing.status != "claimed" {
-                return Err(write_failed(
-                    "terminal planner replan claim cannot be changed",
-                ));
-            }
-            transaction
-                .execute(
-                    "UPDATE planner_replan_claims SET status = ?3, updated_at = ?4 WHERE task_id = ?1 AND decision_digest = ?2",
-                    rusqlite::params![task_id, decision_digest, status, now],
-                )
-                .map_err(|error| sqlite_error("update planner replan claim failed", error))?;
-        }
-        let claim = planner_replan_claim_by_identity(&transaction, task_id, decision_digest)?
-            .ok_or_else(|| write_failed("updated planner replan claim was not found"))?;
-        transaction
-            .commit()
-            .map_err(|error| sqlite_error("commit planner replan mark failed", error))?;
-        Ok(claim)
-    }
-
     pub fn transition_node(
         &self,
         task_id: &str,
@@ -748,100 +654,6 @@ impl RuntimeSidecarSqliteAdapter {
             )
         })
         .collect()
-    }
-
-    pub fn save_task_edge(
-        &self,
-        edge: TaskEdgeRecord,
-        idempotency_key: &str,
-    ) -> Result<TaskEdgeRecord, RuntimeSidecarError> {
-        let idempotency_key = require_idempotency_key(idempotency_key)?;
-        let mut connection = self.lock_connection()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| sqlite_error("begin task edge save transaction failed", error))?;
-        if let Some(edge) = task_edge_for_idempotency(&transaction, &idempotency_key)? {
-            transaction
-                .commit()
-                .map_err(|error| sqlite_error("commit idempotent task edge save failed", error))?;
-            return Ok(edge);
-        }
-        transaction
-            .execute(
-                r"
-                INSERT INTO task_edges (
-                    task_id,
-                    from_node_id,
-                    to_node_id,
-                    edge_type,
-                    condition
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                ON CONFLICT(task_id, from_node_id, to_node_id) DO UPDATE SET
-                    edge_type = excluded.edge_type,
-                    condition = excluded.condition
-                ",
-                rusqlite::params![
-                    &edge.task_id,
-                    &edge.from_node_id,
-                    &edge.to_node_id,
-                    &edge.edge_type,
-                    &edge.condition,
-                ],
-            )
-            .map_err(|error| sqlite_error("upsert task edge failed", error))?;
-        transaction
-            .execute(
-                r"
-                INSERT INTO task_edge_idempotency (
-                    idempotency_key,
-                    task_id,
-                    from_node_id,
-                    to_node_id,
-                    edge_type,
-                    condition
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ",
-                rusqlite::params![
-                    &idempotency_key,
-                    &edge.task_id,
-                    &edge.from_node_id,
-                    &edge.to_node_id,
-                    &edge.edge_type,
-                    &edge.condition,
-                ],
-            )
-            .map_err(|error| sqlite_error("insert task edge idempotency key failed", error))?;
-        transaction
-            .commit()
-            .map_err(|error| sqlite_error("commit task edge save failed", error))?;
-        Ok(edge)
-    }
-
-    pub fn list_task_edges(
-        &self,
-        task_id: &str,
-    ) -> Result<Vec<TaskEdgeRecord>, RuntimeSidecarError> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare(
-                r"
-                SELECT task_id, from_node_id, to_node_id, edge_type, condition
-                FROM task_edges
-                WHERE task_id = ?1
-                ORDER BY from_node_id, to_node_id
-                ",
-            )
-            .map_err(|error| sqlite_error("prepare task edge list failed", error))?;
-        let rows = statement
-            .query_map(rusqlite::params![task_id], task_edge_from_row)
-            .map_err(|error| sqlite_error("query task edge list failed", error))?;
-        let mut edges = Vec::new();
-        for row in rows {
-            edges.push(row.map_err(|error| sqlite_error("read task edge row failed", error))?);
-        }
-        Ok(edges)
     }
 
     pub fn save_artifact(
@@ -1429,7 +1241,6 @@ impl RuntimeSidecarSqliteAdapter {
                     status TEXT,
                     routing_mode TEXT,
                     requested_capability_id TEXT,
-                    root_node_id TEXT,
                     summary TEXT,
                     cancel_requested_at TEXT,
                     created_at TEXT,
@@ -1451,7 +1262,6 @@ impl RuntimeSidecarSqliteAdapter {
                     status TEXT,
                     routing_mode TEXT,
                     requested_capability_id TEXT,
-                    root_node_id TEXT,
                     summary TEXT,
                     cancel_requested_at TEXT,
                     created_at TEXT,
@@ -1476,39 +1286,12 @@ impl RuntimeSidecarSqliteAdapter {
                     task_id TEXT NOT NULL,
                     node_json TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS planner_replan_claims (
-                    task_id TEXT NOT NULL,
-                    decision_digest TEXT NOT NULL,
-                    planning_revision INTEGER NOT NULL,
-                    planning_epoch TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('claimed', 'applied', 'rejected')),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (task_id, decision_digest),
-                    UNIQUE (task_id, planning_revision)
-                );
                 CREATE TABLE IF NOT EXISTS node_transition_idempotency (
                     idempotency_key TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,
                     status TEXT NOT NULL,
                     node_json TEXT
-                );
-                CREATE TABLE IF NOT EXISTS task_edges (
-                    task_id TEXT NOT NULL,
-                    from_node_id TEXT NOT NULL,
-                    to_node_id TEXT NOT NULL,
-                    edge_type TEXT NOT NULL,
-                    condition TEXT NOT NULL,
-                    PRIMARY KEY (task_id, from_node_id, to_node_id)
-                );
-                CREATE TABLE IF NOT EXISTS task_edge_idempotency (
-                    idempotency_key TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    from_node_id TEXT NOT NULL,
-                    to_node_id TEXT NOT NULL,
-                    edge_type TEXT NOT NULL,
-                    condition TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS artifacts (
                     artifact_id TEXT PRIMARY KEY,
@@ -1695,7 +1478,7 @@ fn submitted_task_conversation_id(
         .map_err(|error| sqlite_error("select submitted task identity failed", error))
 }
 
-const TASK_RECORD_COLUMNS: &str = "task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, root_node_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at";
+const TASK_RECORD_COLUMNS: &str = "task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at";
 
 fn task_record_by_id(
     connection: &Connection,
@@ -1734,17 +1517,17 @@ fn task_record_for_idempotency(
 }
 
 fn task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
-    let route_mode: Option<String> = row.get(11)?;
+    let route_mode: Option<String> = row.get(10)?;
     let assignment = match route_mode {
         Some(route_mode) => Some(TaskRouteAssignment {
             route_mode,
-            real_path: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-            shadow_path: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
-            config_version: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
-            reason_code: row.get::<_, Option<String>>(15)?.unwrap_or_default(),
-            cohort_id: row.get(16)?,
-            assignment_key_hash: row.get(17)?,
-            assigned_at: row.get(18)?,
+            real_path: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+            shadow_path: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+            config_version: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+            reason_code: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+            cohort_id: row.get(15)?,
+            assignment_key_hash: row.get(16)?,
+            assigned_at: row.get(17)?,
         }),
         None => None,
     };
@@ -1755,11 +1538,10 @@ fn task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord>
         status: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
         routing_mode: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         requested_capability_id: row.get(5)?,
-        root_node_id: row.get(6)?,
-        summary: row.get(7)?,
-        cancel_requested_at: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        summary: row.get(6)?,
+        cancel_requested_at: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
         assignment,
     })
 }
@@ -1770,9 +1552,9 @@ fn upsert_task_record(
 ) -> Result<(), RuntimeSidecarError> {
     let assignment = task.assignment.as_ref();
     connection.execute(
-        r"INSERT INTO submitted_tasks (task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, root_node_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
-           ON CONFLICT(task_id) DO UPDATE SET root_message_id=COALESCE(submitted_tasks.root_message_id, excluded.root_message_id), status=excluded.status, routing_mode=COALESCE(submitted_tasks.routing_mode, excluded.routing_mode), requested_capability_id=COALESCE(submitted_tasks.requested_capability_id, excluded.requested_capability_id), root_node_id=excluded.root_node_id, summary=excluded.summary, cancel_requested_at=excluded.cancel_requested_at, created_at=COALESCE(submitted_tasks.created_at, excluded.created_at), updated_at=excluded.updated_at, route_mode=COALESCE(submitted_tasks.route_mode, excluded.route_mode), real_path=COALESCE(submitted_tasks.real_path, excluded.real_path), shadow_path=COALESCE(submitted_tasks.shadow_path, excluded.shadow_path), config_version=COALESCE(submitted_tasks.config_version, excluded.config_version), reason_code=COALESCE(submitted_tasks.reason_code, excluded.reason_code), cohort_id=COALESCE(submitted_tasks.cohort_id, excluded.cohort_id), assignment_key_hash=COALESCE(submitted_tasks.assignment_key_hash, excluded.assignment_key_hash), assigned_at=COALESCE(submitted_tasks.assigned_at, excluded.assigned_at)",
+        r"INSERT INTO submitted_tasks (task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+           ON CONFLICT(task_id) DO UPDATE SET root_message_id=COALESCE(submitted_tasks.root_message_id, excluded.root_message_id), status=excluded.status, routing_mode=COALESCE(submitted_tasks.routing_mode, excluded.routing_mode), requested_capability_id=COALESCE(submitted_tasks.requested_capability_id, excluded.requested_capability_id), summary=excluded.summary, cancel_requested_at=excluded.cancel_requested_at, created_at=COALESCE(submitted_tasks.created_at, excluded.created_at), updated_at=excluded.updated_at, route_mode=COALESCE(submitted_tasks.route_mode, excluded.route_mode), real_path=COALESCE(submitted_tasks.real_path, excluded.real_path), shadow_path=COALESCE(submitted_tasks.shadow_path, excluded.shadow_path), config_version=COALESCE(submitted_tasks.config_version, excluded.config_version), reason_code=COALESCE(submitted_tasks.reason_code, excluded.reason_code), cohort_id=COALESCE(submitted_tasks.cohort_id, excluded.cohort_id), assignment_key_hash=COALESCE(submitted_tasks.assignment_key_hash, excluded.assignment_key_hash), assigned_at=COALESCE(submitted_tasks.assigned_at, excluded.assigned_at)",
         rusqlite::params_from_iter(task_values(task, assignment)),
     ).map(|_| ()).map_err(|error| sqlite_error("upsert TaskRecord failed", error))
 }
@@ -1805,8 +1587,8 @@ fn insert_task_record_idempotency(
     let mut values = vec![Value::Text(idempotency_key.to_owned())];
     values.extend(task_values(task, assignment));
     connection.execute(
-        r"INSERT INTO task_submit_idempotency (idempotency_key, task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, root_node_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        r"INSERT INTO task_submit_idempotency (idempotency_key, task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         rusqlite::params_from_iter(values),
     ).map(|_| ()).map_err(|error| sqlite_error("insert TaskRecord idempotency snapshot failed", error))
 }
@@ -1819,7 +1601,6 @@ fn task_values(task: &TaskRecord, assignment: Option<&TaskRouteAssignment>) -> V
         text_value(&task.status),
         text_value(&task.routing_mode),
         optional_text_value(task.requested_capability_id.as_deref()),
-        optional_text_value(task.root_node_id.as_deref()),
         optional_text_value(task.summary.as_deref()),
         optional_text_value(task.cancel_requested_at.as_deref()),
         optional_text_value(task.created_at.as_deref()),
@@ -1853,7 +1634,6 @@ fn ensure_task_authority_columns(
         ("status", "TEXT"),
         ("routing_mode", "TEXT"),
         ("requested_capability_id", "TEXT"),
-        ("root_node_id", "TEXT"),
         ("summary", "TEXT"),
         ("cancel_requested_at", "TEXT"),
         ("created_at", "TEXT"),
@@ -1933,87 +1713,11 @@ fn task_node_by_id(
     node_json.as_deref().map(decode_task_node_json).transpose()
 }
 
-fn planner_replan_claim_by_identity(
-    connection: &Connection,
-    task_id: &str,
-    decision_digest: &str,
-) -> Result<Option<PlannerReplanClaimRecord>, RuntimeSidecarError> {
-    let row = connection
-        .query_row(
-            "SELECT task_id, decision_digest, planning_revision, planning_epoch, status, created_at, updated_at FROM planner_replan_claims WHERE task_id = ?1 AND decision_digest = ?2",
-            rusqlite::params![task_id, decision_digest],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| sqlite_error("select planner replan claim failed", error))?;
-    row.map(
-        |(
-            task_id,
-            decision_digest,
-            planning_revision,
-            planning_epoch,
-            status,
-            created_at,
-            updated_at,
-        )| {
-            Ok(PlannerReplanClaimRecord {
-                task_id,
-                decision_digest,
-                planning_revision: u64::try_from(planning_revision)
-                    .map_err(|_| write_failed("planner replan revision is invalid"))?,
-                planning_epoch,
-                status,
-                created_at,
-                updated_at,
-            })
-        },
-    )
-    .transpose()
-}
-
 fn decode_task_node_json(payload: &str) -> Result<TaskNodeRecord, RuntimeSidecarError> {
     let node: TaskNodeRecord =
         serde_json::from_str(payload).map_err(|_| write_failed("decode TaskNodeRecord failed"))?;
     validate_task_node_record(&node)?;
     Ok(node)
-}
-
-fn task_edge_for_idempotency(
-    connection: &Connection,
-    idempotency_key: &str,
-) -> Result<Option<TaskEdgeRecord>, RuntimeSidecarError> {
-    connection
-        .query_row(
-            r"
-            SELECT task_id, from_node_id, to_node_id, edge_type, condition
-            FROM task_edge_idempotency
-            WHERE idempotency_key = ?1
-            ",
-            rusqlite::params![idempotency_key],
-            task_edge_from_row,
-        )
-        .optional()
-        .map_err(|error| sqlite_error("select task edge idempotency key failed", error))
-}
-
-fn task_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEdgeRecord> {
-    Ok(TaskEdgeRecord {
-        task_id: row.get(0)?,
-        from_node_id: row.get(1)?,
-        to_node_id: row.get(2)?,
-        edge_type: row.get(3)?,
-        condition: row.get(4)?,
-    })
 }
 
 fn artifact_for_idempotency(

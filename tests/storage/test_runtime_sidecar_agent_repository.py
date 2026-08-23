@@ -63,7 +63,6 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             "status": "accepted",
             "routing_mode": "auto",
             "requested_capability_id": None,
-            "root_node_id": None,
             "summary": None,
             "cancel_requested_at": None,
             "created_at": "2026-08-22T11:59:00+00:00",

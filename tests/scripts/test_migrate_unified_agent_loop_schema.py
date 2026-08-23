@@ -486,7 +486,7 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
                         command_runner=runner,
                     )
 
-    def test_lock_is_single_instance_and_apply_is_unavailable_before_p7b(self) -> None:
+    def test_lock_is_single_instance_and_apply_failure_is_redacted(self) -> None:
         with migration_lock(self.state_root):
             with self.assertRaisesRegex(AgentSchemaMigrationError, "operator_locked"):
                 with migration_lock(self.state_root):
@@ -495,6 +495,12 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
         output = io.StringIO()
         with (
             patch("scripts.migrate_unified_agent_loop_schema.verify_tested_revision"),
+            patch(
+                "scripts.migrate_unified_agent_loop_schema.apply_all",
+                side_effect=AgentSchemaMigrationError(
+                    "agent_schema_partial_apply_requires_restore"
+                ),
+            ),
             redirect_stdout(output),
         ):
             result = main(
@@ -517,7 +523,7 @@ class AgentSchemaMigrationOperatorTest(unittest.TestCase):
         self.assertEqual(result, 2)
         payload = json.loads(output.getvalue())
         self.assertEqual(
-            payload["reason_code"], "agent_schema_apply_not_available_before_p7b"
+            payload["reason_code"], "agent_schema_partial_apply_requires_restore"
         )
         self.assertNotIn("postgresql://", output.getvalue())
 

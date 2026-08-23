@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from src.core.enums import DependencyType, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
+from src.core.enums import NodeStatus, RoutingMode, TaskStatus
 from src.core.evidence import (
     is_number as _is_number,
     number_at_least as _number_at_least,
@@ -150,20 +150,6 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
         if task is not None:
             _validate_task_record(task)
         return
-    if operation_name in {
-        "planner_replan_claim",
-        "planner_replan_claim_get",
-        "planner_replan_claim_mark",
-    }:
-        found = response.get("found")
-        claim = response.get("claim")
-        if not isinstance(found, bool) or found != (claim is not None):
-            _raise_response_invalid()
-        if operation_name != "planner_replan_claim_get" and not found:
-            _raise_response_invalid()
-        if claim is not None:
-            _validate_planner_replan_claim_record(claim)
-        return
     if operation_name == "node_state_transition":
         if not _non_empty_string(response.get("node_id")) or not _non_empty_string(response.get("status")):
             _raise_response_invalid()
@@ -224,16 +210,6 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
                 _raise_response_invalid()
         elif projection is not None:
             _raise_response_invalid()
-        return
-    if operation_name == "task_edge_save":
-        _validate_task_edge_record(response.get("edge"))
-        return
-    if operation_name == "task_edge_list":
-        edges = response.get("edges")
-        if not isinstance(edges, list):
-            _raise_response_invalid()
-        for edge in edges:
-            _validate_task_edge_record(edge)
         return
     if operation_name == "artifact_save":
         _validate_artifact_record(response.get("artifact"))
@@ -314,27 +290,6 @@ def _validate_agent_item_record(item: Any) -> None:
         _raise_response_invalid()
 
 
-def _validate_planner_replan_claim_record(claim: Any) -> None:
-    if not isinstance(claim, Mapping):
-        _raise_response_invalid()
-    decision_digest = claim.get("decision_digest")
-    planning_revision = claim.get("planning_revision")
-    if not (
-        _non_empty_string(claim.get("task_id"))
-        and isinstance(decision_digest, str)
-        and len(decision_digest) == 64
-        and all(character in "0123456789abcdef" for character in decision_digest)
-        and isinstance(planning_revision, int)
-        and not isinstance(planning_revision, bool)
-        and planning_revision >= 1
-        and claim.get("planning_epoch") == f"r{planning_revision}"
-        and claim.get("status") in {"claimed", "applied", "rejected"}
-        and _non_empty_string(claim.get("created_at"))
-        and _non_empty_string(claim.get("updated_at"))
-    ):
-        _raise_response_invalid()
-
-
 def _validate_lease_response(response: Mapping[str, Any]) -> None:
     if not (
         _non_empty_string(response.get("task_id"))
@@ -343,19 +298,6 @@ def _validate_lease_response(response: Mapping[str, Any]) -> None:
         and response["revision"] > 0
         and isinstance(response.get("expires_at_ms"), int)
         and _non_empty_string(response.get("renew_token"))
-    ):
-        _raise_response_invalid()
-
-
-def _validate_task_edge_record(edge: Any) -> None:
-    if not isinstance(edge, Mapping):
-        _raise_response_invalid()
-    if not (
-        _non_empty_string(edge.get("task_id"))
-        and _non_empty_string(edge.get("from_node_id"))
-        and _non_empty_string(edge.get("to_node_id"))
-        and _non_empty_string(edge.get("edge_type"))
-        and isinstance(edge.get("condition"), str)
     ):
         _raise_response_invalid()
 
@@ -374,7 +316,6 @@ def _validate_task_record(task: Any) -> None:
         _raise_response_invalid()
     for name in (
         "requested_capability_id",
-        "root_node_id",
         "summary",
         "cancel_requested_at",
         "created_at",
@@ -417,22 +358,18 @@ def _validate_task_node_record(node: Any) -> None:
         _raise_response_invalid()
     if not all(
         _non_empty_string(node.get(name))
-        for name in ("node_id", "task_id", "capability_id", "status", "criticality", "dependency_type")
+        for name in ("node_id", "task_id", "capability_id", "status")
     ):
         _raise_response_invalid()
     if (
         node.get("status") not in {str(value) for value in NodeStatus}
-        or node.get("criticality") not in {str(value) for value in NodeCriticality}
-        or node.get("dependency_type") not in {str(value) for value in DependencyType}
     ):
-        _raise_response_invalid()
-    if not isinstance(node.get("retry_policy"), Mapping) or not isinstance(node.get("timeout_policy"), Mapping):
         _raise_response_invalid()
     if not isinstance(node.get("input_refs"), list) or not all(isinstance(value, str) for value in node["input_refs"]):
         _raise_response_invalid()
     if not isinstance(node.get("output_refs"), list) or not all(isinstance(value, str) for value in node["output_refs"]):
         _raise_response_invalid()
-    for name in ("assigned_instance_id", "resource_class", "started_at", "finished_at"):
+    for name in ("assigned_instance_id", "started_at", "finished_at"):
         if node.get(name) is not None and not isinstance(node.get(name), str):
             _raise_response_invalid()
 

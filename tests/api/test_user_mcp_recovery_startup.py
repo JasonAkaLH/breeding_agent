@@ -234,9 +234,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             envelope = build_mcp_dispatch_resume_envelope_v2(
                 task=task,
                 node=node,
-                edges=(),
                 attachments=(),
-                dependency_nodes=(),
                 server_id=server.server_id,
             )
             await runtime.storage.arm_user_mcp_target_intent(
@@ -1363,9 +1361,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             envelope = build_mcp_dispatch_resume_envelope_v2(
                 task=task,
                 node=node,
-                edges=(),
                 attachments=(),
-                dependency_nodes=(),
                 server_id=server.server_id,
             )
             self.assertEqual(
@@ -1534,20 +1530,24 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 "safe-remote-2025",
                 published_at=now,
                 continuation_plan={
+                    "authority_digest": "a" * 64,
+                    "call_item_id": "call-item-2025",
+                    "capability_id": "mcp.dispatch",
+                    "conversation_id": "conv-2025",
+                    "model_binding": {
+                        "model_edition": "test-edition",
+                        "option_digests": {},
+                        "reasoning_effort": "minimal",
+                        "thinking_enabled": False,
+                    },
+                    "node_id": "node-2025",
+                    "owner_scope": "user:alice",
+                    "pinned_bundle_revision": None,
+                    "provider_call_id": "call-2025",
+                    "resume_kind": "mcp_remote_task",
+                    "run_id": "run-2025",
+                    "sample_item_id": "sample-item-2025",
                     "task_id": "task-2025",
-                    "nodes": [
-                        {
-                            "node_id": "node-2025",
-                            "capability_id": "mcp.dispatch",
-                            "input_payload": {},
-                            "metadata": {},
-                            "depends_on": [],
-                            "criticality": "required",
-                            "retry_policy": {},
-                            "timeout_policy": {},
-                            "resource_class": None,
-                        }
-                    ],
                 },
             )
 

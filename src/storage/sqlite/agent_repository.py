@@ -345,11 +345,6 @@ class SQLiteAgentRepository:
                     capability_id=commit.capability_ids_by_tool_name[call.provider_safe_name],
                     assigned_instance_id=None,
                     status="pending",
-                    criticality="required",
-                    dependency_type="hard",
-                    retry_policy={},
-                    timeout_policy={},
-                    resource_class=None,
                     input_refs=[call_id],
                     output_refs=[result_id],
                     started_at=None,
@@ -789,11 +784,6 @@ class SQLiteAgentRepository:
                     capability_id="agent.final_output",
                     assigned_instance_id=None,
                     status="completed",
-                    criticality="required",
-                    dependency_type="hard",
-                    retry_policy={},
-                    timeout_policy={},
-                    resource_class=None,
                     input_refs=[assistant_row.item_id],
                     output_refs=[ids["artifact_id"]],
                     started_at=now,
@@ -852,7 +842,6 @@ class SQLiteAgentRepository:
         if task is None:
             raise AgentStorageConflict("agent_final_task_missing")
         task.status = "completed"
-        task.root_node_id = ids["node_id"]
         task.updated_at = now
         run.status = AgentRunStatus.COMPLETED.value
         run.next_item_sequence = int(run.next_item_sequence) + 1

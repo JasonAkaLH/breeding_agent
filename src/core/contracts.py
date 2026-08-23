@@ -68,11 +68,9 @@ from .models import (
     MCPTerminalCandidateSnapshot,
     Message,
     PendingSkillContext,
-    PlannerReplanClaim,
     SlotCollection,
     SlotEvent,
     Task,
-    TaskEdge,
     TaskInputAttachment,
     TaskNode,
     UserMCPCredentialRecord,
@@ -1458,29 +1456,6 @@ class StoragePort(Protocol):
 
     async def get_task(self, task_id: str) -> Task | None: ...
 
-    async def claim_planner_replan(
-        self,
-        task_id: str,
-        decision_digest: str,
-        *,
-        now: datetime,
-    ) -> PlannerReplanClaim: ...
-
-    async def get_planner_replan_claim(
-        self,
-        task_id: str,
-        decision_digest: str,
-    ) -> PlannerReplanClaim | None: ...
-
-    async def mark_planner_replan_claim(
-        self,
-        task_id: str,
-        decision_digest: str,
-        *,
-        status: str,
-        now: datetime,
-    ) -> PlannerReplanClaim: ...
-
     async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None: ...
 
     async def list_tasks_for_conversation(self, conversation_id: str, statuses: Iterable[TaskStatus] | None = None) -> list[Task]: ...
@@ -1496,10 +1471,6 @@ class StoragePort(Protocol):
     async def get_task_node(self, node_id: str) -> TaskNode | None: ...
 
     async def list_task_nodes_for_task(self, task_id: str) -> list[TaskNode]: ...
-
-    async def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge: ...
-
-    async def list_task_edges(self, task_id: str) -> list[TaskEdge]: ...
 
     async def save_artifact(self, artifact: Artifact) -> Artifact: ...
 

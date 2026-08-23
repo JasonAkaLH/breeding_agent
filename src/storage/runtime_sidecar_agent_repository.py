@@ -191,11 +191,6 @@ class RuntimeSidecarAgentRepository:
                     ],
                     "assigned_instance_id": None,
                     "status": "pending",
-                    "criticality": "required",
-                    "dependency_type": "hard",
-                    "retry_policy": {},
-                    "timeout_policy": {},
-                    "resource_class": None,
                     "input_refs": [call_id],
                     "output_refs": [result_id],
                     "started_at": None,
@@ -544,11 +539,6 @@ class RuntimeSidecarAgentRepository:
             "capability_id": "agent.final_output",
             "assigned_instance_id": None,
             "status": "completed",
-            "criticality": "required",
-            "dependency_type": "hard",
-            "retry_policy": {},
-            "timeout_policy": {},
-            "resource_class": None,
             "input_refs": [assistant.item_id],
             "output_refs": [ids["artifact_id"]],
             "started_at": _iso(now),
@@ -591,7 +581,6 @@ class RuntimeSidecarAgentRepository:
         updated_task = {
             **task,
             "status": "completed",
-            "root_node_id": ids["node_id"],
             "updated_at": _iso(now),
         }
         updated_run = replace(

@@ -303,78 +303,6 @@ class RuntimeSidecarGrpcClient:
             )
         return response
 
-    def claim_planner_replan(
-        self,
-        *,
-        task_id: str,
-        decision_digest: str,
-        now: str,
-        timeout_seconds: float = 5,
-    ) -> dict[str, Any]:
-        self._ensure_compatible(timeout_seconds=timeout_seconds)
-        request = (
-            _field_string(1, task_id)
-            + _field_string(2, decision_digest)
-            + _field_string(3, now)
-        )
-        payload = self._unary("ClaimPlannerReplan", request, timeout_seconds=timeout_seconds)
-        response = _planner_replan_claim_response("planner_replan_claim", _decode_message(payload))
-        _consume_response("planner_replan_claim", response)
-        _ensure_planner_replan_claim_identity(
-            response["claim"],
-            task_id=task_id,
-            decision_digest=decision_digest,
-        )
-        return response
-
-    def get_planner_replan_claim(
-        self,
-        *,
-        task_id: str,
-        decision_digest: str,
-        timeout_seconds: float = 5,
-    ) -> dict[str, Any]:
-        self._ensure_compatible(timeout_seconds=timeout_seconds)
-        request = _field_string(1, task_id) + _field_string(2, decision_digest)
-        payload = self._unary("GetPlannerReplanClaim", request, timeout_seconds=timeout_seconds)
-        response = _planner_replan_claim_response("planner_replan_claim_get", _decode_message(payload))
-        _consume_response("planner_replan_claim_get", response)
-        if response["claim"] is not None:
-            _ensure_planner_replan_claim_identity(
-                response["claim"],
-                task_id=task_id,
-                decision_digest=decision_digest,
-            )
-        return response
-
-    def mark_planner_replan_claim(
-        self,
-        *,
-        task_id: str,
-        decision_digest: str,
-        status: str,
-        now: str,
-        timeout_seconds: float = 5,
-    ) -> dict[str, Any]:
-        self._ensure_compatible(timeout_seconds=timeout_seconds)
-        request = (
-            _field_string(1, task_id)
-            + _field_string(2, decision_digest)
-            + _field_string(3, status)
-            + _field_string(4, now)
-        )
-        payload = self._unary("MarkPlannerReplanClaim", request, timeout_seconds=timeout_seconds)
-        response = _planner_replan_claim_response("planner_replan_claim_mark", _decode_message(payload))
-        _consume_response("planner_replan_claim_mark", response)
-        _ensure_planner_replan_claim_identity(
-            response["claim"],
-            task_id=task_id,
-            decision_digest=decision_digest,
-        )
-        if response["claim"]["status"] != status:
-            _raise_task_identity_invalid("planner replan claim mark response status differs from request")
-        return response
-
     def transition_node(
         self,
         *,
@@ -592,49 +520,6 @@ class RuntimeSidecarGrpcClient:
         _consume_response("task_node_list", response)
         if any(node["task_id"] != task_id for node in response["nodes"]):
             _raise_task_identity_invalid("task_node_list response contains a different task_id")
-        return response
-
-    def save_task_edge(
-        self,
-        *,
-        task_id: str,
-        from_node_id: str,
-        to_node_id: str,
-        edge_type: str,
-        condition: str,
-        idempotency_key: str,
-        owner: str = "python-runtime",
-        timeout_seconds: float = 5,
-    ) -> dict[str, Any]:
-        self._ensure_compatible(timeout_seconds=timeout_seconds)
-        edge = _task_edge_record(
-            task_id=task_id,
-            from_node_id=from_node_id,
-            to_node_id=to_node_id,
-            edge_type=edge_type,
-            condition=condition,
-        )
-        request = _field_bytes(1, edge) + _field_bytes(2, _idempotency(idempotency_key, owner))
-        payload = self._unary("SaveTaskEdge", request, timeout_seconds=timeout_seconds)
-        response = _task_edge_response("task_edge_save", _decode_message(payload))
-        _consume_response("task_edge_save", response)
-        return response["edge"]
-
-    def list_task_edges(
-        self,
-        *,
-        task_id: str,
-        timeout_seconds: float = 5,
-    ) -> dict[str, Any]:
-        self._ensure_compatible(timeout_seconds=timeout_seconds)
-        payload = self._unary("ListTaskEdges", _field_string(1, task_id), timeout_seconds=timeout_seconds)
-        fields = _decode_message(payload)
-        response = {
-            "operation": "task_edge_list",
-            "edges": [_decode_task_edge_record(value) for value in fields.get(1, [])],
-            "error": _optional_typed_error(fields, 2),
-        }
-        _consume_response("task_edge_list", response)
         return response
 
     def save_artifact(
@@ -1139,7 +1024,6 @@ def _task_record(task: Mapping[str, Any]) -> bytes:
     )
     for number, name in (
         (6, "requested_capability_id"),
-        (7, "root_node_id"),
         (8, "summary"),
         (9, "cancel_requested_at"),
         (10, "created_at"),
@@ -1176,7 +1060,6 @@ def _decode_task_record(payload: bytes) -> dict[str, Any]:
         "status": _first_string(fields, 4),
         "routing_mode": _first_string(fields, 5),
         "requested_capability_id": _optional_string(fields, 6),
-        "root_node_id": _optional_string(fields, 7),
         "summary": _optional_string(fields, 8),
         "cancel_requested_at": _optional_string(fields, 9),
         "created_at": _optional_string(fields, 10),
@@ -1190,50 +1073,6 @@ def _optional_task_record(fields: dict[int, list[Any]], field_number: int) -> di
     return _decode_task_record(payload) if payload else None
 
 
-def _decode_planner_replan_claim(payload: bytes) -> dict[str, Any]:
-    fields = _decode_message(payload)
-    return {
-        "task_id": _first_string(fields, 1),
-        "decision_digest": _first_string(fields, 2),
-        "planning_revision": _first_int(fields, 3),
-        "planning_epoch": _first_string(fields, 4),
-        "status": _first_string(fields, 5),
-        "created_at": _first_string(fields, 6),
-        "updated_at": _first_string(fields, 7),
-    }
-
-
-def _planner_replan_claim_response(
-    operation: str,
-    fields: dict[int, list[Any]],
-) -> dict[str, Any]:
-    payload = _first_message(fields, 1)
-    claim = _decode_planner_replan_claim(payload) if payload else None
-    found = _first_bool(fields, 2, default=False)
-    if found != (claim is not None):
-        raise RuntimeError(
-            "runtime_store_response_invalid: planner replan claim response is inconsistent"
-        )
-    return {
-        "operation": operation,
-        "claim": claim,
-        "found": found,
-        "error": _optional_typed_error(fields, 3),
-    }
-
-
-def _ensure_planner_replan_claim_identity(
-    claim: Mapping[str, Any] | None,
-    *,
-    task_id: str,
-    decision_digest: str,
-) -> None:
-    if claim is None:
-        _raise_task_identity_invalid("planner replan claim response omitted the claim")
-    if claim.get("task_id") != task_id or claim.get("decision_digest") != decision_digest:
-        _raise_task_identity_invalid("planner replan claim response identity differs from request")
-
-
 def _task_node_record(node: Mapping[str, Any]) -> bytes:
     payload = b"".join(
         [
@@ -1241,13 +1080,9 @@ def _task_node_record(node: Mapping[str, Any]) -> bytes:
             _field_string(2, str(node["task_id"])),
             _field_string(3, str(node["capability_id"])),
             _field_string(5, str(node["status"])),
-            _field_string(6, str(node["criticality"])),
-            _field_string(7, str(node["dependency_type"])),
-            _field_bytes(8, json.dumps(node["retry_policy"], sort_keys=True, separators=(",", ":")).encode()),
-            _field_bytes(9, json.dumps(node["timeout_policy"], sort_keys=True, separators=(",", ":")).encode()),
         ]
     )
-    for number, name in ((4, "assigned_instance_id"), (10, "resource_class"), (13, "started_at"), (14, "finished_at")):
+    for number, name in ((4, "assigned_instance_id"), (13, "started_at"), (14, "finished_at")):
         if node.get(name) is not None:
             payload += _field_string(number, str(node[name]))
     payload += b"".join(_field_string(11, str(value)) for value in node["input_refs"])
@@ -1365,22 +1200,12 @@ def _agent_state_response(operation: str, fields: dict[int, list[Any]]) -> dict[
 
 def _decode_task_node_record(payload: bytes) -> dict[str, Any]:
     fields = _decode_message(payload)
-    try:
-        retry_policy = json.loads(_first_message(fields, 8) or b"{}")
-        timeout_policy = json.loads(_first_message(fields, 9) or b"{}")
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("runtime_store_response_invalid: TaskNodeRecord policy JSON is invalid") from exc
     return {
         "node_id": _first_string(fields, 1),
         "task_id": _first_string(fields, 2),
         "capability_id": _first_string(fields, 3),
         "assigned_instance_id": _optional_string(fields, 4),
         "status": _first_string(fields, 5),
-        "criticality": _first_string(fields, 6),
-        "dependency_type": _first_string(fields, 7),
-        "retry_policy": retry_policy,
-        "timeout_policy": timeout_policy,
-        "resource_class": _optional_string(fields, 10),
         "input_refs": _all_strings(fields, 11),
         "output_refs": _all_strings(fields, 12),
         "started_at": _optional_string(fields, 13),
@@ -1406,45 +1231,6 @@ def _ensure_task_identity(
 
 def _raise_task_identity_invalid(message: str) -> None:
     raise RuntimeError(f"runtime_store_response_invalid: {message}")
-
-
-def _task_edge_record(
-    *,
-    task_id: str,
-    from_node_id: str,
-    to_node_id: str,
-    edge_type: str,
-    condition: str,
-) -> bytes:
-    return b"".join(
-        [
-            _field_string(1, task_id),
-            _field_string(2, from_node_id),
-            _field_string(3, to_node_id),
-            _field_string(4, edge_type),
-            _field_string(5, condition),
-        ]
-    )
-
-
-def _decode_task_edge_record(payload: bytes) -> dict[str, Any]:
-    fields = _decode_message(payload)
-    return {
-        "task_id": _first_string(fields, 1),
-        "from_node_id": _first_string(fields, 2),
-        "to_node_id": _first_string(fields, 3),
-        "edge_type": _first_string(fields, 4),
-        "condition": _first_string(fields, 5),
-    }
-
-
-def _task_edge_response(operation: str, fields: dict[int, list[Any]]) -> dict[str, Any]:
-    edge_payload = _first_message(fields, 1)
-    return {
-        "operation": operation,
-        "edge": _decode_task_edge_record(edge_payload) if edge_payload else None,
-        "error": _optional_typed_error(fields, 2),
-    }
 
 
 def _artifact_record(

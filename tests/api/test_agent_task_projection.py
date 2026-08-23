@@ -109,15 +109,6 @@ class AgentTaskProjectionAPITest(APITestCase):
                 AgentCallOutcomeStatus.WAITING_FOR_INPUT,
             )
         )
-        edge_reads = 0
-
-        async def forbidden_edge_read(_task_id):
-            nonlocal edge_reads
-            edge_reads += 1
-            raise AssertionError("Agent graph projection must not read TaskEdge")
-
-        self.runtime.storage.list_task_edges = forbidden_edge_read  # type: ignore[method-assign]
-
         task_response = await self.client.get(f"/api/v1/tasks/{run.task_id}")
         graph_response = await self.client.get(f"/api/v1/tasks/{run.task_id}/graph")
 
@@ -127,7 +118,6 @@ class AgentTaskProjectionAPITest(APITestCase):
         self.assertEqual(graph_response.status_code, 200)
         graph = graph_response.json()
         self.assertEqual(graph["edges"], [])
-        self.assertEqual(edge_reads, 0)
         self.assertEqual(
             {(node["criticality"], node["dependency_type"]) for node in graph["nodes"]},
             {("required", "hard")},
@@ -272,7 +262,7 @@ class AgentTaskProjectionAPITest(APITestCase):
         self.assertEqual(replayed.event_type, "task.graph_created")
         self.assertEqual(
             replayed.payload,
-            {"edge_count": 0, "node_count": 0, "root_node_id": None},
+            {"edge_count": 0, "node_count": 0},
         )
 
 

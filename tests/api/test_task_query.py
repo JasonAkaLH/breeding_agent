@@ -11,7 +11,7 @@ class TaskQueryAPITest(APITestCase):
 
         task_payload = await self.wait_for_terminal_task(task_id)
         self.assertEqual(task_payload["status"], "completed")
-        self.assertIsNotNone(task_payload["root_node_id"])
+        self.assertIsNone(task_payload["root_node_id"])
         self.assertEqual(task_payload["completed_node_count"], 2)
         self.assertEqual(task_payload["failed_node_count"], 0)
         self.assertFalse(task_payload["cancel_requested"])

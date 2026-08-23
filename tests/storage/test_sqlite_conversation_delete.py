@@ -18,7 +18,6 @@ from src.core.models import (
     MailboxMessage,
     Message,
     Task,
-    TaskEdge,
     TaskInputAttachment,
     TaskNode,
 )
@@ -34,7 +33,6 @@ from src.storage.sqlite.models import (
     MailboxMessageRow,
     MessageRow,
     MCPNoServerIntentRow,
-    TaskEdgeRow,
     TaskInputAttachmentRow,
     TaskNodeRow,
     TaskRow,
@@ -84,7 +82,6 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                     conversation_id="conv-delete",
                     root_message_id="msg-user",
                     status=TaskStatus.RUNNING,
-                    root_node_id="node-delete",
                     created_at=now,
                     updated_at=now,
                 )
@@ -118,7 +115,6 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                     terminal_at=now,
                 )
             )
-            state_repo.save_task_edge("task-delete", TaskEdge(from_node_id="node-delete", to_node_id="node-next"))
             state_repo.save_artifact(
                 Artifact(
                     artifact_id="artifact-delete",
@@ -233,7 +229,6 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                 MessageRow,
                 TaskRow,
                 TaskNodeRow,
-                TaskEdgeRow,
                 ArtifactRow,
                 TaskInputAttachmentRow,
                 EventRecordRow,
