@@ -2,7 +2,7 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- 新增已逐节获批、待书面复审的全仓业务代码渐进式架构清理总设计：采用稳定门面与P0～P8系列计划，先冻结import/type/data/事务/副作用/UI/Rust contract，再渐进拆分Orchestration、Integrations、ApiRuntime、Storage/State/Lifecycle、Frontend、Rust与scripts；每个检查点独立验证、提交、回滚，不双跑真实副作用，不混入bug/fallback/安全策略修复，不执行schema/data migration或修改`prod`。License Requirement：设计不新增依赖、第三方代码或许可变更。
+- 新增已逐节获批并完成自审、待用户书面复审的全仓业务代码渐进式架构清理总设计：采用稳定门面与P0～P8系列计划，先冻结import/type/data/事务/副作用/UI/Rust contract，再渐进拆分Orchestration、Integrations、ApiRuntime、Storage/State/Lifecycle、Frontend、Rust与scripts；每个检查点独立验证、提交、回滚，不双跑真实副作用，不混入bug/fallback/安全策略修复，不执行schema/data migration或修改`prod`。License Requirement：设计不新增依赖、第三方代码或许可变更。
 
 - 统一同模型Agent Loop完成当前HEAD收尾复验：以`af246a6`/tree `db7e3b0`重新运行全部Backend canonical域，Core 42、Storage 400、Lifecycle 37、Integrations 704（另有2项macOS平台声明skip，沿用原Linux零skip证据）、Agent Skills 209、Orchestration 102、Capabilities 45、API 436、E2E 7、Observability 39、Scripts 62和Deployment 3项通过；Storage的7个环境skip另在临时PostgreSQL 17容器的7个隔离数据库中以61项零skip真实门禁闭合，容器与一次性数据随后删除。Frontend 21文件/307项、typecheck/build和Rust fmt/clippy/test/deny通过，Phase 6/7 evidence validator及旧DAG/physical contract生产零引用扫描通过。未发现Phase 0～7业务实现缺口；本次仅更新当前代码复验绑定，不重跑或改写P7-A/P7-B迁移receipt、原真实MCP authority或`prod`。License Requirement：无业务代码或依赖变更；复用既有Python、PostgreSQL、Frontend与Rust门禁。
 

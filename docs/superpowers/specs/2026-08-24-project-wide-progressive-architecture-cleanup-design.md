@@ -1,7 +1,7 @@
 # 全仓业务代码渐进式架构清理设计
 
 - **日期**：2026-08-24
-- **状态**：设计章节已获用户逐项批准；书面设计待最终审阅
+- **状态**：设计章节已获用户逐项批准并完成书面自审；待用户最终审阅
 - **适用分支**：`main`
 - **适用仓库**：`breeding_agent`
 - **目标**：在可验证地保持现有功能、公开合同和副作用顺序不变的前提下，分阶段清理全仓业务代码中的单体模块、复制实现、无效抽象、死代码和错误的职责边界
@@ -216,7 +216,7 @@ crate-root public declarations
 | 计划 | 主目标 | 风险级别 |
 |---|---|---|
 | P0 | 冻结公开合同、行为 trace 与环境门禁 | 低 |
-| P1 | 无状态 helper、wire contract、StoragePort 子协议与基础依赖方向 | 低 |
+| P1 | Core `StoragePort` 子协议、证据 primitive 与基础依赖方向 | 低 |
 | P2 | Orchestration/Capabilities 所有权、continuation、Skill authority、Prompt | 中 |
 | P3 | Agent Skills、Result Parser、Gateway、Coordinator | 中到高 |
 | P4 | `ApiRuntime` 内部组件与 factory | 中到高 |
@@ -256,9 +256,9 @@ P0 只增加测试与证据，不修改业务实现。
 
 P5 前明确真实测试 profile：auth CAS、Task/Node CAS、mailbox、interrupt、event order、owner guard、claim takeover、rollout role separation、legacy migration role、conversation delete 并发、fresh bootstrap 和 drift rollback。
 
-## 10. P1：无状态基础层
+## 10. P1：Core 协议基础层
 
-P1 只抽纯 helper、类型和协议，不迁移有状态控制器。
+P1 只拆 Core 中跨层共享的协议与无副作用证据 primitive，不迁移领域 helper 或有状态控制器。各业务域的纯 helper 与兼容门面仍由 P2～P7 的唯一主责计划处理，避免两个计划同时拥有同一迁移。
 
 ### 10.1 StoragePort 子协议
 
@@ -275,18 +275,16 @@ P1 只抽纯 helper、类型和协议，不迁移有状态控制器。
 
 `src.core.contracts.StoragePort` 与 `src.storage.interfaces.StoragePort` re-export 同一个 composite 类型。方法签名逐项原样迁移，不先修改生产消费者注解。
 
-### 10.2 共享纯 helper
+### 10.2 唯一计划所有权
 
-候选包括：
+- capability event 与 prompt helper 归 P2；
+- Agent Skills、MCP 与 Result Parser helper 归 P3；
+- API bootstrap/trust/registry/event helper 归 P4；
+- SQLAlchemy mapper、repository support 与 storage helper 归 P5；
+- Frontend wire contract 与 domain helper 归 P6；
+- Rust 常量、crate-private validation 与 scripts helper 归 P7。
 
-- capability event helper，但不合并 event-id material 不同的 Skill event；
-- Agent Skills slot JSON、file-selection validation 和 slot contract；
-- MCP attachment display sanitizer；
-- API bootstrap/trust/registry/event helper；
-- Frontend wire contracts；
-- Rust 单一常量源和 crate-private validation helper。
-
-任何 helper 只能承载完全相同的纯逻辑。调用方仍负责抛出各自原异常。
+所有计划都遵守同一抽取规则：helper 只能承载完全相同的纯逻辑，调用方仍负责抛出各自原异常。
 
 ## 11. P2：Orchestration 与 Capabilities
 
@@ -401,8 +399,8 @@ contract/schema/value/slot_contract
 4. `runtime_components/interrupts.py`；
 5. `runtime_components/lifecycle.py`，整块迁移 startup/recovery/shutdown；
 6. `runtime_components/service_core.py` 与 `factory.py`；
-7. 配合 P1 完成 StoragePort facade；
-8. 公开 model 类物理迁移仅在 module/pickle 合同可证明时执行，否则保留声明原位。
+7. 只消费 P1 已稳定的 StoragePort facade，不在 P4 再修改该协议；
+8. 完成旧 runtime 私有 helper re-export、patch seam 与 import smoke 的兼容收口。
 
 ### 13.1 关键限制
 
@@ -544,6 +542,8 @@ P8 只删除或收敛满足以下条件的内容：
 - 删除不会改变异常、日志、事件、计时或副作用。
 
 已审计候选包括未使用 import/local、断链旧 parser、不可达 fallback literal、完全相同 pure helper、无效半成品对象等。具体清单必须在 P8 基于当时 HEAD 重新验证，不能直接引用设计期行号执行。
+
+`src.core.models` 中公开类的物理迁移也只允许在 P8 单独评估。只有 module identity、pickle、repr、type hints、Rust contract 和旧 import 均可证明不变时才迁移；否则保留公开类定义原位，只拆其私有 helper 与 validation。
 
 以下问题不属于功能不变重构，继续形成单独延期报告：
 
