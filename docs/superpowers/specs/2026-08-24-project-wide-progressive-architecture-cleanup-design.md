@@ -1,8 +1,8 @@
 # 全仓业务代码渐进式架构清理设计
 
 - **日期**：2026-08-24
-- **状态**：设计章节已获用户逐项批准；document-perfectization 第 3 轮审计与修订完成，待第 4 轮独立复审
-- **审查轮次**：3 次完整审计、3 次授权修订
+- **状态**：设计章节已获用户逐项批准；document-perfectization 第 4 轮审计与修订完成，待第 5 轮独立复审
+- **审查轮次**：4 次完整审计、4 次授权修订
 - **适用分支**：`main`
 - **适用仓库**：`breeding_agent`
 - **目标**：在可验证地保持现有功能、公开合同和副作用顺序不变的前提下，分阶段清理全仓业务代码中的单体模块、复制实现、无效抽象、死代码和错误的职责边界
@@ -116,7 +116,7 @@
 | ID | 必须满足的需求 | 主责计划 | 完成证据摘要 |
 |---|---|---|---|
 | FR-01 | P0 必须枚举全部受跟踪业务源码；每个路径有一个 `primary_owner_plan`，必要时另列不拥有该文件的 `authorized_touch_plans`。P0 初始状态允许 `planned_change`，项目完成时该状态必须为零；路径最终状态只能是 `changed` 或 `reviewed_no_change`，rename/delete 以 action+tombstone 表达。`deferred_out_of_scope` 只属于已审行为 finding，`blocked_external` 只属于具名 gate，均不得替代源码路径审计 | P0/P8 | inventory 无遗漏、无重复 primary owner、无未授权 touch、最终 path status 仅两类、`planned_change == 0` |
-| FR-02 | 旧公开 import、签名、默认值、对象/模块身份、错误合同、Proto/PyO3/Frontend facade 必须保持，除非另有明确破坏性批准 | P0～P8 | public-contract manifest 前后 exact comparison |
+| FR-02 | 旧公开 import、签名、默认值、对象/模块身份、错误合同、HTTP/SSE、Proto/PyO3/Frontend facade 必须保持，除非另有明确破坏性批准 | P0～P8 | Python/HTTP/runtime-seam manifests 前后 exact comparison |
 | FR-03 | 每个有状态或跨层职责迁移前必须先在旧实现上建立可执行 characterization；replacement test 必须先绿，才能移除只锁文件布局的旧测试 | P0/各计划 | trace、golden、focused test 在迁移前后相同 |
 | FR-04 | 每个检查点只允许一个业务实现和一个副作用执行路径；不得双跑真实 Tool、数据库写、上传、删除、provider 或消息发送 | 全部 | call-count/side-effect trace 与基线完全相同 |
 | FR-05 | P0 必须生成编译期 import edge inventory；P8 时所有 forbidden edge 必须清零，或记录为带唯一 owner、理由和退出条件的显式兼容 exception | P0/P2～P8 | AST edge gate + exception registry |
@@ -137,11 +137,12 @@
 
 | ID | 类别 | 可判定要求 | 主责计划与证据 |
 |---|---|---|---|
-| NFR-COMP-01 | 兼容性 | 公开 Python/Rust/TS 符号的 import、签名、默认值、`__module__`/`__qualname__`、关键 `type_name`、对象 identity、Proto/PyO3 path 和 JSON schema 必须与 P0 manifest 相同 | P0/全部；public-contract manifest、compile/import/pickle smoke |
+| NFR-COMP-01 | 兼容性 | 公开 Python/Rust/TS 符号的 import、签名、默认值、`__module__`/`__qualname__`、关键 `type_name`、对象 identity、dataclass/Pydantic/Enum、HTTP/OpenAPI/SSE、Proto/PyO3 path 和 JSON schema 必须与 P0 manifest 相同 | P0/全部；Python/HTTP/runtime-seam manifests、compile/import/pickle smoke |
 | NFR-REL-01 | 可靠性 | 确定性调用次数、写入顺序、事务数、锁序、CAS、lease、timer/retry 次数必须 exact；wall-clock 只按既有 timeout/budget 验证，不要求逐毫秒相同 | P0/P2～P7；side-effect trace 与 fault tests |
-| NFR-REL-02 | No-replay | 任一 may-have-dispatched 或不确定副作用在 restart/retry 时第二次外部 Tool 调用必须为 0；现有 17 个 MCP fault boundary 集合不得减少 | P3；fault-injection matrix、network delta |
+| NFR-REL-02 | No-replay | 任一 may-have-dispatched 或不确定副作用在 restart/retry 时第二次原始 `tools/call`/job-start 必须为 0；合法 `tasks/get`/poll/ack 按 side-effect identity + operation kind 单独计数；现有 17 个 MCP fault boundary 集合不得减少 | P3；fault-injection operation matrix |
 | NFR-SEC-01 | Gateway 安全 | scope bootstrap/retry 必须保持 `lease/admission → endpoint revalidate/observe → credential decrypt → exact ValidatedEndpoint client → initialize/discover`，本 attempt 在 endpoint/admission 拒绝时下游 credential/client/network 为 0；已打开 scope 的 call 必须保持现有 `safety admission → scope → authorization → accepting#1 → descriptor/args → registration/on_created → assignment guard → accepting#2 → task safety → 已有 adapter Tool send`，guard 失败只要求 Tool send 为 0，不得为每个 call 重做 DNS/credential/client | P3；分阶段 Gateway security tests、bootstrap/call trace |
 | NFR-SEC-02 | Authority 隔离 | Temporary Result、Pending Action、Projection、CP7 Candidate、Credential/Master Key、historical raw authority 的 key/AAD/cap/mode/identity/exception 不得合并 | P3/P5；authority-specific tests 与 import gate |
+| NFR-ENV-01 | 验证隔离 | ordinary gate 必须从空 env mapping 构造 closed profile 与 temp home；external gate 只注入具名 closed keys 并在连接前证明 non-prod/独立 scope；未声明部署/DSN/credential/proxy 不得继承 | P0/全部；`gate-environment-profile.json`、launcher tests/preflight |
 | NFR-PRIV-01 | 隐私 | prompt/LLM/public event/audit/metric/frontend public projection 不得包含 Tool args、credential、raw MCP result、附件正文或 execution-only artifact 字段；authority-bound execution request metadata 维持现有例外且不得外泄；历史重投不得获得网络/client/credential 依赖 | P3/P6；分通道 forbidden-key/taint snapshots、zero-network test |
 | NFR-PERF-01 | 性能/资源 | 不得新增 LLM、DNS、credential、network、DB/API round trip、subscription/timer、worker spawn 或完整 raw-copy 次数；queue/cap/timeout/size 常量保持 exact，除非另有行为变更批准 | P0/P3/P5/P6；spy/counter、frontend call trace、constant manifest |
 | NFR-OBS-01 | 观测 | durable event、metric label/cardinality、bucket、error/result category、八条 safety red line、gap 与 cleanup failure 语义保持；observer 的 fail-open/fail-closed 角色不变 | P2/P3/P4；event/metric golden 与 observability tests |
@@ -372,32 +373,44 @@ gRPC bridge 可以分别调用 service 与 transport codec；service/kernel/back
 | `bounded_deferred` | 仅明确非 mandatory、out-of-scope 行为修复延期，已记录 exact scope、owner、风险和重入条件 | 不作为 mandatory dependency；不得承载外部证据缺口 |
 | `blocked_external` | required PostgreSQL、远端服务或权限不可用 | 不解锁依赖该证据的计划；独立计划可继续 |
 | `pending_platform` | required Ubuntu/Linux/manylinux gate 未运行 | 不得把相关 Result Parser 或 Rust 检查点标为 complete；独立计划可继续 |
+| `stale` | 曾通过的 evidence 所绑 relevant-source/contract/environment digest 已被后续修改破坏 | 否；必须在最新 `tested_commit` 重跑并闭合 |
 | `failed` | 行为、合同或门禁漂移 | 否；必须回滚当前检查点 |
 
-解锁按具名 gate 而不是编号或 plan scalar：P1～P4、P6 与 P7 纯机械检查点依赖 `P0.local-contract`；P3 Slot facade 依赖 `P2.interrupt-authority`，P4 interrupt adapter 同时依赖 `P2.interrupt-authority` 与 `P3.slot-domain-facade`；P4 MCP wiring 其余检查点依赖 `P3.local-integrations`，本地闭合后产出 `P4.local-mcp-wiring`，不要求等待 P3 external gates；`P3.real-mcp` 依赖这两个 local gate并在最后一个相关 implementation commit 后运行。P3 Result Parser 收口额外依赖 `P3.ubuntu-result-parser`；P5 各高风险切片依赖 11.6 表中对应的 8 个稳定 `P0.pg.*` leaf；P7 各检查点按 18.5 选择三个稳定 `P7.ubuntu.*` leaf。一个 plan 可以同时拥有 `local_status=complete`、某个 `P0.pg.*=blocked_external`、`P3/P7.ubuntu.*=pending_platform`，报告必须逐 gate 展示全部 blocker，不能用优先级覆盖或把局部完成写成 plan complete。无依赖的 P6/P7/P3 检查点可以继续，但项目级状态仍不得标为 `complete`。
+解锁按具名 gate 而不是编号或 plan scalar：P1～P4、P6 与 P7 纯机械检查点依赖 `P0.local-contract`；P3 Slot facade 依赖 `P2.interrupt-authority`，P4 interrupt adapter 同时依赖 `P2.interrupt-authority` 与 `P3.slot-domain-facade`；P4 中只有涉及 MCP assembly/wiring 的检查点依赖 `P3.local-integrations`，本地闭合后产出 `P4.local-mcp-wiring`，不要求等待 P3 external gates；`P3.real-mcp` 首次依赖 `P3.local-integrations` 与 `P4.local-mcp-wiring`，并在当时最后一个 relevant implementation commit 后运行；后续任一 P5/P7/P8 传递闭包变更使它 `stale`，P5/P8/completion 必须在最后 relevant commit 后重跑。P3 Result Parser 收口额外依赖 `P3.ubuntu-result-parser`；P5 各高风险切片依赖 11.6 表中对应的 8 个稳定 `P0.pg.*` leaf；P7 各检查点按 18.5/18.6 从表中逐个选择确切 `P7.ubuntu...` 和 `P7.scripts...` stable ID，不得用通配 blocking ID。一个 plan 可以同时拥有 `local_status=complete`、某个 `P0.pg.*=blocked_external`、`P3/P7.ubuntu.*=pending_platform`，报告必须逐 gate 展示全部 blocker，不能用优先级覆盖或把局部完成写成 plan complete。无依赖的 P6/P7/P3 检查点可以继续，但项目级状态仍不得标为 `complete`。
+
+各计划必须产出稳定本地收口 ID：`P1.local-core`、`P2.local-orchestration`、`P3.local-integrations`、`P4.local-runtime`、`P5.local-storage`、`P6.local-frontend`、`P7.local-native-scripts`。`P2.interrupt-authority`、`P3.slot-domain-facade`、`P4.interrupt-adapter`、`P4.local-mcp-wiring` 是对应 local gate 的具名子门禁，不可替代整个 plan 收口。`P8.local-finalization` 必须同时依赖上述七个 local gate，并绑定包含 P8 自身最后业务源码清理提交的 `tested_commit` 与全业务源码 ledger digest。任一 P1～P8 relevant source 之后变化都使 `P8.local-finalization` 立即 `stale`并重开；`stale` 不是完成状态，必须重跑后才能回到 `complete`。项目 completion 再额外依赖全部 required external/platform gate。
 
 `bounded_deferred` 只适用于明确非范围行为修复，不得用于外部 gate，也不得用于跳过 `ApiRuntime`、Storage、Frontend App、MCP Gateway/Coordinator 或 Rust 核心结构目标。任何 mandatory structural deliverable 未完成时，最终只能报告已完成的具名 deliverable 与全部 blocker。
 
 ## 11. P0：行为与兼容基线冻结
 
-P0 只增加测试与证据，不修改业务实现。
+P0 只增加 characterization、证据生成/校验、validation-only CI/config 与必要索引，不修改业务实现或生产行为。
 
 ### 11.1 机器可读证据
 
 P0 必须创建 `docs/checkpoint/progressive-architecture-cleanup/`，至少包含：
 
 - `business-source-inventory.json`：路径、语言、`primary_owner_plan`、`authorized_touch_plans`、状态、finding IDs、证据命令；
-- `public-contract-manifest.json`：import、signature、default、async、module/type/object identity；
+- `python-public-contract-manifest.json`：公开符号发现依据、import、signature/default/annotation、descriptor、module/type/object identity 与 dataclass/Pydantic/Enum/error 合同；
+- `api-http-contract-manifest.json`：canonical OpenAPI、app metadata/lifespan/router 顺序、method/path/auth/status/media/response/error 与 SSE header 合同；
+- `api-runtime-seam-manifest.json`：tests/routes 对 `ApiRuntime` 方法、字段、direct member、`patch.object` 与字符串 patch seam 的反向索引；
+- `api-component-storage-method-map.json`：每个 route/runtime component 允许的 P1 窄 port 与 exact method set；
 - `dependency-edge-inventory.json`：现有 edge、允许/禁止分类、primary owner/authorized touch plan、退出条件；
 - `storage-port-ownership.json`：259 个方法到唯一子协议的映射；
 - `postgres-override-ownership.json`：MRO、effective defining class/module、override set、transaction runner；
+- `runtime-sidecar-persistence-ownership.json`：Task/Node/Artifact/Event/Cancellation 的 off/shadow/enforce owner、mode 采样点、SQL/Sidecar 次数、错误、CAS/idempotency 与两阶段顺序；
+- `gate-environment-profile.json`：ordinary/PG/MCP/Ubuntu 各 gate 允许传入的 env key、禁止 key/prefix、新鲜 temp home/cache 与非生产预检；
+- `applicable-agent-instructions.json`：tracked 指令源与 host-local ignored `AGENTS.md` 的 source kind/digest/可复现性，不复制 ignored 正文；
 - `side-effect-traces/*.json`：Agent、Gateway、Coordinator、API lifecycle、Storage、Frontend runtime 的确定性 trace；
+- `side-effect-traces/api-lifecycle-fault-matrix.json`：startup/shutdown 每个 await/create-task/subscription/close/dispose 边界的异常收口与剩余资源；
 - `gate-results/*.json`：command、`start_commit`、`tested_commit`、ran/pass/fail/skip、duration、platform、artifact digest；
 - `finding-register.md`：稳定 finding ID、分类、owner、状态、风险、证据和退出条件。
 
 JSON artifact 必须包含 `schema_version`、`baseline_commit`、`baseline_tree`、生成命令和 `canonical_sha256`。摘要算法固定为：移除顶层 `canonical_sha256` 字段后，使用锁定 Python 版本的 `json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)`，再 UTF-8 encode 并计算 SHA-256；输入 number 类型不得先做字符串化/float 归一，NaN/Infinity 必须拒绝。校验器必须重算，禁止把摘要字段本身纳入摘要。不得保存 credential、DSN、用户正文、Tool 参数、raw result、附件正文或绝对敏感路径。
 
 Gate 只绑定一个已经存在的 `tested_commit`，并在该 commit 的 disposable clean checkout 中运行，不得要求原共享工作树 clean，也不得要求 artifact 写入承载自身的 evidence commit SHA。检查点先创建业务实现 commit；若原工作树仍有无关用户 diff，保留它们并记录 status/path 与 tracked-diff bytes digest，然后用 `mktemp -d` + 从当前 repository object database 进行 `git clone --no-local --no-checkout` + 在新 clone 内 `git switch --detach <tested_commit>` 创建隔离 checkout。禁止用 stash/reset/checkout 原工作树，也不向原仓库注册 secondary worktree；Gate 前要求 clone 的 HEAD/tree exact 且 tracked status 为空。Conda/toolchain 可复用宿主环境，Node/remote cache 等非源码依赖只能按 P0 allowlist 只读接入并记录版本/digest。Ignored secret、runtime 数据和 `docker_cmd.md` 不在 Git object 中，禁止复制进 clone。
+
+Git 隔离不等于进程环境隔离。P0 新增单一 repo-owned `scripts/run_progressive_cleanup_gate.py`，命令形式固定为 `--profile <closed-profile-id> --evidence-output <path> -- <command...>`，它以 argv 直接启动子进程而不经 shell，并用单元测试证明子进程只收到该 profile 的 allowlist。所有 ordinary gate 必须由它从空 mapping 构造闭集 env：只传入已记录的 PATH/Conda/toolchain/locale/tmp 与只读 cache key，使用 gate 专用 temp home，并显式清除 deployment、DSN/PG、credential/token、MCP、Sidecar/Rust mode、master-key、Skill root、proxy 与 cloud-provider 配置。未声明的敏感/网络 key 存在即 fail，测试不得再从 `clear=False` 的宿主 env 继承值。PG/MCP external profile 也从空 mapping 开始，只注入该具名 gate 的 closed env set，并在任何连接前验证 non-prod marker、独立 database/schema/role 或 run scope。Artifact 只记 env key、presence 与允许的非敏感 digest，不记值。
 
 Gate 期间 disposable clone 禁止任何 agent/user并行写；Gate 后要求其无非预期 tracked diff，先完成 evidence 脱敏/摘要复制，再仅删除经 realpath 验证位于本次 `mktemp` root 的 clone；cleanup 失败写 gate failure，不得删除未知目录。原工作树的 status/diff digest 前后若不同，必须登记为 external/user drift、确认不与 checkpoint-owned path 重叠并保留最新内容，不能据此修改或覆盖用户文件；无外部 drift 时 digest 必须一致。`docker_cmd.md` metadata/ignore/tracking 状态始终必须一致。随后允许在原工作树创建一个只含 evidence、AGENTS/CHANGELOG/index 的 evidence commit；若只有测试/证据变化而无业务实现，`tested_commit` 指向该测试 commit。这样既隔离实际被测代码和无关用户 diff，也避免 commit SHA 或文件 digest 自引用。
 
@@ -416,12 +429,21 @@ git ls-files -z -- src frontend/src native/crates scripts
 
 每个路径必须有且只有一个 `primary_owner_plan`。跨计划装配接线等必要修改写入 `authorized_touch_plans`，每项包含计划、exact symbol/lineage、允许动作、前置 gate 和退出条件；secondary touch 不取得文件所有权。初始 inventory 可标 `planned_change`，P8 必须将其清零；最终路径只能标 `changed` 或 `reviewed_no_change`。明确非范围的行为问题另写 finding，外部缺口另写 `blocking_gate_id`；二者不得改变 path status 或使 mandatory structural work 看似闭合。`api/runtime.py` 等多计划交接文件必须显式记录 P2/P3 wiring touch 与 P4 primary ownership。Checked-in contract JSON、Proto、Cargo/Node/Python lock/config 属验证依赖，不作为普通清理目标，但其差异必须进入 gate result。
 
+P0 新增的 `run_progressive_cleanup_gate.py`、`run_result_parser_linux_gate.py`、证据 validator 与 `.github/workflows` job 必须在 ledger 中标为 `validation_infrastructure`，primary owner=P0、P7 只在对应 Native/Scripts gate 有 authorized touch；它们不是业务清理目标，但 scripts 必须进 raw tracked-set，workflow 必须进独立 validation-dependency inventory，两者都进 relevant evidence digest。
+
 Inventory 是随检查点演进的 ledger，不是只含 P0 路径的静态 snapshot。P1～P8 每个检查点都重新运行 raw tracked-set 命令，并为变动记录 `baseline_path`、`current_path`、`action`（`created|modified|renamed|deleted|reviewed`）、primary owner、authorized touch 与 parent finding。删除路径保留 tombstone，rename 同时关联 old/new path，新文件不得因不在 P0 snapshot 而逃逸。P8 必须对当前 raw tracked set、历史 tombstones 和 inventory 做双向 set-difference，三者无未解释路径。
 
-P0 还要解析本次范围内各层 `AGENTS.md` 中形如仓库相对路径的反引号项，生成 `agents-index-audit.json`，逐项记录 exists/tracked/ignored/intentional-external；命令、环境变量和通配说明不得误判为路径。已知 `scripts/AGENTS.md` 引用但当前不存在的 `scripts/stage_user_mcp_cp7_inputs.py` 必须进入 finding register，不能据此臆造入口；只有对应目录索引被修正或明确标为 intentional historical reference 后该 finding 才闭合。
+P0 必须先区分指令源的可复现性。Commit-bound 审计只解析该 `tested_commit` 已跟踪的根、`docs/`、`frontend/` `AGENTS.md`，生成 `agents-index-audit.json`，对反引号中的仓库相对路径逐项记录 exists/tracked/ignored/intentional-external；命令、env 和通配说明不得误判为路径。当前 `src/AGENTS.md`、`native/AGENTS.md`、`scripts/AGENTS.md` 被根 `.gitignore` 明确忽略，因此只是 host-local 实施指令：主工作树在编码前必须读取，`applicable-agent-instructions.json` 只记录 path/source-kind/SHA-256/存在性，不复制正文、不拷入 disposable clone、不将其声称为 commit-bound 证据或 revert 目标。
+
+模块职责变更时，checked-in 索引与完成证据只能由已跟踪的根/`docs`/`frontend` `AGENTS.md`、`CHANGELOG.md` 和 inventory 承载；ignored 子目录文件如果需要 host-local 同步，必须作为独立本地维护动作记录 before/after digest，不得用它解锁任何 gate。已知 ignored `scripts/AGENTS.md` 引用不存在的 `scripts/stage_user_mcp_cp7_inputs.py`，只进入 host-local advisory finding，不臆造入口，也不阻塞 commit-bound source inventory；该 advisory 只能由本地索引修正或标记 historical 后闭合。
 
 ### 11.2 Python 公开面与 trace
 
+P0 不得用一份手工列表代替公开面发现。生成器必须合并：包 `__all__`、受跟踪 Python 中的 direct import/from-import、文档化 import path、registry/factory/spawn/pickle entrypoint、测试对符号的 direct access/`patch.object`/字符串 patch，以及 `src/core/{models,enums,contracts}.py`、`src/api/{dto,app}.py` 与 routes 中本模块定义的非下划线符号。每个候选必须进入 `preserved_public`、`private_with_proof` 或 `external_import_dependency` 之一，并有 source/use evidence；`unclassified == 0`。禁止因当前包 `__all__` 较小就忽略仓内已经 direct-import 的 Core model/Enum/API DTO。
+
+- dataclass 记录 field 顺序、default/factory、frozen/slots/order；Pydantic 记录 field/alias/default/schema、model config、validator 顺序和已受测错误；Enum 记录 member 定义顺序、name/value/alias、module/qualname；公开 exception/error 记录继承、code/category/message 合同；
+- `api-http-contract-manifest.json` 以锁定 Python/FastAPI/Pydantic 版本生成 canonical OpenAPI，另行记录 OpenAPI 不完整表达的 SSE headers/media type、app title/version、lifespan/startup/shutdown 和 router registration 顺序；
+- `api-runtime-seam-manifest.json` AST 扫描全部受跟踪 `tests/**/*.py` 与 `src/api/routes/**/*.py`，记录 `ApiRuntime` method/field 读写、private helper import、patch target/kind，并为 P4 每项指定 keep-in-place/wrapper/re-export/injected-port 策略；`unclassified == 0`；
 - snapshot `src.api`、`src.capabilities.main_agent`、`src.orchestration.agent_loop`、`src.integrations`、`src.integrations.mcp`、`src.integrations.agent_skills`、Result Parser service/worker 的公开导出；
 - 冻结 `ApiRuntime`、`build_api_runtime` 签名、默认值、属性与 patch seam；
 - 冻结旧 `src.integrations.codex_skills` alias、`MCPGateway`、`UserMCPDispatchCoordinator`、adapter、worker entry/checkpoint 的 import、signature、`__module__`、pickle/spawn；
@@ -431,6 +453,8 @@ P0 还要解析本次范围内各层 `AGENTS.md` 中形如仓库相对路径的�
 - 冻结公开导出的 `SQLiteCollaborationRepository`、`SQLiteStateRepository`、`SQLiteStorage`、`PostgreSQLStorage` 的 class identity/MRO、public descriptor defining class/module/qualname/signature/async、effective implementation、patch seam；记录 `SQLiteStorage._run` 在同一 Session 内依次构造 State/Collaboration repository、执行 callback、commit 的精确关系；
 - 冻结关键 Python 类型的 module identity 与 pickle；
 - 为 Agent waiting/continuation、MCP Coordinator/Gateway、startup/shutdown、SQLite `_run` cancellation 和 PostgreSQL transaction owner 建立 side-effect trace。
+
+API lifecycle 不只锁 success trace。P0 必须对 `start()`/`shutdown()` 当前每个 await、task creation/done-callback、subscription、close/aclose 与 engine dispose 边界做可确定故障注入，逐项记录 catch class、异常传播目标、Ready 是否到达、已启动 task/service、后续 cleanup/dispose 调用次数、剩余资源与 event 顺序。必须特别锁定：master-key sentinel 失败才在该 early branch dispose engine；PostgreSQL MCP invalidation bus `start` 的普通 `Exception` 按现实现吞掉；其他启动阶段通常 fail-fast 并保留已发生的部分启动；shutdown 的首个未捕获异常会阻止后续清理。这些当前偏差登记 `BEHAVIOR-API-LIFECYCLE-001`，结构迁移只保持；统一清理/吞错策略必须另立行为设计。
 
 时间、UUID、event ID、idempotency key 等可观察字段必须通过注入固定 clock/generator 得到 exact trace，不得通过删除字段来“归一化”漂移。只有纯 wall-clock duration 可以按 manifest 中逐字段记录的理由排除 exact comparison。
 
@@ -464,7 +488,7 @@ P0 必须先在旧实现上增加更强的 effective-method、SQL/lock/transacti
 - 冻结 root imports、public signatures、serde contract、error strings 和 Cargo dependencies；
 - 冻结 root-defined public type 的 `std::any::type_name`，并冻结 `RuntimeSidecarSqliteAdapter` 的 `sqlite_adapter` canonical module path；
 - 枚举 root-defined public free functions，以可实例化 representative function item 的 `std::any::type_name_of_val`/compile fixture 冻结 def path；对 public `async fn` 还要构造但不执行 representative future 并冻结其 `type_name_of_val`。body 下沉时保留物理定义在 root 的签名一致 thin wrapper，不允许仅 `pub use child::function`；
-- 对 public type/function 另存 outer attribute/qualifier token manifest：至少 `#[must_use]`（含 message）、`#[deprecated]`、`#[cfg]`/`cfg_attr`、`pub` visibility、`async|const|unsafe|extern ABI`、generics/where；root wrapper 必须复制 exact。外部 compile fixture 使用 `#![deny(unused_must_use)]`，防止 wrapper 漏属性而普通 import/type-name仍通过；
+- 对 public type、free/associated function、inherent method 与 trait method 另存 outer attribute/qualifier token manifest：至少 `#[must_use]`（含 message）、`#[deprecated]`、`#[cfg]`/`cfg_attr`、`pub` visibility、`async|const|unsafe|extern ABI`、generics/where；root wrapper 必须复制 exact。外部 compile fixture 使用 `#![deny(unused_must_use)]`，对每个适用的 free/associated/method 返回值逐项触发检查，防止 wrapper 漏属性而普通 import/type-name 仍通过；
 - byte-level 比较下表 6 份 checked-in contract 与各自 Cargo export binary 输出；Cargo bin name 使用 hyphen，不能把 source stem 的 underscore 当作 `--bin` 名；
 - 建立外部-crate root-import compile fixture，冻结 `pb::{common,runtime,skill}::v1` 与 PyO3 module/function/JSON envelope；逐 PyO3 export 记录 direct canonical target、是否经过 service、调用/I/O次数，禁止跨 crate 套用统一 bridge 链；
 - 建立 operation-by-operation 内存/SQLite parity matrix：task submit/get/list/active、Agent commit/get/list/final、node、artifact、event、lease、cancel、bundle。success 对每个 operation 必须覆盖；exact retry、conflict、CAS 和 invalid idempotency 只适用于签名/合同实际支持该语义的 mutation，纯 read 或无相应 key/version 的 operation 必须逐项标 `N/A` 并给 signature/contract reason，禁止把 N/A 伪装为 pass；
@@ -497,16 +521,18 @@ P0 必须新增可实际执行的普通 StoragePort PostgreSQL parity suite，�
 
 | Gate ID | 必须覆盖 | 解锁切片 |
 |---|---|---|
-| `P0.pg.storage-parity` | auth generation/rotate/clear、Task/TaskNode CAS、mailbox/interrupt/event ordering | P5 Auth、Task/Lifecycle shared→PG |
+| `P0.pg.storage-parity` | 受影响 StoragePort operation map 逐项 parity：auth generation/rotate/clear、Task/TaskNode CAS、mailbox/interrupt/event ordering，以及 Conversation/Message/File Resource/Index Repair/Memory Summary/Pending Skill Context 的 success/not-found/error/reopen | P5 Auth、Task/Lifecycle shared→PG；P5 普通 Conversation/File/Memory 切片 |
 | `P0.pg.cp7-authority` | owner guard 首次接管、claim takeover、terminal mutation/commit | P5 MCP dispatch/CP7/Remote Task |
 | `P0.pg.rollout-permissions` | rollout API、app/snapshot/evaluator/operator role isolation | P5 MCP rollout/observability |
 | `P0.pg.legacy-migration` | dedicated migration role、first apply/exact replay/conflict、durable record | P5 legacy compatibility runners |
-| `P0.pg.conversation-delete` | concurrent delete、guard/rollback/final state | P5 Conversation |
+| `P0.pg.conversation-delete` | concurrent delete、guard/rollback/final state | 只解锁 P5 Conversation delete state machine/physical-delete runner；普通 Conversation 仍同时依赖 `P0.pg.storage-parity` |
 | `P0.pg.bootstrap-ddl` | fresh bootstrap、single metadata、table/index/constraint/DDL digest drift | P5 SQLAlchemy base/mapper registration |
 | `P0.pg.mvcc-concurrency` | competing claim/CAS/lock winner与旧 snapshot可见性 | P5 owner/claim/remote high-risk paths |
 | `P0.pg.transaction-rollback` | 每个受影响 runner 的 exception point、all-or-zero、session/commit/rollback | P5 所有 PG transaction-owner 迁移 |
 
 每个 profile 必须记录准确 env 名、命令、预期测试数和 `skipped == 0`。测试必须使用模块独立、可删除、明确非生产的数据库/schema/role；仅检查 DSN 字符串存在不构成 live evidence。P5 高风险切片只有在对应 profile 真正执行通过后才能开始。
+
+所有用于证明 PostgreSQL SQL/事务 owner 的 leaf 还必须强制记录 actual dialect=`postgresql`、effective method/session-factory owner、SQL/lock/flush/commit/rollback trace 与 Sidecar call count=0；`runtime_store`、`event_log` 及 MCP task authority 以该 profile 的 closed env 固定到预期 SQL/off path，不得继承宿主 shadow/enforce 配置或意外走 `SQLiteStorage` Sidecar branch。每个 operation 的 effective owner 与实际 PostgreSQL session/SQL spy 必须同时成立，只有结果相同不足以证明 PG parity。
 
 ### 11.7 P0 本地与外部门禁分层
 
@@ -548,7 +574,34 @@ Core 作为该 aggregate 的 canonical owner 是当前跨模块 contract 边界�
 
 所有计划都遵守同一抽取规则：helper 只能承载完全相同的纯逻辑，调用方仍负责抛出各自原异常。
 
-### 12.3 P1 验收
+### 12.3 Non-aggregate Sidecar writer port
+
+`CancellationTokenWriter` 是独立 side-effect port，不是 persistence CRUD，不进入 `StoragePort` 或 259-method 子协议 union。它只向 Lifecycle private implementation 暴露两个有序阶段（具体命名可在计划中细化，语义不可合并）：
+
+```python
+class CancellationTokenWriter(Protocol):
+    async def write_before_projection(
+        self, *, task_id: str, requested_at: datetime
+    ) -> None: ...
+
+    async def compare_after_legacy_task_save(
+        self,
+        *,
+        task_id: str,
+        requested_at: datetime,
+        legacy_output: Mapping[str, Any],
+    ) -> None: ...
+```
+
+- `write_before_projection` 每次在调用点重新解析 `runtime_store` mode；off/shadow 保留 Rust contract admission 且 Sidecar 调用 0，enforce 在任何 AgentRun/legacy Task 状态写之前以既有 `reason=user_cancel`、`terminal_policy=terminal-noop`、millisecond timestamp 和 `{task_id}:cancellation_token` idempotency key 调 Sidecar 恰好一次，按原 envelope/error 失败关闭；
+- `compare_after_legacy_task_save` 只在非 AgentRun 分支的 legacy `save_task(cancelling)` 成功后调用，并在该调用点再解析 mode；只有 shadow + raw client + audit sink 时执行 Sidecar compare，Sidecar/audit 的普通 `Exception` 继续 fail-open 且不改变 Python 结果；off/enforce 或缺 client/sink 时调用 0；AgentRun terminal-CAS 分支永不调第二阶段；
+- Storage 拥有 raw Sidecar client、mode/contract admission、response validation 与 shadow comparison adapter。为保留已公开的 `CancellationService(..., runtime_sidecar_client: Any | None = None)` 签名，Lifecycle facade 允许一条具名 `LIFECYCLE-SIDECAR-COMPAT-001` 兼容边：它只调用 Storage-owned adapter factory 将 raw client + 已有 audit sink 包装为 writer；不实现 mode/validation/shadow 业务。新 private cancellation implementation 只见 `CancellationTokenWriter`；该例外只能在未来获批改公开 constructor 后退出。
+
+P0/P5 对 AgentRun/legacy 两分支的 off/shadow/enforce、mode 中途变化、sync/async client、invalid/error envelope、Sidecar/audit 异常、SQL/Agent CAS、event 与两阶段次数/顺序建 exact trace。结构迁移不得顺手统一 AgentRun 与 legacy shadow 语义。
+
+P1 只定义该 Protocol/兼容 factory boundary 并在旧实现上锁 trace，不搬动 Sidecar 业务；Storage-owned concrete adapter 的提取与 Lifecycle private implementation 切换由 P5 同一具名检查点完成。因此 `P1.local-core` 不依赖 P5，而 `P5.local-storage` 必须证明该边界已实际接线。
+
+### 12.4 P1 验收
 
 - 三条公开 import 使用 `is` 指向 `src.core.contracts.StoragePort`；
 - `StoragePort.__module__ == "src.core.contracts"` 且 `__qualname__ == "StoragePort"`；
@@ -557,12 +610,13 @@ Core 作为该 aggregate 的 canonical owner 是当前跨模块 contract 边界�
 - `isinstance(SQLiteStorage(...), StoragePort)` 保持；
 - 新消费者只依赖所需窄协议，AST import gate 不新增反向 edge；
 - `tests/core/test_contracts.py`、`tests/storage/test_sqlite_bootstrap.py` 和 Storage 全量通过。
+- `CancellationTokenWriter` 明确不计入 259 union，两阶段/兼容 adapter edge 与 P0 trace exact。
 
 ## 13. P2：Orchestration 与 Capabilities
 
 ### 13.1 规范性权威
 
-P2 只做结构等价迁移，不重新解释统一 Agent Loop。若本设计、后续 implementation plan、源码注释或局部测试发生冲突，以 `docs/prd/backend/unified-agent-loop/README.md`、总纲及 Phase 2/3/4 PRD 为准。唯一已确认的例外是 13.6 `BEHAVIOR-ORCH-PARALLEL-001`：它明确记录当前代码与架构理想的既有偏差，本轮因“功能不变”只允许保留并延期，不得把它反写成统一权威的新规范。
+P2 只做结构等价迁移，不重新解释统一 Agent Loop。若本设计、后续 implementation plan、源码注释或局部测试发生冲突，以 `docs/prd/backend/unified-agent-loop/README.md`、总纲及 Phase 1/2/3/4 PRD 为准。已确认的当前实现偏差只有两项并都不改写权威：13.6 `BEHAVIOR-ORCH-PARALLEL-001` 与 13.6 `BEHAVIOR-ORCH-LEASE-001`。本轮因“功能不变”只允许保留并延期；任一修复都必须另立获批行为设计。
 
 P2 必须持续满足统一权威的 FR-1、FR-8～FR-10、FR-13、FR-15～FR-18、FR-20、FR-23～FR-26。`AgentToolCatalogBuilder`、`CapabilityInvocationPolicy` 与 Runner 唯一负责 capability 可见性、model payload filtering、schema 校验和 effective payload；policy-filtered payload 是 Invocation Kernel 的输入。`CapabilityInvocationService` 唯一负责 route handoff、instance selection、execution metadata/request、executor 调用、late-result 与 semantic classification。
 
@@ -669,12 +723,15 @@ Remote binding 未成功发布时不得把 outcome 伪装为可恢复 waiting，
 - commit 成功但 ack 失败的 duplicate delivery 必须从 committed result 收敛，只重试 ack，不再次 resolve capability；
 - 新构造、空 handoff cache 的 continuation service 必须仍能从 Interrupt/slot carrier、MCP aggregate/remote binding 和 Agent outcome 恢复原 Run/call/model binding；cold locator reconstruction 本身不得从内存 cache 猜 locator或调用 resolver/executor，但收到新的有效 answer/approval/remote authority 后按下列 resume-kind 调用合同执行。
 
-Resume-kind 调用次数必须分开锁定：
+Resume-kind 调用次数必须分开锁定。下表计数范围是目标 reserved/committed call 的 authority 收口直到其 atomic outcome/ack；最后一个 waiting 闭合后按原 Runner 继续的 remaining wave/model sample 另按 13.6 wave 合同计数，不得反过来冒充目标 call resolver/Tool replay：
 
 | 场景 | Resolver/executor/external call 合同 |
 |---|---|
 | 仅 cold locator/cache reconstruction，尚无新 authority delivery | resolver 0、executor 0、network 0 |
-| committed duplicate、terminal repair、unknown no-replay | resolver/executor 0；只允许幂等 ack/投影修复 |
+| committed duplicate 或 Run 已 terminal 的 delivery | authority resolver 0、capability executor 0、Tool 0；只允许幂等 ack/投影修复 |
+| authoritative terminal payload 已持久化但 Agent result 仍 reserved | authority resolver 恰好 1、capability executor 0、Tool 0、atomic outcome commit 恰好 1 |
+| `converge_unknown_side_effect` | 本地 closed no-replay resolver 恰好 1、capability executor 0、Tool/network 0 |
+| startup `recover_crashed_run` 直接收敛非 waiting reserved call | 每个 reserved-reconciliation 的 authority resolver 0、capability executor/Tool 0，只写一个 aborted outcome；随后 `run_claimed` 若继续新 wave 另计 |
 | 新接受的 Skill missing-input answer | 继续原 capability authority恰好 1 次；不得创建新 call/sample |
 | MCP approval | 批准前 Tool send 0；首次有效批准后原 Tool 最多 1 次；duplicate approval Tool 0 |
 | remote completion/dependency | 只 adopt/poll/commit既有 remote authority；`tools/call` 重投 0 |
@@ -687,8 +744,11 @@ Parallel exception 路径冻结当前实现并登记 `BEHAVIOR-ORCH-PARALLEL-001
 | HTTP Interrupt/Slot answer 直接走 `_resume_agent_interrupt → AgentRunRecoveryCoordinator` | continuation 内的异常同步向 answer request 传播；该路径当前不调 `_mark_task_failed`，不得在结构迁移中暗自改成通用 terminalizer |
 | `start() → _recover_agent_runs` 或启动阶段 MCP dispatch recovery | 异常向 `start()` 传播并阻止 ready，不经 `_mark_task_failed` |
 | post-ready `_reconcile_mcp_dispatch_recovery` background task | 异常保存到 `_mcp_post_ready_recovery_error`，不经通用 Task failure path |
+| `_run_mcp_continuation_commands_forever → _consume_mcp_continuation_command` remote-continuation consumer | 普通 `Exception` 由 forever loop 吞掉，等待 0.25s 后继续轮询；不写 `_mcp_post_ready_recovery_error`、不调 `_mark_task_failed`，continuation outcome/ack/outbox 已写部分按现状保留 |
 
-P0 barrier fixture 必须分别让 sibling 在入口收口前/后越过副作用点，对上表四类入口各自锁定 exception target、HTTP/startup/background outcome、reserved results、Node/Event、Agent outcome count=0、Task/Run/claim/waiting/lease 实际终态与 event 顺序；只有第一行断言 `execution_crash`/`task.failed`。该行为与统一架构的 fatal sibling-cancel 理想存在既有偏差，本轮按功能不变登记延期；不得换成 TaskGroup、`return_exceptions=True`、显式 sibling cancel、all-settle，也不得把后三类入口新接到 `_mark_task_failed`。若迁移无法原样保持，P2 该检查点阻断。
+P0 barrier fixture 必须分别让 sibling 在入口收口前/后越过副作用点，对上表五类入口各自锁定 exception target、HTTP/startup/background/consumer-loop outcome、reserved results、Node/Event、Agent outcome count=0、Task/Run/claim/waiting/lease、continuation outbox/ack 实际状态与 event 顺序；只有第一行断言 `execution_crash`/`task.failed`。该行为与统一架构的 fatal sibling-cancel 理想存在既有偏差，本轮按功能不变登记延期；不得换成 TaskGroup、`return_exceptions=True`、显式 sibling cancel、all-settle，也不得把后四类入口新接到 `_mark_task_failed`。若迁移无法原样保持，P2 该检查点阻断。
+
+Lease heartbeat 路径另登记 `BEHAVIOR-ORCH-LEASE-001`：当前 active capability 开始时 `AgentCapabilityInvoker` 将 `run.claim_token` 缓存到 `InvocationRequest.expected_claim_token`；30s production TTL 的 heartbeat 每 10s renew 并旋转持久 token/`handle.current.token`，但 executor 返回后的 projection ownership recheck 仍比较调用开始的旧 token。因此 capability 跨过一次成功 renew 后，即使仍是同一 owner，也会失败为 `agent_invocation_not_owned`；已发生的外部副作用不回滚。P0 必须用 fake clock/renew barrier 让 executor 恰好跨过一次成功 token 旋转，对上表五类可到达入口锁定 old/current token digest、ownership error、executor/Tool 次数、Node/Event/result、Task/Run/claim/lease/outbox/ack 和收口。统一 Phase 1 要求 commit/recheck 读 current token，但本轮不得暗自改为 handle/token provider；该修复必须另立行为任务。
 
 ### 13.7 P2/P3/P4 交接
 
@@ -726,12 +786,13 @@ P0 冻结的 `src.capabilities.main_agent.__all__` 与 11.2 明列的直接模�
 | capability execute | 每个 call 恰好 1 次 | invocation trace |
 | waiting trace | 13.4/13.5 逐项 exact | Agent invocation/continuation tests |
 | multi-waiting | outcomes 按 ordinal；关闭一个时 model 0 次 | Agent loop/continuation tests |
-| restart/resume kinds | 空 cache locator reconstruction 0 调用；新 Skill answer/MCP approval/remote/duplicate 按 13.6 表 exact | lifecycle recovery/API continuation call-count tests |
+| restart/resume kinds | 空 cache locator reconstruction、duplicate、authoritative repair、unknown no-replay、startup reserved、新 Skill answer/MCP approval/remote 按 13.6 分类 exact，authority resolver 与 capability executor 分别计数 | lifecycle recovery/API continuation call-count tests |
+| active heartbeat | 跨一次成功 renew 后按 `BEHAVIOR-ORCH-LEASE-001` 保留旧 token ownership failure 与五入口收口 | fake-clock renew barrier/call trace |
 | slot carrier | continuation 完整，duplicate answer 不重复 slot event/message/outcome | Skill slot/API interrupt tests |
 | prompt | 四 mode golden equality，原类型与 import 保留 | prompt envelope/profile/main-agent tests |
 | boundary | `task_projection.py` 不再 import `missing_input_interrupt` 或调用 `slot_collection_*` | AST import gate |
 
-必须覆盖的 fault：slot collection 已写但 interrupt 未写、interrupt 已写但 visible message 未写、locator 已构造但 authority persist 报错、remote binding publish 失败、outcome commit 失败、parallel invocation 异常、restart/duplicate delivery，以及 resume 的 waiting→waiting/terminal+others/last-terminal/commit后ack失败。P0 先生成 `side-effect-traces/p2-fault-state-matrix.json`；每个中断点记录 projection-port Node 写与 atomic-writer Node 重写各自的 before/after/call count，并记录 AgentRun status/revision/waiting IDs、SlotCollection revision/events、Interrupt、visible message、node event、reserved/committed result item、lease owner/token/release/terminal clear、ack 以及 resolver/executor/external call count。该 artifact 未生成前不得进入 continuation/slot 搬迁。任何 fault 都不得新增 capability 或外部 Tool 调用；remote binding publish 失败允许保留现有 TaskNode 部分状态但不得产生 waiting outcome，outcome commit 失败不得释放 waiting lease。
+必须覆盖的 fault：slot collection 已写但 interrupt 未写、interrupt 已写但 visible message 未写、locator 已构造但 authority persist 报错、remote binding publish 失败、outcome commit 失败、parallel invocation 异常的五入口、active capability 跨 heartbeat token 旋转、restart/duplicate delivery，以及 resume 的 waiting→waiting/terminal+others/last-terminal/commit后ack失败。P0 先生成 `side-effect-traces/p2-fault-state-matrix.json`；每个中断点记录 projection-port Node 写与 atomic-writer Node 重写各自的 before/after/call count，并记录 AgentRun status/revision/waiting IDs、SlotCollection revision/events、Interrupt、visible message、node event、reserved/committed result item、lease owner/current+cached token/release/terminal clear、ack/outbox 以及 authority-resolver/capability-executor/external call count。该 artifact 未生成前不得进入 continuation/slot 搬迁。任何 fault 都不得新增 capability 或外部 Tool 调用；remote binding publish 失败允许保留现有 TaskNode 部分状态但不得产生 waiting outcome，outcome commit 失败不得释放 waiting lease。
 
 ## 14. P3：Integrations
 
@@ -760,7 +821,7 @@ Agent Skills 必须保持两个信息通道：
 - prompt-safe channel 只允许受限摘要与 public profile；
 - authority-bound execution-only channel 可以在现有 `CapabilityExecutionRequest.metadata` 中持有 raw `content`、`content_base64`、`storage_key`，供 executor 构造脚本上下文；canonical key 是 `skill_artifacts`，但兼容读取顺序必须保持 `skill_artifacts or uploaded_artifacts or artifacts`，随后才按现有规则 sanitize，若结果为空才使用 `fallback_artifact_context`。该 transport metadata 不是 public/safe metadata，字段不得进入 slot/input/question prompt、LLM payload、public result metadata、diagnostic、event、audit、metric 或日志。
 
-P0/P3 必须分别对 execution request metadata 与 prompt/public channels 做 sentinel/taint snapshot：前者证明既有 raw artifact 可达 executor且调用次数不变，后者证明相同 sentinel 不可达。Execution matrix 必须覆盖 `skill_artifacts` 优先、legacy raw `uploaded_artifacts`、legacy `artifacts`、空/falsey key 向下一 key fallback、truthy 但 sanitize 后为空时只落到 `fallback_artifact_context` 的现有语义，以及 safe-metadata 对三 key 的 raw-field 净化。另覆盖 input resolution v1/v2、slot state、public profile、result/event/audit/metric，禁止用删除 legacy/execution transport 的方式让隐私测试通过。
+P0/P3 必须分别对 execution request metadata 与 prompt/public channels 做 sentinel/taint snapshot：前者证明既有 raw artifact 可达 executor且调用次数不变，后者证明相同 sentinel 不可达。Execution matrix 必须覆盖 `skill_artifacts` 优先、legacy raw `uploaded_artifacts`、legacy `artifacts`、空/falsey key 向下一 key fallback、truthy 但 sanitize 后为空时只落到 `fallback_artifact_context` 的现有语义，以及 safe-metadata 对三 key 的 raw-field 净化。另覆盖 input resolution v1/v2、slot state、public profile、result/event/audit/metric、structured log/caplog 与 exception text，所有 public/observer channel forbidden sentinel 为 0；禁止用删除 legacy/execution transport 的方式让隐私测试通过。
 
 ### 14.2 Result Parser
 
@@ -772,21 +833,28 @@ P0/P3 必须分别对 execution request metadata 与 prompt/public channels 做 
 - 父进程仍只接收不超过 4 KiB checkpoint 和 bounded projection，不读取 raw；
 - gate 必须保持 1 active、8 queued、每 owner 2；queue wait 30 秒、worker wall 10 秒、mapping 64 KiB、raw 64 MiB、checkpoint 4 KiB、projection envelope 192 KiB、worker address space 512 MiB；
 - cleanup 按现实现分阶段保持 exact：首消息 timeout 为 `terminate → join(2s) → kill(if still alive) → join(2s)` 并 hard fail；首消息前的其他异常/取消只在仍存活时 `terminate → join(2s)` 后原异常传播；已收到 checkpoint key、仍等待第二消息时若 timeout/EOF/`MCPResultWorkerError`，只在仍存活时 `terminate → join(2s)` 并把第二阶段降为 `projection_failed`，随后才 semantic-validate checkpoint；同阶段若 coroutine 被 cancel/抛其他 `BaseException`，必须丢弃 checkpoint、传播原异常，且只 `terminate → join(2s)`；正常/soft-projection 路径最终 `join(2s)`，仍存活时再 `terminate → join(2s)`。后 4 条路径不得顺手新增 kill；event-loop heartbeat 与 gate release次数保持；
+- cleanup 内部的 `join(2s)` 自身也是 cancellation point，且当前 normal final join 与部分 timeout cleanup 不在另一层不可取消 finally 中。登记 `BEHAVIOR-PARSER-CLEANUP-CANCEL-001`：P0 必须分别在 first-timeout cleanup join、second-timeout/EOF cleanup join 和 normal final join 中用 barrier 注入 cancel，锁定 `CancelledError`、checkpoint/outcome 是否返回、terminate/join/kill 次数、子进程是否仍存活和 gate release。资源泄漏修复不属于结构迁移，不得暗自加 shield/finally/kill；
 - worker entry、checkpoint type、spawn/pickle module identity 原位；
 - 不把 decoder 合并成配置驱动的大一统 parser。
 
-证据至少覆盖 `tests/integrations/mcp/test_result_parser_worker.py` 中 checkpoint、projection-store failure、timeout/heartbeat、cancellation、gate、Linux resource limit 与 malicious regex cases。P0 必须新增 barrier-controlled process fixtures，确定性覆盖 first-send 前 cancel、first-send 后/second-send 前 cancel、checkpoint key 存在但 semantic invalid、second EOF 后 worker 已退出/仍存活；逐例断言 outcome/exception、checkpoint 是否保留、terminate/join/kill 顺序、gate release 和 observer/projection-store 调用次数。当前只 `sleep(0.001)` 后取消并检查 gate 的用例不是阶段证明。
+证据至少覆盖 `tests/integrations/mcp/test_result_parser_worker.py` 中 checkpoint、projection-store failure、timeout/heartbeat、cancellation、gate、Linux resource limit 与 malicious regex cases。P0 必须新增 barrier-controlled process fixtures，确定性覆盖 first-send 前 cancel、first-send 后/second-send 前 cancel、checkpoint key 存在但 semantic invalid、second EOF 后 worker 已退出/仍存活，以及上述三个 cleanup-join cancellation point；逐例断言 outcome/exception、checkpoint 是否保留、terminate/join/kill 顺序、子进程最终状态、gate release 和 observer/projection-store 调用次数。当前只 `sleep(0.001)` 后取消并检查 gate 的用例不是阶段证明。
 
-Result Parser `worker_supervisor.py` 检查点还要求 P0 在 `.github/workflows/rust-quality.yml` 新增独立 job ID `result-parser-linux-gate`：`runs-on: ubuntu-22.04`，`actions/checkout@v4`，`actions/setup-python@v5` 固定 Python `3.13.13`，随后 `python -m pip install -r requirements.txt`。Workflow 的 pull_request/push paths 必须加入 Result Parser service/worker/projection store、`tests/integrations/mcp/test_result_parser_worker.py`、`requirements.txt` 和 workflow自身；不得假设现有 Rust job 中已存在名为 `multi_agent` 的 Conda env。Job 执行：
+Result Parser `worker_supervisor.py` 检查点还要求 P0 在 `.github/workflows/rust-quality.yml` 新增独立 job ID `result-parser-linux-gate`：`runs-on: ubuntu-22.04`，`actions/checkout@v4`，`actions/setup-python@v5` 固定 Python `3.13.13`，随后 `python -m pip install -r requirements.txt`。Workflow 的 pull_request/push paths 必须加入 Result Parser service/worker/projection store、barrier tests、repo-owned runner、`requirements.txt` 和 workflow自身；不得假设现有 Rust job 中已存在名为 `multi_agent` 的 Conda env。
+
+P0 新增 `scripts/run_result_parser_linux_gate.py`，不解析 console 文本：它在两个隔离子进程中用 `unittest.TestLoader`/`TestResult` 程序化加载 exact targeted suite 与 full MCP integration suite，接收 barrier fixtures 的脱敏 RLIMIT/terminate/join/kill/process-final-state collector，并原子写入 `${RUNNER_TEMP}/result-parser-linux-gate.v1.json`。Schema 固定为 `maf.cleanup.result_parser_linux_gate.v1`，包含 canonical SHA、actual HEAD/tree、runner/kernel/Python/pip/requirements digest、target/full discovered/ran/failure/error/skip、RLIMIT before/after、timeout 与 process-cleanup trace，禁止 raw 64 MiB payload。Runner 先用 repo-owned validator 重算 schema/SHA/commit/tree 并确认 process collector 闭合，workflow 才可 upload。Job 唯一命令为：
+
+Targeted suite 内部常量恰好是 `MCPResultParserWorkerTest.test_linux_worker_enforces_512_mib_and_parses_64_mib_boundary` 与 `MCPResultParserWorkerTest.test_linux_malicious_schema_regex_is_terminated_by_wall_timeout`；任一 rename/缺失都必须通过 P0 contract 显式更新，不能退化为 discover pattern。
 
 ```bash
-python -m unittest \
-  tests.integrations.mcp.test_result_parser_worker.MCPResultParserWorkerTest.test_linux_worker_enforces_512_mib_and_parses_64_mib_boundary \
-  tests.integrations.mcp.test_result_parser_worker.MCPResultParserWorkerTest.test_linux_malicious_schema_regex_is_terminated_by_wall_timeout
-python -m unittest discover -s tests/integrations/mcp -p 'test_*.py'
+python scripts/run_progressive_cleanup_gate.py \
+  --profile P3.ubuntu-result-parser \
+  --evidence-output "$RUNNER_TEMP/result-parser-linux-env.v1.json" \
+  -- python scripts/run_result_parser_linux_gate.py \
+     --tested-commit "$TESTED_COMMIT" \
+     --output "$RUNNER_TEMP/result-parser-linux-gate.v1.json"
 ```
 
-Targeted profile 的 expected count 恰为 2、`ran=2`、`failed=0`、`skipped=0`；MCP integration full suite 也必须记录 discovered/ran/skip，以上两项不得 skip。Job 上传 `progressive-cleanup-result-parser-linux` artifact，记录 workflow/job ID、Git commit/tree、runner image/architecture/kernel、Python/pip version、`requirements.txt` SHA、target/full counts、RLIMIT before/after、timeout 与 process cleanup trace，不保存 raw 64 MiB payload。只有 artifact commit 等于 `tested_commit` 且 job success 才闭合 `P3.ubuntu-result-parser`；runner/job/artifact 缺失时该 Result Parser 子检查点和 P3 总体为 `pending_platform`。P3 其他独立检查点可继续，但不得用 macOS skip 或既有 wheel job冒充通过。
+Targeted profile 的 two test IDs 由 runner 内部常量锁定，expected count 恰为 2、`ran=2`、`failed=0`、`errors=0`、`skipped=0`；MCP integration full suite 也必须记录 discovered/ran/failure/error/skip，且 skip=0。Job 上传 `progressive-cleanup-result-parser-linux` artifact 的两个固定文件（env profile + runner result），缺文件/字段/脱敏检查或校验不符即 fail。`workflow_dispatch` 新增 required `tested_commit` input，job checkout 该 exact SHA 并验证 actual HEAD；push 事件只有 actual `github.sha == tested_commit` 时可闭合，pull-request 默认 merge-ref artifact 只是 preflight，不能闭合 implementation commit gate。只有 artifact commit 等于 `tested_commit` 且 job success 才闭合 `P3.ubuntu-result-parser`；runner/job/artifact 缺失时该 Result Parser 子检查点和 P3 总体为 `pending_platform`。P3 其他独立检查点可继续，但不得用 macOS skip 或既有 wheel job冒充通过。
 
 ### 14.3 MCP Gateway 状态所有权
 
@@ -837,10 +905,13 @@ safety admission
 -> accepting-calls barrier #2
 -> authoritative task load + task/shadow safety validation
 -> result sink + descriptor recheck
+-> optional on_registered callback
+-> call_state.dispatched = true
+-> durable recovery context construction
 -> existing adapter Tool send
 ```
 
-两次 accepting check 是 `on_created`/task creation 与 close race 之间的 barrier，不得合并、重排或删去。各 guard/callback 失败必须保持现有 error class/code、call task cancel/gather、state.calls/terminal bookkeeping、gauge 和 sink cleanup trace，且 Tool send/network delta 为 0；bootstrap 已经发生的 credential/client 次数不回溯为 0，且不得在每个 call 重做 endpoint、DNS、credential 或 client construction。验证分别绑定 Gateway single-flight/bootstrap retry/endpoint/no-DNS 与 call authorization/argument/on_created/assignment/task safety/two-close-barrier/cleanup failure tests。
+两次 accepting check 是 `on_created`/task creation 与 close race 之间的 barrier，不得合并、重排或删去。`on_created` 与 `on_registered` 也不是同一回调：前者在 `start_allowed` 前交付本地 call ref；后者在 sink/descriptor 完成后、`dispatched=True` 和 adapter send 之前让 Coordinator 写 may-have-dispatched authority。P0 必须用 barrier 分别覆盖 `on_registered` 成功、普通异常、`CancelledError`、durable write 前/后异常，锁定 callback count、`call_state.dispatched`、sink abort/close、call record/unknown 分类、recovery context 是否构造与 Tool send=0。各 guard/callback 失败必须保持现有 error class/code、call task cancel/gather、state.calls/terminal bookkeeping、gauge 和 sink cleanup trace；bootstrap 已经发生的 credential/client 次数不回溯为 0，且不得在每个 call 重做 endpoint、DNS、credential 或 client construction。验证分别绑定 Gateway single-flight/bootstrap retry/endpoint/no-DNS 与 call authorization/argument/on_created/on_registered/assignment/task safety/two-close-barrier/cleanup failure tests。
 
 ### 14.5 MCP Coordinator 与 no-replay
 
@@ -854,7 +925,7 @@ safety admission
 
 这些模块是 Coordinator 私有有状态 phase，不是可复用 pure helper：preparation 会 arm intent、写 audit、resolve/claim outbox，terminal 会写 durable aggregate。它们只能由同一 Coordinator 实例按固定 phase 调用，Gateway、recovery 和 API 禁止直接导入。若 call trace 无法证明一致，方法保留在原类中而不迁文件。
 
-`tests/integrations/mcp/test_mcp_dispatch_fault_injection.py` 的 17 个 closed boundary 集合和逐 boundary durable proof 不得减少。P0/P3 必须让每个 fixture 同时输出 machine-readable `expected_network_delta`、spy 取得的 `actual_network_delta` 与 `restart_network_delta`，逐边界要求 actual exact-equal expected 且 restart 为 0；当前只断言 expected 属于 `{0,1}` 不是执行证据。另须保持：
+`tests/integrations/mcp/test_mcp_dispatch_fault_injection.py` 的 17 个 closed boundary 集合和逐 boundary durable proof 不得减少。P0/P3 必须让每个 fixture 同时输出 machine-readable operation matrix：每行含 `side_effect_identity`、closed `operation_kind` （至少 `tools/call`、`tasks/get`、`ocr/start`、`ocr/poll`、`ocr/ack`）、`expected_initial_delta`、spy 取得的 `actual_initial_delta` 与 `restart_delta`。逐行 actual 必须 exact-equal expected；被保护的原始 Tool 或 OCR start 副作用 `restart_delta=0`，而协议允许的 remote `tasks/get`、OCR poll/ack 必须以各自 identity/次数单独验证，不得被通用“network total=0”误拒，也不得用 poll 增量掩盖第二次 start/`tools/call`。当前只断言 expected 属于 `{0,1}` 不是执行证据。另须保持：
 
 - approval/MRTR 从原 action/payload 恢复，不 rerun Selector 或重新审批；
 - remote Task 只 adopt + poll，不重发 tools/call；
@@ -870,7 +941,7 @@ safety admission
 - raw 不进入父进程日志、异常、metric 或公共 projection；
 - source deleted、tamper、missing authority 的现有 safe-hide/failure 语义不变。
 
-P0/P3 必须为 historical service/reconciler 增加 fail-fast network spy：Gateway、client factory、credential loader、endpoint revalidator 或 transport 任一被解析/调用即测试失败，并以 AST/import gate 禁止 historical 模块依赖这些 symbol。当前测试中未连接真实依赖的常量 `network_calls = 0` 不能作为零网络证据。
+P0/P3 必须为 historical service/reconciler 增加 fail-fast network spy：Gateway、client factory、credential loader、endpoint revalidator 或 transport 任一被解析/调用即测试失败，并以 AST/import gate 禁止 historical 模块依赖这些 symbol。当前测试中未连接真实依赖的常量 `network_calls = 0` 不能作为零网络证据。Characterization 还必须有 1000/1001 records 的 keyset 分页（无遗漏/重复）、held durable source 与 managed-copy 同时存在时前者唯一被读、held 回收后才读后者，以及两个 source 各自 tamper/missing/deleted 的 safe-hide/failure sentinel。
 
 ### 14.7 Observability 与资源
 
@@ -896,14 +967,14 @@ P0/P3 必须为 historical service/reconciler 增加 fail-fast network spy：Gat
 | 领域 | 必须结果 | 主要证据 |
 |---|---|---|
 | Agent Skills | prompt/public 与 authority-bound execution metadata 分离，sentinel transport 保留且 public forbidden keys 为 0 | Agent Skills artifact/input/slot/public-profile taint tests |
-| Result Parser | first-key/semantic-validation阶段、pre/post-checkpoint cancel、process cleanup、gate/size/timeout、spawn identity exact；Ubuntu 两项零 skip | Result Parser barrier worker/service tests + `P3.ubuntu-result-parser` |
+| Result Parser | first-key/semantic-validation阶段、pre/post-checkpoint 及三个 cleanup-join cancel、process cleanup、gate/size/timeout、spawn identity exact；Ubuntu runner artifact 两项/全量零 skip | Result Parser barrier worker/service tests + `P3.ubuntu-result-parser` |
 | Gateway state | 单 state owner、mixed/lock/event-loop field site exact、single-flight、close/invalidate barrier | Gateway field/await trace + concurrency/cleanup tests |
-| Gateway security | bootstrap reject 后下游 credential/client/network 0；call两次accepting及各guard reject后 Tool send 0；retry exact endpoint | 分阶段 Gateway endpoint/security/call tests |
-| Coordinator | 17 fault boundaries，actual=expected且 restart Tool=0 | dispatch fault-injection machine-readable traces |
+| Gateway security | bootstrap reject 后下游 credential/client/network 0；call两次accepting、`on_created`、`on_registered` 及各guard reject后 Tool send 0；retry exact endpoint | 分阶段 Gateway endpoint/security/call tests |
+| Coordinator | 17 fault boundaries，按 side-effect identity/operation 的 actual=expected，受保护的 Tool/start restart=0，合法 poll/ack 单独计数 | dispatch fault-injection machine-readable traces |
 | Job workflow | start/poll/persist/ack 顺序 exact，terminal failure no ack | job workflow tests |
-| Historical | page=1000、source priority、fail-fast spy/forbidden import证明零网络、raw 不泄露 | historical reprojection tests/import gate |
+| Historical | page=1000 的 1000/1001 keyset、held→managed source priority/tamper、fail-fast spy/forbidden import证明零网络、raw 不泄露 | historical reprojection tests/import gate |
 | Observability | labels/cardinality/red-lines/cleanup 语义不变 | gateway/coordinator/rollout observability tests |
-| Controlled real MCP | 5 场景、Server count exact、restart second Tool=0、redaction/cleanup/revoke 全绿 | `P3.real-mcp` artifact |
+| Controlled real MCP | 5 场景、Server attempt/final-input counter 与 local durable call/arguments trace exact、restart 被保护的第二次 `tools/call`=0、TTL/setup-business-cleanup budget、redaction/cleanup/revoke 全绿 | `P3.real-mcp` artifact |
 
 ## 15. P4：API Runtime
 
@@ -917,8 +988,10 @@ P0/P3 必须为 historical service/reconciler 增加 fail-fast network spy：Gat
 4. `runtime_components/interrupts.py`；
 5. `runtime_components/lifecycle.py`，整块迁移 startup/recovery/shutdown；
 6. `runtime_components/service_core.py` 与 `factory.py`；
-7. P4 业务组件只消费 P1 已稳定的 StoragePort facade，不在 P4 再修改该协议；composition root 仅按 9.1 例外构造具体 backend；
+7. `ApiRuntime.__init__(storage: StoragePort)` 与 `runtime.storage` 只作为旧签名/属性兼容 surface 保留；每个新 `runtime_components/*` 业务组件只接收 P1 的一个或多个窄 port，不得接收 259-method aggregate。Composition root 把同一 storage object 以窄视图注入，不增加 wrapper transaction/call；P4 不修改 P1 协议声明；
 8. 完成旧 runtime 私有 helper re-export、patch seam 与 import smoke 的兼容收口。
+
+P0 inventory 必须把当前直接读取 `runtime.storage` 的 `src/api/routes/**`、`src/api/auth.py` 等路径列为 P4 authorized touch，只允许将其切换到对应 runtime service/narrow-port adapter，并以 HTTP/DB call trace 证明 route、状态码、错误、事务与调用次数不变。这些 secondary touch 不把 route 所有权转给 P4 runtime component。
 
 ### 15.1 关键限制
 
@@ -929,6 +1002,8 @@ P0/P3 必须为 historical service/reconciler 增加 fail-fast network spy：Gat
 - runtime holder 仍在完整构造后赋值；
 - master-key sentinel、aggregate reconciliation、dispatch recovery、Agent recovery、Ready 和 post-ready remote task 的顺序不变；
 - shutdown 的 quiesce、cancel/gather、CP7 close、service close 和 engine dispose 顺序不变。
+
+P4 lifecycle 搬迁必须把 11.2 的 `api-lifecycle-fault-matrix` 作为前置和后置门禁，而不只验 success sequence。`BEHAVIOR-API-LIFECYCLE-001` 中 sentinel-only early dispose、PostgreSQL MCP invalidation fail-open、其他 startup partial-state fail-fast、shutdown 首错阻断后续 cleanup 都要 exact；不得为“更稳健”而在结构 commit 中改 catch/finally。
 
 `ApiRuntime` 类声明必须继续物理位于 `src/api/runtime.py`，保持 `__module__`、构造签名、实例属性名和测试直接访问的 private seam。`build_api_runtime` wrapper 保持 53 参数及原 import path；factory body 可以迁移，但 wrapper 必须在调用时显式传入当前 facade 中可被 monkeypatch 的 `RuntimeSidecarGrpcClient`、`ApiRuntime` 和其他 factory seam，禁止新模块在 import 时静态捕获替代对象。
 
@@ -954,11 +1029,13 @@ P4 的 `runtime_components/interrupts.py` 只能搬迁 API adapter 与装配代�
 - patch `src.api.runtime.RuntimeSidecarGrpcClient` 仍只构造预期 client；
 - env/config 读取、engine/storage、master-key、registry、orchestrator、holder 赋值顺序 exact；
 - startup 十阶段 reconciliation、Ready、post-ready remote work 与 shutdown trace exact；
+- startup/shutdown 每个故障点的 catch class、partial resource、后续 close/dispose 次数与 11.2 matrix exact；
 - P2/P3 interrupt/slot/recovery ownership无重复实现；
+- `api-component-storage-method-map.json` 每个 component 只使用声明窄 port/method；production routes/components 不再直接依赖 `runtime.storage` aggregate，旧属性本身仍可导入/访问；
 - API focused、API 全量、Lifecycle/Orchestration/Integrations 受影响套件通过；
 - `src/api/runtime.py` facade 仅保留 class declaration、assembly/wrapper、compat re-export 与尚未迁移检查点的唯一实现，不出现第二套 method body。
 
-以上本地项全绿后产出 `P4.local-mcp-wiring`；它只解锁真实 MCP profile，不等于 P4 plan complete。P4 plan complete 还要求 `P3.real-mcp` 的 `relevant_source_digest` 与当前 P3/P4 MCP wiring 相同；P4 任一相关修改后旧 evidence 自动失效并必须重跑。
+以上本地项全绿后产出 `P4.local-runtime`，其中 MCP 子集另产出 `P4.local-mcp-wiring`；后者只解锁真实 MCP profile，不等于 P4 plan complete。P4 plan complete 还要求当时 `P3.real-mcp` 的 full call-closure `relevant_source_digest` 新鲜；任一 scope 后续修改都使旧 evidence 与 P4 external completion 变为 `stale`并必须重跑。
 
 ## 16. P5：Storage、State 与 Lifecycle
 
@@ -974,9 +1051,9 @@ P4 的 `runtime_components/interrupts.py` 只能搬迁 API adapter 与装配代�
 
 先移动纯类型、row mapper、规范化和校验 helper。SQLite/PostgreSQL 继续 re-export 旧路径；PostgreSQL 不再依赖 SQLite 私有下划线 helper。
 
-`src/storage/sqlalchemy/base.py` 是 ORM metadata 的 canonical owner；authoritative model-registration 模块必须显式导入且只注册一次。必须保持：
+`src/storage/sqlalchemy/base.py` 是共享 `RUNTIME_METADATA` object 的 canonical owner，不强迫迁移已被 direct import 的 declarative base class。`SQLiteBase` 继续物理定义在 `src/storage/sqlite/base.py` 以保持 module/qualname/import，只将 `metadata = RUNTIME_METADATA` 绑定到共享 object；新 State/Storage 消费者直接依赖共享 metadata，不通过 SQLite 模块。Authoritative model-registration 模块必须显式导入且只注册一次。必须保持：
 
-- `RuntimeBase.metadata is SQLiteBase.metadata`；
+- `RUNTIME_METADATA is SQLiteBase.metadata`，`SQLiteBase.__module__/__qualname__` 与 P0 manifest exact；
 - SQLite 与 PostgreSQL 使用同一 metadata object；
 - table/column/index/constraint set 与 canonical DDL digest 前后相同；
 - compatibility import 不产生 duplicate table definition；
@@ -1009,13 +1086,15 @@ P0 必须冻结上述四个 class 的 MRO、public descriptor owner、public wra
 
 ### 16.4 Lifecycle 与 State 边界
 
-公开 Lifecycle/Auth service facade 的 constructor、参数名、annotation、default 与 patch seam 保持 P0 manifest exact，包括现有 `storage: StoragePort` 与 `runtime_sidecar_client=`。新私有 implementation/helper 才依赖 P1 的窄 store/writer port；公开 facade 在内部只把需要的窄能力传给它。Conversation guard、Mailbox、MCP presence、Interrupt、Cancellation、Auth token 分别拥有独立 Protocol。Cancellation facade 保留 `runtime_sidecar_client` keyword，并在内部/assembly 包装为 `CancellationTokenWriter`；不得改名、删除或增加调用次数。公开 aggregate 参数可保留但 AST/method-usage gate 要证明各私有业务组件只使用其领域子集。
+公开 Lifecycle/Auth service facade 的 constructor、参数名、annotation、default 与 patch seam 保持 P0 manifest exact，包括现有 `storage: StoragePort` 与 `runtime_sidecar_client=`。新私有 implementation/helper 才依赖 P1 的窄 store/writer port；公开 facade 在内部只把需要的窄能力传给它。Conversation guard、Mailbox、MCP presence、Interrupt、Cancellation、Auth token 分别拥有独立 Protocol。Cancellation facade 保留 `runtime_sidecar_client` keyword，并严格按 12.3 的 `LIFECYCLE-SIDECAR-COMPAT-001` 白名单边调用 Storage-owned adapter factory；private implementation 只见 non-aggregate `CancellationTokenWriter`，不得导入 mode/response/shadow concrete helper。公开 aggregate 参数可保留但 AST/method-usage gate 要证明各私有业务组件只使用其领域子集。
+
+`SQLiteStorage` 的 Task/Node/Artifact/Event Runtime Sidecar 分支是 Storage-owned persistence，不是可在拆 repository 时省略的 compatibility detail。P5 必须按 `runtime-sidecar-persistence-ownership.json` 逐 operation 保持 call-time mode，off/shadow/enforce 的 SQL/Sidecar 次数与顺序、enforce 零 legacy SQL、legacy commit 后 shadow compare、fail-closed/fail-open 边界、invalid envelope、CAS/idempotency/replay 和 sync/async client。不得用一个通用“Sidecar writer”把 Task/Node/Artifact/Event/Cancellation 语义合并。
 
 `src/state/service.py`、PostgreSQL queue/read-store、health/cutover 均纳入 FR-01 审计；只有发现有证据的职责混合或复制时才拆分，不能为了对称性做推测性重写。State schema policy 与 Storage bootstrap 的窄 assembly edge 按 9.1 import DAG 与 9.2 runtime flow inventory 管理。
 
 ### 16.5 PostgreSQL 停止条件
 
-没有真实 integration/permissions/并发 DSN 证据时，P5 可以停在纯协议、mapper 和 SQLite/shared 检查点，但不得进入或宣称完成 rollout、CP7、remote-task 和最终 PG parity。
+没有真实 integration/permissions/并发 DSN 证据时，P5 只可继续纯 Protocol、row mapper/normalizer 与明确 SQLite-only 的检查点。共享 metadata/base/authoritative model registration 的任何搬迁必须先闭合 `P0.pg.bootstrap-ddl`；普通 Conversation/File/Memory PG 切片必须先闭合 `P0.pg.storage-parity`，delete runner 再另加 `P0.pg.conversation-delete`。缺对应证据时也不得进入或宣称完成 rollout、CP7、remote-task 和最终 PG parity。
 
 P5 高风险 profile 必须使用 11.6 的独立非生产数据库并达到目标模块零 skip。仅 source-order test 或 DSN 字符串断言不是 parity evidence。缺证据时对应 11.6 stable leaf gate 为 `blocked_external`，P5 local deliverables 与独立 P6/P7 可以继续，但 P5 plan 和项目不得 complete。
 
@@ -1029,6 +1108,8 @@ P5 高风险 profile 必须使用 11.6 的独立非生产数据库并达到目�
 | Collaboration repository | 30 个 event/mailbox/interrupt/slot/checkpoint 方法有 owner map；State+Collaboration 同 Session/单 callback/单 commit exact |
 | PostgreSQL transaction | session/lock/flush/commit/rollback trace exact |
 | Lifecycle ports | 公开 constructor/annotation/keyword exact；私有 implementation 不导入 concrete storage 且只用窄 port；调用/事务次数不变 |
+| Cancellation writer | 12.3 两阶段、AgentRun/legacy 分支、call-time mode、raw-client compat edge 与调用/错误顺序 exact；不计入 259 union |
+| Runtime Sidecar persistence | Task/Node/Artifact/Event 逐 operation off/shadow/enforce、SQL/Sidecar、CAS/idempotency、envelope/error trace exact |
 | Source-shape replacement | 新 behavior/trace tests 先在旧实现绿，旧布局断言才删除 |
 | PG parity | 对应真实 profile ran>0、failed=0、target skipped=0 |
 | Facade | 旧路径仅 assembly/compat/白名单 runner，无第二套 method body |
@@ -1065,7 +1146,7 @@ P5 高风险 profile 必须使用 11.6 的独立非生产数据库并达到目�
 
 Interrupt answer API、keep-open/resume 与 task artifact completion 由 Task Runtime Hook 唯一执行；Hook 通过 `patchAssistant` 修改由 App 持有的 message，不得复制 message store。附件 Hook 唯一执行 upload/delete/rollback API；App 只决定何时发 command。
 
-Interrupt answer 的跨 Hook 协议必须在 F8 implementation plan 前冻结为 closed discriminated outcome，至少区分 `resumed`、`keep_open`、`rejected` 与 `stale_scope`，并携带原 task/interrupt/generation binding；不得用 exception/nullable object 猜分支。App 是唯一协调者：先向 Attachment Hook 取得 upload snapshot，再创建既有 optimistic turn，然后调用 Runtime Hook 的 `answerInterrupt` 恰好一次；根据 outcome，App 只调用 outcome 指定的 Attachment `commitSnapshot`，或按现有顺序调用 `rollbackSnapshot → resetSnapshot`，`stale_scope` 保持现有不补偿语义。Runtime Hook 唯一应用 task/interrupt/subscription/busy state，App 不直接写这些 state。P0 trace 必须逐 outcome 锁定 optimistic message、API、attachment disposition、task state/notice、subscribe 的实际先后；若实现需要两阶段 `settleInterruptOutcome` 或 callback，opaque token 必须 one-shot，禁止 App/Hook 双 rollback、双 reset、双 subscribe 或在 API 失败后遗漏补偿。
+Interrupt answer 的跨 Hook 协议必须在 F8 implementation plan 前冻结为 immutable `InterruptAnswerCommand` + closed discriminated outcome。Command 至少包含 `conversationId`、`generation`、原 `taskId/interruptId`、optimistic user `clientMessageId`、新 optimistic assistant ID、mode/request metadata 与 upload snapshot binding；outcome 至少区分 `resumed`、`keep_open`、`rejected` 与 `stale_scope`，并回显同一 binding；不得用 exception/nullable object 猜分支。App 是唯一协调者：先向 Attachment Hook 取得 upload snapshot，再创建既有 optimistic turn，然后调用 Runtime Hook 的 `answerInterrupt` 恰好一次；根据 outcome，App 只调用 outcome 指定的 Attachment `commitSnapshot`，或按现有顺序调用 `rollbackSnapshot → resetSnapshot`，`stale_scope` 保持现有不补偿语义。Runtime Hook 唯一应用 task/interrupt/subscription/busy state，并只对 command 的新 assistant 建一次订阅/投影；App 不直接写这些 state。P0 trace 必须逐 outcome 锁定 optimistic message、API、attachment disposition、task state/notice、新 assistant subscribe恰好1、旧 assistant patch=0、stale scope 错误写=0 的实际先后；若实现需要两阶段 `settleInterruptOutcome` 或 callback，opaque token 必须 one-shot 且回显同一 binding，禁止 App/Hook 双 rollback、双 reset、双 subscribe 或在 API 失败后遗漏补偿。
 
 ### 17.2 App 最终所有权
 
@@ -1077,7 +1158,7 @@ Interrupt answer 的跨 Hook 协议必须在 F8 implementation plan 前冻结为
 - optimistic user/assistant message creation；
 - drawer/drag/input refs 与 composer eligibility。
 
-F3 先把现有 Login markup 原样迁入受控 `LoginView`（props 至少含 username、submitting、error、change/submit callbacks），`LoginPage` 继续持有当前 form state、trim/canSubmit、`api.login`、错误文案和 finally 时序。`LoginPage` 与 `MCPSettingsPanel` 都是明确的 feature-controller 例外，不得在本轮伪称纯展示或顺手把 API ownership 改到别处。
+F3 先把现有 Login markup 原样迁入受控 `LoginView`（props 至少含 username、submitting、error、`canSubmit: boolean`、change/submit callbacks），`LoginPage` 继续持有当前 form state、trim/canSubmit、`api.login`、错误文案和 finally 时序；`LoginView` 只用 `canSubmit`/`submitting` 投影 disabled，不自行 trim 或重算 eligibility。`LoginPage` 与 `MCPSettingsPanel` 都是明确的 feature-controller 例外，不得在本轮伪称纯展示或顺手把 API ownership 改到别处。
 
 ### 17.3 附件时序
 
@@ -1163,7 +1244,7 @@ Partial rollback 失败时必须保持当前 draft/saved-list 与用户 notice �
 
 `maf_runtime_sidecar` 继续拥有 Runtime transport/kernel/gRPC/serve 实现，相关 PyO3 crate 只拥有稳定 bridge；它们不是上表 aggregate artifact 的当然字段 authority。
 
-Serialization producer 不自动成为每个 JSON field 的 runtime enforcement owner。P0 必须生成 `rust-contract-field-ownership.json`，逐 JSON pointer 记录 artifact/serializer symbol、实际 enforcement crate/symbol、literal mirror/parity test 和允许依赖边。例如 Safety 的 `db_row_limit/db_column_limit/db_result_bytes` 由 `maf_data_access` 常量/校验执行，artifact/auth/audit字段分别由其既有 kernel 执行；`maf_audit_sanitizer` 只序列化 aggregate snapshot。Runtime contract 的 `queue_size` 镜像 `maf_task_dispatcher`，event payload/replay limits 镜像 `maf_event_log`，而 artifact producer 仍是 `maf_runtime_store`。
+Serialization producer 不自动成为每个 JSON field 的 runtime enforcement owner。P0 必须生成 `rust-contract-field-ownership.json`，逐 JSON pointer 记录 artifact/serializer symbol、closed `owner_kind=rust_runtime|python_runtime|declarative_only`、consumer/enforcement crate-or-module/symbol、literal mirror/parity test 和允许依赖边。只有 `declarative_only` 允许 enforcement owner 为 null，但必须附零 runtime-reference 扫描、已有声明/序列化用途、preserve reason 与另行行为化的退出条件；禁止为填表虚构 Rust owner。例如 Safety 的 `db_row_limit/db_column_limit/db_result_bytes` 由 `maf_data_access` 常量/校验执行，`audit_event_bytes` 由 sanitizer 执行，`db_deadline_ms/db_hard_cap_ms` 与 `upload_preview_bytes` 记录当前 Python consumer，而当前无 runtime enforcer 的 deadline/cap 只能按 `declarative_only` 记录；`maf_audit_sanitizer` 仍是 aggregate serializer。Runtime contract 的 `queue_size` 镜像 `maf_task_dispatcher`，event payload/replay limits 镜像 `maf_event_log`，而 artifact producer 仍是 `maf_runtime_store`。
 
 共享常量只在既有依赖方向允许时由 consumer 单向引用 enforcement owner。若 aggregate serializer 当前故意不依赖 enforcement crate，literal mirror 是 byte-compat snapshot，不是本轮“重复代码”目标；使用外部 compile/parity fixture证明值相同，禁止为了去重给 `maf_audit_sanitizer`/`maf_runtime_store` 新增或倒置生产 Cargo 依赖。每个 field 的运行时校验继续留在原 owner，6 份 artifact bytes 与 Cargo dependency manifest 均保持 exact。
 
@@ -1211,10 +1292,10 @@ P7 Ubuntu stable leaf gates：
 | Gate ID | Existing workflow job | 适用范围 / required result |
 |---|---|---|
 | `P7.ubuntu.rust-quality` | `.github/workflows/rust-quality.yml#rust-quality` | 任一 Rust business/contract/Cargo change；完整 fmt/clippy/test/nextest/audit/deny/coverage、fuzz compile、release binary/provenance步骤 success |
-| `P7.ubuntu.rust-fuzz-smoke` | `#rust-fuzz-smoke` | 修改被现有 fuzz target 覆盖的 validation/parser/sanitizer/policy 或 fuzz harness；bounded targets 与 locked metadata 全 success |
+| `P7.ubuntu.rust-fuzz-smoke` | `#rust-fuzz-smoke` | 修改被 fuzz target 覆盖的 validation/parser/sanitizer/policy 或 harness；P0 先把已存在但当前漏跑的 `mcp_runtime_protocol` 以 `cargo +nightly fuzz run mcp_runtime_protocol -- -max_total_time=30` 加入 workflow 与统一 gate runner；artifact 固定本检查点适用 target set、每 target duration/exit/conclusion，缺任一适用 target 即 fail |
 | `P7.ubuntu.pyo3-wheel-smoke` | `#skill-runtime-pyo3-wheel-smoke` | 修改任一 Skill、Core/Lifecycle、Safety PyO3 bridge/contract/packaging；三 wheel manylinux_2_35 build、install、import/contract smoke 全 success |
 
-P0/P7 为每个 leaf 保存 job/run ID、workflow commit、conclusion、step set、artifact/provenance digest 与 `relevant_source_digest`。Digest path set至少包含该 job trigger 的业务/contract/Cargo/workflow/requirements/quality scripts；任一 relevant path 后续变化使旧 evidence 失效并必须在最新 `tested_commit` 重跑。P7 implementation plan 只能从上表选择 required leaf，不能生成临时 `P7.ubuntu.<profile>` 名；不适用 leaf 必须以 path/fuzz/PyO3 owner map证明 N/A。
+P0/P7 为每个 leaf 保存 job/run ID、workflow commit、conclusion、step/target set、artifact/provenance digest 与 `relevant_source_digest`。Digest path set至少包含该 job trigger 的业务/contract/Cargo/fuzz/workflow/requirements/quality scripts；任一 relevant path 后续变化使旧 evidence 失效并必须在最新 `tested_commit` 重跑。P7 implementation plan 只能从上表选择 required leaf，不能生成临时 `P7.ubuntu.<profile>` 名；不适用 leaf 必须以 path/fuzz/PyO3 owner map证明 N/A。
 
 ### 18.6 Scripts
 
@@ -1224,21 +1305,37 @@ P7 对 engine create/dispose 只做 audit-first：P0 finding 必须逐 symbol �
 
 `scripts/postgres/*.sql` 权限模板、`check_docker_cmd_policy.sh`、shebang 与 executable mode 只审计不重构，除非存在已批准的具体 finding。每个受影响 CLI 必须从 repo root 运行其 help/success/failure tests，并检查 workflow/runbook/path 引用；新增 helper 若改变 CI path trigger，必须同步 trigger。
 
+P7 Scripts 只能使用下表稳定 deliverable/gate map，不得在 implementation plan 现造外部状态 ID。所有行先运行 `P7.scripts.local-cli`：`compileall src scripts tests` + `unittest discover -s tests/scripts -p 'test_*.py'` + 受影响 exact API/Storage module + 逐 CLI help/success/failure trace，ran 不低于 P0 expected count、failed/error/skip=0、stdout/stderr/exit/env/role exact，且在闭集 ordinary env 中运行。
+
+| Stable ID | 适用 scripts/验收 | Required external leaf（不适用必须有 owner-map N/A） |
+|---|---|---|
+| `P7.scripts.local-cli` | 所有 touched CLI/helper；P0 command/count/zero-skip 与 output trace | 无，本地 gate |
+| `P7.scripts.rollout-permissions` | `control_user_mcp_rollout.py`、shadow/evidence producer/validator、rollout permissions SQL | `P0.pg.rollout-permissions` |
+| `P7.scripts.legacy-migration` | `migrate_legacy_mcp_config.py` 与 dedicated-role SQL；first apply/replay/conflict/audit | `P0.pg.legacy-migration` + `P0.pg.transaction-rollback` |
+| `P7.scripts.dispatch-aggregate` | `migrate_mcp_dispatch_aggregate.py`；report/backup/apply/restore 与 CP7 owner | `P0.pg.cp7-authority` + `P0.pg.transaction-rollback` |
+| `P7.scripts.conversation-delete` | `conversation_delete_ops.py`；raw-DSN reject、list/delete/rollback/cleanup | `P0.pg.conversation-delete` + `P0.pg.transaction-rollback` |
+| `P7.scripts.state-platform` | `postgresql_state_{migration,cutover}.py`、runtime validator；fresh schema/MVCC/role | `P0.pg.bootstrap-ddl` + `P0.pg.mvcc-concurrency` + `P0.pg.transaction-rollback` |
+| `P7.scripts.unified-schema-sandbox` | `migrate_unified_agent_loop_schema.py`；report/backup/restore-check/apply/restore-all 只在可删验证 sandbox | `P0.pg.bootstrap-ddl` + `P0.pg.transaction-rollback` |
+
+每个复合 ID 的 artifact 记录 fixed env names/presence、实际命令、P0 expected/actual count、skip=0、隔离 database/schema/role before/after inventory、cleanup 与 N/A 依据。External leaf 未闭合时该复合 ID 为 `blocked_external`，不得用 local CLI PASS 代替。
+
 ### 18.7 P7 验收
 
 | 子检查点 | 风险 | Required gate |
 |---|---|---|
 | Runtime validation/codec/impl 搬迁 | 中 | crate test + fmt + clippy + type-name/contract diff + `P7.ubuntu.rust-quality` |
 | SQLite adapter domain split | 高 | parity matrix + reopen + runtime-sidecar full tests + `P7.ubuntu.rust-quality` |
-| Skill contract/policy | 中 | contract bytes + skill tests + PyO3 check + `P7.ubuntu.rust-quality`；涉及bridge再加 `pyo3-wheel-smoke` |
-| Sandbox process/stdio/gRPC | 高 | process/fault tests + `rust-quality` + `pyo3-wheel-smoke`，若fuzz-covered再加 `rust-fuzz-smoke` |
-| MCP Runtime split | 中到高 | MCP crate tests + contract/SDK conformance + `P7.ubuntu.rust-quality`，若fuzz-covered再加 `rust-fuzz-smoke` |
+| Skill contract/policy | 中 | contract bytes + skill tests + PyO3 direct-target check + `P7.ubuntu.rust-quality` + `P7.ubuntu.pyo3-wheel-smoke`；适用性由逐-export owner map 而非 bridge 文件是否 touched 决定 |
+| Sandbox process/stdio/gRPC | 高 | process/fault tests + `P7.ubuntu.rust-quality` + `P7.ubuntu.pyo3-wheel-smoke`，若 fuzz-covered 再加 `P7.ubuntu.rust-fuzz-smoke` |
+| MCP Runtime split | 中到高 | MCP crate tests + contract/SDK conformance + `P7.ubuntu.rust-quality`，因已有 `mcp_runtime_protocol` target，修改其 validation/sanitizer 时必加 `P7.ubuntu.rust-fuzz-smoke` |
 | PRD evidence reuse audit | 低 | existing-helper inventory + symbol-pair equivalence + ordered gate/CLI output trace；无等价 pair 时 `reviewed_no_change` |
-| Operator/migration/storage scripts | 中到高 | role/env/engine/SQL/exit trace + isolated environment |
+| Operator/migration/storage scripts | 中到高 | 18.6 上表确切 `P7.scripts...` ID 的 local CLI + 对应 PG leaf，role/env/engine/SQL/exit/cleanup exact |
 
 Python compile gate必须包含 `src scripts tests`；P7 还检查 `git diff --summary` 以捕获 file mode 变化。
 
 ## 19. P8：收尾清理与延期审计
+
+P8 不得与仍在变动的前序计划并行收口。只有 `P1.local-core`、`P2.local-orchestration`、`P3.local-integrations`、`P4.local-runtime`、`P5.local-storage`、`P6.local-frontend`、`P7.local-native-scripts` 全部 complete 时才能启动 `P8.local-finalization`。P8 evidence 必须绑定当时全 business-source inventory 的 path/blob digest 和包含 P8 自身最后清理改动（也即最后 P1～P8 relevant commit）的 clean `tested_commit`；后续任一业务路径 created/modified/renamed/deleted 立即将 P8 标为 `stale` 并重跑。
 
 P8 只删除或收敛满足以下条件的内容：
 
@@ -1263,6 +1360,10 @@ P8 只删除或收敛满足以下条件的内容：
 - Artifact ID 跨层语义；
 - Frontend 键盘与错误可见性 bug；
 - scripts pre-validation engine leak；
+- `BEHAVIOR-ORCH-PARALLEL-001` 已启动 sibling 不取消与五入口收口差异；
+- `BEHAVIOR-ORCH-LEASE-001` heartbeat 后旧 fencing token ownership 失败；
+- `BEHAVIOR-PARSER-CLEANUP-CANCEL-001` cleanup join 取消可留存活子进程；
+- `BEHAVIOR-API-LIFECYCLE-001` partial startup 与 shutdown 首错阻断后续 cleanup；
 - 安全 authority 或 crate 边界重构。
 
 这些项只有在用户明确批准行为变化并先补合同后，才能进入独立任务。
@@ -1284,7 +1385,7 @@ P8 结束时，FR-01 inventory 中每个业务源码路径和 finding 必须闭�
 
 | Finding | Primary/trigger/fallback | 分类与精确证据 | Owner / exit criterion |
 |---|---|---|---|
-| `FALLBACK-API-001` MCP artifact projection | `src.api.artifact_responses.artifact_response` 在无 projection metadata 时 safe-hide；有 ref 但 store missing 时 `projection_missing`；load/hash/envelope/model invalid 时 `projection_invalid`；均不读取或下载 raw | Grounded 的 safe-hide 证据：`tests/api/test_conversation_messages_artifacts.py::ConversationMessagesArtifactRestoreAPITest::test_mcp_result_file_is_safe_hidden_and_cannot_be_downloaded`；P0 补 store-missing、tampered hash/envelope/model-invalid 各分支与 download=404 characterization | P4 保持；只有另行批准 artifact 行为/安全合同并有 raw non-disclosure replacement tests 才可退出 |
+| `FALLBACK-API-001` MCP artifact projection | `src.api.artifact_responses.artifact_response` 在无 projection metadata 时 safe-hide；`projection_store is None` （store 未注入）才为 `projection_missing`；store 存在但 manifest/data file missing、load、hash、envelope 或 model validation 失败均为 `projection_invalid`；均不读取或下载 raw | Grounded 的 safe-hide 证据：`tests/api/test_conversation_messages_artifacts.py::ConversationMessagesArtifactRestoreAPITest::test_mcp_result_file_is_safe_hidden_and_cannot_be_downloaded`；P0 分别补 store-not-injected、manifest-missing、data-missing、tampered hash/envelope/model-invalid 分支与 download=404 characterization | P4 保持；只有另行批准 artifact 行为/安全合同并有 raw non-disclosure replacement tests 才可退出 |
 | `FALLBACK-MCP-001` adapter explicit downgrade | `src.integrations.mcp.adapter_2026.safe_auto_downgrade_version` 仅由显式 unsupported evidence 触发到批准版本 | Grounded；`tests/integrations/mcp/test_2026_07_28_adapter.py::MCP20260728AdapterTests::test_safe_auto_downgrade_requires_explicit_unsupported_evidence` | P3 保持；只有版本矩阵与 downgrade policy 独立变更获批才退出 |
 | `FALLBACK-SCRIPT-001` legacy audit export | `scripts.migrate_legacy_mcp_config.run` durable apply 成功后 `_write_audit` 失败，返回 `failed_non_authoritative` | Grounded；`tests/scripts/test_migrate_legacy_mcp_config.py::LegacyMCPMigrationCommandTests::test_builtin_apply_persists_config_and_writes_secret_safe_audit` | P7 保持；只有 audit authority/CLI exit contract 独立变更获批才退出 |
 | `FALLBACK-CORE-001` Core Rust contract `off` | `src.core.rust_contract._load_core_contract_for_mode` 显式 `off` 读取 checked-in contract | `off` 是主模式，不是 fallback；现有 artifact test 为间接证据，P0 新增显式 `MAF_RUST_CORE_MODE=off` characterization并断言 PyO3 import/call=0 | P7 保持；只有部署 mode 产品决策变化才退出 |
@@ -1306,12 +1407,12 @@ P8 结束时，FR-01 inventory 中每个业务源码路径和 finding 必须闭�
 | FR | Owner | Required acceptance/evidence |
 |---|---|---|
 | FR-01 | P0/P8 | raw tracked set 全覆盖；每路径唯一 primary owner、authorized touches 可审计；new/renamed/deleted tombstone 双向闭合；P8 `planned_change=0` 且最终 path status 只含 `changed|reviewed_no_change` |
-| FR-02 | P0/全部 | `public-contract-manifest.json` 前后 exact；API patch seam、StoragePort identity、Rust type path、Frontend facade smoke |
+| FR-02 | P0/全部 | `python-public-contract-manifest.json`、`api-http-contract-manifest.json`、`api-runtime-seam-manifest.json` 前后 exact；StoragePort identity、Rust type path、Frontend facade smoke |
 | FR-03 | P0/各计划 | replacement characterization 在旧实现先绿；迁移后同 trace/golden；source-shape test 仅在 replacement 通过后移除 |
 | FR-04 | 全部 | side-effect trace 中外部/DB/worker/message call count 与基线 exact；无新旧双实现并行 |
 | FR-05 | P0/P8 | AST edge inventory；forbidden edge 为零或 exception 有 owner/退出条件 |
-| FR-06 | P1 | 12.3 全部通过；Core/Storage tests；259 方法无缺失/重复 |
-| FR-07 | P2 | 13.9 matrix 与 fault 全绿；统一 Agent Loop 权威 FR 映射无漂移 |
+| FR-06 | P1 | 12.3/12.4 全部通过；Core/Storage tests；259 方法无缺失/重复；non-aggregate writer 不污染 union |
+| FR-07 | P2 | 13.9 matrix 与 fault 全绿；统一 Agent Loop 权威 FR 映射除 `BEHAVIOR-ORCH-PARALLEL-001`/`BEHAVIOR-ORCH-LEASE-001` 已登记现状外无漂移 |
 | FR-08 | P3 | 14.9 matrix、17 fault boundary、Gateway/Parser/Skills/privacy/history tests、Ubuntu Parser 与 `P3.real-mcp` 全绿 |
 | FR-09 | P4 | 15.3 全部通过；API/startup/shutdown/interrupt focused 与全量门禁 |
 | FR-10 | P5 | 16.6 全部通过；SQLite/PG owner、metadata、transaction、parity artifact；目标 profile 零 skip |
@@ -1320,22 +1421,22 @@ P8 结束时，FR-01 inventory 中每个业务源码路径和 finding 必须闭�
 | FR-13 | P0/P8 | fallback/finding registry 每项具 symbol、source、test、owner、preserve reason、exit criterion |
 | FR-14 | 全部 | 每命令 gate JSON 记录 ran/pass/fail/skip；目标 profile ran>0、skip=0；required platform 有 artifact |
 | FR-15 | 全部 | 状态机满足 10.1；mandatory 未完成时总体不得 complete |
-| FR-16 | 全部 | clean start/tested commit、reviewed diff、独立 implementation/test commit + 可选 evidence-only commit、rollback record、AGENTS/CHANGELOG decision |
-| FR-17 | P8 | deferred behavior finding 与结构 diff 分离；无行为修复混入结构 commit |
+| FR-16 | 全部 | recorded start commit + checkpoint-owned paths 无未授权重叠 + original-worktree preservation digest + `tested_commit` 的 clean disposable checkout、reviewed diff、独立 implementation/test commit + 可选 evidence-only commit、rollback record、tracked AGENTS/CHANGELOG decision |
+| FR-17 | P8 | deferred behavior finding（包括 Orchestration lease/parallel、Parser cleanup cancel、API lifecycle partial cleanup）与结构 diff 分离；无行为修复混入结构 commit |
 
 ### 21.2 计划退出条件
 
 | 计划 | Mandatory exit | 不满足时状态 |
 |---|---|---|
-| P0 | 本地 manifests/trace/characterization 可重现；外部 profile 测试代码和命令已定义 | 本地缺口 `failed`；PG `blocked_external`；Ubuntu `pending_platform` |
-| P1 | Aggregate identity/259-method ownership/窄 port consumer 全绿 | `failed` |
-| P2 | 13.9 与统一 Agent Loop 权威回归全绿 | `failed` |
-| P3 | 14.9、安全/NFR/no-replay 本地 gate 全绿；Result Parser Ubuntu profile 与 `P3.real-mcp` 实际通过后才可 plan complete | 本地缺口 `failed`；Linux 为 `pending_platform`；真实 MCP 为 `blocked_external` |
-| P4 | Runtime facade、startup/shutdown、interrupt owner 和 API gates 全绿；当前 relevant-source digest 有新鲜 `P3.real-mcp` evidence | 本地缺口 `failed`；真实 MCP 缺失为 `blocked_external` |
-| P5 | Shared/SQLite 可分步 complete；最终 P5 还要求所有受影响真实 PG profile 零 skip | `blocked_external` 不能冒充 complete |
-| P6 | F1～F8、DOM/a11y、全量/typecheck/build 全绿 | `failed` |
-| P7 | 本地门禁与 required Ubuntu/manylinux gate 全绿 | 未远端验证为 `pending_platform` |
-| P8 | Inventory/finding/forbidden-edge/facade gates 闭合；全仓最终证明通过 | 任一 mandatory 缺口则总体非 complete |
+| P0 | 本地 manifests/trace/characterization/environment launchers 可重现并产出 `P0.local-contract`；外部 profile 测试代码和命令已定义 | 本地缺口 `failed`；PG `blocked_external`；Ubuntu `pending_platform` |
+| P1 | Aggregate identity/259-method ownership/窄 port consumer/non-aggregate writer 全绿，产出 `P1.local-core` | `failed` |
+| P2 | 13.9、两项 bounded behavior 与统一 Agent Loop 其余权威回归全绿，产出 `P2.local-orchestration` | `failed` |
+| P3 | 14.9、安全/NFR/no-replay 本地 gate 全绿产出 `P3.local-integrations`；Result Parser Ubuntu profile 与 fresh `P3.real-mcp` 实际通过后才可 plan complete | 本地缺口 `failed`；Linux 为 `pending_platform`；真实 MCP 为 `blocked_external`；digest 漂移为 `stale` |
+| P4 | Runtime facade、startup/shutdown fault matrix、narrow-port component、interrupt owner 和 API gates 全绿产出 `P4.local-runtime`；full call-closure digest 有新鲜 `P3.real-mcp` evidence | 本地缺口 `failed`；真实 MCP 缺失为 `blocked_external`；digest 漂移为 `stale` |
+| P5 | 所有计划中的 Shared/SQLite/Sidecar/PG 结构切片实际完成并闭合 local trace 后产出 `P5.local-storage`；PG leaf 是对应高风险切片的启动前置，被阻塞时 local gate 也不 complete；最后还要求 relevant real-MCP freshness | `blocked_external`/`stale` 不能冒充 complete |
+| P6 | F1～F8、DOM/a11y、全量/typecheck/build 全绿，产出 `P6.local-frontend` | `failed` |
+| P7 | 所有计划中的 Native/Scripts 结构切片实际完成且 local CLI 闭合后产出 `P7.local-native-scripts`；高风险 script 的 PG leaf 是启动前置，被阻塞时 local gate 也不 complete；required Ubuntu/manylinux 后续闭合 plan | 未远端验证为 `pending_platform`；PG script leaf 可为 `blocked_external` |
+| P8 | 七个 P1～P7 stable local gate 全 complete 后，`P8.local-finalization` 在最新全源码 digest 上闭合 Inventory/finding/forbidden-edge/facade 与全仓证明 | 前置未闭合为 `pending`；digest 后续变化为 `stale`；任一 mandatory 缺口则总体非 complete |
 
 任何计划的 module/file 提议可以在 implementation plan 中因最新 HEAD 调整，但 FR、NFR、owner、trace 和退出条件只能通过新的用户批准设计修改。
 
@@ -1402,6 +1503,7 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 
 ### 22.5 Skip、lint 与差异判定
 
+- 每条命令运行前先由 11.1 repo-owned launcher 验证/record `gate-environment-profile.json`；ordinary gate 从空 env 构造，external gate 只注入其 closed keys 并先做 non-prod/isolation preflight；
 - `Ran 0 tests`、命令不存在、non-zero exit 都是失败；
 - 高风险 profile 和被修改模块在其适用平台要求目标 skip=0；
 - 本地平台声明 skip 只有两种合法处理：未改对应代码且该平台确实 N/A，可记录理由；或由具名 required remote gate 覆盖，此时本地 suite 只能记为 green-with-declared-skip，相关 deliverable 保持 `pending_platform`，直到远端适用平台 `skipped=0`。不得把本地 skip 计为 required pass；
@@ -1418,7 +1520,10 @@ Gate ID 为 `P3.real-mcp`，前置必须是 `P3.local-integrations=complete` 与
 
 ```bash
 CLEANUP_REAL_MCP_RUN=1 \
-conda run -n multi_agent python -m unittest tests.e2e.test_controlled_real_mcp_gate
+python scripts/run_progressive_cleanup_gate.py \
+  --profile P3.real-mcp \
+  --evidence-output docs/checkpoint/progressive-architecture-cleanup/gate-results/controlled-real-mcp.json \
+  -- conda run -n multi_agent python -m unittest tests.e2e.test_controlled_real_mcp_gate
 ```
 
 Required env 名固定为：`CLEANUP_REAL_MCP_ENDPOINT`、`CLEANUP_REAL_MCP_PROTOCOL_VERSION`、`CLEANUP_REAL_MCP_CONTROL_ENDPOINT`、`CLEANUP_REAL_MCP_CONTROL_HOST`、`CLEANUP_REAL_MCP_CONTROL_SPKI_SHA256`、`CLEANUP_REAL_MCP_CONTROL_TOKEN`、`CLEANUP_REAL_MCP_ORDINARY_TOOL`、`CLEANUP_REAL_MCP_APPROVAL_TOOL`、`CLEANUP_REAL_MCP_ARTIFACT_TOOL`、`CLEANUP_REAL_MCP_RESPONSE_LOSS_TOOL`。artifact 只记录 env 是否存在和非敏感 digest，不记录值、endpoint、token 或 credential。
@@ -1428,29 +1533,35 @@ Control protocol 固定为 `maf.cleanup.real_mcp.control.v1`。在发送 `CONTRO
 - `schema=maf.cleanup.real_mcp.control_manifest.v1`、`environment=testing`、`destructive=false`、profile revision/expiry；
 - MCP endpoint digest、supported protocol versions，以及 control paths 固定相对值 `POST /v1/cleanup-runs`、`POST /v1/cleanup-runs/{run_ref}/faults/response-loss`、`GET /v1/cleanup-runs/{run_ref}/counters`、`POST /v1/cleanup-runs/{run_ref}/cleanup`；
 - capabilities exact set：`issue_short_lived_credential`、`run_scoped_counter`、`response_loss_after_commit`、`artifact_cleanup`、`counter_reset`、`credential_revoke`；
-- 四个 Tool 的 name、canonical safe `input_template`/digest、允许替换的 `run_ref|scenario_ref|fault_token` placeholders、canonical expected result template/digest、output schema/digest、typed projection/artifact schema，以及 closed `approval_policy`（仅 approval Tool 为 `platform_per_call`）和 `response_behavior`（仅 loss Tool 为 `drop_after_commit`）。
+- 四个 Tool 的 name、canonical safe `input_template`/digest、允许替换的 `run_ref|attempt_ref|fault_token` placeholders、canonical expected result template/digest、output schema/digest、typed projection/artifact schema，以及 closed `approval_policy`（仅 approval Tool 为 `platform_per_call`）和 `response_behavior`（仅 loss Tool 为 `drop_after_commit`）。禁止出现第二个场景/尝试同义占位符。
 
 Manifest Tool names 必须与 env exact，协议/MCP endpoint 必须通过生产 `ValidatedEndpoint` policy 并与 env exact。Harness 禁止从任意 Tool schema猜参数，只能对 manifest 的安全 canonical template 做声明过的 placeholder 替换，并在调用前重算 input/output-schema digest。
 
-Control JSON/HTTP envelope 固定如下：所有 response 带 `schema` 与 `control_revision`；error 使用 `schema=maf.cleanup.real_mcp.control_error.v1`、closed `code`、`retriable` boolean、safe `request_ref`，不得回显 token/credential/input。Manifest=200；create run 首次=201、相同 `client_run_id`+`Idempotency-Key` exact replay=200且返回同一 run binding；fault-token 首次=201/exact replay=200；counter/cleanup=200。401/403 不重试，409 表示 identity/idempotency conflict，410 表示 expired run，429/503 只允许 GET counter 有界重试且不能重试 Tool/control mutation；其他 status/error/schema 一律 fail。Cleanup 因协议定义幂等，可在 transport response-loss 后以同 key最多重试一次，但仍按最终 closed action验证。
+Control JSON/HTTP envelope 固定如下：所有 response 带 `schema` 与 `control_revision`；error 使用 `schema=maf.cleanup.real_mcp.control_error.v1`、closed `code`、`retriable` boolean、safe `request_ref`，不得回显 token/credential/input。Manifest=200；create run 首次=201、相同 `client_run_id` + request body digest + `Idempotency-Key` exact replay=200 且返回同一 run/credential binding；fault-token 首次=201/exact replay=200；counter/cleanup=200。401/403 不重试，409 表示 identity/idempotency conflict，410 表示 expired run，429/503 只允许 GET counter 有界重试；其他 status/error/schema 一律 fail。Tool call 与非幂等 control mutation 永不重试；但 create-run、arm-fault 与 cleanup 是协议明确的 exact-idempotent mutation，只在 transport 未知（未收到可解析 HTTP response）时允许以完全相同 body/identity/key 最多重放一次，并必须验证 same binding/token digest/action result；业务 error、401/403/409/410 不进入该例外。若 exact replay 仍不能确认 binding，gate 失败并通过脱敏 operator cleanup action 处理，不创建第二 run掩盖。
 
-通过同 origin Bearer-authenticated `POST /v1/cleanup-runs` 创建 run，request schema 为 `maf.cleanup.real_mcp.create_run.v1`，只含随机 `client_run_id`、owner ref digest、protocol 与 requested TTL；response `maf.cleanup.real_mcp.run.v1` 必须返回 opaque `run_ref`、expires-at、短期 Bearer MCP credential、counter nonce 和与 manifest 匹配的 endpoint，初始四类 counter 全为 0。Credential 只注入 disposable owner/server 的现有 encrypted credential store，header 固定 `Authorization: Bearer <secret>`；不得放入 Tool args、文件、evidence或进程 argv/env二次传播。
+通过同 origin Bearer-authenticated `POST /v1/cleanup-runs` 创建 run，request schema 为 `maf.cleanup.real_mcp.create_run.v1`，只含随机 `client_run_id`、owner ref digest、protocol 与固定 `requested_ttl_seconds=600`；response `maf.cleanup.real_mcp.run.v1` 必须返回 opaque `run_ref`、`issued_at`、`expires_at`、短期 Bearer MCP credential、counter nonce 和与 manifest 匹配的 endpoint，初始四类 counter 全为 0。Harness 验证 response TTL 至少 600s、本地与 server `issued_at` 时钟差绝对值不超过 30s，且进入业务 suite 前安全剩余 TTL 至少 540s；不满足即在 Tool call 前 fail。Credential 只注入 disposable owner/server 的现有 encrypted credential store，header 固定 `Authorization: Bearer <secret>`；不得放入 Tool args、文件、evidence或进程 argv/env二次传播。
 
-每个 Tool 场景生成唯一 `attempt_ref` 与 call idempotency key，canonical template只替换 `run_ref`、`attempt_ref` 及 loss 场景的 `fault_token`。Response-loss 前用 request schema `maf.cleanup.real_mcp.arm_fault.v1` 取得绑定 `run_ref + attempt_ref + call/idempotency digest` 的一次性 token。Counters response `maf.cleanup.real_mcp.counters.v1` 每项必须返回 attempt ref digest、Tool name、call/idempotency digest、execution count、committed flag、result digest 和 counter nonce，禁止只给全局累计值。Cleanup request/response 分别为 `maf.cleanup.real_mcp.cleanup.v1`/`cleanup_result.v1`，必须幂等地删除本 run 外部 artifact、把 counters清零并撤销 credential，返回 `artifact_cleanup|counter_reset|credential_revoke` 三项 closed result；任何 path/schema/binding/TTL/nonce/digest 不匹配都 fail closed。
+每个 Tool 场景生成唯一 `attempt_ref`，canonical template 只替换 `run_ref`、`attempt_ref` 及 loss 场景的 `fault_token`，并在 send 前计算 canonical input digest。Server 跨边界的唯一 correlation 是 `run_ref + attempt_ref + tool_name + canonical_input_digest`；Gateway 随机生成的 local `call_ref` 与 durable arguments SHA 只由 harness 从本地 storage/trace 取得脱敏 digest，不要求 Server 回显从未收到的 call/idempotency identity。Loss Tool 的最终 input digest 依赖尚未取得的 token，因此 arm 阶段另使用 `base_input_digest`：在替换 `run_ref`/`attempt_ref` 后保留 manifest 的 exact `fault_token` placeholder literal 计算，不得用空字符串或猜测 token。
+
+Response-loss 前用 request schema `maf.cleanup.real_mcp.arm_fault.v1` 取得一次性 token；request 只含 `attempt_ref`、tool name、`base_input_digest` 和固定 `requested_fault_ttl_seconds=90`。Success response schema 固定为 `maf.cleanup.real_mcp.response_loss_fault.v1`，必须含 opaque `fault_token`、`one_shot=true`、`expires_at`、run-ref digest、attempt-ref digest、tool name 与 base-input digest；收到时 token 安全剩余 TTL 至少 75s，覆盖该 45s 场景与 30s 时钟差，且 token 不进 evidence/log。替换 token 后 harness 和 Server 分别重算 final canonical input digest。Counters response `maf.cleanup.real_mcp.counters.v1` 每项必须返回 run/attempt ref digest、Tool name、loss 场景的 base-input digest、所有场景的 final canonical input digest、execution count、committed flag、result digest 和 counter nonce，禁止只给全局累计值或 local call digest。Harness 以 final canonical input digest 将 Server counter 与本地 arguments SHA/call trace exact 关联。Cleanup request/response 分别为 `maf.cleanup.real_mcp.cleanup.v1`/`cleanup_result.v1`，必须幂等地删除本 run 外部 artifact、把 counters清零并撤销 credential，返回 `artifact_cleanup|counter_reset|credential_revoke` 三项 closed result；任何 path/schema/binding/TTL/nonce/digest 不匹配都 fail closed。
 
 Suite 必须恰好运行 5 个场景，`ran=5`、`failed=0`、`skipped=0`：
 
 1. owner-bound disposable Task/Server scope 完成真实 discovery；
-2. ordinary allowlisted Tool 使用 manifest canonical input，返回的 result/output-schema/typed projection digest exact，Server run+scenario counter delta 恰为 1；
+2. ordinary allowlisted Tool 使用 manifest canonical input，返回的 result/output-schema/typed projection digest exact，Server 该 run+attempt+final-input counter delta 恰为 1；
 3. harness 在本地 authority 中把 manifest 标记的 Tool 配置为 per-call approval，approval→resume 使用原 Call/Run binding，批准前 counter 0、批准后 result digest exact 且 counter 恰为 1；
 4. Artifact Tool 的 Result Parser checkpoint/outcome、typed projection schema/digest与公共 Artifact contract exact，evidence 只保存 schema/digest 而非 raw；
-5. 专用 response-loss Tool 使用 one-shot fault token，在 Server 以同一 call/idempotency correlation 记账后断开；重建本地 Coordinator/runtime 并从同一临时 durable store 恢复，restart 前该 scenario counter 为 1、restart 后第二次 Tool network delta 为 0。
+5. 专用 response-loss Tool 使用 one-shot fault token，在 Server 以同一 `run_ref + attempt_ref + tool_name + final_input_digest` correlation 记账后断开；本地 durable call-ref/arguments-SHA 链接 exact；重建 Coordinator/runtime 并从同一临时 durable store 恢复，restart 前该 attempt counter 为 1、restart 后被保护的第二次 `tools/call` delta 为 0，合法恢复读取单独计数。
 
-四个 Tool 必须由 control manifest 明确 allowlist，且为 deterministic、idempotent、非破坏、无下游外部副作用的 gate-only Tool；response-loss 只能使用专门实现“commit counter then drop response”的测试 Tool，禁止拿真实写业务 Tool 模拟。每场景最长 60 秒，suite 最长 300 秒，超时为 fail。
+四个 Tool 必须由 control manifest 明确 allowlist，且为 deterministic、idempotent、非破坏、无下游外部副作用的 gate-only Tool；response-loss 只能使用专门实现“commit counter then drop response”的测试 Tool，禁止拿真实写业务 Tool 模拟。Manifest/TLS/create-run setup 独立最长 60s；每场景最长 45s，五场景业务 phase 总预算最长 300s；finally cleanup/revoke 使用与业务 timeout 分离的 shielded cancellation scope，独立最长 120s，业务超时也必须进入。总 watchdog 最长 510s；任一预算超时都 fail，cleanup 不因业务 timeout 被取消。
 
-Harness 使用全新随机 owner/task/call scope 与模块独立临时 storage，不访问 `prod`、不复活旧失败 Task、不复用上次 credential/counter。finally 必须关闭 scope/client/runtime，删除本地 Task/Server 配置和临时 artifact，调用 control endpoint 清除 counter/外部 artifact 并撤销短期 credential；任何 cleanup/revoke 失败使 gate 失败且该 run 不可复用。失败 evidence 只保存 run-ref digest、未闭合 action code 与 operator cleanup ticket/action，禁止保存 control token/credential；人工清理成功也只能闭合 cleanup，不得把该失败 run 改记为业务场景 PASS，必须新建 run 重跑。
+Harness 使用全新随机 owner/task/call scope 与模块独立、可重开的临时 file-backed durable storage，不访问 `prod`、不复活旧失败 Task、不复用上次 credential/counter。Response-loss 场景必须关闭第一个 Coordinator/runtime 实例后从同一 durable file 新建实例，禁止使用原进程内 cache 伪装 restart。finally 必须关闭 scope/client/runtime，删除本地 Task/Server 配置和临时 artifact，调用 control endpoint 清除 counter/外部 artifact 并撤销短期 credential；任何 cleanup/revoke 失败使 gate 失败且该 run 不可复用。失败 evidence 只保存 run-ref digest、未闭合 action code 与 operator cleanup ticket/action，禁止保存 control token/credential；人工清理成功也只能闭合 cleanup，不得把该失败 run 改记为业务场景 PASS，必须新建 run 重跑。
 
-Evidence `gate-results/controlled-real-mcp.json` 必须按 11.1 canonicalization 记录 `tested_commit`、`relevant_source_digest`、protocol/version/adapter、Server ref digest、5 个场景 ID、脱敏 Task/Call ref digest、每阶段 counter before/after、restart network delta、projection/artifact schema+digest、timeout、redaction scan 与 cleanup/revoke result。`relevant_source_digest` 对 inventory 中标记 `real_mcp_evidence_scope` 的 P3 Gateway/Coordinator/Parser/Agent Skills adapter、P4 MCP assembly/runtime wiring、相关 capability/orchestration adapter 及 gate harness，以 `path NUL git-blob-sha LF` 排序计算；P0 保存 exact path set。任一路径后续 created/modified/renamed/deleted 都立即使旧 artifact 失效，必须在包含最后相关改动的最新 clean `tested_commit` 重跑；无关 docs/其他模块 commit 只有 digest 不变时才不失效。P4 exit 与项目 completion 都必须现场重算该 digest。日志、event、metric、diagnostic、exception 和公共 artifact 对 sentinel Tool args、credential 与 raw result 的 forbidden scan 必须为零。fake/local unit tests 仍是前置门禁，但不能代替此 profile。
+Evidence `gate-results/controlled-real-mcp.json` 必须按 11.1 canonicalization 记录 `tested_commit`、`relevant_source_digest`、protocol/version/adapter、Server ref digest、5 个场景 ID、脱敏 Task/Call ref digest、本地 arguments SHA 与 Server final-input digest 关联、每阶段 counter before/after、按 side-effect/operation 分类的 restart delta、projection/artifact schema+digest、setup/business/cleanup timeout、TTL/skew、redaction scan 与 cleanup/revoke result。
+
+`real_mcp_evidence_scope` 是五场景生产调用链的显式传递闭包，不只是 P3/P4 目录列表。P0 保存 exact path set 与每路径 owner/call-edge reason，至少包含：P1 MCP/storage ports 及 Core models/contracts；P2 capability/orchestration projection、continuation/lease 与 Lifecycle recovery；P3 Gateway/Coordinator/Parser/Agent Skills adapter；P4 MCP assembly/runtime wiring/Auth credential injection；P5 本 gate 实际使用的 file-backed Storage models/bootstrap/repository/facade、MCP config/dispatch aggregate/CP7/durable-result/artifact/remote-task/Agent repository、transaction/schema 与 Lifecycle adapter；若生产 adapter 会调用 P7 native MCP/PyO3/Sidecar，再包含其 contract/bridge/runtime/Cargo path；最后包含 harness、runner、workflow 与 `requirements.txt`。P8 若修改/删除其中任一 path，自然进入同一闭包。Digest 以 `path NUL git-blob-sha LF` 排序计算。
+
+任一 scope 路径后续 created/modified/renamed/deleted 都立即使 `P3.real-mcp` 及依赖它的 P3/P4 plan status 变为 `stale`，必须在包含最后相关 P1～P8 业务源码改动的最新 clean `tested_commit` 重跑；无关 docs/其他模块 commit 只有 digest 不变时才不失效。P4 exit 可以使用当时新鲜 evidence，但后续 P5/P7/P8 relevant change 会重开；P5 relevant-slice exit 必须当时新鲜，P8 业务收尾后与项目 completion 前还必须现场重算并在最后 relevant commit 后重跑。日志、event、metric、diagnostic、exception 和公共 artifact 对 sentinel Tool args、credential 与 raw result 的 forbidden scan 必须为零。fake/local unit tests 仍是前置门禁，但不能代替此 profile。
 
 ## 23. Edge cases 与 failure modes
 
@@ -1477,8 +1588,14 @@ Evidence `gate-results/controlled-real-mcp.json` 必须按 11.1 canonicalization
 | EDGE-19 | Result Parser first-send后取消或 semantic-invalid checkpoint | post-checkpoint cancel 丢弃checkpoint并传播；semantic validation只在process/gate收口后hard fail；process trace exact | P3 barrier fixtures |
 | EDGE-20 | Gateway close 横跨 call registration/on_created | mixed `accepting_calls/closing` 临界区和两次 accepting barrier exact；Tool send 0或1按actual trace | P3 field/call matrix |
 | EDGE-21 | Control token发送前 endpoint/TLS/pin失败 | credential send 0、redirect 0、MCP call 0；gate fail | `P3.real-mcp` control protocol |
-| EDGE-22 | Parallel wave 一个 sibling 抛异常 | 保留当前 gather不取消已启动 sibling、零 wave Agent outcome；只有 scheduled execution 走 `execution_crash` terminal CAS，HTTP continuation/startup recovery/post-ready recovery 分别保持 13.6 的现有收口 | P2 四入口 barrier fault matrix |
+| EDGE-22 | Parallel wave 一个 sibling 抛异常 | 保留当前 gather不取消已启动 sibling、零 wave Agent outcome；只有 scheduled execution 走 `execution_crash` terminal CAS，HTTP continuation/startup recovery/post-ready recovery/remote-continuation consumer 分别保持 13.6 收口 | P2 五入口 barrier fault matrix |
 | EDGE-23 | 真实 MCP cleanup/revoke 部分失败 | run不可复用，记录脱敏operator action；清理后也必须新run重跑全部场景 | controlled MCP evidence |
+| EDGE-24 | Active capability 跨一次成功 heartbeat token 旋转 | 保留当前旧 token `agent_invocation_not_owned`、已发生外部副作用不回滚与五入口收口；行为修复另立 | `BEHAVIOR-ORCH-LEASE-001` renew barrier |
+| EDGE-25 | Result Parser 在 cleanup `join` 内被取消 | 保留当前 CancelledError、terminate/join/kill 与可能存活子进程状态；不暗自 shield/finally | `BEHAVIOR-PARSER-CLEANUP-CANCEL-001` barriers |
+| EDGE-26 | API startup/shutdown 中途异常 | 保留 sentinel-only dispose、特定 invalidation fail-open、其他 partial startup 与 shutdown 首错停止 | `BEHAVIOR-API-LIFECYCLE-001` fault matrix |
+| EDGE-27 | Gateway `on_registered` 在 durable may-have-dispatched 写前/后失败或取消 | Tool send=0；dispatched flag、sink、call record/unknown 和 cleanup 按实际 barrier trace | P3 on_registered fixtures |
+| EDGE-28 | Ordinary gate 继承宿主 DSN/MCP/Sidecar/master-key/proxy | 命令前 fail；只允许 closed environment profile，不连接任何外部/生产资源 | P0 environment launcher/artifact |
+| EDGE-29 | P5/P7 相关修改发生在真实 MCP 或 P8 evidence 之后 | 立即标 `stale`，扩展闭包 digest 后在最新 commit 重跑，不复用旧 PASS | `P3.real-mcp`/`P8.local-finalization` freshness |
 
 ## 24. 依赖、风险与假设
 
@@ -1487,7 +1604,8 @@ Evidence `gate-results/controlled-real-mcp.json` 必须按 11.1 canonicalization
 | 依赖 | 用途 | 约束 |
 |---|---|---|
 | `docs/prd/backend/unified-agent-loop/` | Agent execution/recovery 唯一 authority | P2/P4 不得重新解释 |
-| `src/**/AGENTS.md`、`frontend/AGENTS.md`、`native/AGENTS.md`、`scripts/AGENTS.md` | 模块职责与门禁 | 每个检查点重新读取并同步索引 |
+| Tracked root/`docs`/`frontend` `AGENTS.md` | commit-bound 模块职责、索引与门禁 | 每个检查点从 `tested_commit` 重读并在职责变化时同步 |
+| Ignored `src/native/scripts` `AGENTS.md` | host-local 实施指令，非 Git 产物 | 主工作树编码前读取并记录 digest；不拷入 clone、不用于解锁 commit-bound gate |
 | Conda `multi_agent` + `requirements.txt` | Python runtime/tests | P0 记录版本；不新增生产依赖 |
 | Frontend `package.json` lock/install | Vitest/TypeScript/Vite | 不升级依赖；全量/typecheck/build required |
 | Rust toolchain 1.95 与 quality tools | Native gates | macOS dev + Ubuntu 22.04 release；缺 required tool 不算 PASS |
@@ -1517,7 +1635,13 @@ Evidence `gate-results/controlled-real-mcp.json` 必须按 11.1 canonicalization
 | R-14 | scripts SQL/role/mode/CLI 合同因通用 helper 漂移 | audit-only 边界、CLI trace、diff summary、role tests | active |
 | R-15 | 无关用户改动在长任务中被覆盖 | 每 CP clean/dirty inventory，只编辑主责文件，保留无关 diff | active |
 | R-16 | 受控真实 MCP control protocol/Server/授权不可用，或 cleanup/revoke 失败 | pinned HTTPS/SPKI + v1 manifest/run API/canonical fixture；失败 artifact 保留 run-ref digest 与外部 operator cleanup action，不复用 run；缺失为 blocked_external | blocked_external until run |
-| R-17 | 当前 parallel gather异常不取消 sibling，且四类入口的异常收口不同，与统一架构理想偏差 | `BEHAVIOR-ORCH-PARALLEL-001` 四入口 barrier trace；结构迁移保持 13.6 的 entry-specific failure/零 wave outcome 语义，行为修复另立设计 | bounded_deferred behavior |
+| R-17 | 当前 parallel gather异常不取消 sibling，且五类入口的异常收口不同，与统一架构理想偏差 | `BEHAVIOR-ORCH-PARALLEL-001` 五入口 barrier trace；结构迁移保持 13.6 的 entry-specific failure/零 wave outcome 语义，行为修复另立设计 | bounded_deferred behavior |
+| R-18 | Heartbeat 旋转 token 但 Invocation 缓存旧 token，长 capability 在有效 lease 下仍失败 | `BEHAVIOR-ORCH-LEASE-001` fake-clock renew barrier；保留旧错误/副作用语义，current-token 修复另立 | bounded_deferred behavior |
+| R-19 | Parser cleanup await 被取消可跳过后续 terminate 并留存活子进程 | `BEHAVIOR-PARSER-CLEANUP-CANCEL-001` 三 cleanup-join barrier；资源修复另立 | bounded_deferred behavior |
+| R-20 | API startup partial failure/shutdown 首错可留部分资源 | `BEHAVIOR-API-LIFECYCLE-001` 逐 await/close fault matrix；cleanup 策略修复另立 | bounded_deferred behavior |
+| R-21 | 真实 MCP 或 P8 证据在后续 P5/P7 变更后仍被误用 | 传递调用链 path/blob digest、`stale` 状态、P5/P8/completion 现场重算与重跑 | active |
+| R-22 | Ordinary gate 继承宿主部署/DSN/credential 并误连外部资源 | 从空 mapping 构造 closed env、temp home、undeclared-key fail、external non-prod preflight | active |
+| R-23 | Ignored 子目录 `AGENTS.md` 被当成 commit-bound 证据或在 clean clone 中消失 | tracked/local source-kind 分离；只记 local digest，不用于 gate/revert | active |
 
 ### 24.3 假设与无阻断开放项
 
@@ -1552,8 +1676,8 @@ Evidence `gate-results/controlled-real-mcp.json` 必须按 11.1 canonicalization
 ## 26. 文档与 Git
 
 - 每个计划开始前生成基于当前 HEAD 的详细 implementation plan；
-- 每个结构检查点同步检查对应 `AGENTS.md` 与 `CHANGELOG.md`；
-- 模块职责、入口或目录变化时更新索引；
+- 每个结构检查点同步检查 tracked root/`docs`/`frontend` `AGENTS.md`、`CHANGELOG.md` 与 inventory；
+- 模块职责、入口或目录变化时更新 tracked 索引；ignored `src/native/scripts` AGENTS 只按 11.1 记录 local digest/维护动作，不放入 commit/evidence；
 - 每个检查点有独立 implementation/test commit；需要 checked-in gate artifact 时紧随 evidence-only commit；
 - 依赖前置必须 `complete`；与 `bounded_deferred`/外部阻断无依赖的计划可按 10.1 继续；
 - 只读审计可以并行；主工作树写入任务只在文件边界互不重叠时并行，最终由主代理统一集成。任何 evidence-bound gate 使用的 disposable checkout 禁止并行写，验证完成并移除后才可复用该并发槽。
@@ -1563,18 +1687,19 @@ Evidence `gate-results/controlled-real-mcp.json` 必须按 11.1 canonicalization
 项目级清理只有同时满足以下条件才完成：
 
 - P0～P8 的 mandatory structural deliverable 均为 `complete`；行为修复类 `deferred_out_of_scope` 不阻断，但必须登记；
-- 任何 required PostgreSQL、Ubuntu/manylinux 或受控真实 MCP gate 为 `blocked_external`/`pending_platform` 时，总体不得标 `complete`；
+- 任何 required PostgreSQL、Ubuntu/manylinux、确切 script composite 或受控真实 MCP gate 为 `blocked_external`/`pending_platform`/`stale` 时，总体不得标 `complete`；
 - FR-01 inventory 中每个当前/历史业务源码路径均有唯一 primary owner、可审计 touch/action，最终 status 仅 `changed|reviewed_no_change` 且 `planned_change=0`；
-- FR-01～FR-17、NFR 矩阵和 21.2 计划退出条件全部有绑定 `tested_commit` 的 evidence；`P3.real-mcp` relevant-source digest 与最终相关源码集合现场重算一致；
+- FR-01～FR-17、NFR 矩阵和 21.2 计划退出条件全部有绑定 `tested_commit` 的 evidence；`P8.local-finalization` 绑定最后 P1～P8 业务源码 digest，`P3.real-mcp` 传递闭包 digest 与最终 P1～P8 相关源码集合现场重算一致；
 - 各旧公开 facade 只承担兼容与装配，不保留第二套业务实现；
 - P0 forbidden dependency edges 已清零；兼容 exception 必须有唯一 owner、理由和退出条件；
 - 已识别的完全复制实现已合并，语义不同的相似实现有清晰所有权；
-- 结构变化已同步 AGENTS/CHANGELOG；
+- 结构变化已同步 tracked root/`docs`/`frontend` AGENTS、CHANGELOG 与 inventory；ignored host-local AGENTS 只报告 digest/维护动作，不伪称 checked-in；
 - Backend、Frontend、Rust 相关全量门禁通过；
+- ordinary/external 门禁全部通过 closed environment-profile 验证，无宿主部署/DSN/credential 意外继承；
 - PostgreSQL、Ubuntu/manylinux、受控真实 MCP 等 required gate 实际运行通过；非适用项必须有明确 N/A 依据；
 - `docker_cmd.md` 始终存在、被忽略、未被跟踪且未被读取；
 - 最终报告按 AI Slop Cleaner 格式记录范围、行为锁、简化、fallback、changed files、checks、风险和延期项。
 
-如果 P3、P5、P7 或真实 MCP required gate 仍被外部条件阻断，可以报告其他独立 deliverable/计划完成，但总标题必须写明项目级全部 `blocking_gate_ids` 与 `blocked_external`/`pending_platform`，不得使用“全仓清理完成”。
+如果 P3、P5、P7 或真实 MCP required gate 仍被外部条件阻断或 evidence 已失鲜，可以报告其他独立 deliverable/计划完成，但总标题必须写明项目级全部 `blocking_gate_ids` 与 `blocked_external`/`pending_platform`/`stale`，不得使用“全仓清理完成”。
 
 代码行数、文件数量或 lint 数字不是单独完成条件。职责单一、依赖清晰、重复实现消失且行为证据闭合，才是本计划的成功标准。
