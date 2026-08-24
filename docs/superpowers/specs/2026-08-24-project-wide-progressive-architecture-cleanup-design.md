@@ -259,7 +259,7 @@ Storage实现不得import API/SSE、Tool选择或Orchestration controller/servic
 Lifecycle Agent recovery是另一个已知bounded functional edge：P2拥有`AgentLeaseController`、continuation locator与Agent resume/atomic-outcome语义；Lifecycle拥有公开recovery coordinator、startup guard和durable recovery identity，并按当前路径调用P2 services。P0按入口和分支冻结exact imported symbols、stable call-site IDs/kinds/counts与顺序，不能压成一条统一链：
 
 - continuation先preload/validate；duplicate/terminal可在acquire前ack并return；
-- normal active分支为`acquire → reload → run_active_phase(resolve) → reload/fence → optional atomic commit → ack → reload`；
+- normal active reserved分支为`acquire → reload → run_active_phase(resolve) → reload/fence → mandatory atomic commit → ack → reload`；若post-resolve reload已发现concurrent committed/terminal，则属于post-acquire early分支，只执行`ack → return`，不再commit且ack后不再reload；
 - ack后remaining waiting非空时`release_waiting`且不resume；waiting清空时直接`run_claimed`复用handle，recovery不再统一release；
 - post-acquire duplicate/terminal、ack-loss、cancel race与final-candidate各按P0 barrier trace保持；
 - crash recovery独立为`reconcile/early terminal-or-waiting → acquire → abort outstanding reservations/commits → run_claimed`，没有通用resolver/ack链。
