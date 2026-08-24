@@ -135,7 +135,7 @@ P0 不从上述几条手写 glob 直接推导“全部业务代码”。它从�
 - MCP Gateway 是 endpoint、credential、client、外部 I/O 和 isolated parsing 的唯一 authority；
 - Storage/State 是 session、事务、SQL、锁、CAS 和持久化的唯一 authority；
 - Lifecycle 是 interrupt、cancel、mailbox 与 conversation guard 规则的唯一 authority；
-- API 只负责装配、HTTP/SSE、DTO 和公开投影；
+- API通常只负责装配、HTTP/SSE、DTO和公开投影；现存`file_selection_runtime`是P4/API唯一bounded business-authority例外，继续拥有其候选决策、selector LLM、附件绑定、TaskNode/Interrupt持久化与事件顺序，不并入Slot authority；
 - Frontend reducer 先消费事件，controller 才执行终态副作用。
 
 ### 5.4 禁止双跑副作用
@@ -158,7 +158,7 @@ P0 不从上述几条手写 glob 直接推导“全部业务代码”。它从�
 | FR-06 | P1 保持四条`StoragePort`公开路径identity，建立无catch-all的窄persistence port映射和Cancellation边界；P2～P5采用最窄port |
 | FR-07 | P2 保持 Agent Loop、waiting/resume、continuation、interrupt 与 lease 的现有 authority 和阶段顺序 |
 | FR-08 | P3 保持 Agent Skills、Result Parser、Gateway、Coordinator、Historical 的独立安全边界、隐私和 no-replay |
-| FR-09 | P4 保持 `ApiRuntime`/factory/patch seam，API 仅装配且 startup→ready→post-ready→shutdown 顺序不变 |
+| FR-09 | P4保持`ApiRuntime`/factory/patch seam与startup→ready→post-ready→shutdown；composition唯一执行Agent backend mode/select/DI；bounded file-selection coordinator的现有业务trace exact不变 |
 | FR-10 | P5 保持 Storage/State/Lifecycle 的 session、transaction、lock、CAS、metadata 与 PostgreSQL 专用语义 |
 | FR-11 | P6 保持 Frontend state/effect owner、异步 scope guard、附件/Task 时序及 DOM/a11y 合同 |
 | FR-12 | P7保持Rust public/contract/Cargo/PyO3/Proto与Scripts CLI/SQL/receipt/exit合同；四个workstream独立关闭 |
@@ -251,9 +251,11 @@ Lifecycle implementation -> Core contracts / narrow Storage ports
 Storage implementation -> Core contracts
 ```
 
-Storage/Lifecycle实现不得import API/SSE、Tool选择或Orchestration controller/service。P5 Agent repository与Lifecycle recovery可以type-only依赖P2稳定Agent persistence models/ports，这是目标依赖倒置，不是待消除反向边；不得借此调用Agent Loop行为。API composition root/factory可以仅为constructor、backend selection、registration和dependency injection导入具体repository实现；routes、public projection与普通runtime component不得import repository或调用concrete business methods，也不得取得slot/transaction authority。
+Storage实现不得import API/SSE、Tool选择或Orchestration controller/service。P5 Agent repositories可以在运行时依赖P2稳定Agent persistence models/enums/errors/ports，构造、比较和返回合同对象；这是runtime model/contract-only依赖，不得调用Agent Loop controller/service。API composition root/factory可以仅为constructor、backend selection、registration和dependency injection导入具体repository实现；routes、public projection与普通runtime component不得import repository或调用concrete business methods，也不得取得slot/transaction authority。
 
-已知MCP Dispatch bounded edge：P2 Capabilities继续拥有`src.capabilities.mcp_dispatch`公开executor、`MCPDispatchOutcome`、selector/router及其models/contracts；P3 Integrations拥有concrete Coordinator、Gateway、transport、`selector_context`与shadow-compare integration glue。P3当前对上述P2对象的imports既保持module/object identity，也承载现有functional call seam（selector/router调用及其LLM次数、context构造、Outcome返回）。P0冻结exact import symbols、allowed call sites/kinds/counts；P2/P3不得新增跨边state、I/O或调用类型。P8可保留有理由的兼容例外，若要消除则另立获批计划并先定义public facade迁移，不能在本次结构检查点临场移动类型。
+Lifecycle Agent recovery是另一个已知bounded functional edge：P2拥有`AgentLeaseController`、continuation locator与Agent resume/atomic-outcome语义；Lifecycle拥有公开recovery coordinator、startup guard和durable recovery identity，并按当前路径调用P2 services。P0冻结exact imported symbols、call-site IDs/kinds/counts及`acquire/reload/resolve → active-or-claimed phase → atomic outcome → ack → remaining/resume → release`场景顺序；普通结构检查点必须exact-equal/delta=0，双方不得复制lease/locator/recovery状态机。若要迁移该owner，必须另立获批计划并保留`src.lifecycle`公开identity。
+
+已知MCP Dispatch bounded edge：P2 Capabilities继续拥有`src.capabilities.mcp_dispatch`公开executor、`MCPDispatchOutcome`、selector/router及其models/contracts；P3 Integrations拥有concrete Coordinator、Gateway、transport、`selector_context`与shadow-compare integration glue。P3当前对上述P2对象的imports既保持module/object identity，也承载现有functional call seam（selector/router调用及其LLM次数、context构造、Outcome返回）。P0按场景冻结exact import symbols、call-site IDs/kinds与selector/router/context/Outcome/LLM调用次数；每个普通结构检查点actual必须与baseline exact-equal、delta=0，不能通过复制/内联/缓存使调用减少。只有另行获批的edge-elimination检查点允许减少，且必须同时保持公开identity、删除旧实现并证明无第二owner；不能在本次结构检查点临场移动类型。
 
 后端层级目标：
 
@@ -265,7 +267,7 @@ Storage/Lifecycle实现不得import API/SSE、Tool选择或Orchestration control
 | Orchestration | AgentRun/Item、continuation、catalog、调用顺序 | Skill schema、具体 slot 持久化 |
 | Capabilities | Skill/MCP 执行入口与领域 adapter | API 装配、外部 credential store |
 | Integrations | 协议、client、Gateway、parser、安全 authority | AgentRun 状态机、API route |
-| API | runtime 装配、HTTP/SSE、DTO、公开投影 | repository 与 slot 业务实现 |
+| API | runtime装配、HTTP/SSE、DTO、公开投影；bounded file-selection coordinator | repository、Slot authority与其他领域业务实现 |
 
 Frontend import方向：
 
@@ -338,7 +340,7 @@ P0 只增加测试与证据，不修改业务实现。
 - 冻结 `ApiRuntime`、`build_api_runtime` 签名、默认值、属性与 patch seam；
 - 冻结 `StoragePort` 259 个方法的名称、async 属性和 `inspect.signature`；
 - 冻结关键 Python 类型的 module identity 与 pickle；
-- 冻结SQLite/PostgreSQL/RuntimeSidecar三种Python Agent repository的公开路径、effective method surface、mode wiring与共同operation trace，并把Sidecar lease缺口登记为6.6延期行为；
+- 冻结SQLite/PostgreSQL/RuntimeSidecar三种Python Agent repository的公开路径、effective method surface、共同operation trace，以及P4 composition→P5 adapter的唯一mode-selection/enforce-route trace；把Sidecar lease缺口登记为6.6延期行为；
 - 为 Agent waiting/continuation、MCP Coordinator/Gateway、startup/shutdown 建立 side-effect trace。
 
 ### 9.2 Frontend
@@ -439,13 +441,14 @@ Dependency waiting与terminal continuation不得把不同状态的异常、ack�
 | P2 Orchestration | initial missing-input bootstrap、Agent/Interrupt协调、waiting/resume顺序 |
 | P3 Integrations | Slot carrier、transition与question domain；不取得AgentRun authority |
 | P2/P3 MCP Dispatch | P2拥有public executor/outcome/selector-router contracts；P3拥有concrete Coordinator/Gateway/transport；现有P3→P2 imports只按7.1 bounded edge保留 |
-| P4 API | HTTP answer/cancel/recovery adapter；只装配和投影 |
+| P4 API | HTTP answer/cancel/recovery adapter与通常装配/投影；另原位拥有bounded file-selection coordinator |
 | P5 Storage | Slot/Interrupt durable CRUD与CAS；不决定resume顺序 |
-| P2/P5/P7 Agent persistence | P2拥有AgentRun/AgentItem/lease/atomic-outcome语义与ports；P5拥有SQLite、PostgreSQL、Python `RuntimeSidecarAgentRepository` adapters及authority-mode wiring；P7拥有Rust kernel/SQLite backend/gRPC/proto authority |
-| API file-selection | 保持独立业务路径，不错误复用Slot authority port |
-| Lifecycle | durable Agent recovery identity与conversation/task guard |
+| P2/P5/P7 Agent persistence | P2拥有AgentRun/AgentItem/lease/atomic-outcome语义与ports；P5拥有SQLite、PostgreSQL、Python `RuntimeSidecarAgentRepository` adapters的surface/wire/transaction/error；P7拥有Rust kernel/SQLite backend/gRPC/proto authority |
+| P4 Agent backend composition | 唯一读取mode/evidence/client availability，选择SQL或RuntimeSidecar adapter并完成dependency injection；不得在P5复制selector/factory |
+| P4 API file-selection | 唯一拥有candidate决策、selector LLM、attachment binding、TaskNode/Interrupt persistence/event顺序；与Slot authority隔离，普通结构检查点exact trace不变 |
+| Lifecycle/P2 recovery | Lifecycle拥有公开recovery coordinator、startup/conversation/task guard与durable recovery identity；P2拥有lease/locator/resume services；双方只按7.1 exact bounded functional edge交接 |
 
-P2退出条件：公开Orchestration/Capability imports不变；waiting/resume/terminal与multi-waiting focused trace前后相同；Tool/LLM/Storage调用次数不变；locator cache可从durable carriers重建；不存在第二套interrupt/continuation authority；MCP Dispatch bounded import/call-site set与selector/router/LLM call counts未扩张。
+P2退出条件：公开Orchestration/Capability imports不变；waiting/resume/terminal与multi-waiting focused trace前后相同；Tool/LLM/Storage调用次数不变；locator cache可从durable carriers重建；不存在第二套interrupt/continuation authority；MCP Dispatch与Lifecycle recovery两条functional seam的imports/call sites/kinds/counts/order相对P0 exact-equal、delta=0。
 
 ## 12. P3：Integrations
 
@@ -498,13 +501,13 @@ Historical reprojection保持raw/managed source优先级、分页边界和零网
 
 只有检查点实际修改MCP transport、adapter或runtime wiring，且已有隔离non-prod endpoint时，才运行薄真实烟测：discovery、普通调用、approval/resume、artifact parse与cleanup。没有现成环境时标记该切片`external_pending`，不得为本清理任务新建control service、fault-token/counter协议或SPKI测试平台；no-replay的阻断权威仍是本地确定性fault/restart测试。
 
-P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、Gateway state/security、Coordinator no-replay与Historical zero-network focused tests前后相同；不存在合并后的安全authority或第二套external I/O owner；7.1 MCP Dispatch bounded edge的imports、functional call sites/kinds/counts与identity未扩张且无未解释reverse edge；适用的Linux/真实烟测已通过或准确标记pending。
+P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、Gateway state/security、Coordinator no-replay与Historical zero-network focused tests前后相同；不存在合并后的安全authority或第二套external I/O owner；7.1 MCP Dispatch bounded edge的imports、functional call sites/kinds、逐场景counts与identity相对P0 exact-equal、delta=0且无未解释reverse edge；适用的Linux/真实烟测已通过或准确标记pending。
 
 ## 13. P4：API Runtime
 
 `src.api.runtime.ApiRuntime`、`build_api_runtime`、`src.api.__init__` 导出及测试 patch seam 保持稳定。
 
-内部按 bootstrap/factory、files/attachments、conversation/history、interrupt、lifecycle 五类职责渐进接管；具体模块、mixin或composition由P4实施计划决定。配合P1改用窄port，但routes/runtime只获得实际需要的方法。公开model类只有在module/pickle合同可证明时才物理迁移，否则声明原位。
+内部按bootstrap/factory、files/attachments、conversation/history、interrupt、lifecycle五类职责渐进接管；具体模块、mixin或composition由P4实施计划决定。`file_selection_runtime`作为bounded business-authority例外原位接管/整理，不迁入Slot port或复制到Orchestration；若未来消除该例外须另立获批计划。配合P1改用窄port，但routes/runtime只获得实际需要的方法。公开model类只有在module/pickle合同可证明时才物理迁移，否则声明原位。
 
 ### 13.1 关键限制
 
@@ -516,7 +519,9 @@ P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、
 - master-key sentinel、aggregate reconciliation、dispatch recovery、Agent recovery、Ready 和 post-ready remote task 的顺序不变；
 - shutdown 的 quiesce、cancel/gather、CP7 close、service close 和 engine dispose 顺序不变。
 
-`BEHAVIOR-API-LIFECYCLE-001`与`BEHAVIOR-ORCH-AUTHORITY-SNAPSHOT-001`在搬迁lifecycle/interrupt前先characterize。P4退出条件：API/OpenAPI/SSE与runtime公开面无diff；startup/shutdown/interrupt focused trace相同；concrete repository imports只存在于composition/factory的构造、选择、注册与注入点，routes/projection/components为0；API没有复制Agent recovery、Slot或file-selection业务authority；API及受影响cross-layer suite通过。
+Agent backend的mode/evidence/client-availability校验、SQL adapter初选、enforce fail-closed Sidecar替换与DI只在P4 composition/factory执行一次；P5只提供adapter能力，不读取mode或另建selector。P4/P5共同运行enforce-route trace不代表共同owner。
+
+`BEHAVIOR-API-LIFECYCLE-001`与`BEHAVIOR-ORCH-AUTHORITY-SNAPSHOT-001`在搬迁lifecycle/interrupt前先characterize。P4退出条件：API/OpenAPI/SSE与runtime公开面无diff；startup/shutdown/interrupt focused trace相同；concrete repository imports只存在于composition/factory的构造、选择、注册与注入点，routes/projection/components为0；mode/evidence/client check、backend selector与DI call sites/order/count相对P0 exact且P5 selector=0；API没有复制Agent recovery或Slot authority；file-selection的LLM/storage/attachment/TaskNode/Interrupt/event call sites/kinds/counts/order相对P0 exact-equal且无第二owner；API及受影响cross-layer suite通过。
 
 ## 14. P5：Storage、State 与 Lifecycle
 
@@ -543,7 +548,7 @@ P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、
 - `SQLiteStorage._run` 继续负责 session、`BEGIN IMMEDIATE`、commit、shield 和 cancellation wait；
 - `_run`用同一个Session构造StateRepository与CollaborationRepository，并保持一次callback/commit边界；不得因拆分形成第二Session或第二事务；
 - Agent durable repository继续拥有独立Session、SQLite`BEGIN IMMEDIATE`、CAS、commit/rollback与shield边界，不得并入`SQLiteStorage._run`或State+Collaboration事务；
-- Python Runtime Sidecar adapter保持off/shadow/enforce现有选择与enforce无SQL fallback；冻结其effective supported/unsupported method surface、wire/ID/error/call count、atomic projection、restart/idempotency和mode wiring。三后端parity只比较共同且当前支持的operation，N/A必须有现有contract理由，不能把缺lease等行为补成PASS；
+- Python Runtime Sidecar adapter冻结effective supported/unsupported method surface、wire/ID/error/call count、atomic projection与restart/idempotency；它自身不得读取mode或选择backend。由P4选中enforce adapter后保持无SQL fallback。三后端parity只比较共同且当前支持的operation，N/A必须有现有contract理由，不能把缺lease等行为补成PASS；
 - repository 内现有 flush 与 CAS 失败 rollback 原样保留；
 - PG CP7、rollout、conversation delete runner 各自继续拥有 session/commit；
 - Lifecycle 一次业务操作中的多次 storage 调用不得顺手合并成单事务；
@@ -552,13 +557,13 @@ P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、
 
 ### 14.4 State、Lifecycle 与 Sidecar 边界
 
-State只拥有运行状态投影，Lifecycle只拥有task/node/mailbox/interrupt/cancel/conversation guard规则；两者通过窄port访问Storage，不取得session或SQL。Sidecar off/shadow/enforce仍按各domain现有采样点、SQL/Sidecar调用次数、错误、CAS/idempotency与先后执行，不抽成掩盖差异的大一统writer。Cancellation writer沿用P1独立边界。
+State只拥有运行状态投影，Lifecycle拥有task/node/mailbox/interrupt/cancel/conversation guard与7.1公开Agent recovery coordination；两者通过窄port访问Storage，不取得session或SQL。Lifecycle调用P2 lease/locator/resume services只允许7.1冻结的functional seam，不能复制Agent Loop状态机。Sidecar off/shadow/enforce仍按各domain现有采样点、SQL/Sidecar调用次数、错误、CAS/idempotency与先后执行，不抽成掩盖差异的大一统writer。Cancellation writer沿用P1独立边界。
 
 ### 14.5 PostgreSQL 停止条件
 
 P5实施计划在迁移每个domain前列出受影响的inherited/overridden PostgreSQL有效operation及对应真实integration/permissions/concurrency测试，遗漏operation则不启动该切片。没有隔离真实DSN证据时，P5可以完成不依赖PG的协议、mapper、SQLite/shared切片，但不得迁移或宣称完成对应rollout、CP7、remote-task与PG parity切片。
 
-P5退出条件：公开facade/MRO/metadata合同不变；每个domain只有一个repository/storage owner；三种Python Agent repository的import/MRO/effective surface、authority-mode/enforce route、共同operation parity、lease/CAS/final/fault与其他transaction/lock/cancel trace前后相同；`BEHAVIOR-SIDECAR-AGENT-LEASE-001`未被暗改；受影响SQLite/Sidecar/PG测试通过且目标skip为0，或明确列出尚未开始的`external_pending` PostgreSQL切片。
+P5退出条件：公开facade/MRO/metadata合同不变；每个domain只有一个repository/storage owner；三种Python Agent repository的import/MRO/effective surface、共同operation parity、lease/CAS/final/fault与其他transaction/lock/cancel trace前后相同；adapter内mode/backend selector为0，P4/P5共同enforce-route trace与baseline相同；Lifecycle→P2 recovery symbols/calls/order exact-equal且无第二状态机；`BEHAVIOR-SIDECAR-AGENT-LEASE-001`未被暗改；受影响SQLite/Sidecar/PG测试通过且目标skip为0，或明确列出尚未开始的`external_pending` PostgreSQL切片。
 
 ## 15. P6：Frontend
 
@@ -653,7 +658,7 @@ Unified schema migration的非直觉顺序是设计级合同：apply为`SQLite m
 - 修改Ubuntu专属runtime/packaging路径时使用现有rust-quality job；
 - 修改fuzz覆盖的parser/validation/sanitizer/policy时，现有fuzz job运行全部适用target；当前漏掉的`mcp_runtime_protocol`在对应实施计划中补齐，不新建通用runner；
 - 修改PyO3 bridge/contract/packaging时，现有manylinux job完成三wheel build/install/import smoke；
-- 修改Rust Runtime Sidecar Agent kernel/proto/gRPC时，连同P5 Python Sidecar adapter运行现有supported operation、wire/error/call-count与enforce-route trace；不借此补`BEHAVIOR-SIDECAR-AGENT-LEASE-001`；
+- 修改Rust Runtime Sidecar Agent kernel/proto/gRPC时，连同P4 composition和P5 Python Sidecar adapter运行现有supported operation、wire/error/call-count与enforce-route trace；不借此补`BEHAVIOR-SIDECAR-AGENT-LEASE-001`；
 - Scripts运行受影响CLI的help/success/failure与对应integration tests；涉及真实PG的迁移脚本使用隔离non-prod profile。
 
 P7每个workstream以public/contract manifest前后相同、focused/full tests和适用平台gate通过为退出条件；平台不可用时仅该切片`platform_pending`。具体job、命令、target和artifact由P7实施计划记录。
@@ -765,12 +770,12 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 |---|---|---|
 | FR-01 | P0/P8 | tracked universe分类`unclassified=0`；business inventory前后set检查；最终每路径`changed|reviewed_no_change` |
 | FR-02～FR-04 | 全部 | 公开contract diff为零；迁移前后focused characterization与副作用trace相同 |
-| FR-05 | P0/P1～P8 | owner/dependency review；无第二owner、无新增/未解释反向依赖；bounded edge exact set不扩张 |
+| FR-05 | P0/P1～P8 | owner/dependency review；无第二owner、无新增/未解释反向依赖；MCP functional edge逐项exact-equal/delta=0 |
 | FR-06 | P1/P2～P5 | 四路径StoragePort identity、259-method窄域/consumer handoff、Cancellation writer；最终无未解释internal aggregate consumer |
-| FR-07 | P2 | waiting/resume/terminal/五项known-behavior barrier与Orchestration/Capabilities suites |
-| FR-08 | P2/P3 | MCP Dispatch public/concrete owner与bounded identity edge；Skills/Parser/Gateway/Coordinator/Historical focused tests；适用Linux/真实烟测 |
-| FR-09 | P4 | API/OpenAPI/SSE/runtime seam、lifecycle/interrupt trace与API/cross-layer suites |
-| FR-10 | P2/P5/P7 | 三种Python Agent repository的surface/mode/enforce route与适用Rust backend trace、SQL Agent独立session/MRO、State+Collaboration同Session、其他transaction/lock/CAS/cancel与SQLite/Sidecar/PG suites |
+| FR-07 | P2/P5 Lifecycle | waiting/resume/terminal/known-behavior barrier、Lifecycle recovery functional seam exact trace与Orchestration/Capabilities/Lifecycle suites |
+| FR-08 | P2/P3 | MCP Dispatch public/concrete owner与bounded identity/functional edge逐场景exact trace；Skills/Parser/Gateway/Coordinator/Historical focused tests；适用Linux/真实烟测 |
+| FR-09 | P4 | API/OpenAPI/SSE/runtime seam、composition-only imports与唯一backend selector、lifecycle/interrupt及bounded file-selection exact trace、API/cross-layer suites |
+| FR-10 | P2/P4/P5/P7 | P4唯一mode/backend selection+DI，三种P5 Python adapter surface/wire/transaction与适用Rust backend trace、SQL Agent独立session/MRO、State+Collaboration同Session及其他SQLite/Sidecar/PG suites |
 | FR-11 | P6 | App/Attachment/Task owner、附件/Task/Interrupt outcome、DOM/a11y trace与Frontend全量/typecheck/build |
 | FR-12 | P7 | Rust public/byte contracts、Scripts CLI/SQL/receipt trace与各workstream适用平台gate |
 | FR-13～FR-14 | P8 | 每个删除/合并finding有零引用、行为证据；fallback与延期问题无行为diff |
@@ -813,12 +818,14 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 |---|---|
 | 仓外消费者依赖未发现的公开面 | P0公开contract与兼容facade；无证据时不删 |
 | 新模块形成循环依赖或第二owner | 目标DAG、import review、P8双实现检查 |
-| 既有MCP Dispatch反向兼容edge在重构中扩张 | P0冻结imports及functional call sites/kinds/counts；P2/P3 owner明确；禁止新增跨边state/I/O |
+| 既有MCP Dispatch edge被扩张、绕过或复制/内联后减少 | P0按场景冻结imports、call-site IDs/kinds/counts；普通结构检查点exact-equal/delta=0 |
 | 状态/并发/no-replay因抽象漂移 | 旧实现先做focused barrier/fault trace；一次迁移一个owner |
+| Lifecycle recovery与P2各自复制lease/locator/resume状态机 | 冻结public identity及functional seam symbols/calls/order；普通结构检查点delta=0 |
 | Agent durable repository被误并、Sidecar adapter被当普通duplicate或补出新能力 | 三Python adapter独立surface/mode/wire/session合同、共同operation parity、lease缺口deferred |
 | 高风险平台暂不可用 | 延期对应切片并继续无关模块；完成声明列pending |
 | 安全authority或raw数据被错误合并 | P3独立authority/隐私测试；public/log sentinel为零 |
 | Frontend拆分改变可见DOM或effect identity | DOM/a11y/StrictMode与异步scope测试 |
+| API file-selection例外扩张或被复制到Slot/Orchestration | P0冻结LLM/storage/interrupt/event trace；P4唯一owner，普通检查点exact-equal |
 | Rust物理搬迁改变canonical identity | public声明留root、byte contract与compile tests |
 | 大任务再次演化成基础设施项目 | 设计边界与NFR-REVIEW；新runner/framework需独立用户授权 |
 
@@ -862,7 +869,7 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 - tracked code/config分类`unclassified=0`，每个业务路径为`changed|reviewed_no_change`，无悬空finding；
 - FR-01～FR-16与全部NFR均有对应验收结果，公开contract和关键behavior trace无漂移；
 - 各旧公开 facade 只承担兼容与装配，不保留第二套业务实现；
-- 目标依赖方向无新增或未解释反向import；7.1 bounded compatibility edge未扩张；
+- 目标依赖方向无新增或未解释反向import；7.1 MCP functional edge相对P0 exact-equal/delta=0，其他bounded edge未扩张；
 - 已识别的完全复制实现已合并，语义不同的相似实现有清晰所有权；
 - 结构变化已同步 AGENTS/CHANGELOG；
 - Backend、Frontend、Rust 相关全量门禁通过；
