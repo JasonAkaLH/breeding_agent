@@ -244,16 +244,27 @@ P0 不从上述几条手写 glob 直接推导“全部业务代码”。它从�
 
 下图中`A -> B`表示A可以import/依赖B；禁止新增反向依赖。基线中已存在的反向边只有在P0列出exact symbols、唯一owner、兼容理由、禁止扩张和退出条件后，才能作为bounded compatibility edge保留；完成条件是“无未解释反向边”，不是假设基线已为零。
 
+本文的stable call-site ID是逻辑seam key（`entry/scenario + phase + callee operation + ordinal`），不是文件、函数名或行号。物理source location只作可变的一对一metadata；owner内合法搬家可更新location，但逻辑ID、kind、count、order必须不变，同一ID产生两个实际调用点也判失败。
+
 ```text
 API composition/routes -> Orchestration -> Capabilities -> Integrations
 each consumer -> Core contracts / narrow Lifecycle and Storage ports
 Lifecycle implementation -> Core contracts / narrow Storage ports
 Storage implementation -> Core contracts
+P5 Agent repository adapters -> P2 Agent persistence models/enums/errors/ports
 ```
 
 Storage实现不得import API/SSE、Tool选择或Orchestration controller/service。P5 Agent repositories可以在运行时依赖P2稳定Agent persistence models/enums/errors/ports，构造、比较和返回合同对象；这是runtime model/contract-only依赖，不得调用Agent Loop controller/service。API composition root/factory可以仅为constructor、backend selection、registration和dependency injection导入具体repository实现；routes、public projection与普通runtime component不得import repository或调用concrete business methods，也不得取得slot/transaction authority。
 
-Lifecycle Agent recovery是另一个已知bounded functional edge：P2拥有`AgentLeaseController`、continuation locator与Agent resume/atomic-outcome语义；Lifecycle拥有公开recovery coordinator、startup guard和durable recovery identity，并按当前路径调用P2 services。P0冻结exact imported symbols、call-site IDs/kinds/counts及`acquire/reload/resolve → active-or-claimed phase → atomic outcome → ack → remaining/resume → release`场景顺序；普通结构检查点必须exact-equal/delta=0，双方不得复制lease/locator/recovery状态机。若要迁移该owner，必须另立获批计划并保留`src.lifecycle`公开identity。
+Lifecycle Agent recovery是另一个已知bounded functional edge：P2拥有`AgentLeaseController`、continuation locator与Agent resume/atomic-outcome语义；Lifecycle拥有公开recovery coordinator、startup guard和durable recovery identity，并按当前路径调用P2 services。P0按入口和分支冻结exact imported symbols、stable call-site IDs/kinds/counts与顺序，不能压成一条统一链：
+
+- continuation先preload/validate；duplicate/terminal可在acquire前ack并return；
+- normal active分支为`acquire → reload → run_active_phase(resolve) → reload/fence → optional atomic commit → ack → reload`；
+- ack后remaining waiting非空时`release_waiting`且不resume；waiting清空时直接`run_claimed`复用handle，recovery不再统一release；
+- post-acquire duplicate/terminal、ack-loss、cancel race与final-candidate各按P0 barrier trace保持；
+- crash recovery独立为`reconcile/early terminal-or-waiting → acquire → abort outstanding reservations/commits → run_claimed`，没有通用resolver/ack链。
+
+普通结构检查点对每个适用分支必须exact-equal/delta=0，双方不得复制lease/locator/recovery状态机。若要迁移该owner，必须另立获批计划并保留`src.lifecycle`公开identity。
 
 已知MCP Dispatch bounded edge：P2 Capabilities继续拥有`src.capabilities.mcp_dispatch`公开executor、`MCPDispatchOutcome`、selector/router及其models/contracts；P3 Integrations拥有concrete Coordinator、Gateway、transport、`selector_context`与shadow-compare integration glue。P3当前对上述P2对象的imports既保持module/object identity，也承载现有functional call seam（selector/router调用及其LLM次数、context构造、Outcome返回）。P0按场景冻结exact import symbols、call-site IDs/kinds与selector/router/context/Outcome/LLM调用次数；每个普通结构检查点actual必须与baseline exact-equal、delta=0，不能通过复制/内联/缓存使调用减少。只有另行获批的edge-elimination检查点允许减少，且必须同时保持公开identity、删除旧实现并证明无第二owner；不能在本次结构检查点临场移动类型。
 
