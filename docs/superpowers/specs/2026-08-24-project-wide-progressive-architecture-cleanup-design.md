@@ -1,7 +1,7 @@
 # 全仓业务代码渐进式架构清理设计
 
 - **日期**：2026-08-24
-- **状态**：设计章节已获用户逐项批准；scope reset及首轮精简复审修订已完成，待新固定基线独立信心门复审
+- **状态**：设计章节已获用户逐项批准；scope reset精简复审修订已完成，待新固定基线独立信心门复审
 - **适用分支**：`main`
 - **适用仓库**：`breeding_agent`
 - **目标**：在可验证地保持现有功能、公开合同和副作用顺序不变的前提下，分阶段清理全仓业务代码中的单体模块、复制实现、无效抽象、死代码和错误的职责边界
@@ -241,7 +241,7 @@ P0 不从上述几条手写 glob 直接推导“全部业务代码”。它从�
 
 ### 7.1 编译期/import方向
 
-下图中`A -> B`表示A可以import/依赖B；反向依赖禁止，临时compat facade必须有owner和退出点。
+下图中`A -> B`表示A可以import/依赖B；禁止新增反向依赖。基线中已存在的反向边只有在P0列出exact symbols、唯一owner、兼容理由、禁止扩张和退出条件后，才能作为bounded compatibility edge保留；完成条件是“无未解释反向边”，不是假设基线已为零。
 
 ```text
 API composition/routes -> Orchestration -> Capabilities -> Integrations
@@ -251,6 +251,8 @@ Storage implementation -> Core contracts
 ```
 
 Storage/Lifecycle实现不得import API/SSE、Tool选择或Agent sample；API不得import具体repository或取得slot/transaction authority。
+
+已知MCP Dispatch bounded edge：P2 Capabilities继续拥有`src.capabilities.mcp_dispatch`公开executor、`MCPDispatchOutcome`、selector/router及其models/contracts；P3 Integrations拥有concrete Coordinator、Gateway、transport、`selector_context`与shadow-compare integration glue。P3当前对上述P2公开对象的imports为保持module/object identity的有限例外；P0冻结exact symbol set，P2/P3不得新增跨边状态或I/O。P8可保留有理由的兼容例外，若要消除则另立获批计划并先定义public facade迁移，不能在本次结构检查点临场移动类型。
 
 后端层级目标：
 
@@ -350,7 +352,7 @@ P0 只增加测试与证据，不修改业务实现。
 
 ### 9.4 PostgreSQL
 
-P5 前明确真实测试 profile：auth CAS、Task/Node CAS、mailbox、interrupt、event order、owner guard、claim takeover、rollout role separation、legacy migration role、conversation delete 并发、fresh bootstrap 和 drift rollback。
+P5 前明确真实测试 profile：auth CAS、AgentRun/AgentItem/lease/atomic outcome、Task/Node CAS、mailbox、interrupt、event order、owner guard、claim takeover、rollout role separation、legacy migration role、conversation delete 并发、fresh bootstrap 和 drift rollback。
 
 ### 9.5 P0 最小交付物与证据边界
 
@@ -431,12 +433,14 @@ Dependency waiting与terminal continuation不得把不同状态的异常、ack�
 |---|---|
 | P2 Orchestration | initial missing-input bootstrap、Agent/Interrupt协调、waiting/resume顺序 |
 | P3 Integrations | Slot carrier、transition与question domain；不取得AgentRun authority |
+| P2/P3 MCP Dispatch | P2拥有public executor/outcome/selector-router contracts；P3拥有concrete Coordinator/Gateway/transport；现有P3→P2 imports只按7.1 bounded edge保留 |
 | P4 API | HTTP answer/cancel/recovery adapter；只装配和投影 |
 | P5 Storage | Slot/Interrupt durable CRUD与CAS；不决定resume顺序 |
+| P2/P5 Agent persistence | P2拥有AgentRun/AgentItem/lease/atomic-outcome语义与ports；P5拥有SQLite/PostgreSQL repository、Session/SQL/CAS实现 |
 | API file-selection | 保持独立业务路径，不错误复用Slot authority port |
 | Lifecycle | durable Agent recovery identity与conversation/task guard |
 
-P2退出条件：公开Orchestration/Capability imports不变；waiting/resume/terminal与multi-waiting focused trace前后相同；Tool/LLM/Storage调用次数不变；locator cache可从durable carriers重建；不存在第二套interrupt/continuation authority。
+P2退出条件：公开Orchestration/Capability imports不变；waiting/resume/terminal与multi-waiting focused trace前后相同；Tool/LLM/Storage调用次数不变；locator cache可从durable carriers重建；不存在第二套interrupt/continuation authority；MCP Dispatch bounded symbol set未扩张。
 
 ## 12. P3：Integrations
 
@@ -489,7 +493,7 @@ Historical reprojection保持raw/managed source优先级、分页边界和零网
 
 只有检查点实际修改MCP transport、adapter或runtime wiring，且已有隔离non-prod endpoint时，才运行薄真实烟测：discovery、普通调用、approval/resume、artifact parse与cleanup。没有现成环境时标记该切片`external_pending`，不得为本清理任务新建control service、fault-token/counter协议或SPKI测试平台；no-replay的阻断权威仍是本地确定性fault/restart测试。
 
-P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、Gateway state/security、Coordinator no-replay与Historical zero-network focused tests前后相同；不存在合并后的安全authority或第二套external I/O owner；适用的Linux/真实烟测已通过或准确标记pending。
+P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、Gateway state/security、Coordinator no-replay与Historical zero-network focused tests前后相同；不存在合并后的安全authority或第二套external I/O owner；7.1 MCP Dispatch bounded edge的imports/identity未扩张且无未解释reverse edge；适用的Linux/真实烟测已通过或准确标记pending。
 
 ## 13. P4：API Runtime
 
@@ -520,18 +524,20 @@ P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、
 ### 14.2 领域切片顺序
 
 1. Auth 与 Conversation；
-2. Task/Lifecycle projection，并给 Lifecycle 服务引入窄 port；
-3. MCP config 与 owner authority；
-4. MCP rollout/observability；
-5. MCP dispatch、CP7、durable result；
-6. Remote Task 与最终 assembly。
+2. AgentRun/AgentItem/lease/atomic-outcome durable repository；
+3. Task/Lifecycle projection，并给 Lifecycle 服务引入窄 port；
+4. MCP config 与 owner authority；
+5. MCP rollout/observability；
+6. MCP dispatch、CP7、durable result；
+7. Remote Task 与最终 assembly。
 
-每个切片只迁移一个domain owner；使用mixin、module或composition由实施计划依据当前MRO和patch seam选择。公开`SQLiteStateRepository`、`SQLiteCollaborationRepository`、`SQLiteStorage`、`PostgreSQLStorage`旧路径继续作为assembly/facade，不保留第二套方法体。
+每个切片只迁移一个domain owner；使用mixin、module或composition由实施计划依据当前MRO和patch seam选择。公开`SQLiteAgentRepository`、`PostgreSQLAgentRepository`、`SQLiteStateRepository`、`SQLiteCollaborationRepository`、`SQLiteStorage`、`PostgreSQLStorage`旧路径及现有Agent repository subclass/MRO继续作为assembly/facade，不保留第二套方法体。
 
 ### 14.3 事务与锁不变量
 
 - `SQLiteStorage._run` 继续负责 session、`BEGIN IMMEDIATE`、commit、shield 和 cancellation wait；
 - `_run`用同一个Session构造StateRepository与CollaborationRepository，并保持一次callback/commit边界；不得因拆分形成第二Session或第二事务；
+- Agent durable repository继续拥有独立Session、SQLite`BEGIN IMMEDIATE`、CAS、commit/rollback与shield边界，不得并入`SQLiteStorage._run`或State+Collaboration事务；
 - repository 内现有 flush 与 CAS 失败 rollback 原样保留；
 - PG CP7、rollout、conversation delete runner 各自继续拥有 session/commit；
 - Lifecycle 一次业务操作中的多次 storage 调用不得顺手合并成单事务；
@@ -546,11 +552,11 @@ State只拥有运行状态投影，Lifecycle只拥有task/node/mailbox/interrupt
 
 P5实施计划在迁移每个domain前列出受影响的inherited/overridden PostgreSQL有效operation及对应真实integration/permissions/concurrency测试，遗漏operation则不启动该切片。没有隔离真实DSN证据时，P5可以完成不依赖PG的协议、mapper、SQLite/shared切片，但不得迁移或宣称完成对应rollout、CP7、remote-task与PG parity切片。
 
-P5退出条件：公开facade/MRO/metadata合同不变；每个domain只有一个repository/storage owner；transaction/lock/CAS/cancel trace前后相同；受影响SQLite/Sidecar/PG测试通过且目标skip为0，或明确列出尚未开始的`external_pending` PostgreSQL切片。
+P5退出条件：公开facade/MRO/metadata合同不变；每个domain只有一个repository/storage owner；Agent repository import/MRO、SQLite/PostgreSQL parity、lease/CAS/final/fault与其他transaction/lock/cancel trace前后相同；受影响SQLite/Sidecar/PG测试通过且目标skip为0，或明确列出尚未开始的`external_pending` PostgreSQL切片。
 
 ## 15. P6：Frontend
 
-P6按wire contract、纯domain/reducer、controller hook、presentational component、App shell分层。具体文件和批次由P6实施计划决定。Reducer/projector保持纯函数，组件不直接拥有API/subscription。Attachment controller唯一拥有draft/saved/pending upload、uploading/deleting state与附件API的upload/delete/reload/rollback/commit。Task Runtime controller唯一拥有accepted-task state、current task/assistant IDs、pending interrupt、presentation mode及后续SSE/timer/MCP/cancel/artifact effects；它只能通过App port patch message，不能持有message store，也不能在accepted handoff后再次submit。
+P6按wire contract、纯domain/reducer、controller hook、presentational component、App shell分层。具体文件和批次由P6实施计划决定。Reducer/projector保持纯函数，组件不直接拥有API/subscription。Attachment controller唯一拥有draft/saved/pending upload、uploading/deleting state与附件API的upload/delete/reload/rollback/commit。Task Runtime controller唯一拥有accepted-task state、current task/assistant IDs、pending interrupt、presentation/busy mode、Interrupt answer API与closed outcome分类，以及后续SSE/timer/MCP/cancel/artifact effects；它只能通过App port patch message，不能持有message store，也不能在accepted handoff后再次submit。
 
 ### 15.1 App 最终所有权
 
@@ -564,6 +570,8 @@ P6按wire contract、纯domain/reducer、controller hook、presentational compon
 - slash/MCP command menu；
 - optimistic user/assistant turn；
 - normal/Slash/MCP首次submit、accepted-task handoff与Attachment/Task controller跨域协调。
+
+Interrupt answer时，App只取得attachment snapshot、创建现有optimistic turn、调用Task Runtime command恰好一次并按returned outcome协调Attachment disposition；App不直接执行第二类answer API，也不直接写Task Runtime state。Task Runtime只在`resumed` outcome为新assistant建立subscription。
 
 ### 15.2 附件时序
 
@@ -586,15 +594,15 @@ P6按wire contract、纯domain/reducer、controller hook、presentational compon
 
 Interrupt answer outcome必须按下表锁定；App是唯一跨Attachment/Task controller coordinator，禁止双rollback/reset/subscribe：
 
-| Outcome | API / SSE | Optimistic turn与task/notice | Attachment disposition | Pending interrupt |
+| Outcome | answer-submit API delta / new-assistant SSE subscription delta | Optimistic turn与task/notice | Attachment disposition | Pending interrupt |
 |---|---|---|---|---|
-| pre-upload failure | `0 / 0` | 不创建turn，不启动task | 按既有upload failure回滚已上传项并保持/恢复draft | 不变 |
+| pre-upload failure | `0 / 0` | 不创建turn，不启动task | 按共享upload helper处理failed/draft/rollback | 不变 |
 | stale scope after API | `1 / 0` | 已创建旧scope turn；不得写当前scope、不得新增notice | no compensation/delete/reset | no current-scope write |
 | keep-open | `1 / 0` | clarification assistant完成，task回到waiting | commit已上传draft | retain/refresh |
 | resumed | `1 / 1` | assistant绑定resumed task并继续running | commit/mark sent | clear |
 | API rejected | `1 / 0` | task标failed并显示既有notice；不订阅 | rollback uploaded + reset draft | retain/not cleared |
 
-这些调用和disposition是现状行为，不借hook拆分统一；P6实施计划为rejected与stale补最小characterization。
+两列delta均指单次answer attempt相对调用前的增量；upload/delete/history/listInterrupts API与MCP approval后的重订阅不计入这两列，分别由Attachment/Task trace锁定。Pre-upload失败时，失败附件保留`failed/待重试`、同批其他附件回到draft；已上传项rollback delete失败时按现状移除对应draft、refresh saved list并显示部分保存notice。上述调用和disposition不借hook拆分统一；P6实施计划为rejected与stale补最小characterization。
 
 ### 15.4 DOM 与可访问性
 
@@ -609,7 +617,7 @@ Interrupt answer outcome必须按下表锁定；App是唯一跨Attachment/Task c
 - upload refresh 失败清空状态；
 - 任何文案、视觉、DOM、ARIA、焦点或滚动调整。
 
-P6退出条件：App/Attachment/Task Runtime/reducer/component owner唯一；附件与Task trace、Interrupt delta、stale guards、DOM/a11y focused tests前后相同；Frontend全量测试、typecheck和build通过；不存在第二套message、subscription或timer owner。
+P6退出条件：App/Attachment/Task Runtime/reducer/component owner唯一，Interrupt answer API只由Task Runtime执行；附件与Task trace、Interrupt delta/disposition、stale guards、DOM/a11y focused tests前后相同；Frontend全量测试、typecheck和build通过；不存在第二套message、answer-submit、subscription或timer owner。
 
 ## 16. P7：Native 与 Scripts
 
@@ -749,12 +757,12 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 |---|---|---|
 | FR-01 | P0/P8 | tracked universe分类`unclassified=0`；business inventory前后set检查；最终每路径`changed|reviewed_no_change` |
 | FR-02～FR-04 | 全部 | 公开contract diff为零；迁移前后focused characterization与副作用trace相同 |
-| FR-05 | P0/P1～P8 | owner/dependency review；无第二state/side-effect owner或新增反向依赖 |
+| FR-05 | P0/P1～P8 | owner/dependency review；无第二owner、无新增/未解释反向依赖；bounded edge exact set不扩张 |
 | FR-06 | P1/P2～P5 | 四路径StoragePort identity、259-method窄域/consumer handoff、Cancellation writer；最终无未解释internal aggregate consumer |
 | FR-07 | P2 | waiting/resume/terminal/五项known-behavior barrier与Orchestration/Capabilities suites |
-| FR-08 | P3 | Skills/Parser/Gateway/Coordinator/Historical focused tests；适用Linux/真实烟测 |
+| FR-08 | P2/P3 | MCP Dispatch public/concrete owner与bounded identity edge；Skills/Parser/Gateway/Coordinator/Historical focused tests；适用Linux/真实烟测 |
 | FR-09 | P4 | API/OpenAPI/SSE/runtime seam、lifecycle/interrupt trace与API/cross-layer suites |
-| FR-10 | P5 | facade/MRO/metadata、State+Collaboration同Session、transaction/lock/CAS/cancel trace与适用SQLite/Sidecar/PG suites |
+| FR-10 | P2/P5 | Agent repository独立session/MRO/parity、State+Collaboration同Session、其他facade/metadata/transaction/lock/CAS/cancel trace与适用SQLite/Sidecar/PG suites |
 | FR-11 | P6 | App/Attachment/Task owner、附件/Task/Interrupt outcome、DOM/a11y trace与Frontend全量/typecheck/build |
 | FR-12 | P7 | Rust public/byte contracts、Scripts CLI/SQL/receipt trace与各workstream适用平台gate |
 | FR-13～FR-14 | P8 | 每个删除/合并finding有零引用、行为证据；fallback与延期问题无行为diff |
@@ -784,6 +792,7 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 
 | 依赖 | 用途 | 约束 |
 |---|---|---|
+| `docs/prd/backend/unified-agent-loop/` | Agent execution/recovery语义权威 | P2/P4只做结构迁移，不重新解释waiting/resume/atomic outcome |
 | 当前`main`与适用`AGENTS.md` | 实施权威与模块规则 | 每个计划开始时重读；职责/入口变化同步tracked索引 |
 | 现有Backend/Frontend/Rust tests | 行为锁与回归 | tests不是清理目标；只补最小characterization |
 | 现有CI/workflow | Ubuntu、fuzz、manylinux | 优先复用；只在业务变化使其失效时最小修改 |
@@ -796,7 +805,9 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 |---|---|
 | 仓外消费者依赖未发现的公开面 | P0公开contract与兼容facade；无证据时不删 |
 | 新模块形成循环依赖或第二owner | 目标DAG、import review、P8双实现检查 |
+| 既有MCP Dispatch反向兼容edge在重构中扩张 | P0冻结exact symbols；P2/P3 owner明确；禁止新增跨边state/I/O |
 | 状态/并发/no-replay因抽象漂移 | 旧实现先做focused barrier/fault trace；一次迁移一个owner |
+| Agent durable repository被误并入Storage `_run` | 独立public/MRO/session/CAS合同与SQLite/PG parity/fault trace |
 | 高风险平台暂不可用 | 延期对应切片并继续无关模块；完成声明列pending |
 | 安全authority或raw数据被错误合并 | P3独立authority/隐私测试；public/log sentinel为零 |
 | Frontend拆分改变可见DOM或effect identity | DOM/a11y/StrictMode与异步scope测试 |
@@ -840,10 +851,10 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 项目级清理只有同时满足以下条件才完成：
 
 - P0～P8所有mandatory local结构目标完成；行为修复类finding可以延期，但不得用延期掩盖未做的业务审查；
-- 全量inventory中每个业务路径为`changed|reviewed_no_change`，无未分类路径或悬空finding；
+- tracked code/config分类`unclassified=0`，每个业务路径为`changed|reviewed_no_change`，无悬空finding；
 - FR-01～FR-16与全部NFR均有对应验收结果，公开contract和关键behavior trace无漂移；
 - 各旧公开 facade 只承担兼容与装配，不保留第二套业务实现；
-- 目标依赖方向无新增反向 import；
+- 目标依赖方向无新增或未解释反向import；7.1 bounded compatibility edge未扩张；
 - 已识别的完全复制实现已合并，语义不同的相似实现有清晰所有权；
 - 结构变化已同步 AGENTS/CHANGELOG；
 - Backend、Frontend、Rust 相关全量门禁通过；
