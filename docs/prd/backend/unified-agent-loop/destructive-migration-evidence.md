@@ -4,7 +4,8 @@
 - **适用分支/环境**：`main`；本地受控开发环境，不是`prod`
 - **证据状态**：closed
 - **检查点**：P7-A `restore_proof_complete`；P7-B `migration_complete`；P7-C `complete`
-- **最终代码检查点/tree**：`0babd5067561d0aed8cd2946943f51d73f2b99ce` / `fb50b02dd86d06ada6fa4820038c971f058c7cb7`
+- **P7-C原始最终代码检查点/tree**：`0babd5067561d0aed8cd2946943f51d73f2b99ce` / `fb50b02dd86d06ada6fa4820038c971f058c7cb7`
+- **当前代码复验检查点/tree**：`af246a6f139144df385298126d5f8588b32572f8` / `db7e3b09e08275de57da305ae1f55a05846cb342`
 - **破坏性迁移检查点/tree**：`0df2645e8b2b74ba44c4ff961e8ef5fd3b5db91d` / `b0b41c33eeb8f2cc4cd45267b68016cdcd4e8c0a`
 - **当前决策**：AL-P7-01～10、FR-1～26和12类NFR均已闭合；统一同模型Agent Loop在`main`本地受控开发环境标记`complete`。
 - **保密边界**：本文不记录DSN、credential、业务正文、仓库外绝对路径或可公开下载的backup引用。
@@ -139,6 +140,28 @@ rg -n "TaskEdge|task_edge|task_edges|planner_replan_claim|root_node_id|criticali
 Proto仅在`reserved`声明中保留已删除field number/name；API DTO的`root_node_id=null`和`required/hard`是明示兼容投影；
 destructive migration、historical docs和隔离测试中的旧名词不构成生产读取。Phase 7 evidence validator在`--require-closed`下通过，
 active inventory、目录README、Phase PRD、backend索引、AGENTS和CHANGELOG均以当前Agent-only authority收口。
+
+### 6.5 2026-08-24 当前代码收尾复验
+
+在未修改业务实现、未重跑破坏性迁移且未接触`prod`的前提下，以`af246a6`/tree `db7e3b0`重新执行当前代码门禁：
+
+- `compileall`通过；Core 42项、Storage 400项、Lifecycle 37项、Integrations 704项（另有2项macOS平台声明skip，继续由
+  原P7-C Linux零skip证据覆盖）、Agent Skills 209项、Orchestration
+  102项、Main Agent 16项、MCP Dispatch 14项、MCP Tool 15项、API 436项、E2E 7项、Observability 39项、Scripts
+  62项、Deployment 3项全部通过；Storage的7个外部PostgreSQL环境skip未作为通过证据；
+- 使用本机已有`postgres:17-bookworm`镜像启动精确临时容器，在7个隔离数据库中运行Agent storage、conversation delete、
+  MVCC、legacy migration、rollout、rollout permission和CP7共61项真实PostgreSQL测试，零skip、零失败；容器与一次性数据库
+  随后删除，未连接现有开发库或生产库；
+- Frontend 21个文件/307项Vitest、typecheck和production build通过；build只报告既有large chunk warning；
+- Rust统一`cargo_fmt`、`cargo_clippy -- -D warnings`、workspace `cargo_test`和`cargo_deny`通过；`cargo_deny`的
+  advisories、bans、licenses、sources均为`ok`，重复依赖只产生policy允许的warning；首次受sandbox限制无法取得用户Cargo
+  advisory cache锁，不计通过，获准使用同一统一脚本重跑后成功；
+- Phase 6/7 `--require-closed` evidence validator通过；旧runtime/DAG配置与TaskEdge/DAG-only物理合同的生产源码扫描均为零。
+  Phase 0～5的pre-cutover validator按Phase 0 PRD约束不在post-cutover HEAD恢复已删除DAG测试或重新宣称历史扫描集。
+
+`af246a6`只修复Rust quality gate、锁文件和既有MCP SDK diagnostics兼容，不改变Agent Loop控制面、schema/proto、API或公开
+MCP结果语义；因此P7-A/P7-B的r4备份、restore/apply receipt和`0babd50`受控真实MCP证据继续作为原始closed authority，
+本次不伪造新的迁移、备份或外部MCP执行记录。
 
 ## 7. FR-1～FR-26 最终映射
 

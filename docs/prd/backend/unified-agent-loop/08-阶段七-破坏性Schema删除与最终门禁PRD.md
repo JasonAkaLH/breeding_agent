@@ -261,3 +261,7 @@ AL-P7-01～10全部通过；FR-1～FR-26和全部NFR最终集成证明闭合；`
 
 执行结论（2026-08-23）：上述条件全部满足；最终代码检查点、三backend迁移/恢复、完整门禁、真实MCP、FR/NFR映射和
 本地非`prod`边界统一见`destructive-migration-evidence.md`。r3/r4备份继续保留到用户明确结束rollback窗口。
+
+收尾复验（2026-08-24）：当前代码检查点`af246a6`再次通过完整Backend、7数据库隔离真实PostgreSQL、Frontend、Rust
+required gates、Phase 6/7 evidence validator和零生产引用扫描；未发现Phase 0～7业务实现缺口。本次只刷新当前代码证据，
+不重跑或改写P7-A/P7-B迁移receipt和`0babd50`真实MCP原始authority，不涉及`prod`。

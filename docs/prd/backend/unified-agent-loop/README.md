@@ -2,6 +2,7 @@
 
 - **日期**：2026-08-23
 - **状态**：`complete`；Phase 6 `cutover_complete`；P7-A `restore_proof_complete`；P7-B `migration_complete`；P7-C `complete`
+- **最新代码复验**：2026-08-24；`af246a6`/tree `db7e3b0`完整Backend、隔离真实PostgreSQL、Frontend、Rust与零生产引用门禁通过，详细证据见`destructive-migration-evidence.md`
 - **适用分支**：`main`
 - **架构来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-design.md`
 - **拆分来源**：`docs/superpowers/specs/2026-08-21-unified-agent-loop-prd-decomposition-design.md`

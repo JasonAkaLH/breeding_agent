@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 统一同模型Agent Loop完成当前HEAD收尾复验：以`af246a6`/tree `db7e3b0`重新运行全部Backend canonical域，Core 42、Storage 400、Lifecycle 37、Integrations 704（另有2项macOS平台声明skip，沿用原Linux零skip证据）、Agent Skills 209、Orchestration 102、Capabilities 45、API 436、E2E 7、Observability 39、Scripts 62和Deployment 3项通过；Storage的7个环境skip另在临时PostgreSQL 17容器的7个隔离数据库中以61项零skip真实门禁闭合，容器与一次性数据随后删除。Frontend 21文件/307项、typecheck/build和Rust fmt/clippy/test/deny通过，Phase 6/7 evidence validator及旧DAG/physical contract生产零引用扫描通过。未发现Phase 0～7业务实现缺口；本次仅更新当前代码复验绑定，不重跑或改写P7-A/P7-B迁移receipt、原真实MCP authority或`prod`。License Requirement：无业务代码或依赖变更；复用既有Python、PostgreSQL、Frontend与Rust门禁。
+
 - Rust quality CI的两个确定性阻断已修复：MCP official SDK diagnostics将`peer_info()`统一借用为不消费的视图，同时兼容主workspace锁定的`rmcp 1.7`与fuzz workspace解析的`rmcp 1.8`；`quinn-proto`从命中`RUSTSEC-2026-0185`的0.11.14升级到安全patch版本。重新闭合`native/fuzz/Cargo.lock`并在stable harness compile和bounded fuzz job前强制`--locked`/metadata漂移检查，避免独立fuzz workspace在CI静默升级依赖。License Requirement：未新增依赖种类；仅更新已有Rust依赖的安全patch/锁文件，许可策略不变。
 
 - 统一同模型Agent Loop PRD终态语境已校准：总纲状态同步为Phase 0～5 `proof_complete`、Phase 6 `cutover_complete`、Phase 7 `complete`，并将旧DAG问题明确标记为Phase 0进入基线。Phase 0 PRD保持`proof_complete`，新增pre-cutover历史边界、post-cutover验证参数和Phase 7后回滚权威说明，禁止据历史非范围或单阶段回滚条款重建DAG控制面。当前聚焦71项、Phase 6/7 evidence validator、compileall与diff检查通过；本次仅文档校准，无业务代码、依赖或许可变更。License Requirement：无新增依赖或许可变更。
