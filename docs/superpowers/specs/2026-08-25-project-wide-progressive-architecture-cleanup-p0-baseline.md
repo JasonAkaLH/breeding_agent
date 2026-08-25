@@ -328,3 +328,11 @@ conda run -n multi_agent python -m unittest tests.api.test_runtime_public_contra
 ```
 
 P1只能在P0 final commit clean、inventory=final tracked set、生产业务路径相对P0 start零diff且上述门禁全绿后另行生成实施计划；本节不是直接修改consumer或创建窄port的授权。
+
+## 11. P0～P8终态附录（2026-08-25）
+
+本节只闭合P0 inventory到P8 final HEAD的可追溯性，不回写或重分类冻结的P0 TSV。当前tracked set为1094：`P0 final 1045 + 25 business + 16 tests + 8 phase plans`，删除0、未分类0，排序路径清单SHA-256为`b0dd66c0d71371a198dc06e1a5ac273351634ce3b6518973ce6ed2c02540c6b7`。
+
+P0原320个business中68个在P1～P8被修改、252个完成复核未改；owner维度changed为P1=1、P2=7、P3=24、P4=8、P5=18、P6=5、P7=5。后续阶段新增25个business均已由对应阶段验证，因此当前345个business终态为`93 changed + 252 reviewed_no_change`。新增cross-owner layer pair为0；既有P3→P2、P5→P2/P3依赖已复核，不属于本项目引入。
+
+P8最终证明、逐项finding、完整门禁和平台N/A记录见`2026-08-25-project-wide-progressive-architecture-cleanup-p8-implementation-plan.md`。P0～P8完成不改变本文件冻结的公开合同、行为禁区和外部平台证据规则，也不授权后续行为修复或`prod`变更。

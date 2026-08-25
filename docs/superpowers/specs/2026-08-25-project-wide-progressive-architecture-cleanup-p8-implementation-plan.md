@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P8 start commit：`ff0a65d9f39bb7fb500a48dc2a069f3dc4690259`
 - P8 start tree：`e078560140bd3d7ea7e808bad60a5b4aaba277dc`
 - P8 start tracked set：1093
@@ -100,3 +100,44 @@ Inventory必须闭合：
 若删除项存在动态/字符串/registration/manifest consumer，若RHS/branch删除改变调用、异常、日志、event、timer、DOM或transaction，若测试必须修改业务期待，若需要新跨层共享模块或行为修复，则停止该candidate并记`reviewed_no_change|deferred`。
 
 每个checkpoint独立commit并可逆序revert。P8完成不授权部署`prod`、删除仓外备份、读取受保护正文或修复任何延期行为。
+
+## 5. 终态实现账本
+
+| Checkpoint | Commit | 终态 |
+|---|---|---|
+| A 计划与基线 | `41a2c88` | 冻结P8 finding、停止条件与验证矩阵 |
+| B Auth窄port | `8e5b5a3` | `UsernameTokenService`采用`AuthStoragePort`，调用体与runtime对象不变 |
+| C Python dead bindings | `3989b62` | F401清零；只保留1项trace-sensitive F841 |
+| D Frontend收尾 | `2ef4fe2`、`84fa7aa` | 复用附件helper，删除不可达旧SSE/test-only exports/DTO/CSS |
+| E Native dead field | `fdc6940` | 删除`LimitedReaderState.done`，Receiver同步链不变 |
+| F 最终证明 | 本提交 | inventory、合同与全仓门禁闭合 |
+
+P8业务实现HEAD=`84fa7aa19179dff1ca1e1d1e5a62bcdd9e14d5d7`，tree=`c33456c48afe2868abfc929f9a8d222ee7f864e9`。P8相对start未修改Cargo/Proto/checked-in contract、公开Rust root、数据库schema/data、transaction/CAS、生产依赖或`prod`。
+
+## 6. 最终inventory与静态审计
+
+- tracked set=`1094`，排序路径清单SHA-256=`b0dd66c0d71371a198dc06e1a5ac273351634ce3b6518973ce6ed2c02540c6b7`；相对P0 final的1045条只新增25个business、16个test与8份P1～P8计划，删除0、未分类0；
+- 当前345个business=`93 changed + 252 reviewed_no_change`。P0原320个按owner的changed计数为P1=1、P2=7、P3=24、P4=8、P5=18、P6=5、P7=5，余252保持reviewed；25个新增business均为各阶段已验证的owner实现；
+- 新增cross-owner layer pair=0；既有P3→P2、P5→P2/P3依赖保持`baseline_reviewed`。内部aggregate `StoragePort` consumer=0；公开`ApiRuntime` annotation、四条re-export及SQLite/PostgreSQL facade仍为compatibility seams；
+- Python Ruff=`0 F401 + 1 F841`，唯一F841为`_schedule_v2_slot_resume`的I/O/异常trace保留项；三语句以上exact body=15组且全部按authority/协议/error边界复核为`reviewed_no_change`；C901=158，仅作度量，不为指标拆分；
+- Frontend strict noUnused=0，production import graph无不可达节点，三语句以上exact function body=0；旧browser SSE与test-only production surfaces已清除，authenticated fetch-SSE保持唯一owner；
+- Native Clippy `-D warnings` clean，P8唯一确证未读private field已删除；无新旧双实现或orphan facade。
+
+## 7. 最终验证
+
+| 门禁 | 结果 |
+|---|---|
+| Python compile + Backend/Agent Skills/Scripts/Deployment | 2,165项通过；Storage 7项真实PostgreSQL与Integrations 2项Linux gate为环境N/A |
+| Frontend | 24 files / 320 tests通过；typecheck、strict noUnused、production build通过；保留既有>500 kB chunk warning |
+| Rust fmt / Clippy / cargo test / nextest | 全部通过；nextest 149/149，保留1个既有leaky标记 |
+| Rust coverage | workspace 84.26%、Skill Runtime 92.86%、MCP Runtime 92.97%；全部超过既定阈值 |
+| Rust audit / deny / provenance | 通过；保留已允许的`anyhow` `RUSTSEC-2026-0190` warning及传递依赖duplicate warnings |
+| MCP protocol fuzz | 30秒、1,099,890 runs、无crash；macOS `atos`只影响symbolization；生成corpus/target已清理 |
+| Contract / public surface | StoragePort、Rust public surface、Proto/checked-in contract与production Cargo相对P8 start零diff；相关合同测试通过 |
+| Repository hygiene | `git diff --check`通过；`docker_cmd.md`存在、mode `0600`、仍被忽略且未跟踪，正文从未读取 |
+
+`skill/sql-query`按仓库既定结构为Git-ignored的外部只读挂载，不存在于当前工作树，因此旧组合命令的可选子目录步骤记为N/A；其缺失不替代任何当前tracked业务测试。真实PostgreSQL、Linux、manylinux、外部MCP与`prod`未被P8触及或冒充为通过。
+
+## 8. 退出结论
+
+P0～P8在原设计边界内闭合。所有P8 candidate均已处置为已验证修改、`reviewed_no_change`或明确延期；未新增行为修复、跨层抽象、dependency、schema/data migration或部署动作。后续工作如需处理保留的F841、C901、terminal set、跨authority exact body或既有行为缺陷，必须另立目标，不能继续借用本P8授权。
