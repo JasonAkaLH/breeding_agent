@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P4 start commit：`477b467bd0ab574f140ed7879f38e619fe210531`
 - P4 start tree：`e8d0a679fa58c0342bd4611fb64cd6567fbf3191`
 - P4 start tracked set：1055
@@ -105,3 +105,46 @@ P4只处理`src/api/**`内三类已证实结构问题：重复的request→runti
 若迁移方法需要修改body才能通过、若测试或外部patch依赖原defining module、若`ApiRuntime`/factory签名或route surface变化、若startup/shutdown/Interrupt/file-selection/upload trace变化、若需要修改P5实现或schema/data，则停止该候选并保留已绿检查点。
 
 每个检查点独立commit，逆序revert即可；无schema/data rollback。29个C901、Interrupt约4,000行职责块、lifecycle约1,850行职责块和1,988行factory均不因文件大小自动进入P4，P8也不得把未证明候选当dead/duplicate删除。
+
+## 6. 实施终态
+
+### 6.1 Checkpoints
+
+| Checkpoint | Commit | 结果 |
+|---|---|---|
+| Plan/audit | `b38d10d` | 183项baseline、7份accessor复制、12-method upload块与29个C901分类闭合 |
+| Runtime accessor | `2f834bc` | 7个consumer以原`_runtime`名复用单一private accessor |
+| Upload runtime owner | `eb7b0e5` | 12个方法迁入唯一mixin；12/12迁移前后AST exact |
+| Private narrow ports | `2be4ab3` | Remote continuation与memory builder使用既有窄port；公开aggregate seam保持 |
+| Final ledger | 本文终态提交 | Backend canonical、API索引与P5 handoff闭合 |
+
+### 6.2 Gate record
+
+| Scope | ran/fail/skip | 结果 |
+|---|---:|---|
+| Python compileall `src scripts tests` | completed/0/0 | PASS |
+| Core / Storage / Lifecycle | 48+410+42 / 0 / 7 | PASS；7项真实PostgreSQL profile为未触及平台N/A |
+| Integrations / Agent Skills | 712+211 / 0 / 2 | PASS；2项Linux Result Parser在macOS N/A |
+| Orchestration | 112/0/0 | PASS |
+| Capabilities | 50/0/0 | PASS（Main Agent 17、MCP Dispatch 15、MCP Tool 15、Skill Tool 3） |
+| API | 452/0/0 | PASS；相对P3新增6项owner/accessor/port直接合同 |
+| E2E / Observability / Scripts / Deployment | 7+39+63+3 / 0 / 0 | PASS |
+| Backend合计 | 2149/0/9 | PASS；平台skip无新增 |
+| Upload/file-selection/MCP-binding/Slot/pending focused | 157/0/0 | PASS |
+| Runtime owner/public focused | 28/0/0 | PASS；包含signature、selector、startup/shutdown与private port |
+| Upload method AST | 12/12 exact | PASS；只改变defining owner，不改变body/decorator/signature |
+| API AST exact duplicate | 0 groups | 三语句以上与start相同；7份单行accessor已归一 |
+| API C901 / 全仓Ruff审计 | 29 / 162 C901 + 7 F401 + 3 F841 | 与P4 start及P0相同；未运行`--fix` |
+| Frontend / Rust / real external MCP | N/A | P4未触及对应生产路径或外部I/O；不冒充新证据 |
+
+### 6.3 Final invariants与handoff
+
+- P4 final tracked set为1061，排序path SHA-256为`1b3203b4650b007a37083bae9ff0b3b54f9abf9f74d6f40adda5ac0a8843928a`；相对start只新增本计划、2个private业务module和3份直接测试。
+- request→runtime只有`runtime_access.runtime_from_request`一个owner；7个原module的`_runtime`均为同一object alias，路由签名与读取时点不变。
+- upload/save/delete/resolve/sheet-selection 12个方法只有`ConversationUploadRuntimeMixin`一个defining owner；`ApiRuntime`继承并暴露同一function object，原类无重复声明。
+- `runtime.py`从13,878行降为13,438行；减少来自职责移动，不删除控制流。Interrupt约4,000行、lifecycle约1,850行与factory约1,988行保持原位。
+- `ApiRuntime`、`build_api_runtime`、`create_app` identity和完整签名不变；三repository constructor patch identity、direct assignment与backend selector顺序不变。
+- startup/shutdown、partial-startup/shutdown-first-error、Interrupt/Slot、file-selection和MCP recovery authority保持原call sites/kinds/counts/order；未建立第二owner。
+- private remote continuation和memory builder使用窄ports；公开`ApiRuntime.__init__.storage: StoragePort`是唯一冻结的API aggregate compat annotation。
+- P5只接管Storage/State/Lifecycle adapter、shared mapper/metadata、transaction/lock/CAS及真实PostgreSQL切片；不得把backend mode selector从P4复制进adapter，也不得回写P4 runtime控制流。
+- schema/data、依赖、`prod`、Frontend、Rust和`docker_cmd.md`正文均未触及；License Requirement无变化。
