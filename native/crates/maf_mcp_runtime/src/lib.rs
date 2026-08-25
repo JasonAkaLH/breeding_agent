@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+mod contract;
+mod error;
 mod json_rpc;
 mod registry;
 mod sanitizer;
@@ -100,40 +102,26 @@ pub struct McpRuntimeContractArtifact {
 }
 
 fn string_values(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).to_owned()).collect()
+    contract::string_values(values)
 }
 
 #[must_use]
 pub fn task_terminal_states() -> Vec<String> {
-    string_values(&["completed", "failed", "cancelled"])
+    contract::task_terminal_states()
 }
 
 #[must_use]
 pub fn mcp_runtime_contract_artifact() -> McpRuntimeContractArtifact {
-    McpRuntimeContractArtifact {
-        component: COMPONENT_ID.to_owned(),
-        protocol_version: PROTOCOL_VERSION.to_owned(),
-        schema_hash: SCHEMA_HASH.to_owned(),
-        error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
-        task_terminal_states: task_terminal_states(),
-        task_cancelled_state: "cancelled".to_owned(),
-        task_completed_state: "completed".to_owned(),
-        task_failed_state: "failed".to_owned(),
-        task_input_required_state: "input_required".to_owned(),
-        task_default_state: "working".to_owned(),
-        related_task_meta_key: RELATED_TASK_META_KEY.to_owned(),
-    }
+    contract::mcp_runtime_contract_artifact()
 }
 
 pub fn mcp_runtime_contract_json() -> Result<String, serde_json::Error> {
-    let mut json = serde_json::to_string_pretty(&mcp_runtime_contract_artifact())?;
-    json.push('\n');
-    Ok(json)
+    contract::mcp_runtime_contract_json()
 }
 
 #[must_use]
 pub fn approved_mcp_protocol_versions() -> Vec<String> {
-    string_values(SUPPORTED_MCP_PROTOCOL_VERSIONS)
+    contract::approved_mcp_protocol_versions()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,32 +397,6 @@ impl OfficialRustSdkClientSession {
     }
 }
 
-impl VersionInfo {
-    #[must_use]
-    pub fn current() -> Self {
-        Self {
-            component: COMPONENT_ID.to_owned(),
-            build_version: env!("CARGO_PKG_VERSION").to_owned(),
-            protocol_version: PROTOCOL_VERSION.to_owned(),
-            schema_hash: SCHEMA_HASH.to_owned(),
-            error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
-            supported_features: SUPPORTED_FEATURES
-                .iter()
-                .map(|feature| (*feature).to_owned())
-                .collect(),
-            min_client_version: MIN_CLIENT_VERSION.to_owned(),
-            max_client_version: MAX_CLIENT_VERSION.to_owned(),
-        }
-    }
-
-    #[must_use]
-    pub fn supports(&self, feature: &str) -> bool {
-        self.supported_features
-            .iter()
-            .any(|supported| supported == feature)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthState {
     Serving,
@@ -450,10 +412,7 @@ pub struct HealthResponse {
 
 #[must_use]
 pub fn health() -> HealthResponse {
-    HealthResponse {
-        state: HealthState::Serving,
-        version: VersionInfo::current(),
-    }
+    contract::health()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,23 +431,7 @@ pub struct ReadinessResponse {
 
 #[must_use]
 pub fn readiness(compatibility_handshake_passed: bool) -> ReadinessResponse {
-    let error = (!compatibility_handshake_passed).then(|| {
-        TypedError::new(
-            McpRuntimeErrorCode::CompatibilityHandshakeRequired,
-            "compatibility handshake has not passed",
-        )
-    });
-
-    ReadinessResponse {
-        state: if compatibility_handshake_passed {
-            ReadinessState::Ready
-        } else {
-            ReadinessState::NotReady
-        },
-        version: VersionInfo::current(),
-        compatibility_handshake_passed,
-        error,
-    }
+    contract::readiness(compatibility_handshake_passed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,35 +454,7 @@ pub struct CompatibilityCheckResponse {
 
 #[must_use]
 pub fn check_compatibility(request: &CompatibilityCheckRequest) -> CompatibilityCheckResponse {
-    let version = VersionInfo::current();
-    let missing_features = request
-        .required_features
-        .iter()
-        .filter(|feature| !version.supports(feature))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let incompatible_reason = if request.expected_component != COMPONENT_ID {
-        Some("component mismatch")
-    } else if request.expected_protocol_version != PROTOCOL_VERSION {
-        Some("protocol version mismatch")
-    } else if request.expected_schema_hash != SCHEMA_HASH {
-        Some("schema hash mismatch")
-    } else if request.expected_error_code_table_hash != ERROR_CODE_TABLE_HASH {
-        Some("error code table hash mismatch")
-    } else if !missing_features.is_empty() {
-        Some("required feature is not supported")
-    } else {
-        None
-    };
-
-    CompatibilityCheckResponse {
-        compatible: incompatible_reason.is_none(),
-        version,
-        missing_features,
-        error: incompatible_reason
-            .map(|message| TypedError::new(McpRuntimeErrorCode::ProtocolIncompatible, message)),
-    }
+    contract::check_compatibility(request)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,69 +491,6 @@ pub enum McpRuntimeErrorCode {
     Internal,
 }
 
-impl McpRuntimeErrorCode {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ConfigurationInvalid => "mcp_runtime_configuration_invalid",
-            Self::ProtocolIncompatible => "mcp_runtime_protocol_incompatible",
-            Self::CompatibilityHandshakeRequired => "mcp_runtime_compatibility_handshake_required",
-            Self::IdentityMismatch => "mcp_runtime_identity_mismatch",
-            Self::PublicBindDenied => "mcp_runtime_public_bind_denied",
-            Self::EndpointNotAllowlisted => "mcp_runtime_endpoint_not_allowlisted",
-            Self::QueueFull => "mcp_runtime_queue_full",
-            Self::PerServerConcurrencyExceeded => "mcp_runtime_per_server_concurrency_exceeded",
-            Self::DeadlineExceeded => "mcp_runtime_deadline_exceeded",
-            Self::PayloadTooLarge => "mcp_runtime_payload_too_large",
-            Self::StreamIdleTimeout => "mcp_runtime_stream_idle_timeout",
-            Self::JsonRpcInvalid => "mcp_runtime_json_rpc_invalid",
-            Self::SchemaValidationFailed => "mcp_runtime_schema_validation_failed",
-            Self::OutputSanitizationFailed => "mcp_runtime_output_sanitization_failed",
-            Self::BundleActivationFailed => "mcp_runtime_bundle_activation_failed",
-            Self::RemoteServerError => "mcp_runtime_remote_server_error",
-            Self::Cancelled => "mcp_runtime_cancelled",
-            Self::Internal => "mcp_runtime_internal",
-        }
-    }
-
-    #[must_use]
-    pub const fn category(self) -> ErrorCategory {
-        match self {
-            Self::ConfigurationInvalid => ErrorCategory::Configuration,
-            Self::ProtocolIncompatible | Self::CompatibilityHandshakeRequired => {
-                ErrorCategory::Compatibility
-            }
-            Self::IdentityMismatch | Self::PublicBindDenied | Self::EndpointNotAllowlisted => {
-                ErrorCategory::Security
-            }
-            Self::QueueFull
-            | Self::PerServerConcurrencyExceeded
-            | Self::DeadlineExceeded
-            | Self::PayloadTooLarge
-            | Self::StreamIdleTimeout => ErrorCategory::ResourceLimit,
-            Self::JsonRpcInvalid
-            | Self::SchemaValidationFailed
-            | Self::OutputSanitizationFailed
-            | Self::BundleActivationFailed => ErrorCategory::Protocol,
-            Self::RemoteServerError => ErrorCategory::Upstream,
-            Self::Cancelled => ErrorCategory::Cancellation,
-            Self::Internal => ErrorCategory::Internal,
-        }
-    }
-
-    #[must_use]
-    pub const fn retriable(self) -> bool {
-        matches!(
-            self,
-            Self::QueueFull
-                | Self::PerServerConcurrencyExceeded
-                | Self::DeadlineExceeded
-                | Self::StreamIdleTimeout
-                | Self::RemoteServerError
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedError {
     pub code: String,
@@ -648,37 +500,10 @@ pub struct TypedError {
     pub safe_metadata: BTreeMap<String, String>,
 }
 
-impl TypedError {
-    #[must_use]
-    pub fn new(code: McpRuntimeErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code: code.as_str().to_owned(),
-            message: message.into(),
-            retriable: code.retriable(),
-            category: code.category(),
-            safe_metadata: BTreeMap::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_safe_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.safe_metadata.insert(key.into(), value.into());
-        self
-    }
-}
-
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("{typed_error:?}")]
 pub struct McpRuntimeError {
     pub typed_error: TypedError,
-}
-
-impl From<McpRuntimeErrorCode> for McpRuntimeError {
-    fn from(code: McpRuntimeErrorCode) -> Self {
-        Self {
-            typed_error: TypedError::new(code, code.as_str()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
