@@ -8,6 +8,7 @@ import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFacto
 import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPBusinessResultContentMetadata, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { pickComposerPlaceholder } from './domain/composerPlaceholders';
+import { withoutSetValue } from './domain/collections';
 import { deriveMCPServerCommands, isMCPServerInput, mcpServerMenuCandidates, mcpServerSubmitIntent, parseDirectMCPServerCommand, type MCPServerCommand } from './domain/mcpServerCommands';
 import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
@@ -1161,11 +1162,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
-      setDeletingConversationIds((current) => {
-        const next = new Set(current);
-        next.delete(targetConversationId);
-        return next;
-      });
+      setDeletingConversationIds((current) => withoutSetValue(current, targetConversationId));
     }
   }
 
@@ -1190,11 +1187,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
-      setRenamingConversationIds((current) => {
-        const next = new Set(current);
-        next.delete(targetConversationId);
-        return next;
-      });
+      setRenamingConversationIds((current) => withoutSetValue(current, targetConversationId));
     }
   }
 
@@ -1627,11 +1620,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
-      setDeletingUploadIds((current) => {
-        const next = new Set(current);
-        next.delete(upload.upload_id);
-        return next;
-      });
+      setDeletingUploadIds((current) => withoutSetValue(current, upload.upload_id));
     }
   }
 
