@@ -36,12 +36,9 @@ from ..dto import (
     SubmitMessageRequest,
 )
 from ..runtime import ApiRuntime
+from ..runtime_access import runtime_from_request as _runtime
 
 router = APIRouter()
-
-
-def _runtime(request: Request) -> ApiRuntime:
-    return request.app.state.runtime
 
 
 def _conversation_summary_response(conversation: Conversation) -> ConversationSummaryResponse:

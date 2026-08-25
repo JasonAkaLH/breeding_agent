@@ -11,16 +11,12 @@ from ..dto import (
     UploadPreviewResponse,
     is_reserved_identity_key,
 )
-from ..runtime import ApiRuntime
+from ..runtime_access import runtime_from_request as _runtime
 from ..upload_store import UploadValidationError
 
 router = APIRouter()
 UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 _UPLOAD_FORM_FIELDS = frozenset({"conversation_id", "file"})
-
-
-def _runtime(request: Request) -> ApiRuntime:
-    return request.app.state.runtime
 
 
 def _upload_response(record) -> UploadFileResponse:

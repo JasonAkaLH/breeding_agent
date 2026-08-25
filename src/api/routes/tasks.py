@@ -34,6 +34,7 @@ from ..dto import (
     TaskSummaryResponse,
 )
 from ..runtime import ApiRuntime
+from ..runtime_access import runtime_from_request as _runtime
 from ..sse import encode_sse_event
 
 router = APIRouter()
@@ -56,10 +57,6 @@ UNFINISHED_TASK_STATUSES = {
     TaskStatus.RUNNING,
     TaskStatus.CANCELLING,
 }
-
-
-def _runtime(request: Request) -> ApiRuntime:
-    return request.app.state.runtime
 
 
 def _count_active_nodes(nodes) -> int:

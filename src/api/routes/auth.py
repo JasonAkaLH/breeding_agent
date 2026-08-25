@@ -6,13 +6,9 @@ from src.auth import AuthTokenValidationError, AuthValidationError
 
 from ..auth import bearer_token_from_request, require_authenticated_user
 from ..dto import AuthTokenResponse, AuthUserResponse, LoginRequest, LogoutResponse, UserResponse
-from ..runtime import ApiRuntime
+from ..runtime_access import runtime_from_request as _runtime
 
 router = APIRouter()
-
-
-def _runtime(request: Request) -> ApiRuntime:
-    return request.app.state.runtime
 
 
 @router.post("/api/v1/auth/login", response_model=AuthTokenResponse)

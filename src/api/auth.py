@@ -9,15 +9,13 @@ from src.auth import AuthTokenValidationError
 from src.core.models import Conversation, Task
 from src.core.enums import ConversationStatus
 
+from .runtime_access import runtime_from_request as _runtime
+
 
 @dataclass(slots=True, frozen=True)
 class AuthenticatedUser:
     username: str
     auth_generation: int
-
-
-def _runtime(request: Request) -> ApiRuntime:
-    return request.app.state.runtime
 
 
 def bearer_token_from_request(request: Request) -> str | None:
