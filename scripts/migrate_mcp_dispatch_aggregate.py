@@ -6,7 +6,10 @@ import json
 import os
 import re
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -27,6 +30,49 @@ from src.storage.mcp_dispatch_aggregate_migration import (  # noqa: E402
 
 
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _load_operator_dsn(value: object) -> str:
+    dsn_env = str(value)
+    if _ENV_NAME.fullmatch(dsn_env) is None:
+        raise MCPDispatchAggregateMigrationError(
+            "mcp_dispatch_aggregate_dsn_env_invalid"
+        )
+    dsn = (os.environ.get(dsn_env) or "").strip()
+    if not dsn:
+        raise MCPDispatchAggregateMigrationError(
+            "mcp_dispatch_aggregate_dsn_env_missing"
+        )
+    return dsn
+
+
+@contextmanager
+def _postgres_operator_engine(dsn: str, env: dict[str, str]) -> Iterator[Any]:
+    env["MAF_STATE_STORE_BACKEND"] = "postgresql"
+    env["MAF_POSTGRES_STATE_DSN"] = dsn
+    config = build_state_platform_runtime_config(env=env, require_driver=True)
+    if config.backend is not StatePlatformBackend.POSTGRESQL or config.dsn is None:
+        raise MCPDispatchAggregateMigrationError(
+            "mcp_dispatch_aggregate_backend_mismatch"
+        )
+    from src.storage.postgres import create_postgres_engine
+
+    engine = create_postgres_engine(config.dsn)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def _emit_rejected(exc: Exception, exit_code: int) -> int:
+    print(
+        json.dumps(
+            {"result": "rejected", "reason_code": str(exc)},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    return exit_code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,30 +129,9 @@ def run_report(args: argparse.Namespace) -> dict[str, object]:
                 "mcp_dispatch_aggregate_backend_mismatch"
             )
         return inspect_sqlite_dispatch_aggregate(args.database_path).as_payload()
-    dsn_env = str(args.dsn_env)
-    if _ENV_NAME.fullmatch(dsn_env) is None:
-        raise MCPDispatchAggregateMigrationError(
-            "mcp_dispatch_aggregate_dsn_env_invalid"
-        )
-    dsn = (os.environ.get(dsn_env) or "").strip()
-    if not dsn:
-        raise MCPDispatchAggregateMigrationError(
-            "mcp_dispatch_aggregate_dsn_env_missing"
-        )
-    env["MAF_STATE_STORE_BACKEND"] = "postgresql"
-    env["MAF_POSTGRES_STATE_DSN"] = dsn
-    config = build_state_platform_runtime_config(env=env, require_driver=True)
-    if config.backend is not StatePlatformBackend.POSTGRESQL or config.dsn is None:
-        raise MCPDispatchAggregateMigrationError(
-            "mcp_dispatch_aggregate_backend_mismatch"
-        )
-    from src.storage.postgres import create_postgres_engine
-
-    engine = create_postgres_engine(config.dsn)
-    try:
+    dsn = _load_operator_dsn(args.dsn_env)
+    with _postgres_operator_engine(dsn, env) as engine:
         return inspect_postgres_dispatch_aggregate(engine).as_payload()
-    finally:
-        engine.dispose()
 
 
 def run_apply(args: argparse.Namespace) -> dict[str, object]:
@@ -126,34 +151,13 @@ def run_apply(args: argparse.Namespace) -> dict[str, object]:
             args.database_path,
             expected_report_sha256=expected_report_sha,
         ).as_payload()
-    dsn_env = str(args.dsn_env)
-    if _ENV_NAME.fullmatch(dsn_env) is None:
-        raise MCPDispatchAggregateMigrationError(
-            "mcp_dispatch_aggregate_dsn_env_invalid"
-        )
-    dsn = (os.environ.get(dsn_env) or "").strip()
-    if not dsn:
-        raise MCPDispatchAggregateMigrationError(
-            "mcp_dispatch_aggregate_dsn_env_missing"
-        )
+    dsn = _load_operator_dsn(args.dsn_env)
     env = dict(os.environ)
-    env["MAF_STATE_STORE_BACKEND"] = "postgresql"
-    env["MAF_POSTGRES_STATE_DSN"] = dsn
-    config = build_state_platform_runtime_config(env=env, require_driver=True)
-    if config.backend is not StatePlatformBackend.POSTGRESQL or config.dsn is None:
-        raise MCPDispatchAggregateMigrationError(
-            "mcp_dispatch_aggregate_backend_mismatch"
-        )
-    from src.storage.postgres import create_postgres_engine
-
-    engine = create_postgres_engine(config.dsn)
-    try:
+    with _postgres_operator_engine(dsn, env) as engine:
         return apply_postgres_dispatch_aggregate(
             engine,
             expected_report_sha256=expected_report_sha,
         ).as_payload()
-    finally:
-        engine.dispose()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,23 +165,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         payload = run_report(args) if args.report else run_apply(args)
     except MCPDispatchAggregateAuthorityConflictError as exc:
-        print(
-            json.dumps(
-                {"result": "rejected", "reason_code": str(exc)},
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        )
-        return 3
+        return _emit_rejected(exc, 3)
     except MCPDispatchAggregateMigrationError as exc:
-        print(
-            json.dumps(
-                {"result": "rejected", "reason_code": str(exc)},
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        )
-        return 2
+        return _emit_rejected(exc, 2)
     print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
     return 0
 

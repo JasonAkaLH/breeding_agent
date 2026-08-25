@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from scripts import migrate_mcp_dispatch_aggregate as migration_script
 from scripts.migrate_mcp_dispatch_aggregate import main, run_apply, run_report
 from src.storage.mcp_dispatch_aggregate_migration import (
     MCPDispatchAggregateAuthorityConflictError,
@@ -27,6 +31,22 @@ from src.storage.sqlite import bootstrap_sqlite_database, create_sqlite_engine
 
 
 class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
+    class _TrackingEnvironment:
+        def __init__(self, values: dict[str, str], events: list[str]) -> None:
+            self._values = values
+            self._events = events
+
+        def keys(self):
+            self._events.append("env_snapshot")
+            return self._values.keys()
+
+        def __getitem__(self, key: str) -> str:
+            return self._values[key]
+
+        def get(self, key: str, default=None):
+            self._events.append(f"dsn_read:{key}")
+            return self._values.get(key, default)
+
     def _create_empty_legacy_database(self, path: Path) -> None:
         connection = sqlite3.connect(path)
         try:
@@ -234,6 +254,190 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
                     dsn_env="CP7_POSTGRES_VALIDATION_DSN",
                 )
             )
+
+    def test_postgres_report_and_apply_preserve_env_order_and_lifecycle(
+        self,
+    ) -> None:
+        dsn_env = "CP7_POSTGRES_VALIDATION_DSN"
+        raw_dsn = " postgresql+psycopg://operator "
+        dsn = raw_dsn.strip()
+        config = SimpleNamespace(
+            backend=migration_script.StatePlatformBackend.POSTGRESQL,
+            dsn=dsn,
+        )
+        expected_env = {
+            dsn_env: raw_dsn,
+            "MAF_STATE_STORE_BACKEND": "postgresql",
+            "MAF_POSTGRES_STATE_DSN": dsn,
+        }
+        cases = (
+            (
+                "report",
+                run_report,
+                Namespace(
+                    report=True,
+                    expected_report_sha=None,
+                    database_path=None,
+                    dsn_env=dsn_env,
+                ),
+                "inspect_postgres_dispatch_aggregate",
+                {"backend": "postgresql"},
+                ["env_snapshot", f"dsn_read:{dsn_env}"],
+            ),
+            (
+                "apply",
+                run_apply,
+                Namespace(
+                    apply=True,
+                    expected_report_sha="a" * 64,
+                    database_path=None,
+                    dsn_env=dsn_env,
+                ),
+                "apply_postgres_dispatch_aggregate",
+                {"result": "applied"},
+                [f"dsn_read:{dsn_env}", "env_snapshot"],
+            ),
+        )
+
+        for mode, runner, args, operation_name, payload, expected_events in cases:
+            with self.subTest(mode=mode):
+                events: list[str] = []
+                environment = self._TrackingEnvironment({dsn_env: raw_dsn}, events)
+                engine = Mock()
+                result = Mock()
+                result.as_payload.return_value = payload
+                with (
+                    patch(
+                        "src.storage.postgres.create_postgres_engine",
+                        return_value=engine,
+                    ) as create_engine,
+                    patch.object(
+                        migration_script,
+                        "build_state_platform_runtime_config",
+                        return_value=config,
+                    ) as build_config,
+                    patch.object(
+                        migration_script,
+                        operation_name,
+                        return_value=result,
+                    ) as operation,
+                    patch.object(migration_script.os, "environ", environment),
+                ):
+                    self.assertEqual(runner(args), payload)
+
+                self.assertEqual(events, expected_events)
+                build_config.assert_called_once_with(
+                    env=expected_env,
+                    require_driver=True,
+                )
+                create_engine.assert_called_once_with(dsn)
+                if mode == "report":
+                    operation.assert_called_once_with(engine)
+                else:
+                    operation.assert_called_once_with(
+                        engine,
+                        expected_report_sha256="a" * 64,
+                    )
+                engine.dispose.assert_called_once_with()
+
+    def test_postgres_engine_is_disposed_when_operation_fails(self) -> None:
+        dsn_env = "CP7_POSTGRES_VALIDATION_DSN"
+        dsn = "postgresql+psycopg://operator"
+        config = SimpleNamespace(
+            backend=migration_script.StatePlatformBackend.POSTGRESQL,
+            dsn=dsn,
+        )
+        cases = (
+            (
+                "report",
+                run_report,
+                Namespace(
+                    report=True,
+                    expected_report_sha=None,
+                    database_path=None,
+                    dsn_env=dsn_env,
+                ),
+                "inspect_postgres_dispatch_aggregate",
+            ),
+            (
+                "apply",
+                run_apply,
+                Namespace(
+                    apply=True,
+                    expected_report_sha="a" * 64,
+                    database_path=None,
+                    dsn_env=dsn_env,
+                ),
+                "apply_postgres_dispatch_aggregate",
+            ),
+        )
+
+        for mode, runner, args, operation_name in cases:
+            with self.subTest(mode=mode):
+                engine = Mock()
+                with (
+                    patch.dict(os.environ, {dsn_env: dsn}, clear=True),
+                    patch(
+                        "src.storage.postgres.create_postgres_engine",
+                        return_value=engine,
+                    ),
+                    patch.object(
+                        migration_script,
+                        "build_state_platform_runtime_config",
+                        return_value=config,
+                    ),
+                    patch.object(
+                        migration_script,
+                        operation_name,
+                        side_effect=RuntimeError("injected_postgres_failure"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "injected_postgres_failure"),
+                ):
+                    runner(args)
+                engine.dispose.assert_called_once_with()
+
+    def test_postgres_dsn_guards_fail_before_engine_creation(self) -> None:
+        cases = (
+            (
+                "report_invalid_env",
+                run_report,
+                Namespace(
+                    report=True,
+                    expected_report_sha=None,
+                    database_path=None,
+                    dsn_env="invalid-name",
+                ),
+                {},
+                "mcp_dispatch_aggregate_dsn_env_invalid",
+            ),
+            (
+                "apply_missing_dsn",
+                run_apply,
+                Namespace(
+                    apply=True,
+                    expected_report_sha="a" * 64,
+                    database_path=None,
+                    dsn_env="CP7_POSTGRES_VALIDATION_DSN",
+                ),
+                {},
+                "mcp_dispatch_aggregate_dsn_env_missing",
+            ),
+        )
+
+        for mode, runner, args, environment, reason_code in cases:
+            with self.subTest(mode=mode):
+                with (
+                    patch.dict(os.environ, environment, clear=True),
+                    patch(
+                        "src.storage.postgres.create_postgres_engine"
+                    ) as create_engine,
+                    self.assertRaisesRegex(
+                        MCPDispatchAggregateMigrationError,
+                        f"^{reason_code}$",
+                    ),
+                ):
+                    runner(args)
+                create_engine.assert_not_called()
 
     def test_apply_empty_legacy_sqlite_is_atomic_recorded_and_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -476,12 +680,13 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
                     expected_report_sha256=str(report["report_sha256"]),
                 )
 
-    def test_cli_exit_codes_are_closed(self) -> None:
+    def test_cli_exit_codes_and_stdout_are_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "legacy.sqlite3"
             self._create_empty_legacy_database(path)
-            self.assertEqual(
-                main(
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
                     [
                         "--apply",
                         "--database-path",
@@ -489,8 +694,12 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
                         "--expected-report-sha",
                         "0" * 64,
                     ]
-                ),
-                2,
+                )
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(
+                output.getvalue(),
+                '{"reason_code":"mcp_dispatch_aggregate_report_changed",'
+                '"result":"rejected"}\n',
             )
             connection = sqlite3.connect(path)
             try:
@@ -501,8 +710,9 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
             finally:
                 connection.close()
             blocked = inspect_sqlite_dispatch_aggregate(path).as_payload()
-            self.assertEqual(
-                main(
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
                     [
                         "--apply",
                         "--database-path",
@@ -510,8 +720,12 @@ class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
                         "--expected-report-sha",
                         str(blocked["report_sha256"]).removeprefix("sha256:"),
                     ]
-                ),
-                3,
+                )
+            self.assertEqual(exit_code, 3)
+            self.assertEqual(
+                output.getvalue(),
+                '{"reason_code":"mcp_call_record_business_rows_shape_unsupported",'
+                '"result":"rejected"}\n',
             )
 
     def test_postgres_cutover_plan_uses_bounded_lock_and_not_valid_replacement(
