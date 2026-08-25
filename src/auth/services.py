@@ -7,7 +7,7 @@ from datetime import datetime
 
 from src.auth.generation_cache import AuthGenerationCache
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason, InMemoryAuthInvalidationBus
-from src.core.contracts import StoragePort
+from src.core.contracts import AuthStoragePort
 from src.core.models import AuthUserToken
 from src.integrations.master_key import MasterKeyDomain, MasterKeyError, _DerivedDomainKey
 from src.integrations.rust_safety_contract import hmac_sha256_hex
@@ -75,7 +75,7 @@ class UsernameTokenService:
 
     def __init__(
         self,
-        storage: StoragePort,
+        storage: AuthStoragePort,
         *,
         now_fn: NowFn,
         token_hasher: AuthTokenHasher,
