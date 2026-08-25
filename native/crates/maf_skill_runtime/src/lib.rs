@@ -14,8 +14,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+mod grpc;
+mod service;
 mod stdio;
 
+#[cfg(test)]
+use grpc::{
+    error_category_to_pb, health_state_to_pb, missing_features_from_error, readiness_state_to_pb,
+};
 #[cfg(test)]
 use stdio::{
     LimitedReaderHandle, LimitedReaderState, read_limited_prefix, receive_before_deadline,
@@ -40,6 +46,7 @@ pub mod pb {
     }
 }
 
+#[cfg(test)]
 use pb::common::v1 as common_pb;
 use pb::skill::v1 as skill_pb;
 
@@ -482,146 +489,6 @@ pub struct SkillSandboxService {
     process_manager: Option<SandboxProcessManager>,
 }
 
-impl SkillSandboxService {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            compatibility_handshake_passed: false,
-            process_manager: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_process_manager(process_manager: SandboxProcessManager) -> Self {
-        Self {
-            compatibility_handshake_passed: false,
-            process_manager: Some(process_manager),
-        }
-    }
-
-    #[must_use]
-    pub fn version(&self) -> SkillRuntimeVersion {
-        let artifact = skill_runtime_contract_artifact();
-        SkillRuntimeVersion {
-            component: artifact.component,
-            protocol_version: artifact.protocol_version,
-            schema_hash: artifact.schema_hash,
-            error_code_table_hash: artifact.error_code_table_hash,
-            supported_features: artifact.supported_features,
-        }
-    }
-
-    #[must_use]
-    pub fn health(&self) -> HealthStatus {
-        HealthStatus {
-            state: HealthState::Serving,
-            version: self.version(),
-        }
-    }
-
-    #[must_use]
-    pub fn readiness(&self) -> ReadinessStatus {
-        ReadinessStatus {
-            state: if self.compatibility_handshake_passed {
-                ReadinessState::Ready
-            } else {
-                ReadinessState::NotReady
-            },
-            version: self.version(),
-            compatibility_handshake_passed: self.compatibility_handshake_passed,
-        }
-    }
-
-    pub fn check_compatibility(
-        &self,
-        check: CompatibilityCheck,
-    ) -> Result<CompatibilityResult, SkillRuntimeError> {
-        let version = self.version();
-        if check.expected_component != version.component
-            || check.expected_protocol_version != version.protocol_version
-            || check.expected_schema_hash != version.schema_hash
-            || check.expected_error_code_table_hash != version.error_code_table_hash
-        {
-            return Err(SkillRuntimeError::new(
-                SkillRuntimeErrorCode::ContractMismatch,
-                "skill sandbox protocol handshake is incompatible",
-            ));
-        }
-        validate_client_version(&check.client_version)?;
-
-        let supported = version
-            .supported_features
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let missing_features = check
-            .required_features
-            .into_iter()
-            .filter(|feature| !supported.contains(feature))
-            .collect::<Vec<_>>();
-        if !missing_features.is_empty() {
-            let mut error = SkillRuntimeError::new(
-                SkillRuntimeErrorCode::ContractMismatch,
-                "skill sandbox required features are missing",
-            );
-            error
-                .safe_metadata
-                .insert("missing_features".to_owned(), missing_features.join(","));
-            return Err(error);
-        }
-
-        Ok(CompatibilityResult {
-            compatible: true,
-            missing_features,
-        })
-    }
-
-    pub fn accept_compatibility_handshake(
-        &mut self,
-        check: CompatibilityCheck,
-    ) -> Result<CompatibilityResult, SkillRuntimeError> {
-        let result = self.check_compatibility(check)?;
-        self.compatibility_handshake_passed = true;
-        Ok(result)
-    }
-
-    #[must_use]
-    pub fn validate_policy(&self, input: SkillPolicyInput) -> ValidatePolicyResponse {
-        match validate_policy(&input) {
-            Ok(decision) => ValidatePolicyResponse {
-                allowed: decision.allowed,
-                bundle_fingerprint: decision.bundle_fingerprint,
-                error: None,
-            },
-            Err(error) => ValidatePolicyResponse {
-                allowed: false,
-                bundle_fingerprint: String::new(),
-                error: Some(TypedErrorEnvelope::from(error)),
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn execute_sandboxed(&self, request: ExecuteSandboxedRequest) -> ExecuteSandboxedResponse {
-        if let Err(error) = guard_public_root_path(&request.cwd_under_public_root) {
-            return sandbox_error_response(error);
-        }
-        if !allowed_execution_modes().contains(&request.execution_mode) {
-            return sandbox_error_response(SkillRuntimeError::new(
-                SkillRuntimeErrorCode::ManifestInvalid,
-                "execution mode is not supported by generic skill runtime",
-            ));
-        }
-        if let Some(process_manager) = &self.process_manager {
-            return process_manager.execute(&request);
-        }
-        sandbox_error_response(SkillRuntimeError::new(
-            SkillRuntimeErrorCode::SandboxPolicyDenied,
-            "rust skill sandbox process manager is not enabled yet",
-        ))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillSandboxServeConfig {
     pub listen_addr: SocketAddr,
@@ -697,30 +564,6 @@ pub struct SkillSandboxGrpcService {
     inner: std::sync::Arc<std::sync::Mutex<SkillSandboxService>>,
 }
 
-impl SkillSandboxGrpcService {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(SkillSandboxService::new())),
-        }
-    }
-
-    #[must_use]
-    pub fn with_process_manager(process_manager: SandboxProcessManager) -> Self {
-        Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(
-                SkillSandboxService::with_process_manager(process_manager),
-            )),
-        }
-    }
-
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, SkillSandboxService>, tonic::Status> {
-        self.inner
-            .lock()
-            .map_err(|_| tonic::Status::internal("skill sandbox service lock is poisoned"))
-    }
-}
-
 pub async fn serve_skill_sandbox(
     config: SkillSandboxServeConfig,
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {
@@ -754,133 +597,6 @@ where
         ))
         .serve_with_shutdown(listen_addr, shutdown)
         .await
-}
-
-#[tonic::async_trait]
-impl skill_pb::skill_sandbox_server::SkillSandbox for SkillSandboxGrpcService {
-    async fn health(
-        &self,
-        _request: tonic::Request<skill_pb::HealthRequest>,
-    ) -> Result<tonic::Response<skill_pb::HealthResponse>, tonic::Status> {
-        let status = self.lock()?.health();
-        Ok(tonic::Response::new(skill_pb::HealthResponse {
-            state: health_state_to_pb(status.state) as i32,
-            version: Some(version_to_pb(status.version)),
-            error: None,
-        }))
-    }
-
-    async fn readiness(
-        &self,
-        _request: tonic::Request<skill_pb::ReadinessRequest>,
-    ) -> Result<tonic::Response<skill_pb::ReadinessResponse>, tonic::Status> {
-        let status = self.lock()?.readiness();
-        Ok(tonic::Response::new(skill_pb::ReadinessResponse {
-            state: readiness_state_to_pb(status.state) as i32,
-            version: Some(version_to_pb(status.version)),
-            compatibility_handshake_passed: status.compatibility_handshake_passed,
-            error: None,
-        }))
-    }
-
-    async fn version(
-        &self,
-        _request: tonic::Request<skill_pb::VersionRequest>,
-    ) -> Result<tonic::Response<skill_pb::VersionResponse>, tonic::Status> {
-        let version = self.lock()?.version();
-        Ok(tonic::Response::new(skill_pb::VersionResponse {
-            version: Some(version_to_pb(version)),
-        }))
-    }
-
-    async fn check_compatibility(
-        &self,
-        request: tonic::Request<skill_pb::CompatibilityCheckRequest>,
-    ) -> Result<tonic::Response<skill_pb::CompatibilityCheckResponse>, tonic::Status> {
-        let request = request.into_inner();
-        let mut service = self.lock()?;
-        let version = service.version();
-        let result = service.accept_compatibility_handshake(CompatibilityCheck {
-            client_version: request.client_version,
-            expected_component: request.expected_component,
-            expected_protocol_version: request.expected_protocol_version,
-            expected_schema_hash: request.expected_schema_hash,
-            expected_error_code_table_hash: request.expected_error_code_table_hash,
-            required_features: request.required_features,
-        });
-        match result {
-            Ok(result) => Ok(tonic::Response::new(skill_pb::CompatibilityCheckResponse {
-                compatible: result.compatible,
-                version: Some(version_to_pb(version)),
-                missing_features: result.missing_features,
-                error: None,
-            })),
-            Err(error) => Ok(tonic::Response::new(skill_pb::CompatibilityCheckResponse {
-                compatible: false,
-                version: Some(version_to_pb(version)),
-                missing_features: missing_features_from_error(&error),
-                error: Some(typed_error_to_pb(TypedErrorEnvelope::from(error))),
-            })),
-        }
-    }
-
-    async fn validate_policy(
-        &self,
-        request: tonic::Request<skill_pb::ValidatePolicyRequest>,
-    ) -> Result<tonic::Response<skill_pb::ValidatePolicyResponse>, tonic::Status> {
-        let request = request.into_inner();
-        let x_runtime_rust = request
-            .x_runtime_rust
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
-        let input = SkillPolicyInput {
-            skill_name: request.skill_name,
-            capability_id: request.capability_id,
-            execution_mode: request.execution_mode,
-            trust_scope: request.trust_scope,
-            handler: request.handler,
-            requested_services: if request.requested_services.is_empty() {
-                request.manifest_services.clone()
-            } else {
-                request.requested_services
-            },
-            manifest_services: request.manifest_services,
-            runtime_allowlist_services: request.runtime_allowlist_services,
-            runtime_allowlist_handlers: request.runtime_allowlist_handlers,
-            x_runtime_rust,
-        };
-        let response = self.lock()?.validate_policy(input);
-        Ok(tonic::Response::new(skill_pb::ValidatePolicyResponse {
-            allowed: response.allowed,
-            bundle_fingerprint: response.bundle_fingerprint,
-            error: response.error.map(typed_error_to_pb),
-        }))
-    }
-
-    async fn execute_sandboxed(
-        &self,
-        request: tonic::Request<skill_pb::ExecuteSandboxedRequest>,
-    ) -> Result<tonic::Response<skill_pb::ExecuteSandboxedResponse>, tonic::Status> {
-        let request = request.into_inner();
-        let response = self.lock()?.execute_sandboxed(ExecuteSandboxedRequest {
-            skill_name: request.skill_name,
-            execution_mode: request.execution_mode,
-            cwd_under_public_root: request.cwd_under_public_root,
-            argv: request.argv,
-            timeout_ms: request.timeout_ms,
-            stdout_limit_bytes: request.stdout_limit_bytes,
-            stderr_limit_bytes: request.stderr_limit_bytes,
-            stdin_payload: request.stdin_payload,
-        });
-        Ok(tonic::Response::new(skill_pb::ExecuteSandboxedResponse {
-            exit_code: response.exit_code,
-            stdout_prefix: response.stdout_prefix,
-            stderr_prefix: response.stderr_prefix,
-            stdout_truncated: response.stdout_truncated,
-            stderr_truncated: response.stderr_truncated,
-            error: response.error.map(typed_error_to_pb),
-        }))
-    }
 }
 
 #[must_use]
@@ -1463,71 +1179,6 @@ const SIGKILL: i32 = 9;
 unsafe extern "C" {
     fn setpgid(pid: i32, pgid: i32) -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
-}
-
-fn version_to_pb(version: SkillRuntimeVersion) -> common_pb::VersionInfo {
-    common_pb::VersionInfo {
-        component: version.component,
-        build_version: env!("CARGO_PKG_VERSION").to_owned(),
-        protocol_version: version.protocol_version,
-        schema_hash: version.schema_hash,
-        error_code_table_hash: version.error_code_table_hash,
-        supported_features: version.supported_features,
-        min_client_version: MIN_CLIENT_VERSION.to_owned(),
-        max_client_version: MAX_CLIENT_VERSION.to_owned(),
-    }
-}
-
-fn health_state_to_pb(state: HealthState) -> common_pb::HealthState {
-    match state {
-        HealthState::Serving => common_pb::HealthState::Serving,
-        HealthState::NotServing => common_pb::HealthState::NotServing,
-        HealthState::Degraded => common_pb::HealthState::Degraded,
-    }
-}
-
-fn readiness_state_to_pb(state: ReadinessState) -> common_pb::ReadinessState {
-    match state {
-        ReadinessState::Ready => common_pb::ReadinessState::Ready,
-        ReadinessState::NotReady => common_pb::ReadinessState::NotReady,
-    }
-}
-
-fn typed_error_to_pb(error: TypedErrorEnvelope) -> common_pb::TypedError {
-    common_pb::TypedError {
-        code: error.code,
-        message: error.message,
-        retriable: error.retriable,
-        category: error_category_to_pb(&error.category) as i32,
-        safe_metadata: error.safe_metadata.into_iter().collect(),
-    }
-}
-
-fn error_category_to_pb(category: &str) -> common_pb::ErrorCategory {
-    match category {
-        "configuration" => common_pb::ErrorCategory::Configuration,
-        "compatibility" => common_pb::ErrorCategory::Compatibility,
-        "security" => common_pb::ErrorCategory::Security,
-        "resource_limit" => common_pb::ErrorCategory::ResourceLimit,
-        "protocol" => common_pb::ErrorCategory::Protocol,
-        "upstream" => common_pb::ErrorCategory::Upstream,
-        "cancellation" => common_pb::ErrorCategory::Cancellation,
-        _ => common_pb::ErrorCategory::Internal,
-    }
-}
-
-fn missing_features_from_error(error: &SkillRuntimeError) -> Vec<String> {
-    error
-        .safe_metadata
-        .get("missing_features")
-        .map(|features| {
-            features
-                .split(',')
-                .filter(|feature| !feature.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
