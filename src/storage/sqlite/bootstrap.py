@@ -4,7 +4,7 @@ import re
 
 from sqlalchemy import Connection, Engine, inspect, text
 
-from .base import SQLiteBase
+from src.storage.sqlalchemy_base import SQLiteBase
 
 
 LEGACY_AUTH_TABLES = (

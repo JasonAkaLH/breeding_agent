@@ -39,7 +39,7 @@ from src.storage.agent_payload import (
     canonicalize_agent_payload,
 )
 
-from .models import (
+from src.storage.sqlalchemy_models import (
     AgentFinalReceiptRow,
     AgentItemRow,
     AgentRunRow,

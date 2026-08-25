@@ -10,8 +10,8 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.dialects import postgresql
 
 # Importing models registers all runtime tables on SQLiteBase.metadata.
-import src.storage.sqlite.models  # noqa: F401
-from src.storage.sqlite.base import SQLiteBase
+import src.storage.sqlalchemy_models  # noqa: F401
+from src.storage.sqlalchemy_base import SQLiteBase
 
 from .schema import POSTGRES_STATE_TABLES, build_schema_ddl
 

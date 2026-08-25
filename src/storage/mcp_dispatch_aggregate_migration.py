@@ -21,7 +21,7 @@ from src.state.postgres.runtime_schema import (
     build_postgres_fresh_cutover_schema_manifest,
 )
 from src.state.postgres.schema_reconciler import SchemaInspection
-from src.storage.sqlite.base import SQLiteBase
+from src.storage.sqlalchemy_base import SQLiteBase
 
 
 MCP_DISPATCH_AGGREGATE_REPORT_SCHEMA = (

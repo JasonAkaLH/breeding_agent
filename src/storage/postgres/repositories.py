@@ -56,7 +56,7 @@ from src.core.models import (
     validate_mcp_rollout_drill_observation,
 )
 from src.integrations.mcp.rollout_evidence import is_exact_mcp_metric_bucket_window
-from src.storage.sqlite.models import (
+from src.storage.sqlalchemy_models import (
     ConversationRow,
     InterruptAnswerRow,
     InterruptRow,

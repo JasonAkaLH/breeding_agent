@@ -165,7 +165,7 @@ from src.storage.mcp_dispatch_aggregate import (
     TerminalCandidateSnapshotReader,
 )
 
-from .models import (
+from src.storage.sqlalchemy_models import (
     ArtifactRow,
     AuthUserTokenRow,
     CheckpointRow,
