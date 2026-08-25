@@ -164,6 +164,26 @@ from src.storage.mcp_dispatch_aggregate import (
     PendingActionPayloadReader,
     TerminalCandidateSnapshotReader,
 )
+from src.storage.mcp_legacy_records import (
+    _mcp_legacy_migration_record_values,
+    _user_mcp_server_insert_values,
+    _validate_mcp_legacy_migration_record,
+)
+from src.storage.row_mappers import (
+    _mcp_owner_server_set_fingerprint,
+    _row_to_conversation,
+    _row_to_mcp_remote_task,
+    _row_to_mcp_rollout_block_resolution,
+    _row_to_mcp_rollout_deployment_activation,
+    _row_to_mcp_rollout_drill_observation,
+    _row_to_mcp_rollout_evidence_snapshot,
+    _row_to_mcp_rollout_gate_scope,
+    _row_to_mcp_rollout_instance_config,
+    _row_to_mcp_rollout_metric_bucket,
+    _row_to_mcp_rollout_promotion_block,
+    _row_to_mcp_rollout_stage_approval,
+    _row_to_mcp_shadow_audit_sample,
+)
 
 from src.storage.sqlalchemy_models import (
     ArtifactRow,
@@ -714,30 +734,6 @@ def _row_to_mcp_terminal_projection(
     )
 
 
-def _row_to_mcp_remote_task(row: MCPRemoteTaskBindingRow) -> MCPRemoteTaskBinding:
-    return MCPRemoteTaskBinding(
-        safe_remote_task_ref=row.safe_remote_task_ref,
-        owner_user_id=row.owner_user_id,
-        task_id=row.task_id,
-        node_id=row.node_id,
-        call_ref=row.call_ref,
-        server_id=row.server_id,
-        protocol_version=row.protocol_version,
-        remote_task_ciphertext=row.remote_task_ciphertext,
-        remote_task_nonce=row.remote_task_nonce,
-        encryption_version=int(row.encryption_version),
-        last_status=row.last_status,
-        next_poll_at=row.next_poll_at,
-        published_at=row.published_at,
-        continuation_plan=dict(row.continuation_plan or {}),
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        terminal_at=row.terminal_at,
-        claim_owner=row.claim_owner,
-        claim_token=row.claim_token,
-        lease_expires_at=row.lease_expires_at,
-        revision=0 if row.revision is None else int(row.revision),
-    )
 
 
 def _row_to_mcp_remote_task_outbox(
@@ -840,201 +836,24 @@ def _row_to_mcp_legacy_migration_record(
     )
 
 
-def _row_to_mcp_rollout_gate_scope(row: MCPRolloutGateScopeRow) -> MCPRolloutGateScope:
-    return MCPRolloutGateScope(
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        created_at=row.created_at,
-    )
 
 
-def _row_to_mcp_rollout_drill_observation(
-    row: MCPRolloutDrillObservationRow,
-) -> MCPRolloutDrillObservation:
-    return MCPRolloutDrillObservation(
-        drill_observation_id=row.drill_observation_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        deployment_id=row.deployment_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        drill=row.drill,
-        outcome=row.outcome,
-        observed_at=row.observed_at,
-        recorded_at=row.recorded_at,
-        expires_at=row.expires_at,
-        payload_digest=row.payload_digest,
-    )
 
 
-def _row_to_mcp_rollout_metric_bucket(
-    row: MCPRolloutMetricBucketRow,
-) -> MCPRolloutMetricBucket:
-    return MCPRolloutMetricBucket(
-        metric_bucket_id=row.metric_bucket_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        deployment_id=row.deployment_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        metric_name=row.metric_name,
-        bucket_started_at=row.bucket_started_at,
-        bucket_ended_at=row.bucket_ended_at,
-        execution_path=row.execution_path,
-        routing_mode=row.routing_mode,
-        transport=row.transport,
-        protocol_version=row.protocol_version,
-        adapter=row.adapter,
-        result_category=row.result_category,
-        error_category=row.error_category,
-        call_kind=None if row.call_kind == "not_applicable" else row.call_kind,
-        red_line=None if row.red_line == "not_applicable" else row.red_line,
-        latency_bucket=row.latency_bucket,
-        value=int(row.value),
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-    )
 
 
-def _row_to_mcp_rollout_evidence_snapshot(
-    row: MCPRolloutEvidenceSnapshotRow,
-) -> MCPRolloutEvidenceSnapshot:
-    return MCPRolloutEvidenceSnapshot(
-        evidence_id=row.evidence_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        git_sha=row.git_sha,
-        deployment_id=row.deployment_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        window_started_at=row.window_started_at,
-        window_ended_at=row.window_ended_at,
-        recorded_at=row.recorded_at,
-        producer=row.producer,
-        source=row.source,
-        snapshot_id=int(row.snapshot_id),
-        nonce=row.nonce,
-        evidence_kind=row.evidence_kind,
-        payload=dict(row.payload),
-        payload_digest=row.payload_digest,
-        attestation_key_id=row.attestation_key_id,
-        attestation_signature=row.attestation_signature,
-    )
 
 
-def _row_to_mcp_shadow_audit_sample(
-    row: MCPShadowAuditSampleRow,
-) -> MCPShadowAuditSample:
-    return MCPShadowAuditSample(
-        sample_id=row.sample_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        deployment_id=row.deployment_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        manifest_fingerprint=row.manifest_fingerprint,
-        fixture_fingerprint=row.fixture_fingerprint,
-        mapping_fingerprint=row.mapping_fingerprint,
-        scenario=row.scenario,
-        nonce=row.nonce,
-        safe_owner_ref=row.safe_owner_ref,
-        safe_task_ref=row.safe_task_ref,
-        safe_call_ref=row.safe_call_ref,
-        legacy_outcome=row.legacy_outcome,
-        shadow_outcome=row.shadow_outcome,
-        transport=row.transport,
-        endpoint_policy=row.endpoint_policy,
-        comparison=row.comparison,
-        blockers=tuple(str(item) for item in row.blockers),
-        payload_digest=row.payload_digest,
-        observed_at=row.observed_at,
-        recorded_at=row.recorded_at,
-        expires_at=row.expires_at,
-    )
 
 
-def _row_to_mcp_rollout_stage_approval(
-    row: MCPRolloutStageApprovalRow,
-) -> MCPRolloutStageApproval:
-    return MCPRolloutStageApproval(
-        approval_id=row.approval_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        deployment_id=row.deployment_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        evidence_id=row.evidence_id,
-        reason=row.reason,
-        approver=row.approver,
-        created_at=row.created_at,
-    )
 
 
-def _row_to_mcp_rollout_deployment_activation(
-    row: MCPRolloutDeploymentActivationRow,
-) -> MCPRolloutDeploymentActivation:
-    return MCPRolloutDeploymentActivation(
-        activation_id=row.activation_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        deployment_id=row.deployment_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        approval_id=row.approval_id,
-        evidence_id=row.evidence_id,
-        previous_activation_id=row.previous_activation_id,
-        operator_reason=row.operator_reason,
-        is_rollback=bool(row.is_rollback),
-        created_at=row.created_at,
-    )
 
 
-def _row_to_mcp_rollout_promotion_block(
-    row: MCPRolloutPromotionBlockRow,
-) -> MCPRolloutPromotionBlock:
-    return MCPRolloutPromotionBlock(
-        block_id=row.block_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        deployment_id=row.deployment_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        evidence_id=row.evidence_id,
-        reason_code=row.reason_code,
-        created_at=row.created_at,
-    )
 
 
-def _row_to_mcp_rollout_block_resolution(
-    row: MCPRolloutBlockResolutionRow,
-) -> MCPRolloutBlockResolution:
-    return MCPRolloutBlockResolution(
-        resolution_id=row.resolution_id,
-        block_id=row.block_id,
-        approval_id=row.approval_id,
-        evidence_id=row.evidence_id,
-        reason=row.reason,
-        approver=row.approver,
-        created_at=row.created_at,
-    )
 
 
-def _row_to_mcp_rollout_instance_config(
-    row: MCPRolloutInstanceConfigRow,
-) -> MCPRolloutInstanceConfigLease:
-    return MCPRolloutInstanceConfigLease(
-        instance_config_id=row.instance_config_id,
-        environment_id=row.environment_id,
-        rollout_program=row.rollout_program,
-        deployment_id=row.deployment_id,
-        instance_id=row.instance_id,
-        stage=row.stage,
-        config_fingerprint=row.config_fingerprint,
-        activation_id=row.activation_id,
-        lease_expires_at=row.lease_expires_at,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-    )
 
 
 def _row_to_user_mcp_server(row: UserMCPServerRow) -> UserMCPServer:
@@ -1102,24 +921,6 @@ def _row_to_user_mcp_scope_lease(row: UserMCPScopeLeaseRow) -> UserMCPScopeLease
     )
 
 
-def _row_to_conversation(row: ConversationRow) -> Conversation:
-    return Conversation(
-        conversation_id=row.conversation_id,
-        username=row.username,
-        status=row.status,
-        current_task_id=row.current_task_id,
-        title=row.title,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        delete_runner_id=row.delete_runner_id,
-        delete_requested_at=row.delete_requested_at,
-        delete_started_at=row.delete_started_at,
-        delete_finished_at=row.delete_finished_at,
-        delete_failed_at=row.delete_failed_at,
-        delete_error_code=row.delete_error_code,
-        delete_error_summary=row.delete_error_summary,
-        delete_phase=row.delete_phase,
-    )
 
 
 def _row_to_conversation_file_resource(row: ConversationFileResourceRow) -> ConversationFileResource:
@@ -1358,20 +1159,6 @@ _CP7_HOOK_BY_RED_LINE = {
 }
 
 
-def _mcp_owner_server_set_fingerprint(rows: Sequence[UserMCPServerRow]) -> str:
-    payload = [
-        [
-            row.server_id,
-            int(row.config_version),
-            int(row.security_version),
-            bool(row.enabled),
-            str(row.health_status),
-            bool(row.deletion_pending),
-            row.deleted_at is not None,
-        ]
-        for row in sorted(rows, key=lambda item: item.server_id.encode("utf-8"))
-    ]
-    return canonical_sha256(payload)
 
 
 def _mcp_server_is_available(row: UserMCPServerRow | None) -> bool:
@@ -1957,6 +1744,14 @@ def _ensure_runtime_store_write_allowed_by_rust_contract(
 
 
 class SQLiteStateRepository:
+    _validate_mcp_legacy_migration_record = staticmethod(
+        _validate_mcp_legacy_migration_record
+    )
+    _mcp_legacy_migration_record_values = staticmethod(
+        _mcp_legacy_migration_record_values
+    )
+    _user_mcp_server_insert_values = staticmethod(_user_mcp_server_insert_values)
+
     def __init__(
         self,
         session: Session,
@@ -3790,63 +3585,7 @@ class SQLiteStateRepository:
             raise ValueError("legacy MCP migration identity conflicts")
         return existing
 
-    @staticmethod
-    def _validate_mcp_legacy_migration_record(
-        record: MCPLegacyMigrationRecord,
-    ) -> None:
-        if record.event_type != "mcp.legacy.config_migrated":
-            raise ValueError("legacy MCP migration event type is invalid")
-        if record.disposition != "migrate_owner":
-            raise ValueError("legacy MCP migration disposition is invalid")
-        if not record.source_server_id.strip() or not record.target_server_id.strip():
-            raise ValueError("legacy MCP migration server identity is invalid")
-        sha_values = (
-            record.migration_id,
-            record.plan_fingerprint,
-            record.source_fingerprint,
-            record.target_consumer_set_digest,
-            record.capability_obligations_fingerprint,
-            record.catalog_fingerprint,
-            record.capability_fingerprint,
-            record.validator_provenance_fingerprint,
-        )
-        if any(re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in sha_values):
-            raise ValueError("legacy MCP migration fingerprint is invalid")
-        hmac_values = (record.owner_consumer_ref, record.credential_digest)
-        if any(
-            re.fullmatch(r"hmac-sha256:[0-9a-f]{64}", value) is None
-            for value in hmac_values
-        ):
-            raise ValueError("legacy MCP migration safe reference is invalid")
-        if record.occurred_at >= record.evidence_expires_at:
-            raise ValueError("legacy MCP migration evidence window is invalid")
 
-    @staticmethod
-    def _mcp_legacy_migration_record_values(
-        record: MCPLegacyMigrationRecord,
-    ) -> dict[str, object]:
-        return {
-            "migration_id": record.migration_id,
-            "event_type": record.event_type,
-            "plan_fingerprint": record.plan_fingerprint,
-            "source_server_id": record.source_server_id,
-            "source_fingerprint": record.source_fingerprint,
-            "owner_consumer_ref": record.owner_consumer_ref,
-            "target_server_id": record.target_server_id,
-            "target_consumer_set_digest": record.target_consumer_set_digest,
-            "capability_obligations_fingerprint": (
-                record.capability_obligations_fingerprint
-            ),
-            "catalog_fingerprint": record.catalog_fingerprint,
-            "capability_fingerprint": record.capability_fingerprint,
-            "validator_provenance_fingerprint": (
-                record.validator_provenance_fingerprint
-            ),
-            "credential_digest": record.credential_digest,
-            "disposition": record.disposition,
-            "occurred_at": record.occurred_at,
-            "evidence_expires_at": record.evidence_expires_at,
-        }
 
     @classmethod
     def _validate_mcp_legacy_migration_replay(
@@ -3859,42 +3598,6 @@ class SQLiteStateRepository:
         ) != cls._mcp_legacy_migration_record_values(record):
             raise ValueError("legacy MCP migration record conflicts")
 
-    @staticmethod
-    def _user_mcp_server_insert_values(
-        server: UserMCPServer,
-        credential: UserMCPCredentialRecord | None,
-    ) -> dict[str, object | None]:
-        return {
-            "server_id": server.server_id,
-            "owner_user_id": server.owner_user_id,
-            "display_name": server.display_name,
-            "routing_description": server.routing_description,
-            "endpoint_url": server.endpoint_url,
-            "transport": str(server.transport),
-            "protocol_preference": str(server.protocol_preference),
-            "auth_type": str(server.auth_type),
-            "auth_metadata": dict(server.auth_metadata),
-            "enabled": server.enabled,
-            "health_status": str(server.health_status),
-            "config_version": max(1, int(server.config_version)),
-            "security_version": max(1, int(server.security_version)),
-            "credential_ciphertext": (
-                None if credential is None else credential.credential_ciphertext
-            ),
-            "credential_nonce": None if credential is None else credential.credential_nonce,
-            "encryption_version": (
-                None if credential is None else credential.encryption_version
-            ),
-            "credential_updated_at": (
-                None if credential is None else credential.credential_updated_at
-            ),
-            "last_tested_at": server.last_tested_at,
-            "last_test_error_code": server.last_test_error_code,
-            "deletion_pending": False,
-            "deleted_at": None,
-            "created_at": server.created_at,
-            "updated_at": server.updated_at,
-        }
 
     @classmethod
     def _validate_user_mcp_server_atomic_replay(

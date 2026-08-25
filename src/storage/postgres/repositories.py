@@ -84,9 +84,12 @@ from src.integrations.mcp.cp7_artifacts import (
     mcp_dispatch_resume_outbox_id,
     mcp_no_server_intent_id,
 )
-from src.storage.sqlite.repositories import (
-    SQLiteStateRepository,
-    SQLiteStorage,
+from src.storage.mcp_legacy_records import (
+    _mcp_legacy_migration_record_values,
+    _user_mcp_server_insert_values,
+    _validate_mcp_legacy_migration_record,
+)
+from src.storage.row_mappers import (
     _mcp_owner_server_set_fingerprint,
     _row_to_conversation,
     _row_to_mcp_remote_task,
@@ -100,6 +103,10 @@ from src.storage.sqlite.repositories import (
     _row_to_mcp_rollout_promotion_block,
     _row_to_mcp_rollout_stage_approval,
     _row_to_mcp_shadow_audit_sample,
+)
+from src.storage.sqlite.repositories import (
+    SQLiteStateRepository,
+    SQLiteStorage,
 )
 
 
@@ -1508,7 +1515,7 @@ class PostgreSQLStorage(SQLiteStorage):
         plan_sources: set[tuple[str, str]] = set()
         target_server_ids: set[str] = set()
         for server, credential, record in batch:
-            SQLiteStateRepository._validate_mcp_legacy_migration_record(record)
+            _validate_mcp_legacy_migration_record(record)
             if record.target_server_id != server.server_id:
                 raise ValueError("migration record target does not match MCP server")
             if credential is not None and (
@@ -1588,10 +1595,10 @@ class PostgreSQLStorage(SQLiteStorage):
                         )
                     for server, credential, record in ordered_batch:
                         parameters: dict[str, object | None] = {
-                            **SQLiteStateRepository._user_mcp_server_insert_values(
+                            **_user_mcp_server_insert_values(
                                 server, credential
                             ),
-                            **SQLiteStateRepository._mcp_legacy_migration_record_values(
+                            **_mcp_legacy_migration_record_values(
                                 record
                             ),
                         }
