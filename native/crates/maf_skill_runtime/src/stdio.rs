@@ -66,7 +66,6 @@ pub(super) struct LimitedReaderState {
     pub(super) prefix: Vec<u8>,
     pub(super) truncated: bool,
     pub(super) error: Option<SkillRuntimeError>,
-    pub(super) done: bool,
 }
 
 pub(super) fn spawn_limited_reader<R>(
@@ -82,7 +81,6 @@ where
         prefix: Vec::with_capacity(limit.min(8192)),
         truncated: false,
         error: None,
-        done: false,
     }));
     let state_for_thread = Arc::clone(&state);
     thread::spawn(move || {
@@ -96,9 +94,6 @@ where
         ) && let Ok(mut state) = state_for_thread.lock()
         {
             state.error = Some(error);
-        }
-        if let Ok(mut state) = state_for_thread.lock() {
-            state.done = true;
         }
         let _ = sender.send(());
     });

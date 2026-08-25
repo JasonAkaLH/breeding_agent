@@ -1455,7 +1455,6 @@ mod tests {
                     SkillRuntimeErrorCode::SandboxPolicyDenied,
                     "reader failed",
                 )),
-                done: true,
             })),
             done: done_receiver,
         };
@@ -1489,7 +1488,6 @@ mod tests {
             prefix: Vec::new(),
             truncated: false,
             error: None,
-            done: false,
         }));
         let mut buffer = [0_u8; 8192];
         let mut input = io::Cursor::new(b"abcdef".to_vec());
