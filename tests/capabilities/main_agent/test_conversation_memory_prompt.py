@@ -3,8 +3,14 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from src.capabilities.main_agent.prompt_envelope_builder import build_main_agent_rendered_prompt
-from src.capabilities.main_agent.prompt_builder import build_main_agent_prompt
+from src.capabilities.main_agent.prompt_envelope_builder import (
+    build_main_agent_prompt_envelope,
+    build_main_agent_rendered_prompt,
+)
+from src.capabilities.main_agent.prompt_builder import (
+    _format_capability_gap_context,
+    build_main_agent_prompt,
+)
 from src.integrations.agent_skills import SkillIOContract, SkillManifest, SkillMatch, SkillParameterSpec
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 
@@ -91,6 +97,25 @@ def _synthetic_internal_skill_manifest() -> SkillManifest:
 
 
 class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
+    def test_capability_gap_segment_matches_legacy_formatter_exactly(self) -> None:
+        context = {"requested_capability_id": "skill.missing", "reason": "not_found"}
+        envelope = build_main_agent_prompt_envelope(
+            user_message="生成报告",
+            skill_matches=[],
+            artifact_context=[],
+            script_results=[],
+            capability_gap_context=context,
+        )
+        segment = next(
+            item
+            for item in envelope.segments
+            if item.name == "capability_gap_disclosure"
+        )
+        self.assertEqual(
+            segment.content,
+            _format_capability_gap_context(context).lstrip("\n"),
+        )
+
     def test_phase_zero_locks_main_agent_prompt_segment_order_and_download_safety_wording(self) -> None:
         skill_manifest = SkillManifest(
             name="synthetic",

@@ -30,6 +30,7 @@ from .prompt_builder import (
     MAIN_AGENT_FILE_DOWNLOAD_CONSTRAINT,
     MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT,
     MAIN_AGENT_SYSTEM_CONTRACT_LINES,
+    _format_capability_gap_context,
     _format_memory_context,
     _format_response_role,
     build_selected_public_skill_profiles,
@@ -181,15 +182,9 @@ def build_main_agent_prompt_envelope(
             PromptSegment(
                 name="capability_gap_disclosure",
                 role="system",
-                content=(
-                    "# Skill 能力缺口披露要求\n"
-                    "当前请求没有匹配到可执行 Skill 或点名的 Skill 不可用。你仍然可以基于通用语言模型能力给出解释、草案、建议或可手工复核的内容，"
-                    "但必须在回答开头明确告知用户：本次回答没有调用 Skill，因为 Skill 能力库中没有匹配的能力。\n"
-                    "不得声称已经执行 Skill、运行工具、后台处理中、生成文件、生成下载入口或完成真实产物。"
-                    "如果用户请求的是文件、表格、报告、图或其它可下载产物，必须明确说明当前无法由系统生成该产物，需要先注册或启用对应 Skill。\n"
-                    "能力缺口诊断：\n"
-                    + json.dumps(dict(capability_gap_context), ensure_ascii=False, indent=2, default=str)
-                ),
+                content=_format_capability_gap_context(
+                    capability_gap_context
+                ).lstrip("\n"),
                 priority=0,
                 mutability="dynamic",
                 cache_affinity="no_cache",
