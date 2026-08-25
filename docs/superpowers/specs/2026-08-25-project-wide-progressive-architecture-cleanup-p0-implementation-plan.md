@@ -20,7 +20,7 @@
 
 1. 在 P0 实际开始 HEAD 上重新取得 branch、commit、tree、clean/owned diff 和测试基线；不得直接复用设计期测试数字。
 2. 完整 tracked code/config universe 与 inventory path 集合精确相等，`unclassified=0`。
-3. 每个 `business_source` 都有且只有一个 P1～P8 owner；跨计划 seam 有唯一 authority、兼容理由、禁止扩张规则和退出条件。
+3. 每个 `business_source` 都有且只有一个 P1～P7 source owner；P8只拥有finding处置与最终审计，不替代活跃源码的分层owner；跨计划 seam 有唯一 authority、兼容理由、禁止扩张规则和退出条件。
 4. finding 只使用 `exact_duplicate|structural_candidate|reviewed_no_change|deferred_behavior`，每项有证据、owner 和退出条件；P0 不处理 finding。
 5. Python 公开 imports、`__all__`、签名、module/object identity、关键 pickle 合同以及四条 `StoragePort` alias 已由直接断言锁定。
 6. `StoragePort` 的 259 个 async method 名称、async 属性和 `inspect.signature` 被精确锁定；P0 不创建窄 port。
@@ -103,12 +103,12 @@ path	classification	reason_code	owner_plan	finding_ids	p0_disposition	project_ex
 
 - `classification`：`business_source|test|contract_or_build_dependency|explicit_out_of_scope`；
 - `reason_code`：只使用 `runtime_business|package_lifecycle_business|operational_business|behavior_test|contract_fixture|build_dependency|validation_dependency|documentation|deployment_config|vendored_or_generated|project_metadata|non_business_asset`，不写自由散文；
-- `owner_plan`：业务源码只能是 `P1|P2|P3|P4|P5|P6|P7|P8` 中一个；非业务项为 `NA`；
+- `owner_plan`：业务源码只能是 `P1|P2|P3|P4|P5|P6|P7` 中一个；非业务项为 `NA`；P8 finding owner只记录在baseline finding register；
 - `finding_ids`：无 finding 为 `-`，多个 ID 用逗号分隔；
 - `p0_disposition`：`candidate|reviewed_no_change|test_lock|contract_dependency|out_of_scope`；
 - `project_exit_state`：P0 时业务源码为 `pending`，非业务项为 `NA`；P8 只允许把业务项收敛为 `changed|reviewed_no_change`。
 
-路径来源只能是 P0 start commit 的 `git ls-files`；不得扫描 ignored runtime 或仓外目录。实现时使用临时目录比较 tracked set 与 TSV path set，比较结果必须为空；不把临时文件提交到仓库。
+Inventory初始集合来自P0 start commit的`git ls-files`；后续每个checkpoint提交前按当前HEAD重新枚举，并把本计划新增的tests/docs/index行加入TSV。Baseline单独保留不可变的P0 start path set摘要；最终TSV必须与P0 final HEAD的tracked set精确相等。不得扫描ignored runtime或仓外目录；集合比较只使用临时目录，临时文件不提交到仓库。
 
 ### 3.2 Baseline Markdown
 
@@ -181,7 +181,7 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 
 ### 5.1 Tracked universe 分类
 
-以 P0 start commit 的完整 `git ls-files` 为输入，至少覆盖：
+首次以P0 start commit的完整`git ls-files`建立分类；后续按3.1的current-HEAD规则增量对账，至少覆盖：
 
 - `src/`、完整 `frontend/`、完整 `native/`、`scripts/`；
 - `tests/`、`.github/`、Docker 与根级 Python/Node/Rust/构建/依赖配置；
@@ -198,18 +198,17 @@ conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only c
 
 ### 5.2 Owner 与 finding
 
-每个 `business_source` 只指定一个 P1～P8 owner。边界以总设计职责为准，不按目录机械分配：
+每个`business_source`只指定一个P1～P7 source owner。目录映射是完整inventory的review责任，不授权对应计划改动超出总设计的职责；具体结构finding仍须单独证明。闭合映射为：
 
-- Core persistence contract/Cancellation boundary → P1；
-- Orchestration/Capabilities/Agent persistence semantics → P2；
-- Skills/Parser/Gateway/Coordinator/Historical → P3；
-- API assembly/HTTP/SSE/file-selection bounded authority → P4；
-- Storage/State/Lifecycle/Python adapters → P5；
-- Frontend → P6；
-- Native/Scripts → P7；
-- 只有当时仍需证明删除/收敛的私有候选 → P8。
+- `src/core/**` → P1；仅persistence/shared contract与Cancellation边界可进入P1结构修改，其他Core源码可以`reviewed_no_change`；
+- `src/orchestration/**`、`src/capabilities/**` → P2；
+- `src/integrations/**`、`src/mysql_engine.py` → P3；
+- `src/api/**` → P4；
+- `src/auth/**`、`src/state/**`、`src/lifecycle/**`、`src/storage/**` → P5；
+- Frontend业务源码及被package lifecycle调用的`frontend/scripts/**` → P6；
+- Native业务源码与根`scripts/**` operational business → P7。
 
-Finding register 每项记录 ID、分类、paths、相似处、语义差异、行为风险、owner、退出条件。看似重复但承载 error、lock、transaction、protocol 或 fallback 差异的代码必须标 `reviewed_no_change`，不能标 exact duplicate。
+Finding register 每项记录 ID、分类、paths、相似处、语义差异、行为风险、finding owner、退出条件。P8只拥有已证明的dead/duplicate finding和最终闭合审计；即使finding计划在P8处置，path的`owner_plan`仍保持其P1～P7分层owner。看似重复但承载error、lock、transaction、protocol或fallback差异的代码必须标`reviewed_no_change`，不能标exact duplicate。
 
 ### 5.3 Dependency 与 authority map
 
@@ -232,6 +231,7 @@ Finding register 每项记录 ID、分类、paths、相似处、语义差异、�
 - duplicate path、空 classification、业务项 owner 非唯一、unknown enum均为失败；
 - baseline 文档中 finding IDs 与 TSV 引用互相可解析；
 - `git diff --check`；
+- 提交前对暂存内容运行`git diff --cached --check`；
 - diff 只能包含 inventory、baseline、计划索引和 CHANGELOG。
 
 Checkpoint commit：
@@ -251,7 +251,7 @@ docs(cleanup): inventory P0 source universe
 - `src.storage.interfaces.StoragePort`；
 - `src.storage.StoragePort`；
 - 四条路径 `is` 同一 canonical object；
-- 259 个 method 的名称、定义顺序、async 属性和 `inspect.signature`；
+- 259 个 method 的精确名称集合、async 属性和 `inspect.signature`；方法定义顺序不是兼容合同；
 - 不允许缺失、重复、额外 method 或 catch-all；
 - Core 不导入 API、Storage 实现、SQLAlchemy、MCP transport 或 capability private module。
 
@@ -265,7 +265,7 @@ docs(cleanup): inventory P0 source universe
 - 三条导出对象与定义模块对象 identity；
 - `ApiRuntime.__init__` 与 `build_api_runtime` 完整参数顺序、kind、default 和 keyword-only 形状；
 - routes实际消费的公开方法/属性，以及现有API测试实际替换的class/parameter monkeypatch seam；先在baseline枚举exact names，不snapshot所有下划线私有成员；
-- import `src.api` 不提前读取 env/config 或构造 runtime；
+- 使用一次全新Python解释器subprocess验证首次import `src.api`不读取env/config或构造runtime；subprocess只执行直接import与安全sentinel断言，不连接网络、不启动服务、不输出环境值；
 - `build_api_runtime` 仍在完整构造后赋值 runtime holder；测试只观察现有 seam，不调用外部服务。
 
 FastAPI path/DTO/SSE 继续复用 `tests/api/test_route_contract.py`、现有 DTO 和 task-event tests；不新增完整 OpenAPI snapshot 文件。
@@ -574,6 +574,7 @@ conda run -n multi_agent python -m unittest discover -s tests/core -p 'test_*.py
 conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/integrations/agent_skills -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/mcp_dispatch -p 'test_*.py'
@@ -586,7 +587,7 @@ conda run -n multi_agent python -m unittest discover -s tests/scripts -p 'test_*
 conda run -n multi_agent python -m unittest discover -s tests/deployment -p 'test_*.py'
 ```
 
-每个命令单独记录 ran/fail/skip；测试数以当次输出为准。`tests/integrations/agent_skills` 已包含在 integrations discover，不重复作为全量完成数；可作为定向诊断运行。
+每个命令单独记录ran/fail/skip，测试数以当次输出为准。`tests/integrations/agent_skills`没有`__init__.py`，不会被父目录discover递归收集，因此必须单独运行并单独记数。
 
 Full suite中与P0 untouched production path无关、且明确声明为其他平台专属的既有skip，要逐项记录为该平台切片N/A，不能写成PASS；P0新增与本checkpoint目标测试的skip必须为0。
 
@@ -621,7 +622,7 @@ P1计划只有在P0最终commit clean、inventory/contract/trace闭合后生成�
 
 ### 12.4 最终审查与提交
 
-- `git diff --check`；
+- 每次提交前的`git diff --cached --check`均已通过；最终运行`git diff --check <p0-start-commit>..HEAD`检查全部P0 committed diff，并再次运行`git diff --check`检查未暂存内容；
 - 相对P0 start commit，生产业务路径diff为空；
 - inventory仍与final tracked set相等；若P0新增tests/docs，必须将它们加入inventory并重新验证；
 - baseline引用的test symbol真实存在；
@@ -665,7 +666,7 @@ P0只定义P5必须取得的隔离真实PostgreSQL证据，不执行DDL或数据
 | G | Rust/Scripts ledger；条件性Scripts test | six contracts、Rust quality、Scripts定向 | `docs(cleanup)`；条件性 `test(scripts)` |
 | H | final ledger、索引、CHANGELOG、P1 handoff | Backend/Frontend/Rust全量与final diff | `docs(cleanup): close P0 behavior baseline` |
 
-不提交红测试，不把多个领域测试挤成一个巨型commit，不squash检查点。
+每个checkpoint只暂存owned files并在commit前运行`git diff --cached --check`；不提交红测试，不把多个领域测试挤成一个巨型commit，不squash检查点。
 
 ## 15. 停止条件
 
