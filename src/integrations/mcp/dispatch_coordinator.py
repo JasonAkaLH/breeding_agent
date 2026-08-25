@@ -52,6 +52,10 @@ from src.integrations.mcp.gateway import (
     MCPResultTerminalError,
 )
 from src.integrations.mcp.client import MCPRemoteError
+from src.integrations.mcp._attachment_metadata import (
+    safe_attachment_basename as _safe_attachment_basename,
+    safe_attachment_content_type as _safe_attachment_content_type,
+)
 from src.integrations.mcp.attachment_materialization import (
     MCPAttachmentMaterializationError,
     MCPJobWorkflowKind,
@@ -3317,34 +3321,6 @@ def _mcp_message_attachments(
     if len(selected) > MAX_MCP_ATTACHMENT_SUMMARIES:
         raise MCPAttachmentSummaryError("mcp_attachment_summary_limit_exceeded")
     return selected
-
-
-def _safe_attachment_basename(value: object) -> str:
-    normalized = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
-    normalized = "".join(
-        char
-        for char in normalized
-        if not (ord(char) < 32 or 127 <= ord(char) <= 159)
-    ).strip()
-    return _truncate_utf8(normalized or "attachment", 255)
-
-
-def _safe_attachment_content_type(value: object) -> str:
-    normalized = str(value or "").strip()
-    if (
-        not normalized
-        or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in normalized)
-        or len(normalized.encode("utf-8")) > 255
-    ):
-        return "application/octet-stream"
-    return normalized
-
-
-def _truncate_utf8(value: str, limit: int) -> str:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= limit:
-        return value
-    return encoded[:limit].decode("utf-8", errors="ignore")
 
 
 def _upstream_facts(outputs: Mapping[str, Mapping[str, Any]]) -> tuple[str, ...]:

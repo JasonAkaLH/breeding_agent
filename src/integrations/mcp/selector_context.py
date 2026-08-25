@@ -14,6 +14,11 @@ from src.capabilities.mcp_dispatch.models import (
 from src.core.contracts import StoragePort
 from src.core.enums import UserMCPHealthStatus
 from src.core.models import MCPCallRecord, MCPTerminalResultReceipt, TaskInputAttachment
+from src.integrations.mcp._attachment_metadata import (
+    safe_attachment_basename as _safe_attachment_basename,
+    safe_attachment_content_type as _safe_attachment_content_type,
+    truncate_utf8 as _truncate_utf8,
+)
 from src.integrations.mcp.cp7_artifacts import (
     mcp_durable_result_artifact_id,
     mcp_dispatch_resume_outbox_id,
@@ -506,34 +511,6 @@ def _user_request(content: str, has_attachments: bool) -> str:
     if has_attachments:
         return "处理本消息附带的文件"
     return "Complete the user's request using the selected MCP server."
-
-
-def _safe_attachment_basename(value: object) -> str:
-    normalized = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
-    normalized = "".join(
-        char
-        for char in normalized
-        if not (ord(char) < 32 or 127 <= ord(char) <= 159)
-    ).strip()
-    return _truncate_utf8(normalized or "attachment", 255)
-
-
-def _safe_attachment_content_type(value: object) -> str:
-    normalized = str(value or "").strip()
-    if (
-        not normalized
-        or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in normalized)
-        or len(normalized.encode("utf-8")) > 255
-    ):
-        return "application/octet-stream"
-    return normalized
-
-
-def _truncate_utf8(value: str, limit: int) -> str:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= limit:
-        return value
-    return encoded[:limit].decode("utf-8", errors="ignore")
 
 
 def _budget_agent_projections(
