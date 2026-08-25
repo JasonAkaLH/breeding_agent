@@ -795,35 +795,6 @@ body {
   font-size: 16px;
 }
 
-.interrupt-card {
-  border: 1px solid var(--color-agri-green-border);
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: linear-gradient(180deg, var(--color-agri-green-soft) 0%, var(--color-surface-strong) 100%);
-}
-
-.interrupt-card-title {
-  margin-bottom: 8px;
-  color: var(--color-agri-green-dark);
-  font-weight: 700;
-}
-
-.interrupt-card-question {
-  margin-bottom: 10px !important;
-}
-
-.interrupt-card-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.interrupt-card-hint {
-  display: block;
-  margin-top: 10px;
-}
-
 .composer-space {
   width: 100%;
 }
@@ -970,10 +941,6 @@ body {
 
 .floating-composer .ant-card-body {
   padding: 0;
-}
-
-.composer-attachments {
-  padding: 4px 8px 0;
 }
 
 .send-row {
@@ -1458,13 +1425,6 @@ body {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
-}
-
-.upload-file-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding-right: 4px;
 }
 
 .conversation-files-fab {

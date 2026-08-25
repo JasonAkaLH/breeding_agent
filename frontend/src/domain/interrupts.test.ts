@@ -7,7 +7,6 @@ import {
   interruptSlotCollectionRef,
   interruptSlotCollectionRefSlots,
   interruptSubmitMetadata,
-  interruptVisibleFieldNames,
   interruptVisibleFieldValues,
   isInterruptKeepOpenResponse,
   isNaturalLanguageInterrupt,
@@ -100,7 +99,6 @@ describe('interrupt domain', () => {
     });
 
     expect(isReservedInterruptField('_internal')).toBe(true);
-    expect(interruptVisibleFieldNames(interrupt)).toEqual(['note', 'artifact']);
     expect(interruptVisibleFieldValues(interrupt)).toEqual([{ type: 'string' }, { accepts_upload: true }]);
     expect(interruptAcceptsUpload(interrupt)).toBe(true);
   });

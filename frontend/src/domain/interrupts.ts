@@ -146,10 +146,6 @@ export function selectedSheetPayload(field: SheetSelectionField, answerText: str
   return payload;
 }
 
-export function interruptVisibleFieldNames(interrupt: PendingInterrupt): string[] {
-  return Object.keys(interrupt.requiredFields ?? {}).filter((field) => !isReservedInterruptField(field));
-}
-
 export function interruptVisibleFieldValues(interrupt: PendingInterrupt): unknown[] {
   return Object.entries(interrupt.requiredFields ?? {})
     .filter(([field]) => !isReservedInterruptField(field))

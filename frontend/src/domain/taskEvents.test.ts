@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, foldMCPResultArtifactProjections, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, replayTaskEvents, taskProgressDisplayText } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, foldMCPResultArtifactProjections, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, taskProgressDisplayText } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -699,16 +699,12 @@ describe('applyTaskEvent', () => {
     expect(duplicate).toBe(state);
   });
 
-  it('flags same event_id payload conflicts and unresolved replay gaps as recoverable sync errors', () => {
-    const [unknown, , resolution, correction] = terminalProjectionEvents();
+  it('flags same event_id payload conflicts as recoverable sync errors', () => {
+    const [unknown] = terminalProjectionEvents();
     const conflict = { ...unknown, payload: { ...unknown.payload, intent_id: 'intent-conflict' } };
     let state = applyTaskEvent(createInitialTaskEventState(), unknown);
     state = applyTaskEvent(state, conflict);
     expect(state.eventSyncError).toContain('冲突');
-
-    state = replayTaskEvents(createInitialTaskEventState(), [correction, resolution]);
-    expect(state.pendingEvents).toHaveLength(2);
-    expect(state.eventSyncError).toContain('缺少前序记录');
   });
 
   it('rejects a closed resolution whose cross-event identity binding disagrees with the consumed unknown event', () => {

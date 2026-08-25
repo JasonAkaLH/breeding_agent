@@ -51,10 +51,6 @@ export interface SubmitMessageRequest {
   metadata: Record<string, unknown>;
 }
 
-export interface MCPServerBindingRequest {
-  server_id: string;
-}
-
 export interface MCPServerBadge {
   server_id: string;
   display_name: string;
@@ -181,11 +177,6 @@ export interface ConversationSummaryResponse {
 
 export interface ConversationListResponse {
   conversations: ConversationSummaryResponse[];
-}
-
-export interface RenameConversationRequest {
-  conversation_id: string;
-  title: string;
 }
 
 export interface MessageResponse {

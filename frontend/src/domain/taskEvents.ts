@@ -298,15 +298,6 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
   return drainPendingTaskEvents(reduceTaskEvent(withFingerprint, event));
 }
 
-export function replayTaskEvents(state: TaskEventState, events: TaskEventEnvelope[]): TaskEventState {
-  const replayed = [...events]
-    .sort(compareTaskEvents)
-    .reduce((current, event) => applyTaskEvent(current, event), state);
-  return replayed.pendingEvents.length === 0
-    ? replayed
-    : { ...replayed, eventSyncError: '任务事件历史缺少前序记录，请稍后重新同步。' };
-}
-
 function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
   const withEvent = {
     ...state,
