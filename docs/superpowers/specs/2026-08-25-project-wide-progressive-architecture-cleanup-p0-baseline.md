@@ -2,7 +2,7 @@
 
 ## 1. 状态与边界
 
-- P0状态：`active`；Checkpoint 0与Checkpoint A完成，Checkpoint B待开始
+- P0状态：`active`；Checkpoint 0～B完成，Checkpoint C待开始
 - P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
 - P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
 - 分支：`main`
@@ -24,17 +24,17 @@ P0开始时工作树clean。相对业务设计基线`c8da6ccdf89eed5851cb5a79385
 - Source：`git -c core.quotePath=false ls-files`
 - Ignored/runtime/仓外文件不进入集合
 
-Checkpoint A增加baseline和inventory两个validation dependency，并把已存在的总设计/P0计划从普通documentation重分类为validation dependency。Checkpoint A提交前目标集合为1041行；提交前必须再次以cached+owned-untracked集合做双向精确比较，提交后以新HEAD重验。
+Checkpoint A增加baseline和inventory两个validation dependency，并把已存在的总设计/P0计划从普通documentation重分类为validation dependency，集合为1041行。Checkpoint B新增三份public contract tests，当前集合为1044行；每个checkpoint均以cached+owned-untracked集合做双向精确比较，提交后以新HEAD重验。
 
 ### 2.2 分类结果
 
 | Classification | 数量 |
 |---|---:|
 | `business_source` | 320 |
-| `test` | 414 |
+| `test` | 417 |
 | `contract_or_build_dependency` | 68 |
 | `explicit_out_of_scope` | 239 |
-| **合计** | **1041** |
+| **合计** | **1044** |
 
 `unclassified=0`。业务源码owner分布：P1=8、P2=51、P3=112、P4=25、P5=61、P6=22、P7=41；合计320且每个path恰好一个source owner。P8只拥有finding处置与最终审计，不替代source owner。
 
@@ -54,11 +54,12 @@ Checkpoint A增加baseline和inventory两个validation dependency，并把已存
 
 | Contract | 当前证据 | 锁定状态 |
 |---|---|---|
-| 四条`StoragePort`路径 | 259个唯一async method；四条路径`is`同一对象 | direct introspection PASS；完整name/signature literal待Checkpoint B |
-| `src.api.__all__` | `ApiRuntime, build_api_runtime, create_app` | observed；Checkpoint B直接断言 |
-| `src.capabilities.main_agent.__all__` | 5个公开对象 | observed；Checkpoint B直接断言 |
-| `src.orchestration.agent_loop.__all__` | 65个公开对象 | observed；Checkpoint B直接断言 |
-| `ApiRuntime.__init__` / `build_api_runtime` | 当前完整keyword-only签名可由`inspect.signature`取得 | Checkpoint B锁定literal shape与fresh-import seam |
+| 四条`StoragePort`路径 | 259个唯一async method；四条路径`is`同一对象 | Checkpoint B literal name/async/signature PASS |
+| `src.api.__all__` | `ApiRuntime, build_api_runtime, create_app` | Checkpoint B identity PASS |
+| `src.capabilities.main_agent.__all__` | 5个公开对象 | Checkpoint B identity/module PASS；两个Callable alias保持`collections.abc` |
+| `src.orchestration.agent_loop.__all__` | 65个公开对象 | Checkpoint B identity/module PASS |
+| `ApiRuntime.__init__` / `build_api_runtime` | 完整parameter order/kind/annotation/default/return | Checkpoint B literal shape PASS |
+| `src.api` fresh import | 只读取Core contract mode两个key，不读取其他应用key、不构造runtime | Checkpoint B isolated subprocess PASS |
 | Python Agent repositories | SQLite=16、PostgreSQL=16、RuntimeSidecar=13个public async methods；共同13 | Checkpoint C锁定surface/MRO/trace |
 | RuntimeSidecar Agent lease | 缺`acquire_agent_lease|renew_agent_lease|release_agent_lease` | `BEHAVIOR-SIDECAR-AGENT-LEASE-001`，不得补能力 |
 | FastAPI/DTO/SSE | 复用route、DTO、task-event tests | Checkpoint B/E映射，不新增完整OpenAPI snapshot |
@@ -69,6 +70,8 @@ Checkpoint A增加baseline和inventory两个validation dependency，并把已存
 | Seam | Exact current symbols/owner | 普通结构检查点约束 |
 |---|---|---|
 | StoragePort aliases | `src.core.contracts.StoragePort`、`src.core.StoragePort`、`src.storage.interfaces.StoragePort`、`src.storage.StoragePort` | identity/name/async/signature delta=0 |
+| Core rollout digest → P3 | `src.core.models.canonical_mcp_rollout_drill_observation_digest`函数内局部import `src.integrations.mcp.rollout_evidence.canonical_evidence_content_digest` | 当前唯一bounded reverse import；不扩张，未来消除须另立owner迁移 |
+| API import → Core contract mode | `src.api`首次import经Core enum读取`MAF_RUST_CORE_MODE`、`MAF_CORE_LIFECYCLE_PYO3_MODULE` | 只允许这两个key；其他应用env/config与runtime construction为0 |
 | Lifecycle → P2 recovery | `AgentContinuationLocator(Service)`、`AgentLeaseController/Handle`、Agent models/errors、`AgentAtomicWriter`、`AgentRunRepository`、`AgentTaskLeaseStore` | logical call-site IDs/kinds/counts/order exact；无第二状态机 |
 | P3 → P2 MCP Dispatch | `MCPDispatchOutcome`、selector/router、selector models/context/fingerprint | imports/object identity与functional calls exact；无复制/内联/缓存绕过 |
 | P5 Agent adapters → P2 contracts | Agent models/enums/errors/persistence payloads | contract-only；不得调用Agent Loop controller/service |
@@ -84,6 +87,8 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | Finding ID | 类型 | Owner | 证据与边界 | 退出条件 |
 |---|---|---|---|---|
 | `P0-P1-STORAGE-PORT-001` | `structural_candidate` | P1 | `src/core/contracts.py`约1613行，StoragePort 259 methods | 四路径identity不变；259方法恰好映射一次到窄域；不建catch-all |
+| `P0-P1P3-CORE-ROLLOUT-DIGEST-001` | `reviewed_no_change` | P1/P3 | Core rollout observation digest函数局部import P3 canonical evidence digest | P0锁唯一symbol/function scope；不得扩张Core→Integrations imports |
+| `P0-P1P4-IMPORT-CORE-CONTRACT-001` | `reviewed_no_change` | P1/P4 | fresh API import读取两个Core Rust contract mode key | 保持当前allowed set；P4不得新增应用env/config import-time读取 |
 | `P0-P2-AGENT-SEAMS-001` | `structural_candidate` | P2/P5 seam | runner/invoker/lease/continuation/task projection与Lifecycle recovery交接 | waiting/recovery逐分支trace exact；无第二authority |
 | `P0-P2-MEMORY-001` | `structural_candidate` | P2 | `conversation_memory.py`约1801行，多阶段memory/prompt职责 | 仅在P2按owner拆分；token/LLM/prompt结果不变 |
 | `P0-P3-SKILLS-001` | `structural_candidate` | P3 | execution/missing-input/slot/input-resolution多个大模块 | schema/value/resolution/execution边界清楚；隐私/fallback不变 |
@@ -130,7 +135,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 
 | Domain | 当前覆盖入口 | P0动作 | 状态 |
 |---|---|---|---|
-| Python public/StoragePort | Core contracts、SQLite bootstrap | 新增literal identity/signature/pickle/import tests | Checkpoint B pending |
+| Python public/StoragePort | Core contracts、SQLite bootstrap | literal identity/signature/pickle/import tests | Checkpoint B PASS（13项新增，focused合计43项） |
 | Agent adapters/Cancellation | Agent storage、runtime-sidecar contract、runtime wiring | 新增surface/MRO/common-operation与mode trace | Checkpoint C pending |
 | Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 补逐分支logical call-site trace | Checkpoint D pending |
 | MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | 补functional seam与order/count trace | Checkpoint E pending |
@@ -155,6 +160,7 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 | Frontend event smoke | `frontend/` / two taskEvents files | macOS/Node | 51/0/0 | PASS |
 | Rust fmt | repo / existing Rust quality gate `cargo_fmt` | macOS/Rust toolchain | completed/0/0 | PASS |
 | Ruff audit | repo / `ruff check src scripts --select C90,F401,F841` | macOS/Python env | 172 signals | audit observation，不是质量PASS/FAIL gate |
+| Checkpoint B public contracts | repo / Core+API+Orchestration public contract focused suite | macOS/Python 3.13 | 43/0/0 | PASS |
 
 所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
 

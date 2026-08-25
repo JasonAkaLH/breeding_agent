@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 全仓业务代码渐进式架构清理P0 Checkpoint B已闭合：新增Core/API/Orchestration三份直接characterization，锁定四条StoragePort同一identity、259个async method名称/签名、`src.api`与Main Agent/Agent Loop公开导出、ApiRuntime/factory完整签名、route消费面、repository patch seam、关键module/pickle/non-pickle与公开错误合同；focused 43项零失败零skip。旧实现同时暴露并记录唯一Core→MCP rollout digest局部reverse import，以及fresh API import只读取两个Core Rust contract mode key的bounded行为；未改业务实现或把它们伪装成新架构目标。Inventory随三份测试更新为1044行。License Requirement：无生产依赖、第三方代码或许可变更。
+
 - 全仓业务代码渐进式架构清理P0 Checkpoint A已闭合：以`3cf44b1`为P0 start建立单一TSV inventory与单一Markdown baseline，起点1039个tracked paths，加入两份账本后集合为1041行，`unclassified=0`、320个business paths均有唯一P1～P7 source owner；记录172个Ruff审计信号、22组AST语法重复及既有8项deferred behavior，但不自动修复或把复杂度当完成指标。Checkpoint 0的compileall、Core 8、SQLite 21、Agent 4、Recovery 12、Frontend events 51及Rust fmt通过；业务实现、schema/data、`prod`不变，不新建runner/snapshot/evidence平台。下一步为Checkpoint B Python公开合同。License Requirement：无生产依赖、第三方代码或许可变更。
 
 - 全仓业务代码渐进式架构清理P0实施计划已就绪：严格限定为完整tracked code/config inventory、公开合同、唯一owner/bounded seam与高风险行为锁，按A～H独立检查点冻结四路径StoragePort、三Agent repository与P4唯一selector、Cancellation、Agent continuation/Lifecycle recovery、MCP/API authority、Frontend异步行为、Rust六份contract及Scripts迁移顺序；P0只允许最小tests、单一TSV inventory、单一Markdown baseline及索引变更，生产业务路径必须零diff，不新建runner/snapshot/evidence平台，不进入P1、不修改schema/data或`prod`。规范基线`bafae8d`经3轮完整审查、2轮收敛修订，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过`document-perfectization`信心门。License Requirement：计划不新增生产依赖、第三方代码或许可变更。

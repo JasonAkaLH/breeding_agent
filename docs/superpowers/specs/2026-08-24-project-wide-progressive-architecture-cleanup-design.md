@@ -1,7 +1,7 @@
 # 全仓业务代码渐进式架构清理设计
 
 - **日期**：2026-08-24
-- **状态**：设计章节已获用户逐项批准；scope reset精简版规范基线`7b36cad`经独立信心门复审，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过；P0实施已在`3cf44b1`激活
+- **状态**：设计章节已获用户逐项批准；scope reset精简版规范基线`7b36cad`经独立信心门复审，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过；P0实施已在`3cf44b1`激活，Checkpoint A～B完成
 - **适用分支**：`main`
 - **适用仓库**：`breeding_agent`
 - **目标**：在可验证地保持现有功能、公开合同和副作用顺序不变的前提下，分阶段清理全仓业务代码中的单体模块、复制实现、无效抽象、死代码和错误的职责边界
@@ -522,7 +522,7 @@ P3退出条件：五个domain公开合同不变；Skills隐私、Parser阶段、
 
 ### 13.1 关键限制
 
-- env/config 不能在 import 时提前读取；
+- ApiRuntime应用级env/config不能在import时提前读取，且import不得构造runtime；当前Core enum初始化会为checked-in/PyO3 contract选择读取`MAF_RUST_CORE_MODE`与`MAF_CORE_LIFECYCLE_PYO3_MODULE`，这是P0发现并锁定的bounded compatibility behavior，不授权P4新增其他import-time配置读取；
 - helper 仍在原调用位置执行；
 - factory 保留现有显式 class/parameter monkeypatch seam；
 - `build_api_runtime` 公开签名暂不改成新 config object；

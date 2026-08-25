@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：规范基线`bafae8d`经3轮完整审查、2轮收敛修订，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过`document-perfectization`信心门；P0实施已在`3cf44b1`激活，Checkpoint A完成，Checkpoint B待开始
+- 状态：规范基线`bafae8d`经3轮完整审查、2轮收敛修订，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过`document-perfectization`信心门；P0实施已在`3cf44b1`激活，Checkpoint A～B完成，Checkpoint C待开始
 - 总设计：`docs/superpowers/specs/2026-08-24-project-wide-progressive-architecture-cleanup-design.md`
 - 规范设计基线：`7b36cad70979aa4d5d6ded186dc00befa80d8054`
 - 计划编写时 HEAD：`c3ee64dc8b35b998672cb5217281e425cc0656dc`
@@ -266,7 +266,7 @@ docs(cleanup): inventory P0 source universe
 - 三条导出对象与定义模块对象 identity；
 - `ApiRuntime.__init__` 与 `build_api_runtime` 完整参数顺序、kind、default 和 keyword-only 形状；
 - routes实际消费的公开方法/属性，以及现有API测试实际替换的class/parameter monkeypatch seam；先在baseline枚举exact names，不snapshot所有下划线私有成员；
-- 使用一次全新Python解释器subprocess验证首次import `src.api`不读取env/config或构造runtime；subprocess只执行直接import与安全sentinel断言，不连接网络、不启动服务、不输出环境值；
+- 使用一次全新Python解释器subprocess验证首次import `src.api`不读取ApiRuntime应用级env/config且不构造runtime；只允许当前Core contract选择读取`MAF_RUST_CORE_MODE`与`MAF_CORE_LIFECYCLE_PYO3_MODULE`，其他`APP_|MAF_|MCP_` key读取失败；subprocess不连接网络、不启动服务、不输出环境值；
 - `build_api_runtime` 仍在完整构造后赋值 runtime holder；测试只观察现有 seam，不调用外部服务。
 
 FastAPI path/DTO/SSE 继续复用 `tests/api/test_route_contract.py`、现有 DTO 和 task-event tests；不新增完整 OpenAPI snapshot 文件。

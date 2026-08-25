@@ -398,7 +398,7 @@ scripts/validate_prd07_orchestration_hotspot_evidence.py	contract_or_build_depen
 scripts/validate_project_skill_bundle.py	contract_or_build_dependency	validation_dependency	NA	-	contract_dependency	NA
 scripts/validate_unified_agent_loop_evidence.py	contract_or_build_dependency	validation_dependency	NA	-	contract_dependency	NA
 scripts/validate_user_mcp_phase3_evidence.py	contract_or_build_dependency	validation_dependency	NA	-	contract_dependency	NA
-src/api/__init__.py	business_source	runtime_business	P4	-	reviewed_no_change	pending
+src/api/__init__.py	business_source	runtime_business	P4	P0-P1P4-IMPORT-CORE-CONTRACT-001	reviewed_no_change	pending
 src/api/agent_projection.py	business_source	runtime_business	P4	-	reviewed_no_change	pending
 src/api/app.py	business_source	runtime_business	P4	-	reviewed_no_change	pending
 src/api/artifact_responses.py	business_source	runtime_business	P4	P0-CROSS-OWNER-SIMILAR-001	reviewed_no_change	pending
@@ -449,11 +449,11 @@ src/capabilities/skill_tool/registration.py	business_source	runtime_business	P2	
 src/core/__init__.py	business_source	runtime_business	P1	P0-P1-STORAGE-PORT-001	candidate	pending
 src/core/coercion.py	business_source	runtime_business	P1	-	reviewed_no_change	pending
 src/core/contracts.py	business_source	runtime_business	P1	P0-P1-STORAGE-PORT-001	candidate	pending
-src/core/enums.py	business_source	runtime_business	P1	-	reviewed_no_change	pending
+src/core/enums.py	business_source	runtime_business	P1	P0-P1P4-IMPORT-CORE-CONTRACT-001	reviewed_no_change	pending
 src/core/errors.py	business_source	runtime_business	P1	P0-CROSS-OWNER-SIMILAR-001	reviewed_no_change	pending
 src/core/evidence.py	business_source	runtime_business	P1	-	reviewed_no_change	pending
-src/core/models.py	business_source	runtime_business	P1	-	reviewed_no_change	pending
-src/core/rust_contract.py	business_source	runtime_business	P1	-	reviewed_no_change	pending
+src/core/models.py	business_source	runtime_business	P1	P0-P1P3-CORE-ROLLOUT-DIGEST-001	reviewed_no_change	pending
+src/core/rust_contract.py	business_source	runtime_business	P1	P0-P1P4-IMPORT-CORE-CONTRACT-001	reviewed_no_change	pending
 src/core/rust_contracts/core_contract.json	contract_or_build_dependency	build_dependency	NA	-	contract_dependency	NA
 src/integrations/__init__.py	business_source	runtime_business	P3	-	reviewed_no_change	pending
 src/integrations/agent_model_gate.py	business_source	runtime_business	P3	-	reviewed_no_change	pending
@@ -545,7 +545,7 @@ src/integrations/mcp/result_parsing/service.py	business_source	runtime_business	
 src/integrations/mcp/result_parsing/worker.py	business_source	runtime_business	P3	P0-P3-RESULT-PARSER-001,BEHAVIOR-PARSER-CLEANUP-CANCEL-001	candidate	pending
 src/integrations/mcp/resume_envelope.py	business_source	runtime_business	P3	-	reviewed_no_change	pending
 src/integrations/mcp/rollout.py	business_source	runtime_business	P3	-	reviewed_no_change	pending
-src/integrations/mcp/rollout_evidence.py	business_source	runtime_business	P3	-	reviewed_no_change	pending
+src/integrations/mcp/rollout_evidence.py	business_source	runtime_business	P3	P0-P1P3-CORE-ROLLOUT-DIGEST-001	reviewed_no_change	pending
 src/integrations/mcp/runtime_state.py	business_source	runtime_business	P3	P0-P3-DUP-RUNTIME-STATE-001	candidate	pending
 src/integrations/mcp/rust_contract.py	business_source	runtime_business	P3	-	reviewed_no_change	pending
 src/integrations/mcp/rust_contracts/mcp_runtime_contract.json	contract_or_build_dependency	build_dependency	NA	-	contract_dependency	NA
@@ -689,6 +689,7 @@ tests/api/test_model_edition_selection.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_pending_skill_context.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_project_skill_bundle_startup_gate.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_route_contract.py	test	behavior_test	NA	-	test_lock	NA
+tests/api/test_runtime_public_contract.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_runtime_sidecar_contract.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_skill_capability_pool.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_skill_dynamic_reload.py	test	behavior_test	NA	-	test_lock	NA
@@ -725,6 +726,7 @@ tests/capabilities/mcp_tool/test_long_task_events.py	test	behavior_test	NA	-	tes
 tests/capabilities/skill_tool/__init__.py	test	behavior_test	NA	-	test_lock	NA
 tests/capabilities/skill_tool/test_executor.py	test	behavior_test	NA	-	test_lock	NA
 tests/core/test_contracts.py	test	behavior_test	NA	-	test_lock	NA
+tests/core/test_public_contract_compatibility.py	test	behavior_test	NA	-	test_lock	NA
 tests/core/test_core_pyo3_facade.py	test	behavior_test	NA	-	test_lock	NA
 tests/core/test_enums.py	test	behavior_test	NA	-	test_lock	NA
 tests/core/test_models.py	test	behavior_test	NA	-	test_lock	NA
@@ -952,6 +954,7 @@ tests/orchestration/test_agent_invocation.py	test	behavior_test	NA	-	test_lock	N
 tests/orchestration/test_agent_loop.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_mcp_binding.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_models.py	test	behavior_test	NA	-	test_lock	NA
+tests/orchestration/test_public_contract_compatibility.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_skill_activation.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_tool_catalog.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_answer_selection.py	test	behavior_test	NA	-	test_lock	NA
