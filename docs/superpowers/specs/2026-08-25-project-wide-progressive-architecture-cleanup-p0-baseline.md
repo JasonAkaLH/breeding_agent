@@ -2,7 +2,7 @@
 
 ## 1. 状态与边界
 
-- P0状态：`active`；Checkpoint 0～E完成，Checkpoint F待开始
+- P0状态：`active`；Checkpoint 0～F完成，Checkpoint G待开始
 - P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
 - P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
 - 分支：`main`
@@ -118,6 +118,16 @@ Location metadata绑定Checkpoint D生产源码位置；owner内一对一搬家�
 | `E-API-SHUTDOWN-01` | API shutdown + close + quiesce/tasks/CP7/services/engine + 1..N | `runtime.py:9649-9725` | 固定顺序；首错仍阻断后续cleanup |
 | `E-FILE-SELECT-01` | file selection + decide/persist + candidate/LLM/TaskNode/Interrupt/events + 1..N | `file_selection_runtime.py:29-734` | P4 mixin/domain唯一owner；audit-only事件与attachment/sheet binding顺序保持 |
 
+### 4.3 Checkpoint F Frontend existing behavior-lock map
+
+F未发现需要新增测试的缺口；不复制现有case，不锁入UI/文案/可访问性修复预期。
+
+| Evidence owner | 已直接覆盖的P0场景 | 结果 |
+|---|---|---|
+| `frontend/src/App.test.tsx` | upload failure保持upload-accepting Interrupt；stale conversation/history response；cancel等待SSE或missed-SSE reconcile；terminal后拒绝stale non-terminal；artifact/history加载；draft upload/rollback/delete failure；optimistic submit与attachment顺序 | 直接行为测试PASS |
+| `frontend/src/api/taskEvents.test.ts` | SSE terminal close、非terminal close error、全部registered event types、Interrupt answer/cancel/unknown/late-result transport | wire/parser/subscription PASS |
+| `frontend/src/domain/taskEvents.test.ts` | Agent/MCP terminal precedence、multi-waiting、replay dedupe、same-ID conflict、predecessor gap、unknown/late chain、loading_artifacts与ignored duplicate state identity | reducer/state identity PASS |
+
 ## 5. Finding register
 
 Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F841，共172个信号。C901不自动等于需要拆分；只有结合owner、side effect和合同证据后才成为finding。P0不运行`--fix`。
@@ -181,7 +191,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | Agent adapters/Cancellation | Agent storage、runtime-sidecar contract、runtime wiring | surface/MRO/common fixture/transaction/selector/off-shadow-enforce/AgentRun trace | Checkpoint C PASS（focused 102项） |
 | Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 逐分支stable logical ID、order/count、durable locator trace | Checkpoint D PASS（focused 29项） |
 | MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | public identity、17 fault proofs、order/count、lifecycle与P4 owner trace | Checkpoint E PASS（focused 161项） |
-| Frontend | App/taskEvents tests | 复用覆盖，缺口才加最小断言 | Checkpoint F pending |
+| Frontend | App/taskEvents tests | 复用既有覆盖；无真实缺口，不新增case | Checkpoint F PASS（3 files / 177项 + typecheck/build） |
 | Rust/Scripts | 六contract tests、migration tests、Rust quality | 记录root public surface与sequence证据 | Checkpoint G pending |
 
 ## 7. PostgreSQL P5 profile
@@ -208,6 +218,9 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 | Checkpoint D continuation/recovery | repo / 5-module Orchestration/Lifecycle/API focused suite | macOS/Python 3.13 | 29/0/0 | PASS |
 | Checkpoint E MCP/API authority | repo / 8-module Capability/Integration/API focused suite（含17 boundary proof调度） | macOS/Python 3.13 | 161/0/0 | PASS |
 | Checkpoint E changed-test compile/Ruff | repo / 6份受影响test files | macOS/Python 3.13 | completed/0/0 | PASS |
+| Checkpoint F Frontend behavior | `frontend/` / App + API/domain taskEvents | macOS/Node/Vitest | 3 files / 177/0/0 | PASS |
+| Checkpoint F Frontend typecheck | `frontend/` / `npm run typecheck` | macOS/Node/TypeScript | completed/0/0 | PASS |
+| Checkpoint F Frontend build | `frontend/` / `npm run build` | macOS/Node/Vite | completed/0/0 | PASS；保留>500 kB chunk warning，P0不做code-splitting |
 
 所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
 

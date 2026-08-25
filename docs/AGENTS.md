@@ -39,7 +39,7 @@
 - `superpowers/specs/2026-08-22-external-project-skill-bundle-authority-implementation-plan.md`：上述100/100设计的双仓执行计划；从基线、digest/operator、pre-catalog gate/clean fixture、Mini v2恢复、三Skill合同/路由对齐、工作树全量、双archive/Docker到P6-A冻结拆分7个green checkpoint，锁定两仓commit和成对回滚，不进入P6-B或部署prod。
 - `superpowers/specs/2026-08-24-project-wide-progressive-architecture-cleanup-design.md`：已逐节获批并完成scope reset精简复审修订的全仓业务代码渐进式架构清理总设计；删除发散的通用gate/evidence与真实MCP控制平台，聚焦完整tracked universe分类、稳定facade、唯一owner、不可变业务时序、P0～P8小检查点、条件性平台验证和独立回滚，并补回四路径StoragePort、Lifecycle recovery exact seam、MCP Dispatch functional exact edge、三Agent repository/P4 selector、API file-selection bounded authority、Frontend Interrupt answer、Rust root declaration等不可下沉合同；具体文件/测试/CI/artifact细节由各计划基于最新HEAD决定，规范基线`7b36cad`已以`100/100`通过独立信心门，不混入行为修复、schema/data migration或`prod`变更。
 - `superpowers/specs/2026-08-25-project-wide-progressive-architecture-cleanup-p0-implementation-plan.md`：上述总设计的首个渐进实施计划；严格只做tracked universe inventory、公开合同和高风险行为锁，按A～H检查点冻结StoragePort、三Agent repository/P4 selector、Cancellation、continuation/recovery、MCP/API、Frontend、Rust与Scripts合同，生产业务路径必须零diff，P0闭合后才单独生成P1计划；规范基线`bafae8d`经3轮审查、2轮收敛修订以`100/100`通过信心门。
-- `superpowers/specs/2026-08-25-project-wide-progressive-architecture-cleanup-p0-baseline.md`与同名`p0-inventory.tsv`：P0 start commit/tree、1039-path起点、Checkpoint A～E后1045-path精确分类、source owner、finding、public/seam/behavior gate、平台N/A与P1 handoff的唯一轻量账本；不建设通用evidence平台。
+- `superpowers/specs/2026-08-25-project-wide-progressive-architecture-cleanup-p0-baseline.md`与同名`p0-inventory.tsv`：P0 start commit/tree、1039-path起点、Checkpoint A～F后1045-path精确分类、source owner、finding、public/seam/behavior gate、平台N/A与P1 handoff的唯一轻量账本；不建设通用evidence平台。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。
@@ -55,7 +55,7 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-08-25-project-wide-progressive-architecture-cleanup-p0-implementation-plan.md` | 计划`100/100`通过信心门；P0实施`active`，Checkpoint A～E完成 | 下一步Checkpoint F映射Frontend现有异步行为锁，仅在真实缺口补最小断言；P0不修改业务实现。 |
+| `superpowers/specs/2026-08-25-project-wide-progressive-architecture-cleanup-p0-implementation-plan.md` | 计划`100/100`通过信心门；P0实施`active`，Checkpoint A～F完成 | 下一步Checkpoint G冻结Rust root public surface与Operational Scripts顺序；P0不修改业务实现。 |
 | `prd/backend/unified-agent-loop/README.md`（来源：统一Agent Loop架构与PRD decomposition design） | `complete`；当前任务编排authority | r3/r4备份继续保留到用户明确结束rollback窗口；后续变更须维持单Agent控制面与Agent-only schema。 |
 | `个人桌面长任务Agent总体设计总纲.md` | 总纲已确认；实现尚未开始 | 基于该总纲生成分阶段实施计划；个人版以 Rust daemon 为唯一可信控制 runtime，必须支持受控子 Agent spawn 以及主 Agent 决策、Runtime 仲裁的权限/上下文/交接边界，一次性替换服务端架构，旧历史只读导入。 |
 | `prd/backend/capability-missing-fallback/README.md`（父入口：`prd/backend/23-能力缺失LLMFallback披露PRD.md`） | Phase 0 至 Phase 4 代码实现已落地 | 后续仅在新增 fallback reason、artifact 政策或能力注册语义时同步更新 PRD、sanitizer、前端 notice 与测试矩阵。 |
