@@ -598,14 +598,12 @@ def _fit_content(content: str, budget: int, *, estimator: TokenEstimator, keep: 
     low = 0
     high = len(content)
     best = ""
-    best_tokens = 0
     while low <= high:
         length = (low + high) // 2
         candidate = content[-length:] if keep == "suffix" and length else content[:length]
         tokens = _count_tokens(estimator, candidate)
         if tokens <= budget:
             best = candidate
-            best_tokens = tokens
             low = length + 1
         else:
             high = length - 1

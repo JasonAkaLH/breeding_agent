@@ -41,7 +41,7 @@ from src.capabilities.mcp_dispatch import (
     MCPToolSelector,
     build_local_mcp_dispatch_instance,
 )
-from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
+from src.capabilities.mcp_tool import build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.contracts import MCPRemoteTaskStoragePort
@@ -303,9 +303,7 @@ from src.orchestration.answer_selection import select_final_text_artifact
 from src.orchestration.capability_fallback import (
     CAPABILITY_MISSING_FALLBACK_EVENT,
     CAPABILITY_MISSING_FALLBACK_KEY,
-    build_capability_missing_fallback_metadata,
     merge_capability_missing_fallback_metadata,
-    sanitize_capability_missing_fallback_metadata,
 )
 from src.orchestration.backpressure import DEFAULT_MAX_ACTIVE_TASKS, BackpressureGuard
 from src.orchestration.agent_loop import (
@@ -3777,13 +3775,11 @@ class ApiRuntime(
             }
 
         await self._await_existing_execution(task.task_id)
-        resume_capability_id = task.requested_capability_id
         interrupted_node = await self.storage.get_task_node(interrupt.node_id)
         if (
             interrupted_node is not None
             and interrupted_node.capability_id == "mcp.dispatch"
         ):
-            resume_capability_id = "mcp.dispatch"
             resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
             persisted_binding = await self._resolve_persisted_mcp_server_binding(
                 task,
@@ -3798,10 +3794,7 @@ class ApiRuntime(
                 if server_id:
                     resume_metadata["mcp_dispatch_server_id"] = server_id
         elif interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
-            resume_capability_id = interrupted_node.capability_id
             resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
-        elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
-            resume_capability_id = interrupt.source_agent
         owner_conversation = await self.storage.get_conversation(task.conversation_id)
         if owner_conversation is None:
             raise ValueError(f"Unknown conversation: {task.conversation_id}")

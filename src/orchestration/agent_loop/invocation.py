@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Protocol, TypeVar
 
 from src.core.contracts import CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
-from src.core.enums import NodeStatus, TaskStatus
+from src.core.enums import TaskStatus
 from src.core.models import Task, TaskNode
 from src.orchestration.mcp_route_handoff import normalize_selected_mcp_route
 from src.orchestration.instance_selector import InstanceSelector

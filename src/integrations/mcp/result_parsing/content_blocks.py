@@ -6,7 +6,6 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping
-from typing import Any
 
 from .errors import MCPResultParseError
 from .models import (
