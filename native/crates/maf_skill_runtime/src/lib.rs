@@ -5,16 +5,26 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::future::Future;
-use std::io::{Read, Write};
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+
+mod stdio;
+
+#[cfg(test)]
+use stdio::{
+    LimitedReaderHandle, LimitedReaderState, read_limited_prefix, receive_before_deadline,
+    receive_reader_before_deadline, snapshot_limited_reader,
+};
+use stdio::{
+    bounded_output_response, receive_limited_reader, receive_stdin_writer, spawn_limited_reader,
+    spawn_stdin_writer, stdio_drain_deadline,
+};
 
 pub mod pb {
     pub mod common {
@@ -42,7 +52,6 @@ pub const DEFAULT_SKILL_SANDBOX_LISTEN_ADDR: &str = "127.0.0.1:50052";
 pub const MIN_CLIENT_VERSION: &str = "0.1.0";
 pub const MAX_CLIENT_VERSION: &str = "0.1.x";
 const SANDBOX_ENV_PATH: &str = "/usr/bin:/bin";
-const STDIO_DRAIN_GRACE_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorCodeEntry {
@@ -1420,202 +1429,6 @@ fn sandbox_limit(name: &str) -> Result<u64, SkillRuntimeError> {
         })
 }
 
-fn stdio_drain_deadline() -> Instant {
-    Instant::now() + Duration::from_millis(STDIO_DRAIN_GRACE_MS)
-}
-
-fn bounded_output_response(
-    exit_code: i32,
-    stdout_prefix: Vec<u8>,
-    stdout_truncated: bool,
-    stderr_prefix: Vec<u8>,
-    stderr_truncated: bool,
-) -> ExecuteSandboxedResponse {
-    let error = if stdout_truncated || stderr_truncated {
-        Some(TypedErrorEnvelope::from(SkillRuntimeError::new(
-            SkillRuntimeErrorCode::OutputTooLarge,
-            "sandbox stdout or stderr exceeded configured limit",
-        )))
-    } else {
-        None
-    };
-    ExecuteSandboxedResponse {
-        exit_code,
-        stdout_prefix,
-        stderr_prefix,
-        stdout_truncated,
-        stderr_truncated,
-        error,
-    }
-}
-
-fn spawn_stdin_writer(
-    mut stdin: std::process::ChildStdin,
-    payload: Vec<u8>,
-) -> mpsc::Receiver<Result<(), SkillRuntimeError>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result = stdin.write_all(&payload).map_err(|_| {
-            SkillRuntimeError::new(
-                SkillRuntimeErrorCode::SandboxPolicyDenied,
-                "sandbox stdin write failed",
-            )
-        });
-        let _ = sender.send(result);
-    });
-    receiver
-}
-
-#[derive(Debug)]
-struct LimitedReaderHandle {
-    state: Arc<Mutex<LimitedReaderState>>,
-    done: mpsc::Receiver<()>,
-}
-
-#[derive(Debug, Clone)]
-struct LimitedReaderState {
-    prefix: Vec<u8>,
-    truncated: bool,
-    error: Option<SkillRuntimeError>,
-    done: bool,
-}
-
-fn spawn_limited_reader<R>(
-    mut pipe: R,
-    limit: usize,
-    stream_name: &'static str,
-) -> LimitedReaderHandle
-where
-    R: Read + Send + 'static,
-{
-    let (sender, receiver) = mpsc::channel();
-    let state = Arc::new(Mutex::new(LimitedReaderState {
-        prefix: Vec::with_capacity(limit.min(8192)),
-        truncated: false,
-        error: None,
-        done: false,
-    }));
-    let state_for_thread = Arc::clone(&state);
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
-        if let Err(error) = read_limited_prefix(
-            &mut pipe,
-            &state_for_thread,
-            &mut buffer,
-            limit,
-            stream_name,
-        ) && let Ok(mut state) = state_for_thread.lock()
-        {
-            state.error = Some(error);
-        }
-        if let Ok(mut state) = state_for_thread.lock() {
-            state.done = true;
-        }
-        let _ = sender.send(());
-    });
-    LimitedReaderHandle {
-        state,
-        done: receiver,
-    }
-}
-
-fn receive_stdin_writer(
-    receiver: Option<mpsc::Receiver<Result<(), SkillRuntimeError>>>,
-    deadline: Instant,
-) -> Result<(), SkillRuntimeError> {
-    match receiver {
-        Some(receiver) => receive_before_deadline(receiver, deadline),
-        None => Ok(()),
-    }
-}
-
-fn receive_limited_reader(
-    receiver: Option<LimitedReaderHandle>,
-    deadline: Instant,
-) -> Result<(Vec<u8>, bool), SkillRuntimeError> {
-    match receiver {
-        Some(receiver) => receive_reader_before_deadline(receiver, deadline),
-        None => Ok((Vec::new(), false)),
-    }
-}
-
-fn receive_reader_before_deadline(
-    receiver: LimitedReaderHandle,
-    deadline: Instant,
-) -> Result<(Vec<u8>, bool), SkillRuntimeError> {
-    let now = Instant::now();
-    let timeout = deadline.saturating_duration_since(now);
-    let _ = receiver.done.recv_timeout(timeout);
-    snapshot_limited_reader(&receiver)
-}
-
-fn snapshot_limited_reader(
-    receiver: &LimitedReaderHandle,
-) -> Result<(Vec<u8>, bool), SkillRuntimeError> {
-    let state = receiver.state.lock().map_err(|_| {
-        SkillRuntimeError::new(
-            SkillRuntimeErrorCode::SandboxPolicyDenied,
-            "sandbox stdio reader state is poisoned",
-        )
-    })?;
-    if let Some(error) = state.error.clone() {
-        return Err(error);
-    }
-    Ok((state.prefix.clone(), state.truncated))
-}
-
-fn receive_before_deadline<T>(
-    receiver: mpsc::Receiver<Result<T, SkillRuntimeError>>,
-    deadline: Instant,
-) -> Result<T, SkillRuntimeError> {
-    let now = Instant::now();
-    let timeout = deadline.saturating_duration_since(now);
-    receiver.recv_timeout(timeout).map_err(|_| {
-        SkillRuntimeError::new(
-            SkillRuntimeErrorCode::SandboxTimeout,
-            "sandbox stdio did not close before deadline",
-        )
-    })?
-}
-
-fn read_limited_prefix<R>(
-    pipe: &mut R,
-    state: &Arc<Mutex<LimitedReaderState>>,
-    buffer: &mut [u8; 8192],
-    limit: usize,
-    stream_name: &str,
-) -> Result<(), SkillRuntimeError>
-where
-    R: Read,
-{
-    loop {
-        let read = pipe.read(buffer).map_err(|_| {
-            SkillRuntimeError::new(
-                SkillRuntimeErrorCode::SandboxPolicyDenied,
-                format!("sandbox {stream_name} collection failed"),
-            )
-        })?;
-        if read == 0 {
-            return Ok(());
-        }
-
-        let mut state = state.lock().map_err(|_| {
-            SkillRuntimeError::new(
-                SkillRuntimeErrorCode::SandboxPolicyDenied,
-                "sandbox stdio reader state is poisoned",
-            )
-        })?;
-        let remaining = limit.saturating_sub(state.prefix.len());
-        if remaining > 0 {
-            let to_copy = remaining.min(read);
-            state.prefix.extend_from_slice(&buffer[..to_copy]);
-        }
-        if read > remaining {
-            state.truncated = true;
-        }
-    }
-}
-
 fn configure_sandbox_environment(command: &mut Command) {
     command.env_clear();
     command.env("PATH", SANDBOX_ENV_PATH);
@@ -1721,9 +1534,9 @@ fn missing_features_from_error(error: &SkillRuntimeError) -> Vec<String> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io;
+    use std::io::{self, Read};
     use std::path::PathBuf;
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, mpsc};
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
