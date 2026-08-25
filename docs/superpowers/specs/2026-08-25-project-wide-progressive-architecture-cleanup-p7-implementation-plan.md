@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P7 start commit：`a5c9318aa6281091f8cdbe06e594b163e0b37984`
 - P7 start tree：`f87b61c2d0c0f883b8b2700e174a02154cad4366`
 - P7 start tracked set：1081
@@ -42,7 +42,7 @@ P7只处理总设计已分配的四个workstream：Runtime Sidecar、Skill Runti
 - contract bytes：Sidecar `f1bce693...c40ee6`、Skill `bafaa94a...f17c`、MCP `ab27de5f...0233`；
 - Proto bytes：Runtime `1201f380...7742f`、MCP `f8951ffc...afbc`、Common `35d7c12e...2a89`。
 
-提交：`docs(cleanup): plan P7 native and scripts boundaries`
+完成：`f276bcb`（`docs(cleanup): plan P7 native and scripts boundaries`）。
 
 ### Checkpoint B：先闭合MCP可执行合同门
 
@@ -51,7 +51,7 @@ P7只处理总设计已分配的四个workstream：Runtime Sidecar、Skill Runti
 - fuzz manifest直接pin仅测试图使用的`rmcp = "=1.7.0"`并机械更新`native/fuzz/Cargo.lock`，不改production manifest/lock；
 - `run_rust_quality_gates.py`新增独立`mcp_runtime_protocol_fuzz_smoke`，workflow与测试加入Ubuntu 30秒实际执行；不替代原Skill fuzz gate。
 
-运行MCP Rust/Python focused、locked fuzz compile与本机30秒MCP fuzz。提交：`test(native): lock MCP runtime refactor contracts`
+完成：`bb954b9`（`test(native): lock MCP runtime refactor contracts`）；MCP crate/public fixture、Python合同、locked compile通过，本机MCP fuzz 1,087,803次无crash。
 
 ### Checkpoint C：Runtime Sidecar private去重与codec
 
@@ -61,6 +61,8 @@ P7只处理总设计已分配的四个workstream：Runtime Sidecar、Skill Runti
 
 - `refactor(sidecar): reuse validation error helpers`
 - `refactor(sidecar): isolate protobuf codec`
+
+完成：`33e3b42`与`ae320e2`；26个codec function迁移等价，Sidecar 42项、Runtime Store 12项、Python focused 64项、fmt/Clippy通过；root约4,008→3,655行，SQLite adapter 2,014→1,997行。
 
 ### Checkpoint D：Skill Runtime private stdio与service边界
 
@@ -74,6 +76,8 @@ P7只处理总设计已分配的四个workstream：Runtime Sidecar、Skill Runti
 
 - `refactor(skill-runtime): isolate bounded stdio`
 - `refactor(skill-runtime): isolate service and grpc adapters`
+
+完成：`9f5e8c2`与`e6ea706`；stdio/service/gRPC/codec逐块等价，Skill crate 40项及Python/PyO3/sandbox/evidence 47项通过；root约2,209→1,673行。
 
 ### Checkpoint E：MCP Runtime private boundaries
 
@@ -89,11 +93,15 @@ P7只处理总设计已分配的四个workstream：Runtime Sidecar、Skill Runti
 
 每批运行MCP crate tests/Clippy/contract bytes；JSON-RPC与sanitizer批次额外运行locked compile和30秒MCP fuzz。可按风险合并为不超过3个清晰提交，但不能把行为修改混入。
 
+完成：`6ebb5fc`（JSON-RPC/sanitizer/registry）、`2abd4b0`（contract/error）、`7e8857f`（official SDK/shadow）；34组迁移body/root declaration对照等价，MCP 26 unit + 2 binary + 2 public fixture、Python contract/SDK/shadow/enforce与Clippy/fmt/locked compile通过；root约2,135→1,367行。Parser/sanitizer批次MCP fuzz 1,079,243次无crash。
+
 ### Checkpoint F：Operational Scripts单文件复用
 
 先在`test_migrate_mcp_dispatch_aggregate.py`锁report/apply success/error的engine create/dispose count、invalid DSN/backend时零create、stdout reason与exit 2/3、环境读取顺序。随后只在该脚本增加private DSN loader、PG engine context manager与rejected JSON emitter；report仍先copy env再读DSN，apply仍先读DSN再copy env；authority conflict捕获仍早于migration error。
 
 其它10个operational/SQL business paths全部`reviewed_no_change`。运行该模块、Scripts 63+新增项和真实PG N/A说明；SQL未改时不要求PG profile。提交：`refactor(scripts): reuse MCP aggregate engine lifecycle`
+
+完成：`3b9e04d`；18项focused与Scripts full 66项通过，report/apply environment order、engine create/dispose、stdout及exit 2/3由direct assertions冻结。
 
 ### Checkpoint G：P7全量门禁与handoff
 
@@ -107,6 +115,17 @@ P7只处理总设计已分配的四个workstream：Runtime Sidecar、Skill Runti
 - `git diff --check`、tracked universe、file mode、dependency/license和`docker_cmd.md`保护检查。
 
 nextest/coverage/audit/deny/release artifact等现有平台gate按availability运行并准确登记；未触及的manylinux、真实PG、Frontend、Backend业务、外部MCP与`prod`不得冒充PASS。同步本计划、`native/AGENTS.md`、`scripts/AGENTS.md`、`docs/AGENTS.md`与`CHANGELOG.md`。
+
+终态结果：
+
+- Python Rust contract/migration 98项、Scripts 66项零失败；
+- Rust workspace fmt、all-target/all-feature Clippy、cargo tests与nextest 149/149通过；
+- workspace line coverage 84.27%，Skill 92.88%，MCP 92.97%，全部阈值通过；
+- cargo audit通过并只报告deny allowlist内既有`anyhow 1.0.102` advisory，cargo deny通过且只有既有duplicate warnings；provenance self-test、fuzz target manifest通过；
+- 终态MCP protocol fuzz 1,122,893次/31秒无crash；macOS既有`atos` warning只影响未来crash符号化；
+- 216个crate-root public items保持；Runtime/MCP/Common Proto及三份checked-in contract SHA与P7 start完全一致；production manifests/Cargo.lock零diff，fuzz-only manifest将既有Apache-2.0 `rmcp`直接pin为与production一致的1.7.0；
+- P7 implementation HEAD=`7e8857fffe1d81937c3a7658f5a95fb1bced9eee`，tree=`b7cabb310996eef5c1acdff33b0dc3be4a851d8b`；终态tracked set=1093，路径清单SHA-256=`3e3f10d884fd1f464d033a057ca76a52b5a5a03a8ba8369aa1407b8b2b5666be`；
+- manylinux、真实PostgreSQL、Frontend、Backend业务、外部MCP与`prod`未触及，准确记为N/A；`docker_cmd.md`仍存在、0600、被ignore且未跟踪。
 
 提交：`docs(cleanup): close P7 native and scripts boundaries`
 
