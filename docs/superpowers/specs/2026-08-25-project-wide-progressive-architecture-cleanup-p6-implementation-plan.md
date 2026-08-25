@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P6 start commit：`e49a0398dde2a939266e4edf352c8200750278f9`
 - P6 start tree：`70bd7f96808264c447146166337e52911b8d1003`
 - P6 start tracked set：1072
@@ -46,13 +46,13 @@ Frontend production TypeScript三语句以上exact duplicate为1组，即`P6-SET
 - DOM wrapper/className/role/name/ARIA/focus/scroll/portal/welcome mount与CSS；
 - 21个测试文件集合与307项基线。
 
-提交：`docs(cleanup): plan P6 frontend boundaries`
+完成：`a5dee57`（`docs(cleanup): plan P6 frontend boundaries`）。
 
 ### Checkpoint B：复用pure Set删除helper
 
 新增最小`domain/collections.ts`，返回clone后删除指定值的新Set。conversation delete、rename和upload deletion setter复用；setter调用位置、finally、key和返回identity语义不变。直接测试覆盖命中/未命中、原Set不变和新Set identity。
 
-提交：`refactor(frontend): reuse immutable Set removal`
+完成：`a8833fe`（`refactor(frontend): reuse immutable Set removal`）；聚焦2 files / 128 tests与typecheck通过。
 
 ### Checkpoint C：分离Attachment pure domain与cards
 
@@ -63,7 +63,7 @@ Frontend production TypeScript三语句以上exact duplicate为1组，即`P6-SET
 
 方法体/JSX AST逐项保持；App通过import使用同一type/helper/component，不复制定义。不得移动`draftAttachments/pendingUploads/uploading/deleting` state，不移动upload/delete/reload/rollback/commit API effect，不改变Drawer/input refs、DOM、aria-label或notice。新增domain直接测试，App existing tests负责DOM/effect trace。
 
-提交：`refactor(frontend): isolate attachment domain and cards`
+完成：`8854310`（`refactor(frontend): separate attachment presentation`）；迁移声明13/13 AST-text等价，聚焦2 files / 131 tests与typecheck通过。
 
 ### Checkpoint D：分离Interrupt pure domain与presentation
 
@@ -74,7 +74,7 @@ Frontend production TypeScript三语句以上exact duplicate为1组，即`P6-SET
 
 函数/JSX AST逐项保持。`handleInterruptAnswer`、optimistic turn、`api.submitMessage`、keep-open/resumed/rejected/stale、Attachment disposition、pending interrupt、subscription和Task state全部留在App原调用位置。新增direct domain fixtures覆盖metadata/upload/sheet/keep-open/natural-language/slot-ref/reserved fields；App full测试锁行为与DOM。
 
-提交：`refactor(frontend): isolate interrupt domain and presentation`
+完成：`b438f62`（`refactor(frontend): isolate interrupt domain and presentation`）；迁移声明20/20 AST-text等价，聚焦2 files / 133 tests与typecheck通过。
 
 ### Checkpoint E：全量门禁与终态handoff
 
@@ -86,6 +86,15 @@ Frontend production TypeScript三语句以上exact duplicate为1组，即`P6-SET
 - Task Runtime/Attachment effect仍只有App一个owner。
 
 Backend、Rust、真实PostgreSQL、Linux Parser与外部MCP因wire/生产路径未触及记为N/A。同步本计划、`docs/AGENTS.md`、`frontend/AGENTS.md`与`CHANGELOG.md`，冻结P7 handoff。
+
+终态结果：
+
+- Frontend全量24 files / 321 tests零失败、零skip；typecheck与production build通过；只有既有`vendor-antd`大于500 kB warning；
+- production TypeScript三语句以上exact block duplicate从1组降为0组；
+- `api.submitMessage` 3→3、upload API 1→1、delete upload API 2→2、`setMessages` 13→13、`setPendingUploads` 9→9、timer 4→4、subscription ref 26→26，均未增加；
+- `App.tsx`从约3,814行降至3,388行，只迁出已登记pure/presentational声明；
+- P6 implementation HEAD=`b438f62c7fe30a3c98f8efbf4fdde510a990055b`，tree=`077a41b289ad2f0fc5b99c6514aae2e85dd1a9c9`；终态tracked set=1081，路径清单SHA-256=`fc319a6f9fd6c2802c99957399b977a6c756dbe155c8f87d682503e69464363b`；
+- `docker_cmd.md`仍存在、被ignore且未跟踪；Backend、Rust、真实PostgreSQL、Linux Parser与外部MCP为未触及N/A。
 
 提交：`docs(cleanup): close P6 frontend boundaries`
 

@@ -2,7 +2,10 @@
 
 ## Structure
 
-- `src/App.tsx`: authenticated chat shell, SSE lifecycle, message surfaces, interrupt flow, and copy actions.
+- `src/App.tsx`: authenticated chat shell and the sole owner of conversation/message state, SSE lifecycle, attachment upload/delete/rollback effects, and interrupt answer submission.
+- `src/domain/collections.ts`: pure immutable collection updates shared by React state setters.
+- `src/domain/attachments.ts`, `src/components/AttachmentCards.tsx`: attachment types, pure labels/summary/merge helpers, and stateless draft/saved-file cards; API effects and attachment state remain in `App.tsx`.
+- `src/domain/interrupts.ts`, `src/components/InterruptPresentation.tsx`: interrupt metadata/sheet/slot pure helpers and stateless question/status presentation; answer submission, optimistic messages, pending state, and task continuation remain in `App.tsx`.
 - `src/components/MarkdownText.tsx`: shared safe Markdown rendering for user, assistant, reasoning, and interrupt content.
 - `src/components/mathFormulaParser.ts`: deterministic TeX/MathML tokenization and per-render resource limits.
 - `src/components/MathFormula.tsx`: React lifecycle boundary for asynchronous formula conversion and readable fallback.
