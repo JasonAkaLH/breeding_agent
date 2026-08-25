@@ -2,7 +2,7 @@
 
 ## 1. 状态与边界
 
-- P0状态：`active`；Checkpoint 0～G完成，Checkpoint H待开始
+- P0状态：`complete`；Checkpoint 0～H全部闭合
 - P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
 - P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
 - 分支：`main`
@@ -25,6 +25,8 @@ P0开始时工作树clean。相对业务设计基线`c8da6ccdf89eed5851cb5a79385
 - Ignored/runtime/仓外文件不进入集合
 
 Checkpoint A增加baseline和inventory两个validation dependency，并把已存在的总设计/P0计划从普通documentation重分类为validation dependency，集合为1041行。Checkpoint B新增三份public contract tests，集合为1044行；Checkpoint C新增一份Agent repository contract test，当前集合为1045行。每个checkpoint均以cached+owned-untracked集合做双向精确比较，提交后以新HEAD重验。
+
+P0 final tracked set仍为1045行，排序path列表SHA-256为`9a4f46bf736cfd50c88c054b4795d0432a754d3e7e0654a524dafb40fda29a8a`；与inventory path列双向差集为空。
 
 ### 2.2 分类结果
 
@@ -224,6 +226,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | public identity、17 fault proofs、order/count、lifecycle与P4 owner trace | Checkpoint E PASS（focused 161项） |
 | Frontend | App/taskEvents tests | 复用既有覆盖；无真实缺口，不新增case | Checkpoint F PASS（3 files / 177项 + typecheck/build） |
 | Rust/Scripts | 六contract tests、migration tests、Rust quality | 216 root public items、六contract bytes、migration sequence | Checkpoint G PASS（Python focused 97项；Rust fmt/clippy/test） |
+| P0 final gates / P1 handoff | Backend canonical、Frontend full、Rust quality、final inventory/diff | 逐域全量复验、平台skip逐项登记、P1允许/禁止边界 | Checkpoint H PASS；生产业务路径相对P0 start零diff |
 
 ## 7. PostgreSQL P5 profile
 
@@ -256,8 +259,30 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 | Checkpoint G Rust fmt | repo / unified `cargo_fmt` gate | macOS/Rust 1.95 | completed/0/0 | PASS |
 | Checkpoint G Rust clippy | repo / workspace all-targets/all-features `-D warnings` | macOS/Rust 1.95 | completed/0/0 | PASS |
 | Checkpoint G Rust test | repo / workspace all-features | macOS/Rust 1.95 | 147/0/0 | PASS；0-test binaries/doc targets不计入ran |
+| H Core | repo / `unittest discover -s tests/core` | macOS/Python 3.13 | 45/0/0 | PASS |
+| H Storage | repo / `unittest discover -s tests/storage` | macOS/Python 3.13 | 410/0/7 | PASS；7项真实PostgreSQL profile未配置，逐项N/A见下文 |
+| H Lifecycle | repo / `unittest discover -s tests/lifecycle` | macOS/Python 3.13 | 41/0/0 | PASS |
+| H Integrations | repo / `unittest discover -s tests/integrations` | macOS/Python 3.13 | 707/0/2 | PASS；2项Linux Result Parser gate在macOS N/A，逐项见下文 |
+| H Agent Skills | repo / `unittest discover -s tests/integrations/agent_skills` | macOS/Python 3.13 | 209/0/0 | PASS；父discover不递归该无`__init__.py`目录，已独立运行 |
+| H Orchestration | repo / `unittest discover -s tests/orchestration` | macOS/Python 3.13 | 109/0/0 | PASS；保留既有`datetime.utcnow` deprecation warning |
+| H Main Agent | repo / `unittest discover -s tests/capabilities/main_agent` | macOS/Python 3.13 | 16/0/0 | PASS |
+| H MCP Dispatch | repo / `unittest discover -s tests/capabilities/mcp_dispatch` | macOS/Python 3.13 | 15/0/0 | PASS |
+| H MCP Tool | repo / `unittest discover -s tests/capabilities/mcp_tool` | macOS/Python 3.13 | 15/0/0 | PASS |
+| H Skill Tool | repo / `unittest discover -s tests/capabilities/skill_tool` | macOS/Python 3.13 | 3/0/0 | PASS |
+| H API | repo / `unittest discover -s tests/api` | macOS/Python 3.13 | 446/0/0 | PASS；保留既有unclosed SQLite connection ResourceWarning |
+| H E2E | repo / `unittest discover -s tests/e2e` | macOS/Python 3.13 | 7/0/0 | PASS |
+| H Observability | repo / `unittest discover -s tests/observability` | macOS/Python 3.13 | 39/0/0 | PASS |
+| H Scripts | repo / `unittest discover -s tests/scripts` | macOS/Python 3.13 | 63/0/0 | PASS；先登记P0新增公开合同测试后闭合legacy inventory exact count=56 |
+| H Deployment | repo / `unittest discover -s tests/deployment` | macOS/Python 3.13 | 3/0/0 | PASS |
+| H Frontend full | `frontend/` / `npm test -- --run` | macOS/Node/Vitest | 21 files / 307/0/0 | PASS |
+| H Frontend typecheck/build | `frontend/` / `npm run typecheck`; `npm run build` | macOS/Node/TypeScript/Vite | completed/0/0 | PASS；build保留既有>500 kB chunk warning |
+| H Rust fmt/clippy/test | repo / 三条existing Rust quality gate | macOS/Rust 1.95 | fmt completed；clippy completed；test 147/0/0 | PASS |
 
 所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
+
+Storage的7项N/A依次为Agent repository、legacy MCP migration、conversation delete、MVCC、CP7 candidate validation、rollout integration、rollout permissions真实PostgreSQL profile；对应skip reason分别为`maf_postgres_agent_test_dsn_not_configured`、`maf_postgres_legacy_migration_test_dsn_not_configured`、`maf_postgres_conversation_delete_test_dsn_not_configured`、`maf_postgres_mvcc_test_dsn_not_configured`、`CP7_POSTGRES_VALIDATION_DSN is not configured`、`postgres_rollout_integration_test_dsn_not_configured`、`postgres_rollout_permissions_test_dsn_not_configured`。Integrations的2项N/A为`Linux terminable regex gate`与`Linux RLIMIT gate`。P0未改这些平台生产路径或测试合同，因此均不是`platform_pending`，也不写作PASS。
+
+H首次并发调度时，Frontend test/build同时准备MathJax目录导致build `EEXIST`，Rust test与其他cargo门禁争用时fake HTTP fixture出现`WouldBlock`；在Frontend test结束后独占build、独占Rust test均通过。此处只记录门禁编排争用，不改变业务或测试期待。
 
 ## 9. 外部与平台状态
 
@@ -271,12 +296,35 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 
 Checkpoint G确认`native/Cargo.toml`、`native/Cargo.lock`及三目标crate manifests相对P0 start均零diff；Ubuntu、manylinux、PyO3 packaging和fuzz源码均未触及，因此不把macOS Rust PASS冒充这些平台证据。
 
-## 10. P1 handoff（P0期间只维护约束）
+## 10. P1 handoff（已冻结；不构成P1实现）
 
-- 输入：四条StoragePort identity、259 method name/async/signature literal baseline。
-- P1产物：每个method恰好一个narrow domain、owner plan与consumer handoff；无catch-all。
-- Cancellation：独立non-aggregate writer；off/shadow/enforce/no-client trace必须先绿。
-- 禁止：迁移P2～P7 private helper、改变Agent/Sidecar authority、修复deferred behavior、修改schema/data。
-- P1开始条件：P0 final commit clean；inventory/contract/trace闭合；Backend/Frontend/Rust适用全量门禁通过。
+### 10.1 输入与必须产物
 
-P0完成前，本节不能被解释为P1实施授权。
+- 四条公开路径`src.core.contracts.StoragePort`、`src.core.StoragePort`、`src.storage.interfaces.StoragePort`、`src.storage.StoragePort`当前以`is`指向同一对象。
+- 259个async method的逐项当前signature authority为`tests/core/test_public_contract_compatibility.py::EXPECTED_STORAGE_METHOD_SIGNATURES`；其sorted compact JSON + LF SHA-256为`4139144f0ca4ef372636368dac366082d403e6764139b0a8686bdbd634a1d12c`。P1不得用运行时重新生成值覆盖literal baseline。
+- P1必须交付完整`method → narrow domain → unique owner plan → known production consumers → legal aggregate compatibility seam → adoption checkpoint`表；259个method必须恰好出现一次，不能缺失、重复或落入`misc/common/catch-all`。
+- 每个窄port只包含真实同域操作；P2～P5在各自计划内迁移consumer。四条公开路径继续re-export同一canonical aggregate对象，名称、async属性与signature delta必须为0。
+
+### 10.2 Cancellation边界
+
+- Cancellation Sidecar writer保持独立non-aggregate port，不进入259-method union。
+- 当前trace必须逐场景保留：`off`只走SQL legacy path；`shadow`保持SQL authority并按当前次序执行Sidecar shadow；`enforce`按当前selector走Sidecar；client缺失保留exact error且下游写入为0；legacy Task与AgentRun各自经过独立admission，不合并writer。
+- P1只可定义窄Protocol/兼容facade与直接test double；不得顺手改变SQL/Sidecar调用次数、顺序、CAS/idempotency、错误映射或AgentRun终态。
+
+### 10.3 允许与禁止
+
+- 允许：Core/shared persistence contract、四条兼容re-export、Cancellation独立contract，以及直接证明这些合同的Core/Storage/Lifecycle测试；具体新模块名由P1计划基于届时HEAD决定。
+- 禁止：迁移或重写P2 Orchestration/Capabilities、P3 Integrations/Skills/MCP、P4 API、P5 Storage/State/Lifecycle adapter实现、P6 Frontend、P7 Rust/Scripts的private helper或consumer；禁止改变Agent/Sidecar authority、schema/data、`prod`或任何业务行为。
+- `BEHAVIOR-ORCH-PARALLEL-001`、`BEHAVIOR-ORCH-LEASE-001`、`BEHAVIOR-ORCH-TERMINAL-CONTINUATION-001`、`BEHAVIOR-ORCH-AUTHORITY-SNAPSHOT-001`、`BEHAVIOR-ORCH-TASKNODE-PREPROJECTION-001`、`BEHAVIOR-PARSER-CLEANUP-CANCEL-001`、`BEHAVIOR-API-LIFECYCLE-001`、`BEHAVIOR-SIDECAR-AGENT-LEASE-001`、`BEHAVIOR-SIDECAR-AGENT-RECOVERY-LIST-001`、`BEHAVIOR-SIDECAR-AGENT-CANCEL-001`全部是行为修复禁区；P1只能维持其characterization，不能借结构迁移修复。
+
+### 10.4 P1启动前定向门禁
+
+```bash
+conda run -n multi_agent python -m unittest tests.core.test_public_contract_compatibility
+conda run -n multi_agent python -m unittest tests.lifecycle.test_task_cancellation
+conda run -n multi_agent python -m unittest tests.storage.test_agent_repository_contract
+conda run -n multi_agent python -m unittest tests.storage.test_runtime_sidecar_agent_repository
+conda run -n multi_agent python -m unittest tests.api.test_runtime_public_contract
+```
+
+P1只能在P0 final commit clean、inventory=final tracked set、生产业务路径相对P0 start零diff且上述门禁全绿后另行生成实施计划；本节不是直接修改consumer或创建窄port的授权。

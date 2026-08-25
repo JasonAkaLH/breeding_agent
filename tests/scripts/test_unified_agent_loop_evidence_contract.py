@@ -22,7 +22,7 @@ class UnifiedAgentLoopEvidenceContractTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "closed")
         self.assertEqual(result["active_prd_count"], 26)
-        self.assertEqual(result["legacy_test_count"], 55)
+        self.assertEqual(result["legacy_test_count"], 56)
         self.assertEqual(result["execution_entry_count"], 9)
         self.assertEqual(
             result["handoffs"],
