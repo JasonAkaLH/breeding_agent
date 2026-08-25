@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P3 start commit：`5d7a3606498349ba8338743a7afa26fdefe7078c`
 - P3 start tree：`253f97e30d26a2cf87eda974cd5285e7323c3573`
 - P3 start tracked set：1049
@@ -60,9 +60,9 @@ Agent Skills parser/input/slot、Coordinator/fault、Gateway、Selector、durabl
 
 - direct：CP7 safety、CP7 terminal lifecycle、MCP observability、health、user config/client、legacy migration apply、shadow compare；
 - local composites：Dispatch Coordinator、Gateway、Selector Context、Durable Result lifecycle、Historical reprojection、Result Artifact projection、MCP audit；
-- 复用P1 bases重写现有Credential recovery与Remote Task recovery本地Protocol，删除重复method declarations。
+- 复用P1 bases重写Remote Task recovery本地Protocol，删除重复method declarations；Credential sentinel/recovery若现有本地Protocol更窄则保持。
 
-新增直接contract test，证明：显式文件不再import aggregate或以`Any`标注storage；组合Protocol无direct async method且继承surface精确；constructor/public function除annotation外签名不变。P4 composition仍传同一concrete storage对象。
+新增直接contract test，证明：显式文件不再import aggregate；组合Protocol无direct async method且继承surface精确；constructor/public function只收窄annotation。最终审计确认Credential sentinel/recovery已有本地最小Protocol比P1现有分类更窄，拒绝以更宽类别Protocol替换。P4 composition仍传同一concrete storage对象。
 
 提交：`refactor(integrations): adopt narrow persistence ports`
 
@@ -87,3 +87,43 @@ Agent Skills parser/input/slot、Coordinator/fault、Gateway、Selector、durabl
 ## 5. 停止条件
 
 若helper复用改变任一异常类型/message、byte边界、schema/fallback；若port annotation需要修改P4/P5实现；若Gateway/Coordinator/Parser/secure store控制流产生diff；若真实I/O、Tool调用或authority owner改变；立即停止该改动并保留已绿检查点。P3不以减少C901、文件行数或抽象数量作为完成条件。
+
+## 6. 实施终态
+
+### 6.1 Checkpoints
+
+| Checkpoint | Commit | 结果 |
+|---|---|---|
+| Plan/audit | `e6b8cfe` | 10组exact duplicate、90个C901、persistence consumers和平台条件完成分类 |
+| Agent Skills parsing | `223f6e8` | 6份重复body收敛到`agent_skills/_parsing.py`；异常与fallback矩阵保持 |
+| MCP attachment metadata | `8c9b785` | Coordinator/Selector复用3个private pure helper；调用名与byte边界保持 |
+| Narrow port adoption | `69a12ac` | 16个consumer采用P1 direct/composite ports；Remote Task重复Protocol删除 |
+| Final ledger | 本文终态提交 | Backend canonical、目录索引、CHANGELOG与P4 handoff闭合 |
+
+### 6.2 Gate record
+
+| Scope | ran/fail/skip | 结果 |
+|---|---:|---|
+| Python compileall `src scripts tests` | completed/0/0 | PASS |
+| Core / Storage / Lifecycle | 48+410+42 / 0 / 7 | PASS；7项真实PostgreSQL profile为未触及平台N/A |
+| Integrations / Agent Skills | 712+211 / 0 / 2 | PASS；2项Linux Result Parser gate在macOS N/A |
+| Orchestration | 112/0/0 | PASS |
+| Capabilities | 50/0/0 | PASS（Main Agent 17、MCP Dispatch 15、MCP Tool 15、Skill Tool 3） |
+| API / E2E / Observability / Scripts / Deployment | 446+7+39+63+3 / 0 / 0 | PASS |
+| Backend合计 | 2143/0/9 | PASS；相对P2新增7项直接回归，平台skip无新增 |
+| MCP integration full | 538/0/2 | PASS；包含所有P3 MCP改动消费者 |
+| Fault/Coordinator/Gateway/Historical focused | 74/0/0 | PASS；17 fault boundaries、调用trace与zero-network authority包含在内 |
+| Changed Python compile/Ruff/diff check | completed/0/0 | PASS |
+| Integrations AST exact duplicate | 5 groups | 从start 10组减少5组；余下5组均为finding register的`reviewed_no_change` |
+| Integrations C901 / 全仓Ruff审计 | 90 / 162 C901 + 7 F401 + 3 F841 | 与P3 start及P0相同；未运行`--fix`，不把复杂度当完成指标 |
+| Frontend / Rust / real external MCP | N/A | P3未触及对应生产路径、传输或外部I/O；不冒充新证据 |
+
+### 6.3 Final invariants与handoff
+
+- P3 final tracked set为1055，排序path SHA-256为`5eda5691e43c078efb8e1adae870d456efcf5637104545fac4a1cbe638a067f4`；相对start只新增本计划、2个private helper和3份直接测试。
+- Agent Skills string tuple与JSON-object parsing各只有一个canonical owner；所有六个旧private调用名仍为import alias，输入、异常类型/message和fallback顺序不变。
+- MCP附件basename/content-type/UTF-8 truncation各只有一个canonical owner；Coordinator/Selector的budget、authority validation、phase、Tool调用和公开合同零变化。
+- 16个P3 persistence consumer不再显式import aggregate `StoragePort`，组合Protocol只继承P1窄合同且无直接async method；Credential本地最小Protocol因替换会扩大依赖而保持不变。
+- Gateway、Coordinator、Parser、secure store、transport和外部I/O控制流未修改；17 fault boundaries、Gateway bootstrap/call、Coordinator no-replay与Historical zero-network seam保持原顺序和次数。
+- P4只接管API composition/wiring及HTTP recovery/Interrupt adapter owner；P5只接管Storage/Lifecycle adapters。P3不得借handoff回写其实现，也不修P0 deferred behavior。
+- schema/data、依赖、`prod`、Frontend、Rust和`docker_cmd.md`正文均未触及；License Requirement无变化。
