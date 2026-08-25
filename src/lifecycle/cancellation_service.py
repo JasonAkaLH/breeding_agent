@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Awaitable, Mapping, Protocol
 
 from src.core.contracts import AuditSink, EventSink, StoragePort
 from src.core.enums import EventVisibility
@@ -13,6 +13,18 @@ from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, val
 from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write
 
 from . import task_state_machine
+
+
+class CancellationSidecarWriter(Protocol):
+    def write_cancellation_token(
+        self,
+        *,
+        task_id: str,
+        requested_at_ms: int,
+        reason: str,
+        terminal_policy: str,
+        idempotency_key: str,
+    ) -> Mapping[str, Any] | Awaitable[Mapping[str, Any]]: ...
 
 
 class AgentCancellationStore(Protocol):
@@ -35,7 +47,7 @@ class CancellationService:
         *,
         event_sink: EventSink | None = None,
         audit_sink: AuditSink | None = None,
-        runtime_sidecar_client: Any | None = None,
+        runtime_sidecar_client: CancellationSidecarWriter | None = None,
         agent_runs: AgentCancellationStore | None = None,
     ) -> None:
         self._storage = storage
