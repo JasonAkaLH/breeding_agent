@@ -5,10 +5,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
-from src.core.contracts import StoragePort
+from src.core.contracts import ArtifactStoragePort, TaskStoragePort
 from src.core.enums import ArtifactType
 from src.core.models import Artifact
 from src.integrations.agent_skills.internal_keys import (
@@ -31,6 +31,12 @@ from src.storage.artifact_files import (
     sanitize_download_filename,
 )
 
+class SkillOutputArtifactStoragePort(
+    ArtifactStoragePort,
+    TaskStoragePort,
+    Protocol,
+):
+    """Persistence surface used by Skill output artifact processing."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -44,7 +50,7 @@ class SkillOutputArtifactManager:
     def __init__(
         self,
         *,
-        storage: StoragePort,
+        storage: SkillOutputArtifactStoragePort,
         file_store: LocalArtifactFileStore,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:

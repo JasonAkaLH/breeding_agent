@@ -8,7 +8,7 @@ from src.core.enums import MessageRole
 from src.core.models import Interrupt, Message
 
 if TYPE_CHECKING:
-    from src.core.contracts import StoragePort
+    from src.core.contracts import MessageStoragePort
 
 
 INTERRUPT_VISIBLE_STREAM_STATUS = "interrupt_visible"
@@ -25,7 +25,7 @@ def interrupt_visible_message_id(interrupt: Interrupt, content: str | None = Non
 
 
 async def persist_interrupt_question_message(
-    storage: "StoragePort",
+    storage: MessageStoragePort,
     interrupt: Interrupt,
     *,
     created_at: datetime | None = None,

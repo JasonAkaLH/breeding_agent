@@ -5,9 +5,16 @@ import inspect
 import json
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
-from src.core.contracts import CapabilityExecutionResult, StoragePort
+from src.core.contracts import (
+    CapabilityExecutionResult,
+    ConversationStoragePort,
+    InterruptStoragePort,
+    MCPRemoteTaskStoragePort,
+    SlotStoragePort,
+    TaskStoragePort,
+)
 from src.core.enums import EventVisibility, NodeStatus, TaskStatus
 from src.core.models import EventRecord, Interrupt, Task, TaskNode
 from src.integrations.agent_skills.missing_input_interrupt import (
@@ -33,13 +40,24 @@ InterruptBinder = Callable[
 ]
 
 
+class AgentTaskProjectionStoragePort(
+    TaskStoragePort,
+    InterruptStoragePort,
+    ConversationStoragePort,
+    MCPRemoteTaskStoragePort,
+    SlotStoragePort,
+    Protocol,
+):
+    """Persistence surface used by Agent invocation task projections."""
+
+
 class AgentTaskInvocationCommitPort:
     """Project one Agent capability call into TaskNode/Event/Interrupt state."""
 
     def __init__(
         self,
         *,
-        storage: StoragePort,
+        storage: AgentTaskProjectionStoragePort,
         runs: AgentRunRepository,
         make_event: Callable[..., EventRecord],
         record_event: Callable[[EventRecord], Awaitable[None]],
@@ -408,7 +426,7 @@ class AgentTaskInvocationCommitPort:
 
 
 async def persist_agent_slot_interrupt_authority(
-    storage: StoragePort,
+    storage: SlotStoragePort,
     interrupt: Interrupt,
     *,
     now: datetime,

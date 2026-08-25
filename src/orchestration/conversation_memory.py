@@ -11,6 +11,12 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from src.core.coercion import coerce_positive_int
+from src.core.contracts import (
+    ArtifactStoragePort,
+    ConversationStoragePort,
+    MessageStoragePort,
+    TaskStoragePort,
+)
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Artifact, ConversationMemorySummary, Message, Task
 from src.integrations.llm_client import load_config
@@ -26,6 +32,17 @@ COMPRESSION_POLICY_VERSION = "conversation-memory-policy-v1"
 
 SummaryGenerator = Callable[..., str | Awaitable[str]]
 ResolutionGenerator = Callable[..., str | Awaitable[str]]
+
+
+class ConversationMemoryStoragePort(
+    ConversationStoragePort,
+    MessageStoragePort,
+    TaskStoragePort,
+    ArtifactStoragePort,
+    Protocol,
+):
+    """Persistence surface used while building conversation memory."""
+
 
 class MemoryRequest(Protocol):
     task_id: str
@@ -576,7 +593,7 @@ class ConversationMemoryBuilder:
     def __init__(
         self,
         *,
-        storage,
+        storage: ConversationMemoryStoragePort,
         config: ConversationMemoryConfig | None = None,
         summary_generator: SummaryGenerator | None = None,
         resolution_generator: ResolutionGenerator | None = None,
