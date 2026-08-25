@@ -143,6 +143,7 @@ Gate record 只记 commit、scope、cwd、原生命令/CI run、平台、ran/fai
 
 - `git status --short --branch`；
 - `git rev-parse HEAD` 与 `git rev-parse HEAD^{tree}`；
+- 将实际40位commit同时记录为baseline字段`p0_start_commit`；最终验证时把该值载入任务专用变量`P0_START_COMMIT`，空值或非40位小写hex必须失败；
 - P0 start HEAD 相对设计业务基线 `c8da6cc…` 的业务/测试/CI/依赖 diff；
 - 当前分支必须为 `main`；
 - 用户已有变更的 owned/unowned path；
@@ -622,7 +623,7 @@ P1计划只有在P0最终commit clean、inventory/contract/trace闭合后生成�
 
 ### 12.4 最终审查与提交
 
-- 每次提交前的`git diff --cached --check`均已通过；最终运行`git diff --check <p0-start-commit>..HEAD`检查全部P0 committed diff，并再次运行`git diff --check`检查未暂存内容；
+- 每次提交前的`git diff --cached --check`均已通过；最终使用baseline中已校验的任务专用变量运行`git diff --check "${P0_START_COMMIT}..HEAD"`检查全部P0 committed diff，并再次运行`git diff --check`检查未暂存内容；
 - 相对P0 start commit，生产业务路径diff为空；
 - inventory仍与final tracked set相等；若P0新增tests/docs，必须将它们加入inventory并重新验证；
 - baseline引用的test symbol真实存在；
