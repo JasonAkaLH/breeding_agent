@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P1 start commit：`97d78c6986008e321580fcb1bb3cf21d1f2335ef`
 - P1 start tree：`3a449edfa644146660b7827dd1127b3f128af264`
 - 输入：P0 `complete` baseline、259-method literal signature authority与Cancellation characterization
@@ -102,7 +102,7 @@ Checkpoint提交：`refactor(lifecycle): type cancellation sidecar boundary`
 
 ### Checkpoint D：Handoff与全量验证
 
-把最终Protocol成员、consumer集合、owner/adoption与P8退出条件写回本计划终态和P1 baseline；同步`docs/AGENTS.md`、`CHANGELOG.md`及tracked inventory。生产源码允许差异只限`src/core/contracts.py`和`src/lifecycle/cancellation_service.py`。
+把最终Protocol成员、consumer集合、owner/adoption与P8退出条件写回本计划终态账本；同步`docs/AGENTS.md`与`CHANGELOG.md`。P0 inventory保持历史冻结，P1单独记录start/final tracked set。生产源码允许差异只限`src/core/contracts.py`和`src/lifecycle/cancellation_service.py`。
 
 Checkpoint提交：`docs(cleanup): close P1 persistence boundaries`
 
@@ -140,3 +140,41 @@ P1终态运行P0 Backend canonical逐域门禁；Frontend与Rust业务均未触�
 - 新Protocol形成catch-all、动态生成或第二份method declaration。
 
 10项P0 deferred behavior全部只锁定、不修复；发现相邻缺陷仅登记到P2～P8对应owner，不扩大P1。
+
+## 7. 实施终态
+
+### 7.1 Checkpoints
+
+| Checkpoint | Commit | 结果 |
+|---|---|---|
+| P1 plan/audit | `0d549be` | 259-method分区、36个生产引用文件、19个port与owner/consumer handoff冻结 |
+| Persistence contracts | `9452999` | 19个runtime-checkable窄Protocol；薄`StoragePort` aggregate；literal membership/signature测试 |
+| Cancellation boundary | `d1128d6` | 单方法`CancellationSidecarWriter`替代`Any` annotation；执行路径零修改 |
+| Final ledger | 本文终态提交 | Backend canonical、final diff、索引与CHANGELOG闭合 |
+
+### 7.2 Gate record
+
+| Scope | ran/fail/skip | 结果 |
+|---|---:|---|
+| Python compileall `src scripts tests` | completed/0/0 | PASS |
+| Core | 48/0/0 | PASS |
+| Storage | 410/0/7 | PASS；7项真实PostgreSQL profile未配置，沿用P0逐项N/A |
+| Lifecycle | 42/0/0 | PASS |
+| Integrations | 707/0/2 | PASS；2项Linux Result Parser gate在macOS N/A |
+| Agent Skills | 209/0/0 | PASS |
+| Orchestration | 109/0/0 | PASS；既有`datetime.utcnow` warning不变 |
+| Capabilities | 49/0/0 | PASS（16+15+15+3） |
+| API | 446/0/0 | PASS；既有unclosed SQLite ResourceWarning不变 |
+| E2E / Observability / Scripts / Deployment | 7+39+63+3 / 0 / 0 | PASS |
+| Backend合计 | 2132/0/9 | PASS；9项均为未触及平台N/A，不是P1新增skip |
+| Changed Python compile/Ruff | completed/0/0 | PASS |
+| Ruff audit `src scripts` | 162 C901 + 7 F401 + 3 F841 | 与P0相同的172个finding信号；未运行`--fix` |
+| Frontend / Rust | N/A | P1未触及对应生产或测试路径；不重复冒充新证据 |
+
+### 7.3 Final invariants与handoff
+
+- P1 final tracked set为1047，排序path SHA-256为`f4030c92bfae20319217ca6141e134aa3a7e0b58be2b5a8b318f8c902db88a73`；相对start只新增本计划与一份直接membership test。
+- 四条`StoragePort`路径仍是同一`src.core.contracts.StoragePort`对象；aggregate直接async methods为0，19个窄Protocol的disjoint union恰为259，完整signature与P0 digest authority一致。
+- 生产consumer和repository实现零修改；P2/P3/P5按第3节handoff逐文件采用最窄port，P4只改自己拥有的API annotation/injection。任何跨计划consumer变更都须在对应计划重新锁行为。
+- Cancellation writer只有`write_cancellation_token`，不属于aggregate；off/shadow/enforce/no-client与AgentRun/legacy admission继续由现有测试锁定。
+- P0的10项deferred behavior、schema/data、`prod`、Frontend、Rust、依赖与`docker_cmd.md`正文均未触及。
