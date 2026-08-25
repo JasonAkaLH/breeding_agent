@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 from uuid import uuid4
 
-from src.core.models import MCPRemoteTaskBinding, MCPRemoteTaskOutbox, Task
+from src.core.contracts import MCPRemoteTaskStoragePort, TaskStoragePort
+from src.core.models import MCPRemoteTaskBinding, MCPRemoteTaskOutbox
 
 from .adapter_2025_tasks import (
     MCP2025TaskCancelAck,
@@ -39,124 +40,12 @@ class MCPRemoteTaskRecoveryError(RuntimeError):
         super().__init__(code)
 
 
-class MCPRemoteTaskStorage(Protocol):
-    async def get_task(self, task_id: str) -> Task | None: ...
-    async def get_mcp_remote_task_binding(
-        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
-    ) -> MCPRemoteTaskBinding | None: ...
-    async def claim_due_mcp_remote_task_bindings(
-        self,
-        *,
-        claim_owner: str,
-        claim_token: str,
-        now: datetime,
-        lease_expires_at: datetime,
-        limit: int = 100,
-    ) -> list[MCPRemoteTaskBinding]: ...
-
-    async def renew_mcp_remote_task_binding_claim(
-        self,
-        owner_user_id: str,
-        task_id: str,
-        safe_remote_task_ref: str,
-        *,
-        claim_owner: str,
-        claim_token: str,
-        expected_revision: int,
-        lease_expires_at: datetime,
-        updated_at: datetime,
-    ) -> MCPRemoteTaskBinding | None: ...
-
-    async def claim_mcp_remote_task_outbox(
-        self, *, claim_owner: str, claim_token: str, now: datetime,
-        lease_expires_at: datetime, limit: int = 100,
-    ) -> list[MCPRemoteTaskOutbox]: ...
-
-    async def claim_abandoned_mcp_remote_task_controls(
-        self, *, claim_owner: str, claim_token: str, now: datetime,
-        limit: int = 100,
-    ) -> list[MCPRemoteTaskOutbox]: ...
-
-    async def apply_mcp_remote_task_continuation(
-        self, outbox_id: str, *, claim_owner: str, claim_token: str,
-        expected_revision: int, updated_at: datetime,
-    ) -> MCPRemoteTaskOutbox | None: ...
-
-    async def admit_mcp_remote_task_continuation(
-        self, outbox_id: str, *, claim_owner: str, claim_token: str,
-        expected_revision: int, admitted_at: datetime,
-    ) -> MCPRemoteTaskOutbox | None: ...
-
-    async def mark_mcp_remote_task_continuation_dispatched(
-        self, outbox_id: str, *, claim_owner: str, claim_token: str,
-        expected_revision: int, dispatched_at: datetime,
-    ) -> MCPRemoteTaskOutbox | None: ...
-
-    async def begin_mcp_remote_task_control_delivery(
-        self, outbox_id: str, *, claim_owner: str, claim_token: str,
-        expected_revision: int, lease_expires_at: datetime, updated_at: datetime,
-    ) -> MCPRemoteTaskOutbox | None: ...
-
-    async def complete_mcp_remote_task_outbox(
-        self, outbox_id: str, *, claim_owner: str, claim_token: str,
-        expected_revision: int, completed_at: datetime,
-    ) -> MCPRemoteTaskOutbox | None: ...
-
-    async def complete_mcp_remote_task_control(
-        self, outbox_id: str, *, claim_owner: str, claim_token: str,
-        expected_revision: int, outcome: str, completed_at: datetime,
-    ) -> MCPRemoteTaskOutbox | None: ...
-
-    async def pause_mcp_remote_task_for_input(
-        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str, *,
-        claim_owner: str, claim_token: str, expected_revision: int,
-        input_requests: Mapping[str, Any], conversation_id: str,
-        source_message_id: str, updated_at: datetime,
-    ) -> MCPRemoteTaskBinding | None: ...
-
-    async def release_mcp_remote_task_binding_claim(
-        self,
-        owner_user_id: str,
-        task_id: str,
-        safe_remote_task_ref: str,
-        *,
-        claim_owner: str,
-        claim_token: str,
-        expected_revision: int,
-        updated_at: datetime,
-    ) -> MCPRemoteTaskBinding | None: ...
-
-    async def update_mcp_remote_task_binding_status(
-        self,
-        owner_user_id: str,
-        task_id: str,
-        safe_remote_task_ref: str,
-        *,
-        claim_owner: str,
-        claim_token: str,
-        expected_revision: int,
-        last_status: str,
-        next_poll_at: datetime | None,
-        updated_at: datetime,
-        terminal_at: datetime | None = None,
-    ) -> MCPRemoteTaskBinding | None: ...
-
-    async def finish_mcp_remote_task_binding(
-        self,
-        owner_user_id: str,
-        task_id: str,
-        safe_remote_task_ref: str,
-        *,
-        claim_owner: str,
-        claim_token: str,
-        expected_revision: int,
-        remote_status: str,
-        call_status: str,
-        terminal_at: datetime,
-        result_ref: str | None = None,
-        safe_error_code: str | None = None,
-        result_receipt_id: str | None = None,
-    ) -> MCPRemoteTaskBinding | None: ...
+class MCPRemoteTaskStorage(
+    MCPRemoteTaskStoragePort,
+    TaskStoragePort,
+    Protocol,
+):
+    pass
 
 
 @dataclass(frozen=True, slots=True)

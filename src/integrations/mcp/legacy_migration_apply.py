@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.core.contracts import UserMCPConfigurationStoragePort
 from src.core.enums import (
     UserMCPAuthType,
     UserMCPHealthStatus,
@@ -208,7 +209,7 @@ class LocalLegacyMigrationApplier:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: UserMCPConfigurationStoragePort,
         credential_cipher: MCPCredentialCipher,
         audit_reference_signer: MCPAuditReferenceSigner,
         endpoint_policy: EndpointPolicy,

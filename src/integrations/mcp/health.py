@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from jsonschema import Draft202012Validator, Draft7Validator, SchemaError
 
+from ...core.contracts import UserMCPConfigurationStoragePort
 from ...core.models import UserMCPHealthAttempt
 from .client import MCPClientError, MCPProtocolError
 from .endpoint_policy import EndpointPolicyError
@@ -138,7 +139,7 @@ class MCPHealthRunner:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: UserMCPConfigurationStoragePort,
         instance_id: str,
         endpoint_revalidator: Callable[[Any], Any | Awaitable[Any]],
         client_factory: Callable[

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
-from src.core.contracts import StoragePort
+from src.core.contracts import MCPRolloutStoragePort
 from src.core.models import (
     MCPRolloutEvidenceSnapshot as MCPRolloutEvidenceSnapshotRecord,
 )
@@ -142,7 +142,7 @@ class MCPRolloutMetricRecorder:
 
     def __init__(
         self,
-        storage: StoragePort,
+        storage: MCPRolloutStoragePort,
         context: MCPRolloutMetricContext,
         *,
         trusted_attestation_keys: Mapping[str, bytes] | None = None,

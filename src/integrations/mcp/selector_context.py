@@ -11,7 +11,14 @@ from src.capabilities.mcp_dispatch.models import (
     MCPToolProfile,
     build_mcp_selector_context,
 )
-from src.core.contracts import StoragePort
+from src.core.contracts import (
+    ArtifactStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPDispatchStoragePort,
+    MessageStoragePort,
+    TaskStoragePort,
+    UserMCPConfigurationStoragePort,
+)
 from src.core.enums import UserMCPHealthStatus
 from src.core.models import MCPCallRecord, MCPTerminalResultReceipt, TaskInputAttachment
 from src.integrations.mcp._attachment_metadata import (
@@ -43,6 +50,18 @@ MAX_MCP_SELECTOR_RESULT_CODE_POINTS = 20_000
 MAX_MCP_SELECTOR_RESULT_BYTES = 80_000
 
 
+class MCPSelectorContextStoragePort(
+    UserMCPConfigurationStoragePort,
+    MCPDispatchStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    ArtifactStoragePort,
+    MessageStoragePort,
+    TaskStoragePort,
+    Protocol,
+):
+    """Persistence surface used to rebuild durable Selector context."""
+
+
 class MCPSelectorContextAuthorityError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -63,7 +82,7 @@ class MCPCompletedResultProjectionAuthority(Protocol):
 
 @dataclass(slots=True)
 class MCPPublishedAgentProjectionAuthority:
-    storage: StoragePort
+    storage: MCPSelectorContextStoragePort
     projection_store: MCPProjectionStore
 
     async def load_agent_projection(
@@ -142,7 +161,7 @@ class MCPSelectorContextBuilderPort(Protocol):
 
 @dataclass(slots=True)
 class MCPDurableSelectorContextBuilder:
-    storage: StoragePort
+    storage: MCPSelectorContextStoragePort
     projection_authority: MCPCompletedResultProjectionAuthority
 
     async def build(

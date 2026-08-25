@@ -10,8 +10,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from src.core.contracts import (
+    ArtifactStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPDispatchStoragePort,
+    MCPResultLifecycleStoragePort,
+)
 from src.core.enums import EventVisibility
 from src.core.models import Artifact, EventRecord, MCPDurableResultLifecycle
 from src.integrations.mcp.cp7_artifacts import mcp_durable_result_artifact_id
@@ -36,6 +42,16 @@ MCP_RESULT_ARTIFACT_PROJECTION_MAX_CALLS = 20
 MCP_RESULT_ARTIFACT_PROJECTION_MAX_EVENTS = 120
 _SAFE_CALL_REF_PATTERN = re.compile(r"[0-9a-f]{64}")
 _SAFE_TOOL_COMPONENT_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+class MCPResultArtifactProjectionStoragePort(
+    ArtifactStoragePort,
+    MCPDispatchStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPResultLifecycleStoragePort,
+    Protocol,
+):
+    pass
 
 
 class MCPResultArtifactProjectionStatus(StrEnum):
@@ -218,7 +234,7 @@ class MCPResultArtifactProjector:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: MCPResultArtifactProjectionStoragePort,
         lifecycle_manager: Any,
         artifact_file_store: LocalArtifactFileStore,
         audit_reference_signer: Any,

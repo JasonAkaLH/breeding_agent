@@ -4,8 +4,13 @@ import asyncio
 import hashlib
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
+from src.core.contracts import (
+    ConversationStoragePort,
+    MCPRolloutStoragePort,
+    TaskStoragePort,
+)
 from src.core.models import EventRecord, MCPAuditEvent, MCPShadowAuditSample
 
 from .shadow_evidence import validate_shadow_audit_sample
@@ -87,13 +92,22 @@ _SECRET_FIELD_MARKERS = (
 )
 
 
+class MCPAuditStoragePort(
+    MCPRolloutStoragePort,
+    ConversationStoragePort,
+    TaskStoragePort,
+    Protocol,
+):
+    pass
+
+
 class MCPAuditService:
     """Persists a redacted MCP-only audit ledger with bounded retention."""
 
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: MCPAuditStoragePort,
         now_fn: Callable[[], datetime] | None = None,
         retention_days: int = MCP_AUDIT_RETENTION_DAYS,
         cleanup_batch_size: int = MCP_AUDIT_CLEANUP_BATCH_SIZE,

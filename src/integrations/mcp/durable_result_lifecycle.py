@@ -7,9 +7,9 @@ import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
-from src.core.contracts import StoragePort
+from src.core.contracts import ArtifactStoragePort, MCPResultLifecycleStoragePort
 from src.core.enums import ArtifactType
 from src.core.models import Artifact, MCPDurableResultLifecycle
 from src.integrations.mcp.temporary_results import (
@@ -21,6 +21,14 @@ from src.storage.artifact_files import (
     build_file_storage_ref,
     parse_file_storage_ref,
 )
+
+
+class MCPDurableResultLifecycleStoragePort(
+    MCPResultLifecycleStoragePort,
+    ArtifactStoragePort,
+    Protocol,
+):
+    """Persistence surface used by durable result lifecycle management."""
 
 
 class MCPDurableResultLifecycleError(RuntimeError):
@@ -47,7 +55,7 @@ class MCPDurableResultReconcileSummary:
 class MCPDurableResultLifecycleManager:
     def __init__(
         self,
-        storage: StoragePort,
+        storage: MCPDurableResultLifecycleStoragePort,
         snapshot_authority: MCPDurableResultSnapshotAuthority,
         *,
         artifact_file_store: LocalArtifactFileStore | None = None,

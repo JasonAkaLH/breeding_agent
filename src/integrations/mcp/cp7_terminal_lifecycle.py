@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.core.contracts import StoragePort
+from src.core.contracts import MCPResultLifecycleStoragePort
 from src.core.models import (
     MCPTerminalCandidateLifecycle,
     MCPTerminalCandidateLifecycleStatus,
@@ -29,7 +29,7 @@ class MCPTerminalCandidateLifecycleManager:
 
     def __init__(
         self,
-        storage: StoragePort,
+        storage: MCPResultLifecycleStoragePort,
         active_root: str | os.PathLike[str],
         *,
         now_fn: Callable[[], datetime] | None = None,

@@ -26,7 +26,18 @@ from src.capabilities.mcp_dispatch.models import (
 )
 from src.capabilities.mcp_dispatch.selector import MCPSelectorOutputError, MCPToolSelector
 from src.capabilities.mcp_dispatch.server_router import MCPServerRouter, MCPServerRouterOutputError
-from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequest, StoragePort
+from src.core.contracts import (
+    ArtifactStoragePort,
+    CapabilityExecutionError,
+    CapabilityExecutionRequest,
+    ConversationStoragePort,
+    InterruptStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPDispatchStoragePort,
+    MCPRemoteTaskStoragePort,
+    TaskStoragePort,
+    UserMCPConfigurationStoragePort,
+)
 from src.core.enums import EventVisibility, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import (
     EventRecord,
@@ -211,6 +222,20 @@ LiveEventRecorder = Callable[[EventRecord], Awaitable[None]]
 MCPResultArtifactProjector = Callable[[str, object | None, object | None], Awaitable[object]]
 
 
+class MCPDispatchCoordinatorStoragePort(
+    UserMCPConfigurationStoragePort,
+    MCPDispatchStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPRemoteTaskStoragePort,
+    ConversationStoragePort,
+    InterruptStoragePort,
+    TaskStoragePort,
+    ArtifactStoragePort,
+    Protocol,
+):
+    """Persistence surface used by MCP dispatch coordination."""
+
+
 class UserMCPDispatchCoordinator:
     """User-scoped MCP execution loop with durable authorization and call barriers.
 
@@ -222,7 +247,7 @@ class UserMCPDispatchCoordinator:
     def __init__(
         self,
         *,
-        storage: StoragePort,
+        storage: MCPDispatchCoordinatorStoragePort,
         gateway: MCPGateway,
         selector: MCPSelectorPort | MCPToolSelector,
         audit_reference_signer: MCPAuditReferenceSigner,

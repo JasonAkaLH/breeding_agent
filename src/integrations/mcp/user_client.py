@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
+from src.core.contracts import UserMCPConfigurationStoragePort
 from src.core.enums import UserMCPAuthType, UserMCPProtocolPreference, UserMCPTransport
 from src.core.models import UserMCPServer
 
@@ -23,7 +24,11 @@ from .transport_legacy_http_sse import LegacyHTTPSSETransport
 
 
 class UserMCPCredentialResolver:
-    def __init__(self, storage: Any, cipher: MCPCredentialCipher) -> None:
+    def __init__(
+        self,
+        storage: UserMCPConfigurationStoragePort,
+        cipher: MCPCredentialCipher,
+    ) -> None:
         self._storage = storage
         self._cipher = cipher
 

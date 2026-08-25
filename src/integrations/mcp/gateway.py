@@ -14,6 +14,12 @@ from uuid import uuid4
 
 from jsonschema import Draft202012Validator, Draft7Validator, SchemaError, ValidationError
 
+from src.core.contracts import (
+    ConversationStoragePort,
+    MCPRemoteTaskStoragePort,
+    TaskStoragePort,
+    UserMCPConfigurationStoragePort,
+)
 from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import MCPRemoteTaskBinding, UserMCPScopeLease, UserMCPServer
 
@@ -200,6 +206,16 @@ RemoteTaskCanceller = Callable[
 ]
 
 
+class MCPGatewayStoragePort(
+    UserMCPConfigurationStoragePort,
+    ConversationStoragePort,
+    TaskStoragePort,
+    MCPRemoteTaskStoragePort,
+    Protocol,
+):
+    pass
+
+
 @dataclass(slots=True)
 class _TaskGuardEntry:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -347,7 +363,7 @@ class MCPGateway:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: MCPGatewayStoragePort,
         gateway_instance_id: str,
         credential_loader: Callable[[UserMCPServer], Mapping[str, Any] | Awaitable[Mapping[str, Any]]],
         client_factory: Callable[

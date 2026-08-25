@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 import os
 
-from src.core.contracts import StoragePort
+from src.core.contracts import MCPCP7StoragePort
 from src.core.models import (
     MCPCP7ReadyEpochEvent,
     MCPCP7ReadyEpochEventKind,
@@ -137,7 +137,7 @@ class CP7LocalSafetyFacade:
 
     def __init__(
         self,
-        storage: StoragePort,
+        storage: MCPCP7StoragePort,
         identity: CP7RuntimeIdentity,
         *,
         fatal_exit: Callable[[int], None] = lambda _code: None,
@@ -598,7 +598,7 @@ def _utc_text(value: datetime) -> str:
 
 
 def cp7_runtime_safety_wiring(
-    storage: StoragePort,
+    storage: MCPCP7StoragePort,
     identity: CP7RuntimeIdentity,
     *,
     fatal_exit: Callable[[int], None] = os._exit,

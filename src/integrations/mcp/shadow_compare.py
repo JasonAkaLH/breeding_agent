@@ -29,6 +29,7 @@ from src.capabilities.mcp_dispatch.models import (
     MCPToolProfile,
     build_mcp_selector_context,
 )
+from src.core.contracts import UserMCPConfigurationStoragePort
 from src.orchestration.models import UserMCPServerProfile
 
 from .legacy_migration import (
@@ -660,7 +661,7 @@ class MCPShadowRuntimeObserver:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: UserMCPConfigurationStoragePort,
         gateway: Any,
         server_router: Any,
         selector: Any,

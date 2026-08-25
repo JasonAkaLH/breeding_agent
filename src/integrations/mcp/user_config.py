@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 from uuid import uuid4
 
+from src.core.contracts import UserMCPConfigurationStoragePort
 from src.core.enums import (
     UserMCPAuthType,
     UserMCPHealthStatus,
@@ -44,7 +45,7 @@ class UserMCPConfigService:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: UserMCPConfigurationStoragePort,
         credential_cipher: MCPCredentialCipher,
         endpoint_policy: EndpointPolicy,
         health_runner: MCPHealthScheduler | None = None,

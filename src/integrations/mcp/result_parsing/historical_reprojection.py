@@ -5,8 +5,14 @@ import os
 import stat
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator, Literal, Protocol
 
+from src.core.contracts import (
+    ArtifactStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPDispatchStoragePort,
+    MCPResultLifecycleStoragePort,
+)
 from src.core.models import Artifact, MCPCallRecord, MCPTerminalResultReceipt
 from src.integrations.mcp.cp7_artifacts import mcp_durable_result_artifact_id
 from src.integrations.mcp.temporary_results import MCPTemporaryResultError
@@ -25,6 +31,16 @@ from .worker import PARSER_REVISION
 MCPHistoricalUnavailableReason = Literal[
     "projection_missing", "historical_authority_invalid", "projection_invalid"
 ]
+
+
+class MCPHistoricalReprojectionStoragePort(
+    ArtifactStoragePort,
+    MCPDispatchStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPResultLifecycleStoragePort,
+    Protocol,
+):
+    pass
 
 
 class MCPRawResultAuthorityError(RuntimeError):
@@ -49,7 +65,7 @@ class MCPRawResultAuthorityResolver:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: MCPHistoricalReprojectionStoragePort,
         snapshot_authority: Any,
         artifact_file_store: LocalArtifactFileStore,
     ) -> None:
@@ -151,7 +167,7 @@ class MCPHistoricalResultReprojector:
     def __init__(
         self,
         *,
-        storage: Any,
+        storage: MCPHistoricalReprojectionStoragePort,
         authority_resolver: MCPRawResultAuthorityResolver,
         result_service: MCPIsolatedResultService,
         projection_store: MCPProjectionStore,
