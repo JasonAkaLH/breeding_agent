@@ -4,7 +4,15 @@ import inspect
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Mapping, Protocol
 
-from src.core.contracts import AuditSink, EventSink, StoragePort
+from src.core.contracts import (
+    AuditSink,
+    CheckpointStoragePort,
+    EventSink,
+    EventStoragePort,
+    InterruptStoragePort,
+    MailboxStoragePort,
+    TaskStoragePort,
+)
 from src.core.enums import EventVisibility
 from src.core.models import EventRecord
 from src.orchestration.agent_loop.models import AgentRun, AgentRunStatus
@@ -40,10 +48,21 @@ class AgentCancellationStore(Protocol):
     ) -> AgentRun: ...
 
 
+class CancellationLifecycleStoragePort(
+    TaskStoragePort,
+    InterruptStoragePort,
+    MailboxStoragePort,
+    CheckpointStoragePort,
+    EventStoragePort,
+    Protocol,
+):
+    pass
+
+
 class CancellationService:
     def __init__(
         self,
-        storage: StoragePort,
+        storage: CancellationLifecycleStoragePort,
         *,
         event_sink: EventSink | None = None,
         audit_sink: AuditSink | None = None,

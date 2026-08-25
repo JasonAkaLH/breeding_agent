@@ -5,8 +5,8 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
+from src.core.contracts import MCPRemoteTaskStoragePort
 from src.core.models import MCPConnectionLease
 
 
@@ -30,7 +30,7 @@ class MCPTaskPresenceService:
         *,
         cancel_mcp_task: MCPPresenceCancellation,
         grace_period_seconds: float = 300.0,
-        storage: Any | None = None,
+        storage: MCPRemoteTaskStoragePort | None = None,
         instance_id: str = "local",
         lease_ttl_seconds: float = 45.0,
         now_fn: Callable[[], datetime] | None = None,

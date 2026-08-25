@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Protocol
 
-from src.core.contracts import AuditSink, EventSink, StoragePort
+from src.core.contracts import (
+    AuditSink,
+    CheckpointStoragePort,
+    EventSink,
+    EventStoragePort,
+    InterruptStoragePort,
+    MCPRemoteTaskStoragePort,
+    TaskStoragePort,
+)
 from src.core.enums import EventVisibility
 from src.core.models import (
     EventRecord,
@@ -22,10 +31,21 @@ from .agent_run_recovery import (
 )
 
 
+class InterruptLifecycleStoragePort(
+    TaskStoragePort,
+    InterruptStoragePort,
+    EventStoragePort,
+    CheckpointStoragePort,
+    MCPRemoteTaskStoragePort,
+    Protocol,
+):
+    pass
+
+
 class InterruptService:
     def __init__(
         self,
-        storage: StoragePort,
+        storage: InterruptLifecycleStoragePort,
         *,
         event_sink: EventSink | None = None,
         audit_sink: AuditSink | None = None,
