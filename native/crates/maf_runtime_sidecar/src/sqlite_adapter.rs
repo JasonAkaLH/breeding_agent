@@ -4,8 +4,8 @@ use crate::{
     TaskRecord, TaskRouteAssignment, idempotency_conflict, idempotency_key, migration_blocked,
     require_idempotency_key, validate_agent_final_commit_shape, validate_agent_final_projection,
     validate_agent_item_record, validate_agent_item_relationships, validate_agent_item_update,
-    validate_agent_run_record, validate_task_node_record, validate_task_node_update,
-    validate_task_record, validate_task_update,
+    validate_agent_run_record, validate_expected_status, validate_task_node_record,
+    validate_task_node_update, validate_task_record, validate_task_update, write_failed,
 };
 use maf_runtime_store::{RuntimeSidecarError, RuntimeSidecarErrorCode, TaskLease};
 use maf_task_dispatcher::TaskSubmitResult;
@@ -1413,19 +1413,6 @@ impl RuntimeSidecarSqliteAdapter {
     }
 }
 
-fn validate_expected_status(
-    expected: Option<&str>,
-    current: Option<&String>,
-) -> Result<(), RuntimeSidecarError> {
-    match (expected, current) {
-        (None | Some(""), None) => Ok(()),
-        (Some(expected), Some(current)) if expected == current => Ok(()),
-        _ => Err(idempotency_conflict(
-            "expected status does not match current authoritative status",
-        )),
-    }
-}
-
 fn ensure_optional_column(
     connection: &Connection,
     table: &str,
@@ -1973,10 +1960,6 @@ fn insert_bundle_revision_idempotency(
         )
         .map(|_| ())
         .map_err(|error| sqlite_error("insert bundle revision idempotency key failed", error))
-}
-
-fn write_failed(message: &str) -> RuntimeSidecarError {
-    RuntimeSidecarError::new(RuntimeSidecarErrorCode::RuntimeStoreWriteFailed, message)
 }
 
 fn sqlite_error(message: &str, error: rusqlite::Error) -> RuntimeSidecarError {
