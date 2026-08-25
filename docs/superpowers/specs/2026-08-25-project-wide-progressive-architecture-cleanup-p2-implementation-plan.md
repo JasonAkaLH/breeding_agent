@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P2 start commit：`92a8a605984f65264f6f5b192eb8b3108a7c93d7`
 - P2 start tree：`d7760d620112c745303ac082a5c9ad978547f780`
 - P2 start tracked set：1047
@@ -82,3 +82,39 @@ Backend canonical逐域运行。Frontend/Rust/schema/data/依赖未触及时记�
 ## 5. 停止条件与回滚
 
 每个checkpoint独立commit，逆序revert即可；无schema/data回滚。若需要修改P3/P4/P5实现、改变任何functional trace、创建第二Interrupt/continuation authority、复制P1 port methods、改变prompt正文或为降C901引入新collaborator，立即停止该改动并保持已独立验证的安全检查点。
+
+## 6. 实施终态
+
+### 6.1 Checkpoints
+
+| Checkpoint | Commit | 结果 |
+|---|---|---|
+| Plan/audit | `fd6f19f` | 4个persistence boundary、1处Prompt复制、8个C901与continuation/Interrupt seam分类闭合 |
+| Narrow port adoption | `cd0db43` | 4个P2 consumer采用Message或3个本地组合Protocol；调用代码零变化 |
+| Prompt reuse | `2760b47` | Envelope复用legacy capability-gap formatter；正文exact-equal测试 |
+| Final ledger | 本文终态提交 | Backend canonical、目录索引与P3/P4/P5 handoff闭合 |
+
+### 6.2 Gate record
+
+| Scope | ran/fail/skip | 结果 |
+|---|---:|---|
+| Python compileall `src scripts tests` | completed/0/0 | PASS |
+| Core / Storage / Lifecycle | 48+410+42 / 0 / 7 | PASS；7项真实PostgreSQL profile沿用P0 N/A |
+| Integrations / Agent Skills | 707+209 / 0 / 2 | PASS；2项Linux Result Parser gate在macOS N/A |
+| Orchestration | 112/0/0 | PASS；waiting/continuation/Prompt及新增3项port合同包含在内 |
+| Capabilities | 50/0/0 | PASS（Main Agent 17、MCP Dispatch 15、MCP Tool 15、Skill Tool 3） |
+| API / E2E / Observability / Scripts / Deployment | 446+7+39+63+3 / 0 / 0 | PASS |
+| Backend合计 | 2136/0/9 | PASS；9项均为未触及平台N/A，P2新增skip=0 |
+| Changed Python compile/Ruff | completed/0/0 | PASS |
+| P2 C901 audit | 8 signals | 与start相同；全部`reviewed_no_change`，不把复杂度当完成指标 |
+| 全仓Ruff审计 | 162 C901 + 7 F401 + 3 F841 | 与P0/P1相同172信号；未运行`--fix` |
+| Frontend / Rust | N/A | P2未触及对应生产或测试路径；不重复冒充新证据 |
+
+### 6.3 Final invariants与handoff
+
+- P2 final tracked set为1049，排序path SHA-256为`b45b16df7fc4a61e1952c5d44fd564a0300b62511c659aa5ea0c9efe1b6a78a3`；相对start只新增本计划与一份port adoption直接测试。
+- `src/orchestration/**`与`src/capabilities/**`已无aggregate `StoragePort` import；4个consumer的组合surface分别精确等于实际使用的P1窄域，生产调用和装配零变化。
+- capability-gap disclosure只有`prompt_builder._format_capability_gap_context`一个文本owner；legacy保留前导换行，Envelope segment去除该单个换行，正文exact-equal。
+- continuation locator cache、waiting/resume、Interrupt callbacks、MCP Dispatch和Lifecycle recovery functional seams相对P0调用点/kind/count/order delta=0；没有第二authority。
+- P3接管Integrations/Skills/MCP具体实现及其窄port consumer；P4接管API wiring、HTTP recovery和统一Interrupt adapter选择；P5接管Storage/Lifecycle adapter及其窄port consumer。P2不得代替这些计划改线。
+- P2的8个C901、P0的10项deferred behavior、schema/data、依赖、`prod`、Frontend、Rust与`docker_cmd.md`正文均未触及。
