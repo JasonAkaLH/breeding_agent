@@ -238,6 +238,27 @@ def _route_runtime_attribute_names(root: Path) -> set[str]:
     return names
 
 
+def _agent_repository_assignments(root: Path) -> tuple[str, ...]:
+    tree = ast.parse((root / "src" / "api" / "runtime.py").read_text(encoding="utf-8"))
+    build = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "build_api_runtime"
+    )
+    assignments: list[tuple[int, str]] = []
+    for node in ast.walk(build):
+        if not isinstance(node, ast.Assign) or not any(
+            isinstance(target, ast.Name) and target.id == "agent_repository"
+            for target in node.targets
+        ):
+            continue
+        if not isinstance(node.value, ast.Call) or not isinstance(node.value.func, ast.Name):
+            raise AssertionError("agent_repository must be assigned by a direct constructor call")
+        assignments.append((node.lineno, node.value.func.id))
+    return tuple(name for _line, name in sorted(assignments))
+
+
 def _api_runtime_init_assignments(root: Path) -> set[str]:
     source_path = root / "src" / "api" / "runtime.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
@@ -295,6 +316,32 @@ class RuntimePublicContractTest(unittest.TestCase):
             runtime_module.RuntimeSidecarAgentRepository,
             RuntimeSidecarAgentRepository,
         )
+
+    def test_composition_root_is_the_only_agent_repository_selector(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(
+            _agent_repository_assignments(root),
+            (
+                "PostgreSQLAgentRepository",
+                "SQLiteAgentRepository",
+                "RuntimeSidecarAgentRepository",
+            ),
+        )
+        concrete_names = {
+            "PostgreSQLAgentRepository",
+            "RuntimeSidecarAgentRepository",
+            "SQLiteAgentRepository",
+        }
+        import_owners = set()
+        for path in (root / "src" / "api").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            if any(
+                isinstance(node, ast.ImportFrom)
+                and any(alias.name in concrete_names for alias in node.names)
+                for node in ast.walk(tree)
+            ):
+                import_owners.add(path.relative_to(root).as_posix())
+        self.assertEqual(import_owners, {"src/api/runtime.py"})
 
     def test_fresh_api_import_only_reads_existing_core_contract_mode_keys(self) -> None:
         root = Path(__file__).resolve().parents[2]

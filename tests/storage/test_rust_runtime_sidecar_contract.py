@@ -25,6 +25,11 @@ from src.core.models import (
 )
 from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.interrupt_service import InterruptService
+from src.orchestration.agent_loop.models import (
+    AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
+)
 from src.storage.rust_contract import (
     artifact_policy,
     benchmark_policy,
@@ -57,7 +62,7 @@ from src.storage.runtime_sidecar_facade import (
     validate_runtime_sidecar_promotion_readiness,
     validate_runtime_sidecar_response,
 )
-from src.storage.sqlite import SQLiteStorage
+from src.storage.sqlite import SQLiteAgentRepository, SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
 
 
@@ -1300,12 +1305,25 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertIn("cancellation_token_write", cancellation_source)
         self.assertEqual(operation_policy("cancellation_token_write")["enforce_failure"], "fail_closed")
 
-        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}),
+            patch.object(storage, "save_task", wraps=storage.save_task) as save_task,
+            patch.object(storage, "append_event", wraps=storage.append_event) as append_event,
+            patch.object(
+                storage,
+                "list_task_nodes_for_task",
+                wraps=storage.list_task_nodes_for_task,
+            ) as list_nodes,
+        ):
             with self.assertRaisesRegex(
                 RuntimeError,
                 "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
             ):
                 asyncio.run(service.cancel_task_context(task.task_id))
+
+        save_task.assert_not_awaited()
+        append_event.assert_not_awaited()
+        list_nodes.assert_not_awaited()
 
         reloaded = asyncio.run(storage.get_task(task.task_id))
         self.assertEqual(reloaded.status, TaskStatus.RUNNING)
@@ -1329,6 +1347,39 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
         cancellation_call = next(call for call in sidecar.calls if call[0] == "cancellation_token_write")
         self.assertEqual(cancellation_call[1]["task_id"], task.task_id)
+        write_operations = [
+            call[0]
+            for call in sidecar.calls
+            if call[0] in {"cancellation_token_write", "task_submit"}
+        ]
+        self.assertEqual(
+            write_operations,
+            ["cancellation_token_write", "task_submit", "task_submit"],
+        )
+
+    def test_cancellation_token_off_keeps_legacy_writes_and_skips_sidecar(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory)
+        service = CancellationService(storage, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-cancel-off",
+            conversation_id="conv-cancel-off",
+            root_message_id="msg-cancel-off",
+            status=TaskStatus.RUNNING,
+        )
+        asyncio.run(storage.save_task(task))
+
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "off"}),
+            patch.object(storage, "save_task", wraps=storage.save_task) as save_task,
+            patch.object(storage, "append_event", wraps=storage.append_event) as append_event,
+        ):
+            cancelled = asyncio.run(service.cancel_task_context(task.task_id))
+
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertEqual(save_task.await_count, 2)
+        self.assertEqual(append_event.await_count, 2)
+        self.assertEqual(sidecar.calls, [])
 
     def test_cancellation_token_shadow_records_sidecar_audit_after_legacy_write(self) -> None:
         sidecar = _RecordingRuntimeSidecarClient()
@@ -1343,7 +1394,27 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         asyncio.run(storage.save_task(task))
 
-        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
+        order: list[str] = []
+        save_task = storage.save_task
+        write_token = sidecar.write_cancellation_token
+
+        async def ordered_save_task(*args, **kwargs):
+            order.append("legacy_task_write")
+            return await save_task(*args, **kwargs)
+
+        async def ordered_write_token(**kwargs):
+            order.append("sidecar_token_write")
+            return await write_token(**kwargs)
+
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}),
+            patch.object(storage, "save_task", side_effect=ordered_save_task),
+            patch.object(
+                sidecar,
+                "write_cancellation_token",
+                side_effect=ordered_write_token,
+            ),
+        ):
             cancelled = asyncio.run(service.cancel_task_context(task.task_id))
 
         shadow_records = [record for record in audit_sink.records if record[0] == "runtime.sidecar_shadow_diff"]
@@ -1355,6 +1426,10 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(shadow_records[-1][1]["operation"], "cancellation_token_write")
         self.assertEqual(shadow_records[-1][1]["legacy_status"], "ok")
         self.assertEqual(shadow_records[-1][1]["rust_status"], "ok")
+        self.assertEqual(
+            order,
+            ["legacy_task_write", "sidecar_token_write", "legacy_task_write"],
+        )
 
     def test_cancellation_token_shadow_sidecar_error_does_not_block_legacy_cancel(self) -> None:
         sidecar = _FailingCancellationRuntimeSidecarClient()
@@ -1377,6 +1452,49 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(sidecar.calls[0][0], "cancellation_token_write")
         self.assertEqual(shadow_records[-1][1]["rust_status"], "error")
         self.assertEqual(shadow_records[-1][1]["error_code"], "runtime_store_unavailable")
+
+    def test_agent_run_cancellation_uses_repository_admission_without_legacy_graph_writes(
+        self,
+    ) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        repository = SQLiteAgentRepository(self.session_factory)
+        task = Task(
+            task_id="task-agent-cancel-admission",
+            conversation_id="conv-agent-cancel-admission",
+            root_message_id="msg-agent-cancel-admission",
+            status=TaskStatus.RUNNING,
+        )
+        asyncio.run(storage.save_task(task))
+        run = asyncio.run(
+            repository.create_run(
+                AgentRun(
+                    run_id="run-agent-cancel-admission",
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    status=AgentRunStatus.RUNNING,
+                    binding=AgentModelBinding("edition-a"),
+                )
+            )
+        )
+        service = CancellationService(storage, agent_runs=repository)
+
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "off"}),
+            patch.object(storage, "save_task", wraps=storage.save_task) as save_task,
+            patch.object(
+                storage,
+                "list_task_nodes_for_task",
+                wraps=storage.list_task_nodes_for_task,
+            ) as list_nodes,
+        ):
+            cancelled = asyncio.run(service.cancel_task_context(task.task_id))
+
+        cancelled_run = asyncio.run(repository.get_run(run.run_id))
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertEqual(cancelled_run.status, AgentRunStatus.CANCELLED)
+        self.assertEqual(cancelled_run.terminal_reason_code, "user_cancel")
+        save_task.assert_not_awaited()
+        list_nodes.assert_not_awaited()
 
     def test_lease_operations_have_no_python_legacy_fallback_without_sidecar(self) -> None:
         facade = RuntimeLeaseFacade()

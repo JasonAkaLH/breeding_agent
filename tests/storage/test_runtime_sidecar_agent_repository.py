@@ -20,8 +20,10 @@ from src.orchestration.agent_loop.models import (
     AgentSample,
     AgentSampleCommit,
     AgentStagedArtifact,
+    AgentStorageConflict,
     AgentToolCall,
     AgentUsage,
+    AgentUserMessageCommit,
 )
 from src.storage.runtime_sidecar_agent_repository import RuntimeSidecarAgentRepository
 from src.storage.agent_payload import agent_compaction_source_digest
@@ -56,11 +58,25 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
         self.client = _connect_with_retry(endpoint, process=self._process)
         self.now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
         self.repository = RuntimeSidecarAgentRepository(self.client, now_fn=lambda: self.now)
-        self.task = {
-            "task_id": "task-agent-repository",
-            "conversation_id": "conv-agent-repository",
+        self.task = self._submit_task(
+            "task-agent-repository",
+            "conv-agent-repository",
+            "agent-repository-task",
+        )
+
+    def _submit_task(
+        self,
+        task_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        *,
+        status: str = "accepted",
+    ) -> dict[str, object]:
+        task: dict[str, object] = {
+            "task_id": task_id,
+            "conversation_id": conversation_id,
             "root_message_id": "message-agent-repository",
-            "status": "accepted",
+            "status": status,
             "routing_mode": "auto",
             "requested_capability_id": None,
             "summary": None,
@@ -70,11 +86,12 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             "assignment": None,
         }
         self.client.submit_task(
-            task_id=self.task["task_id"],
-            conversation_id=self.task["conversation_id"],
-            task=self.task,
-            idempotency_key="agent-repository-task",
+            task_id=task_id,
+            conversation_id=conversation_id,
+            task=task,
+            idempotency_key=idempotency_key,
         )
+        return task
 
     async def asyncTearDown(self) -> None:
         _terminate_process(self._process)
@@ -216,3 +233,97 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             AgentFinalOutputCommit(run.run_id, after_second.revision, None, "最终答案")
         )
         self.assertEqual(retry, final)
+
+    async def test_recovery_user_message_and_terminal_operations_preserve_current_sidecar_traces(
+        self,
+    ) -> None:
+        binding = AgentModelBinding(
+            "edition-a", reasoning_effort="high", option_digests={"policy": "abc"}
+        )
+        running = await self.repository.create_run(
+            AgentRun(
+                run_id="run-agent-supported",
+                task_id=self.task["task_id"],
+                conversation_id=self.task["conversation_id"],
+                status=AgentRunStatus.RUNNING,
+                binding=binding,
+            )
+        )
+        committed = await self.repository.commit_agent_user_message(
+            AgentUserMessageCommit(
+                running.run_id,
+                running.revision,
+                None,
+                "initial user message",
+            )
+        )
+        self.assertEqual(committed.item.kind.value, "user_message")
+        self.assertEqual(
+            await self.repository.reconcile_agent_run_consistency(running.run_id),
+            committed.run,
+        )
+        with self.assertRaisesRegex(
+            KeyError,
+            "Unknown Rust runtime sidecar operation: agent_run_list",
+        ):
+            await self.repository.list_recoverable_runs()
+
+        failed_task = self._submit_task(
+            "task-agent-failed",
+            "conv-agent-failed",
+            "agent-repository-failed-task",
+        )
+        failed_run = await self.repository.create_run(
+            AgentRun(
+                run_id="run-agent-failed",
+                task_id=failed_task["task_id"],
+                conversation_id=failed_task["conversation_id"],
+                status=AgentRunStatus.RUNNING,
+                binding=binding,
+            )
+        )
+        failed = await self.repository.fail_agent_run(
+            failed_run.run_id,
+            expected_revision=failed_run.revision,
+            expected_claim_token=None,
+            safe_error_code="safe_failure",
+        )
+        self.assertEqual(failed.status, AgentRunStatus.FAILED)
+        self.assertEqual(
+            self.client.get_task(task_id=failed.task_id)["task"]["status"],
+            "failed",
+        )
+
+        cancelled_task = self._submit_task(
+            "task-agent-cancelled",
+            "conv-agent-cancelled",
+            "agent-repository-cancelled-task",
+            status="running",
+        )
+        cancelled_run = await self.repository.create_run(
+            AgentRun(
+                run_id="run-agent-cancelled",
+                task_id=cancelled_task["task_id"],
+                conversation_id=cancelled_task["conversation_id"],
+                status=AgentRunStatus.RUNNING,
+                binding=binding,
+            )
+        )
+        with self.assertRaisesRegex(
+            AgentStorageConflict,
+            "runtime_store_response_invalid",
+        ):
+            await self.repository.cancel_agent_run(
+                cancelled_run.run_id,
+                expected_revision=cancelled_run.revision,
+                expected_claim_token=None,
+                safe_reason_code="user_cancel",
+            )
+        self.assertEqual(
+            (await self.repository.get_run(cancelled_run.run_id)).status,
+            AgentRunStatus.RUNNING,
+        )
+        self.assertEqual(
+            self.client.get_task(task_id=cancelled_run.task_id)["task"]["status"],
+            "running",
+        )

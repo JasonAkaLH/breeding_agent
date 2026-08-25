@@ -689,7 +689,7 @@ tests/api/test_model_edition_selection.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_pending_skill_context.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_project_skill_bundle_startup_gate.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_route_contract.py	test	behavior_test	NA	-	test_lock	NA
-tests/api/test_runtime_public_contract.py	test	behavior_test	NA	-	test_lock	NA
+tests/api/test_runtime_public_contract.py	test	behavior_test	NA	P0-P4-RUNTIME-001	test_lock	NA
 tests/api/test_runtime_sidecar_contract.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_skill_capability_pool.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_skill_dynamic_reload.py	test	behavior_test	NA	-	test_lock	NA
@@ -979,6 +979,7 @@ tests/scripts/test_validate_project_skill_bundle.py	test	behavior_test	NA	-	test
 tests/storage/support.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_agent_payload.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_agent_postgres_schema_contract.py	test	behavior_test	NA	-	test_lock	NA
+tests/storage/test_agent_repository_contract.py	test	behavior_test	NA	P0-P5-AGENT-ADAPTERS-001,BEHAVIOR-SIDECAR-AGENT-LEASE-001	test_lock	NA
 tests/storage/test_agent_schema_destructive_migration.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_agent_sqlite_schema.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_agent_storage_conformance.py	test	behavior_test	NA	-	test_lock	NA
@@ -1009,8 +1010,8 @@ tests/storage/test_postgres_test_support.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_postgres_worker_claim_ordering.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_postgres_write_queue_contract.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_postgresql_driver_adr.py	test	behavior_test	NA	-	test_lock	NA
-tests/storage/test_runtime_sidecar_agent_repository.py	test	behavior_test	NA	-	test_lock	NA
-tests/storage/test_rust_runtime_sidecar_contract.py	test	behavior_test	NA	-	test_lock	NA
+tests/storage/test_runtime_sidecar_agent_repository.py	test	behavior_test	NA	P0-P5-AGENT-ADAPTERS-001,BEHAVIOR-SIDECAR-AGENT-RECOVERY-LIST-001,BEHAVIOR-SIDECAR-AGENT-CANCEL-001	test_lock	NA
+tests/storage/test_rust_runtime_sidecar_contract.py	test	behavior_test	NA	P0-P5-AGENT-ADAPTERS-001	test_lock	NA
 tests/storage/test_slot_collection_repository.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_sqlite_bootstrap.py	test	behavior_test	NA	-	test_lock	NA
 tests/storage/test_sqlite_cleanup_after_postgres_cutover.py	test	behavior_test	NA	-	test_lock	NA

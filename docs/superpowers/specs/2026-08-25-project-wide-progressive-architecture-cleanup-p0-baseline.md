@@ -2,7 +2,7 @@
 
 ## 1. 状态与边界
 
-- P0状态：`active`；Checkpoint 0～B完成，Checkpoint C待开始
+- P0状态：`active`；Checkpoint 0～C完成，Checkpoint D待开始
 - P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
 - P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
 - 分支：`main`
@@ -24,17 +24,17 @@ P0开始时工作树clean。相对业务设计基线`c8da6ccdf89eed5851cb5a79385
 - Source：`git -c core.quotePath=false ls-files`
 - Ignored/runtime/仓外文件不进入集合
 
-Checkpoint A增加baseline和inventory两个validation dependency，并把已存在的总设计/P0计划从普通documentation重分类为validation dependency，集合为1041行。Checkpoint B新增三份public contract tests，当前集合为1044行；每个checkpoint均以cached+owned-untracked集合做双向精确比较，提交后以新HEAD重验。
+Checkpoint A增加baseline和inventory两个validation dependency，并把已存在的总设计/P0计划从普通documentation重分类为validation dependency，集合为1041行。Checkpoint B新增三份public contract tests，集合为1044行；Checkpoint C新增一份Agent repository contract test，当前集合为1045行。每个checkpoint均以cached+owned-untracked集合做双向精确比较，提交后以新HEAD重验。
 
 ### 2.2 分类结果
 
 | Classification | 数量 |
 |---|---:|
 | `business_source` | 320 |
-| `test` | 417 |
+| `test` | 418 |
 | `contract_or_build_dependency` | 68 |
 | `explicit_out_of_scope` | 239 |
-| **合计** | **1044** |
+| **合计** | **1045** |
 
 `unclassified=0`。业务源码owner分布：P1=8、P2=51、P3=112、P4=25、P5=61、P6=22、P7=41；合计320且每个path恰好一个source owner。P8只拥有finding处置与最终审计，不替代source owner。
 
@@ -60,8 +60,9 @@ Checkpoint A增加baseline和inventory两个validation dependency，并把已存
 | `src.orchestration.agent_loop.__all__` | 65个公开对象 | Checkpoint B identity/module PASS |
 | `ApiRuntime.__init__` / `build_api_runtime` | 完整parameter order/kind/annotation/default/return | Checkpoint B literal shape PASS |
 | `src.api` fresh import | 只读取Core contract mode两个key，不读取其他应用key、不构造runtime | Checkpoint B isolated subprocess PASS |
-| Python Agent repositories | SQLite=16、PostgreSQL=16、RuntimeSidecar=13个public async methods；共同13 | Checkpoint C锁定surface/MRO/trace |
-| RuntimeSidecar Agent lease | 缺`acquire_agent_lease|renew_agent_lease|release_agent_lease` | `BEHAVIOR-SIDECAR-AGENT-LEASE-001`，不得补能力 |
+| Python Agent repositories | SQLite=16、PostgreSQL=16、RuntimeSidecar=13个public async methods；共同surface 13，Sidecar当前真实成功operation 11 | Checkpoint C literal import/module/constructor/MRO/surface/signature与backend trace PASS |
+| RuntimeSidecar Agent lease | 缺`acquire_task_lease|renew_task_lease|release_waiting_task_lease` | `BEHAVIOR-SIDECAR-AGENT-LEASE-001`，不得补能力 |
+| RuntimeSidecar recovery/cancel | `list_recoverable_runs`因未知`agent_run_list` policy抛`KeyError`；`cancel_agent_run`真实fixture因response validation抛`AgentStorageConflict`且Run/Task不变 | `BEHAVIOR-SIDECAR-AGENT-RECOVERY-LIST-001`、`BEHAVIOR-SIDECAR-AGENT-CANCEL-001`；不得在P0修复 |
 | FastAPI/DTO/SSE | 复用route、DTO、task-event tests | Checkpoint B/E映射，不新增完整OpenAPI snapshot |
 | Rust checked-in contracts | Core/Lifecycle/Runtime Sidecar/Skill Runtime/Safety/MCP Runtime六份 | Checkpoint G byte-level验证 |
 
@@ -75,7 +76,7 @@ Checkpoint A增加baseline和inventory两个validation dependency，并把已存
 | Lifecycle → P2 recovery | `AgentContinuationLocator(Service)`、`AgentLeaseController/Handle`、Agent models/errors、`AgentAtomicWriter`、`AgentRunRepository`、`AgentTaskLeaseStore` | logical call-site IDs/kinds/counts/order exact；无第二状态机 |
 | P3 → P2 MCP Dispatch | `MCPDispatchOutcome`、selector/router、selector models/context/fingerprint | imports/object identity与functional calls exact；无复制/内联/缓存绕过 |
 | P5 Agent adapters → P2 contracts | Agent models/enums/errors/persistence payloads | contract-only；不得调用Agent Loop controller/service |
-| P4 → P5 composition | `SQLiteAgentRepository`、`PostgreSQLAgentRepository`、`RuntimeSidecarAgentRepository` | mode/evidence/client check与selection/DI只在P4一次；P5 selector=0 |
+| P4 → P5 composition | `SQLiteAgentRepository`、`PostgreSQLAgentRepository`、`RuntimeSidecarAgentRepository` | 三次直接assignment只在`build_api_runtime` composition root；P5 adapter mode/backend selector=0 |
 | P4 file-selection | `ConversationFileSelectionRuntimeMixin` + file-selection domain | candidate/LLM/attachment/TaskNode/Interrupt/event trace exact；不迁入Slot/P2 |
 | Frontend | App → controllers/components → domain/wire | App/Attachment/Task Runtime owner不复制；initial submit与answer owner不互换 |
 | Rust root/private | root public declarations；private kernel/adapter/service | root identity/attrs保留；private不得调用root assembly wrapper |
@@ -99,7 +100,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | `P0-P4-FILE-SELECTION-001` | `structural_candidate` | P4 | bounded business authority位于API mixin/domain | 原位整理；LLM/storage/attachment/Interrupt/event exact |
 | `P0-P5-SQLITE-001` | `structural_candidate` | P5 | SQLite repositories约16895行、models约2204行 | domain逐项迁移；同Session/transaction/lock/CAS不变 |
 | `P0-P5-POSTGRES-001` | `structural_candidate` | P5 | PostgreSQL repositories/session含专用override/role逻辑 | shared pure基础与PG override分离；真实PG门禁 |
-| `P0-P5-AGENT-ADAPTERS-001` | `reviewed_no_change` | P5 | 三Agent adapters相似但surface/backend/transaction不同 | 只比较共同operation；不合并authority、不补lease、不SQL fallback |
+| `P0-P5-AGENT-ADAPTERS-001` | `reviewed_no_change` | P5 | 三Agent adapters相似但surface/backend/transaction不同；同一missing-run fixture语义相同而SQL Session trace与Sidecar RPC trace不同 | 只比较共同operation；不合并authority、不补lease、不SQL fallback |
 | `P0-P6-APP-001` | `structural_candidate` | P6 | `App.tsx`约3814行，message/attachment/task effects交织 | App/Attachment/Task Runtime owner唯一；DOM/行为不变 |
 | `P0-P6-TASK-EVENTS-001` | `structural_candidate` | P6 | domain taskEvents约1578行 | wire/reducer/controller边界；state identity与event semantics不变 |
 | `P0-P7-RUNTIME-SIDECAR-001` | `structural_candidate` | P7 | root lib约4008行、sqlite adapter约2014行 | root public定义保留；kernel/service/codec/backend合同不变 |
@@ -116,6 +117,8 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | `BEHAVIOR-PARSER-CLEANUP-CANCEL-001` | `deferred_behavior` | P3 | cleanup join/terminate/kill可取消 | barrier锁当前阶段；不加shield/finally |
 | `BEHAVIOR-API-LIFECYCLE-001` | `deferred_behavior` | P4 | startup部分失败、shutdown首错阻断cleanup | trace锁定；不修复错误策略 |
 | `BEHAVIOR-SIDECAR-AGENT-LEASE-001` | `deferred_behavior` | P2/P4/P5/P7 | enforce选择Sidecar Agent adapter但其缺3个lease methods | 保持supported/unsupported与当前失败；不补方法/SQL fallback |
+| `BEHAVIOR-SIDECAR-AGENT-RECOVERY-LIST-001` | `deferred_behavior` | P2/P5/P7 | Sidecar adapter公开`list_recoverable_runs`调用gRPC `agent_run_list`，但Rust contract无该operation policy，当前抛exact `KeyError` | 保持当前失败；P0不补policy、不改error映射 |
+| `BEHAVIOR-SIDECAR-AGENT-CANCEL-001` | `deferred_behavior` | P2/P5/P7 | 真实Sidecar `cancel_agent_run`返回的error envelope未通过response validation，当前转为`AgentStorageConflict(runtime_store_response_invalid)`且Run/Task保持running | 保持current state/error；P0不改Rust/Python contract或terminal transition |
 
 ### 5.1 Exact duplicate审计
 
@@ -136,7 +139,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | Domain | 当前覆盖入口 | P0动作 | 状态 |
 |---|---|---|---|
 | Python public/StoragePort | Core contracts、SQLite bootstrap | literal identity/signature/pickle/import tests | Checkpoint B PASS（13项新增，focused合计43项） |
-| Agent adapters/Cancellation | Agent storage、runtime-sidecar contract、runtime wiring | 新增surface/MRO/common-operation与mode trace | Checkpoint C pending |
+| Agent adapters/Cancellation | Agent storage、runtime-sidecar contract、runtime wiring | surface/MRO/common fixture/transaction/selector/off-shadow-enforce/AgentRun trace | Checkpoint C PASS（focused 102项） |
 | Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 补逐分支logical call-site trace | Checkpoint D pending |
 | MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | 补functional seam与order/count trace | Checkpoint E pending |
 | Frontend | App/taskEvents tests | 复用覆盖，缺口才加最小断言 | Checkpoint F pending |
@@ -161,6 +164,8 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 | Rust fmt | repo / existing Rust quality gate `cargo_fmt` | macOS/Rust toolchain | completed/0/0 | PASS |
 | Ruff audit | repo / `ruff check src scripts --select C90,F401,F841` | macOS/Python env | 172 signals | audit observation，不是质量PASS/FAIL gate |
 | Checkpoint B public contracts | repo / Core+API+Orchestration public contract focused suite | macOS/Python 3.13 | 43/0/0 | PASS |
+| Checkpoint C repository/cancellation | repo / 8-module Storage/API/Lifecycle focused suite | macOS/Python 3.13 | 102/0/0 | PASS；另观察到1条unclosed SQLite connection ResourceWarning，不计测试失败，P0不改生产清理语义 |
+| Checkpoint C changed-test compile/Ruff | repo / 4份受影响test files | macOS/Python 3.13 | completed/0/0 | PASS |
 
 所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
 
