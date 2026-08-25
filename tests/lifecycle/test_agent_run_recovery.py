@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import asyncio
 import hashlib
+import inspect
 import json
 import tempfile
 from datetime import datetime, timezone
@@ -112,6 +113,37 @@ class _RecordingResumer:
         return SimpleNamespace(run=run, state="resumed", handle=handle)
 
 
+class _TracingRepository:
+    def __init__(self, repository, trace: list[str]) -> None:
+        self._repository = repository
+        self._trace = trace
+
+    def __getattr__(self, name: str):
+        attribute = getattr(self._repository, name)
+        if not inspect.iscoroutinefunction(attribute):
+            return attribute
+
+        async def traced(*args, **kwargs):
+            self._trace.append(f"repository.{name}")
+            return await attribute(*args, **kwargs)
+
+        return traced
+
+
+class _TracingResumer:
+    def __init__(self, repository, trace: list[str], *, state: str = "resumed") -> None:
+        self._repository = repository
+        self._trace = trace
+        self._state = state
+        self.calls = 0
+
+    async def run_claimed(self, run_id, *, handle, **_kwargs):
+        self.calls += 1
+        self._trace.append("resumer.run_claimed")
+        run = await self._repository.get_run(run_id)
+        return SimpleNamespace(run=run, state=self._state, handle=handle)
+
+
 class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
@@ -137,12 +169,40 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             owner_id="recovery-worker",
         )
 
+    def _tracing_coordinator(
+        self,
+        trace: list[str],
+        *,
+        resumer_state: str = "resumed",
+    ):
+        repository = _TracingRepository(self.repository, trace)
+        resumer = _TracingResumer(
+            self.repository,
+            trace,
+            state=resumer_state,
+        )
+        coordinator = AgentRunRecoveryCoordinator(
+            runs=repository,
+            writer=repository,
+            lease_store=repository,
+            resumer=resumer,
+            locator_service=self.locator_service,
+            owner_id="trace-recovery-worker",
+        )
+        return coordinator, resumer
+
     async def asyncTearDown(self) -> None:
         self.engine.dispose()
         self.temp_dir.cleanup()
         await super().asyncTearDown()
 
-    async def _seed_waiting(self, suffix: str, kind: AgentResumeKind):
+    async def _seed_waiting(
+        self,
+        suffix: str,
+        kind: AgentResumeKind,
+        *,
+        extra_waiting: bool = False,
+    ):
         task_id = f"task-{suffix}"
         run_id = f"run-{suffix}"
         with self.sessions.begin() as session:
@@ -171,11 +231,23 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         )
         run = await self.repository.get_run(run_id)
         assert run is not None
+        tool_calls = [AgentToolCall(f"call-{suffix}", "tool_safe", "{}", 0)]
+        capability_ids = {"tool_safe": "skill.safe"}
+        if extra_waiting:
+            tool_calls.append(
+                AgentToolCall(
+                    f"call-{suffix}-extra",
+                    "tool_safe_extra",
+                    "{}",
+                    1,
+                )
+            )
+            capability_ids["tool_safe_extra"] = "skill.safe"
         sample = AgentSample(
             sample_id=f"sample-{suffix}",
             binding=self.binding,
             visible_text="",
-            tool_calls=(AgentToolCall(f"call-{suffix}", "tool_safe", "{}", 0),),
+            tool_calls=tuple(tool_calls),
             usage=AgentUsage(status="usage_unavailable"),
             finish=AgentFinishMetadata("tool_calls", 1),
         )
@@ -185,7 +257,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 expected_revision=run.revision,
                 expected_claim_token=lease.token,
                 sample=sample,
-                capability_ids_by_tool_name={"tool_safe": "skill.safe"},
+                capability_ids_by_tool_name=capability_ids,
             )
         )
         authority_digest = hashlib.sha256(f"authority-{suffix}".encode()).hexdigest()
@@ -209,6 +281,33 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 status=kind.waiting_status,
             )
         )
+        if extra_waiting:
+            current = await self.repository.get_run(run_id)
+            assert current is not None
+            extra_locator = self.locator_service.build(
+                run=current,
+                call_item=committed.call_items[1],
+                owner_scope="owner-1",
+                resume_kind=kind,
+                authority_digest=hashlib.sha256(
+                    f"authority-{suffix}-extra".encode()
+                ).hexdigest(),
+                pinned_bundle_revision=(
+                    "bundle-r1" if kind is AgentResumeKind.SKILL_INPUT else None
+                ),
+            )
+            await self.repository.commit_agent_call_outcome(
+                AgentCallOutcomeCommit(
+                    run_id=run_id,
+                    expected_revision=current.revision,
+                    expected_claim_token=lease.token,
+                    call_item_id=committed.call_items[1].item_id,
+                    safe_result_payload={
+                        "continuation_locator": extra_locator.to_safe_dict()
+                    },
+                    status=kind.waiting_status,
+                )
+            )
         run = await self.repository.get_run(run_id)
         assert run is not None
         released = await self.repository.release_waiting_task_lease(
@@ -217,6 +316,227 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             token=lease.token,
         )
         return locator, waiting, released
+
+    async def test_recovery_logical_call_sites_have_exact_normal_and_remaining_waiting_traces(
+        self,
+    ) -> None:
+        expected_prefix = [
+            "repository.get_run",
+            "repository.list_items",
+            "repository.acquire_task_lease",
+            "repository.get_run",
+            "repository.list_items",
+            "authority.resolve",
+            "repository.get_run",
+            "repository.list_items",
+            "repository.commit_agent_call_outcome",
+            "authority.ack",
+            "repository.get_run",
+        ]
+        for suffix, extra_waiting, resumer_state, expected_tail, expected_state in (
+            (
+                "trace-clear",
+                False,
+                "resumed",
+                ["resumer.run_claimed"],
+                AgentRecoveryState.RESUMED,
+            ),
+            (
+                "trace-final-candidate",
+                False,
+                "final_candidate",
+                ["resumer.run_claimed"],
+                AgentRecoveryState.FINAL_CANDIDATE,
+            ),
+            (
+                "trace-remaining",
+                True,
+                "resumed",
+                ["repository.release_waiting_task_lease"],
+                AgentRecoveryState.WAITING,
+            ),
+        ):
+            with self.subTest(suffix=suffix):
+                locator, _, _ = await self._seed_waiting(
+                    suffix,
+                    AgentResumeKind.SKILL_INPUT,
+                    extra_waiting=extra_waiting,
+                )
+                trace: list[str] = []
+                coordinator, resumer = self._tracing_coordinator(
+                    trace,
+                    resumer_state=resumer_state,
+                )
+
+                async def resolve(_locator):
+                    trace.append("authority.resolve")
+                    return AgentAuthorityResolution(
+                        locator.authority_digest,
+                        AgentCallOutcomeStatus.COMPLETED,
+                        {"answer": "safe"},
+                        {"answer_digest": "b" * 64},
+                    )
+
+                async def acknowledge():
+                    trace.append("authority.ack")
+
+                result = await coordinator.continue_waiting_call(
+                    locator,
+                    owner_scope="owner-1",
+                    authority_digest=locator.authority_digest,
+                    resolve_authority=resolve,
+                    acknowledge=acknowledge,
+                )
+
+                self.assertEqual(result.state, expected_state)
+                self.assertEqual(trace, expected_prefix + expected_tail)
+                self.assertEqual(resumer.calls, 0 if extra_waiting else 1)
+
+    async def test_duplicate_and_terminal_preload_ack_before_lease_acquire(self) -> None:
+        cases = []
+        duplicate_locator, _, _ = await self._seed_waiting(
+            "trace-duplicate",
+            AgentResumeKind.MCP_APPROVAL,
+        )
+        await self.coordinator.continue_waiting_call(
+            duplicate_locator,
+            owner_scope="owner-1",
+            authority_digest=duplicate_locator.authority_digest,
+            resolve_authority=lambda _locator: AgentAuthorityResolution(
+                duplicate_locator.authority_digest,
+                AgentCallOutcomeStatus.COMPLETED,
+                {"answer": "safe"},
+                {"answer_digest": "c" * 64},
+            ),
+        )
+        cases.append((duplicate_locator, AgentRecoveryState.DUPLICATE))
+
+        terminal_locator, _, _ = await self._seed_waiting(
+            "trace-terminal",
+            AgentResumeKind.MCP_REMOTE_TASK,
+        )
+        current = await self.repository.get_run(terminal_locator.run_id)
+        assert current is not None
+        lease = await self.repository.acquire_task_lease(
+            terminal_locator.run_id,
+            owner_id="terminal-worker",
+            ttl_seconds=30,
+        )
+        await self.repository.cancel_agent_run(
+            terminal_locator.run_id,
+            expected_revision=lease.revision,
+            expected_claim_token=lease.token,
+            safe_reason_code="trace_terminal",
+        )
+        cases.append((terminal_locator, AgentRecoveryState.TERMINAL))
+
+        for locator, expected_state in cases:
+            with self.subTest(state=expected_state):
+                trace: list[str] = []
+                coordinator, resumer = self._tracing_coordinator(trace)
+
+                async def acknowledge():
+                    trace.append("authority.ack")
+
+                result = await coordinator.continue_waiting_call(
+                    locator,
+                    owner_scope="owner-1",
+                    authority_digest=locator.authority_digest,
+                    resolve_authority=lambda _locator: (_ for _ in ()).throw(
+                        AssertionError("preload branch must not resolve")
+                    ),
+                    acknowledge=acknowledge,
+                )
+                self.assertEqual(result.state, expected_state)
+                self.assertEqual(
+                    trace,
+                    [
+                        "repository.get_run",
+                        "repository.list_items",
+                        "authority.ack",
+                    ],
+                )
+                self.assertEqual(resumer.calls, 0)
+
+    async def test_post_resolve_committed_and_terminal_barriers_ack_without_commit_or_reload(
+        self,
+    ) -> None:
+        for suffix, barrier, expected_state in (
+            (
+                "trace-concurrent-commit",
+                "commit",
+                AgentRecoveryState.DUPLICATE,
+            ),
+            (
+                "trace-concurrent-terminal",
+                "terminal",
+                AgentRecoveryState.TERMINAL,
+            ),
+        ):
+            with self.subTest(barrier=barrier):
+                locator, _, _ = await self._seed_waiting(
+                    suffix,
+                    AgentResumeKind.MCP_REMOTE_TASK,
+                )
+                trace: list[str] = []
+                coordinator, resumer = self._tracing_coordinator(trace)
+
+                async def resolve(_locator):
+                    trace.append("authority.resolve")
+                    current = await self.repository.get_run(locator.run_id)
+                    assert current is not None
+                    if barrier == "commit":
+                        await self.repository.commit_agent_call_outcome(
+                            AgentCallOutcomeCommit(
+                                run_id=current.run_id,
+                                expected_revision=current.revision,
+                                expected_claim_token=current.claim_token,
+                                call_item_id=locator.call_item_id,
+                                safe_result_payload={"winner": "concurrent"},
+                                status=AgentCallOutcomeStatus.COMPLETED,
+                            )
+                        )
+                    else:
+                        await self.repository.cancel_agent_run(
+                            current.run_id,
+                            expected_revision=current.revision,
+                            expected_claim_token=current.claim_token,
+                            safe_reason_code="concurrent_terminal",
+                        )
+                    return AgentAuthorityResolution(
+                        locator.authority_digest,
+                        AgentCallOutcomeStatus.COMPLETED,
+                        {"loser": "resolved"},
+                        {"answer_digest": "d" * 64},
+                    )
+
+                async def acknowledge():
+                    trace.append("authority.ack")
+
+                result = await coordinator.continue_waiting_call(
+                    locator,
+                    owner_scope="owner-1",
+                    authority_digest=locator.authority_digest,
+                    resolve_authority=resolve,
+                    acknowledge=acknowledge,
+                )
+
+                self.assertEqual(result.state, expected_state)
+                self.assertEqual(
+                    trace,
+                    [
+                        "repository.get_run",
+                        "repository.list_items",
+                        "repository.acquire_task_lease",
+                        "repository.get_run",
+                        "repository.list_items",
+                        "authority.resolve",
+                        "repository.get_run",
+                        "repository.list_items",
+                        "authority.ack",
+                    ],
+                )
+                self.assertEqual(resumer.calls, 0)
 
     async def test_skill_continuation_commits_before_ack_and_duplicate_is_idempotent(self) -> None:
         locator, _, _ = await self._seed_waiting("skill", AgentResumeKind.SKILL_INPUT)
@@ -367,10 +687,24 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
 
         recoverable = await self.repository.list_recoverable_runs()
         self.assertIn(run_id, {item.run_id for item in recoverable})
-        result = await self.coordinator.recover_crashed_run(run_id)
+        trace: list[str] = []
+        coordinator, resumer = self._tracing_coordinator(trace)
+        result = await coordinator.recover_crashed_run(run_id)
 
         self.assertEqual(result.state, AgentRecoveryState.RESUMED)
-        self.assertEqual(self.resumer.run_ids[-1], run_id)
+        self.assertEqual(resumer.calls, 1)
+        self.assertEqual(
+            trace,
+            [
+                "repository.reconcile_agent_run_consistency",
+                "repository.acquire_task_lease",
+                "repository.get_run",
+                "repository.list_items",
+                "repository.get_run",
+                "repository.commit_agent_call_outcome",
+                "resumer.run_claimed",
+            ],
+        )
         items = await self.repository.list_items(run_id)
         tool_result = next(
             item
@@ -381,6 +715,42 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["outcome"], "aborted")
         self.assertEqual(payload["safe_error_code"], "side_effect_unknown_no_replay")
 
+    async def test_startup_recovery_terminal_and_waiting_stop_after_reconcile(self) -> None:
+        waiting_locator, _, _ = await self._seed_waiting(
+            "crash-waiting",
+            AgentResumeKind.SKILL_INPUT,
+        )
+        terminal_locator, _, _ = await self._seed_waiting(
+            "crash-terminal",
+            AgentResumeKind.MCP_REMOTE_TASK,
+        )
+        lease = await self.repository.acquire_task_lease(
+            terminal_locator.run_id,
+            owner_id="crash-terminal-worker",
+            ttl_seconds=30,
+        )
+        await self.repository.cancel_agent_run(
+            terminal_locator.run_id,
+            expected_revision=lease.revision,
+            expected_claim_token=lease.token,
+            safe_reason_code="crash_terminal",
+        )
+
+        for run_id, expected_state in (
+            (waiting_locator.run_id, AgentRecoveryState.WAITING),
+            (terminal_locator.run_id, AgentRecoveryState.TERMINAL),
+        ):
+            with self.subTest(state=expected_state):
+                trace: list[str] = []
+                coordinator, resumer = self._tracing_coordinator(trace)
+                result = await coordinator.recover_crashed_run(run_id)
+                self.assertEqual(result.state, expected_state)
+                self.assertEqual(
+                    trace,
+                    ["repository.reconcile_agent_run_consistency"],
+                )
+                self.assertEqual(resumer.calls, 0)
+
     async def test_authoritative_result_repairs_reserved_item_and_ack_loss_retries(self) -> None:
         locator, _, _ = await self._seed_waiting("repair", AgentResumeKind.MCP_REMOTE_TASK)
         resolution = AgentAuthorityResolution(
@@ -390,27 +760,70 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             {"result_receipt_ref": "receipt-repair"},
         )
 
-        first = await self.coordinator.recover_authoritative_result(
+        trace: list[str] = []
+        coordinator, resumer = self._tracing_coordinator(trace)
+
+        def resolve_authority(_locator):
+            trace.append("authority.resolve")
+            return resolution
+
+        def lose_ack():
+            trace.append("authority.ack_lost")
+            raise RuntimeError("response lost")
+
+        first = await coordinator.recover_authoritative_result(
             locator,
             owner_scope="owner-1",
             authority_digest=locator.authority_digest,
-            resolve_authority=lambda _locator: resolution,
-            acknowledge=lambda: (_ for _ in ()).throw(RuntimeError("response lost")),
+            resolve_authority=resolve_authority,
+            acknowledge=lose_ack,
         )
-        second = await self.coordinator.recover_authoritative_result(
+        first_trace = list(trace)
+        trace.clear()
+
+        def acknowledge_retry():
+            trace.append("authority.ack_retry")
+
+        second = await coordinator.recover_authoritative_result(
             locator,
             owner_scope="owner-1",
             authority_digest=locator.authority_digest,
             resolve_authority=lambda _locator: (_ for _ in ()).throw(
                 AssertionError("durable result must not be recovered twice")
             ),
-            acknowledge=lambda: None,
+            acknowledge=acknowledge_retry,
         )
 
         self.assertFalse(first.acknowledged)
         self.assertTrue(second.acknowledged)
         self.assertEqual(second.state, AgentRecoveryState.DUPLICATE)
         self.assertEqual(first.result_item.item_id, second.result_item.item_id)
+        self.assertEqual(resumer.calls, 1)
+        self.assertEqual(
+            first_trace,
+            [
+                "repository.get_run",
+                "repository.list_items",
+                "repository.acquire_task_lease",
+                "repository.get_run",
+                "repository.list_items",
+                "authority.resolve",
+                "repository.get_run",
+                "repository.list_items",
+                "repository.commit_agent_call_outcome",
+                "authority.ack_lost",
+                "repository.get_run",
+                "resumer.run_claimed",
+            ],
+        )
+        self.assertEqual(
+            trace,
+            [
+                "repository.get_run",
+                "repository.list_items",
+                "authority.ack_retry",
+            ],
+        )
 
     async def test_commit_fault_does_not_ack_or_expose_continuation(self) -> None:
         locator, _, _ = await self._seed_waiting("fault", AgentResumeKind.MCP_APPROVAL)

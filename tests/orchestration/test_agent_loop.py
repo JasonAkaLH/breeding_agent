@@ -43,12 +43,21 @@ def _policy(*, parallel_safe: bool) -> CapabilityInvocationPolicy:
 
 
 class _QueuedModel:
-    def __init__(self, binding: AgentModelBinding, outputs) -> None:
+    def __init__(
+        self,
+        binding: AgentModelBinding,
+        outputs,
+        *,
+        trace: list[str] | None = None,
+    ) -> None:
         self.binding = binding
         self.outputs = iter(outputs)
         self.requests = []
+        self.trace = trace
 
     async def sample_agent(self, request):
+        if self.trace is not None:
+            self.trace.append("model.sample")
         self.requests.append(request)
         text, calls = next(self.outputs)
         return AgentSample(
@@ -66,11 +75,14 @@ class _QueuedModel:
 
 
 class _RecordingInvoker:
-    def __init__(self, outcomes=None) -> None:
+    def __init__(self, outcomes=None, *, trace: list[str] | None = None) -> None:
         self.events = []
         self.outcomes = dict(outcomes or {})
+        self.trace = trace
 
     async def invoke(self, *, call, effective_payload, **_kwargs):
+        if self.trace is not None:
+            self.trace.append("capability.invoke")
         self.events.append(f"start:{call.call_id}")
         if call.call_id == "slow":
             await asyncio.sleep(0.02)
@@ -84,6 +96,33 @@ class _RecordingInvoker:
                 safe_result_payload={"call_id": call.call_id},
             ),
         )
+
+
+class _LogicalTraceRepository:
+    _RECORDED = frozenset(
+        {
+            "acquire_task_lease",
+            "commit_agent_call_outcome",
+            "commit_agent_sample",
+            "release_waiting_task_lease",
+            "renew_task_lease",
+        }
+    )
+
+    def __init__(self, repository, trace: list[str]) -> None:
+        self._repository = repository
+        self._trace = trace
+
+    def __getattr__(self, name: str):
+        attribute = getattr(self._repository, name)
+        if name not in self._RECORDED:
+            return attribute
+
+        async def traced(*args, **kwargs):
+            self._trace.append(f"repository.{name}")
+            return await attribute(*args, **kwargs)
+
+        return traced
 
 
 class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
@@ -142,17 +181,18 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
         await super().asyncTearDown()
 
-    def _runner(self, model, invoker):
+    def _runner(self, model, invoker, *, repository=None):
+        repository = repository or self.repository
         return AgentLoopRunner(
-            runs=self.repository,
-            writer=self.repository,
+            runs=repository,
+            writer=repository,
             model=model,
             context_builder=AgentContextBuilder(
                 AgentContextRules("stable", "tool rules", "final guard")
             ),
             catalog_builder=self.catalog_builder,
             visibility_context=self.visibility,
-            lease_controller=AgentLeaseController(self.repository, ttl_seconds=30),
+            lease_controller=AgentLeaseController(repository, ttl_seconds=30),
             invoker=invoker,
             owner_id="worker-1",
         )
@@ -218,3 +258,49 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model.requests), 1)
         self.assertIsNone(result.run.claim_token)
         self.assertEqual(result.run.status, AgentRunStatus.WAITING_FOR_INPUT)
+
+    async def test_waiting_logical_call_sites_have_exact_order_and_counts(self) -> None:
+        trace: list[str] = []
+        waiting_call = AgentToolCall(
+            "waiting-trace",
+            self.names["skill.exclusive"],
+            "{}",
+            0,
+        )
+        model = _QueuedModel(
+            self.binding,
+            [("", (waiting_call,))],
+            trace=trace,
+        )
+        invoker = _RecordingInvoker(
+            {
+                "waiting-trace": AgentCallExecution(
+                    AgentCallOutcomeStatus.WAITING_FOR_INPUT,
+                    safe_result_payload={"question": "need input"},
+                )
+            },
+            trace=trace,
+        )
+        repository = _LogicalTraceRepository(self.repository, trace)
+
+        result = await self._runner(
+            model,
+            invoker,
+            repository=repository,
+        ).run("run-1")
+
+        self.assertEqual(result.state, "waiting")
+        self.assertEqual(
+            trace,
+            [
+                "repository.acquire_task_lease",
+                "model.sample",
+                "repository.commit_agent_sample",
+                "capability.invoke",
+                "repository.commit_agent_call_outcome",
+                "repository.release_waiting_task_lease",
+            ],
+        )
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(invoker.events, ["start:waiting-trace", "end:waiting-trace"])
+        self.assertIsNone(result.run.claim_token)

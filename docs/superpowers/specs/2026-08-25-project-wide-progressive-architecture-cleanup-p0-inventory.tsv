@@ -662,7 +662,7 @@ src/storage/sqlite/models.py	business_source	runtime_business	P5	P0-P5-SQLITE-00
 src/storage/sqlite/repositories.py	business_source	runtime_business	P5	P0-P5-SQLITE-001	candidate	pending
 src/storage/sqlite/session.py	business_source	runtime_business	P5	-	reviewed_no_change	pending
 tests/api/support.py	test	behavior_test	NA	-	test_lock	NA
-tests/api/test_agent_continuation.py	test	behavior_test	NA	-	test_lock	NA
+tests/api/test_agent_continuation.py	test	behavior_test	NA	BEHAVIOR-ORCH-AUTHORITY-SNAPSHOT-001	test_lock	NA
 tests/api/test_agent_task_projection.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_artifact_trust_helpers.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_auth_api_tokens.py	test	behavior_test	NA	-	test_lock	NA
@@ -927,7 +927,7 @@ tests/integrations/test_rust_server_compatibility.py	test	behavior_test	NA	-	tes
 tests/integrations/test_safety_kernels_pyo3_wheel_contract.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/test_token_counter.py	test	behavior_test	NA	-	test_lock	NA
 tests/lifecycle/support.py	test	behavior_test	NA	-	test_lock	NA
-tests/lifecycle/test_agent_run_recovery.py	test	behavior_test	NA	-	test_lock	NA
+tests/lifecycle/test_agent_run_recovery.py	test	behavior_test	NA	P0-P2-AGENT-SEAMS-001,BEHAVIOR-ORCH-TERMINAL-CONTINUATION-001,BEHAVIOR-ORCH-AUTHORITY-SNAPSHOT-001	test_lock	NA
 tests/lifecycle/test_conversation_serial_guard.py	test	behavior_test	NA	-	test_lock	NA
 tests/lifecycle/test_interrupt_resume.py	test	behavior_test	NA	-	test_lock	NA
 tests/lifecycle/test_lifecycle_pyo3_facade.py	test	behavior_test	NA	-	test_lock	NA
@@ -948,10 +948,10 @@ tests/orchestration/support.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_catalog_preflight.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_compaction.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_context_builder.py	test	behavior_test	NA	-	test_lock	NA
-tests/orchestration/test_agent_continuation.py	test	behavior_test	NA	-	test_lock	NA
+tests/orchestration/test_agent_continuation.py	test	behavior_test	NA	P0-P2-AGENT-SEAMS-001,BEHAVIOR-ORCH-TERMINAL-CONTINUATION-001	test_lock	NA
 tests/orchestration/test_agent_final_output.py	test	behavior_test	NA	-	test_lock	NA
-tests/orchestration/test_agent_invocation.py	test	behavior_test	NA	-	test_lock	NA
-tests/orchestration/test_agent_loop.py	test	behavior_test	NA	-	test_lock	NA
+tests/orchestration/test_agent_invocation.py	test	behavior_test	NA	P0-P2-AGENT-SEAMS-001,BEHAVIOR-ORCH-TASKNODE-PREPROJECTION-001	test_lock	NA
+tests/orchestration/test_agent_loop.py	test	behavior_test	NA	P0-P2-AGENT-SEAMS-001,BEHAVIOR-ORCH-PARALLEL-001,BEHAVIOR-ORCH-LEASE-001	test_lock	NA
 tests/orchestration/test_agent_mcp_binding.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_agent_models.py	test	behavior_test	NA	-	test_lock	NA
 tests/orchestration/test_public_contract_compatibility.py	test	behavior_test	NA	-	test_lock	NA

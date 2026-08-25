@@ -5,7 +5,11 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
-from src.core.contracts import CapabilityExecutionRequest, CapabilityExecutionResult
+from src.core.contracts import (
+    CapabilityExecutionError,
+    CapabilityExecutionRequest,
+    CapabilityExecutionResult,
+)
 from src.core.enums import NodeStatus, TaskStatus
 from src.core.models import Artifact, Task, TaskNode
 from src.orchestration.agent_loop.invocation import (
@@ -156,6 +160,86 @@ class _AgentFixtureCommitPort(_RecordingCommitPort):
 
 
 class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_waiting_branches_keep_execution_revalidation_and_semantic_commit_order(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "cap.lookup",
+                CapabilityExecutionResult(
+                    "cap.lookup",
+                    "task-1",
+                    "node-1",
+                    output_payload={"question": "safe question"},
+                    error=CapabilityExecutionError(
+                        "skill_input_missing",
+                        "input required",
+                    ),
+                ),
+                "waiting_for_input",
+            ),
+            (
+                "mcp.dispatch",
+                CapabilityExecutionResult(
+                    "mcp.dispatch",
+                    "task-1",
+                    "node-1",
+                    output_payload={"mcp_status": "remote_task_created"},
+                ),
+                "waiting_for_dependency",
+            ),
+        )
+        for capability_id, execution_result, waiting_step in cases:
+            with self.subTest(capability_id=capability_id):
+                instances = InstanceRegistry()
+                instances.register(
+                    ExecutionInstance(
+                        "instance-1",
+                        (capability_id,),
+                        InstanceState.ONLINE,
+                        0,
+                    )
+                )
+                task = Task(
+                    "task-1",
+                    "conv-1",
+                    "message-1",
+                    status=TaskStatus.RUNNING,
+                )
+                node = TaskNode(
+                    "node-1",
+                    "task-1",
+                    capability_id,
+                    status=NodeStatus.PENDING,
+                )
+                port = _RecordingCommitPort(task=task, node=node)
+
+                def execute(_request):
+                    port.steps.append("execute")
+                    return execution_result
+
+                kernel = CapabilityInvocationService(
+                    instance_selector=InstanceSelector(instances),
+                    executor=FakeExecutor({capability_id: execute}),
+                    commit_port=port,
+                    now_fn=lambda: datetime(2026, 8, 22, 12, 0),
+                )
+                result = await kernel.invoke(
+                    InvocationRequest(
+                        capability_id,
+                        "conv-1",
+                        "task-1",
+                        "node-1",
+                    ),
+                    node,
+                )
+
+                self.assertEqual(
+                    port.steps,
+                    ["owned", "start", "execute", "owned", waiting_step],
+                )
+                self.assertEqual(result.output_payload, execution_result.output_payload)
+
     async def test_agent_mcp_hook_wraps_the_real_dispatch_invocation(self) -> None:
         instances = InstanceRegistry()
         instances.register(

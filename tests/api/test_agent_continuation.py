@@ -1,19 +1,53 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from src.api.runtime import ApiRuntime
 from src.orchestration.agent_loop.continuation import (
     AgentContinuationLocator,
     AgentContinuationLocatorService,
     AgentResumeKind,
 )
-from src.orchestration.agent_loop.models import AgentModelBinding
+from src.orchestration.agent_loop.models import (
+    AgentItem,
+    AgentItemKind,
+    AgentItemState,
+    AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
+)
+
+
+class _DurableLocatorStorage:
+    def __init__(self, trace: list[str]) -> None:
+        self._trace = trace
+
+    async def list_interrupts_for_task(self, task_id: str):
+        self._trace.append("storage.list_interrupts_for_task")
+        return []
+
+
+class _DurableLocatorRepository:
+    def __init__(self, run: AgentRun, items: tuple[AgentItem, ...], trace: list[str]) -> None:
+        self._run = run
+        self._items = items
+        self._trace = trace
+
+    async def get_run_for_task(self, task_id: str):
+        self._trace.append("repository.get_run_for_task")
+        return self._run
+
+    async def list_items(self, run_id: str):
+        self._trace.append("repository.list_items")
+        return self._items
 
 
 class _ContinuationRequest(BaseModel):
@@ -110,3 +144,66 @@ class AgentContinuationAPIFixtureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["detail"], "agent_continuation_owner_mismatch")
+
+    async def test_locator_cache_miss_rebuilds_from_durable_agent_items(self) -> None:
+        locator = self.locators[0]
+        run = AgentRun(
+            run_id=locator.run_id,
+            task_id=locator.task_id,
+            conversation_id=locator.conversation_id,
+            status=AgentRunStatus.WAITING_FOR_INPUT,
+            binding=locator.model_binding,
+            waiting_call_item_ids=(locator.call_item_id,),
+        )
+        call = AgentItem(
+            item_id=locator.call_item_id,
+            run_id=locator.run_id,
+            task_id=locator.task_id,
+            sequence=1,
+            kind=AgentItemKind.TOOL_CALL,
+            state=AgentItemState.COMMITTED,
+            payload_json=json.dumps({"node_id": locator.node_id}),
+            payload_sha256="0" * 64,
+        )
+        result = AgentItem(
+            item_id="result-item-1",
+            run_id=locator.run_id,
+            task_id=locator.task_id,
+            sequence=2,
+            kind=AgentItemKind.TOOL_RESULT,
+            state=AgentItemState.RESERVED,
+            payload_json=json.dumps(
+                {
+                    "safe_result": {
+                        "continuation_locator": locator.to_safe_dict(),
+                    }
+                }
+            ),
+            payload_sha256="1" * 64,
+            source_call_item_id=locator.call_item_id,
+        )
+        trace: list[str] = []
+        runtime = SimpleNamespace(
+            storage=_DurableLocatorStorage(trace),
+            agent_run_repository=_DurableLocatorRepository(
+                run,
+                (call, result),
+                trace,
+            ),
+        )
+
+        rebuilt = await ApiRuntime._agent_locator_for_node(
+            runtime,
+            task_id=locator.task_id,
+            node_id=locator.node_id,
+        )
+
+        self.assertEqual(rebuilt, locator)
+        self.assertEqual(
+            trace,
+            [
+                "storage.list_interrupts_for_task",
+                "repository.get_run_for_task",
+                "repository.list_items",
+            ],
+        )

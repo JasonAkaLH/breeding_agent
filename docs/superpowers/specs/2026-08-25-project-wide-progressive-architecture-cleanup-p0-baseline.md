@@ -2,7 +2,7 @@
 
 ## 1. 状态与边界
 
-- P0状态：`active`；Checkpoint 0～C完成，Checkpoint D待开始
+- P0状态：`active`；Checkpoint 0～D完成，Checkpoint E待开始
 - P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
 - P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
 - 分支：`main`
@@ -81,6 +81,26 @@ Checkpoint A增加baseline和inventory两个validation dependency，并把已存
 | Frontend | App → controllers/components → domain/wire | App/Attachment/Task Runtime owner不复制；initial submit与answer owner不互换 |
 | Rust root/private | root public declarations；private kernel/adapter/service | root identity/attrs保留；private不得调用root assembly wrapper |
 
+### 4.1 Checkpoint D stable logical call-site IDs
+
+Location metadata绑定Checkpoint D生产源码位置；owner内一对一搬家只更新location，logical ID、kind、count与order不得变化。
+
+| Logical ID | `entry/scenario + phase + callee + ordinal` | 当前location | Exact trace/约束 |
+|---|---|---|---|
+| `D-RUN-WAIT-ENTRY-REL-01` | runner already-waiting + entry + `release_waiting` + 1 | `runner.py:137` | acquire后model/sample/capability/outcome均0，直接release |
+| `D-RUN-WAIT-WAVE-OUT-01` | runner new-waiting + outcome + `commit_agent_call_outcome` + 1 | `runner.py:253` | acquire → model → sample commit → capability → outcome commit |
+| `D-RUN-WAIT-WAVE-REL-02` | runner new-waiting + release + `release_waiting` + 2 | `runner.py:273` | outcome后唯一release；renew=0 |
+| `D-REC-PRELOAD-ACK-01` | continuation duplicate/terminal + preload + `ack` + 1 | `agent_run_recovery.py:270-286` | load Run/items → ack → return；acquire/resolve/commit/reload=0 |
+| `D-REC-ACTIVE-RESOLVE-01` | continuation active + resolve + `resolve_authority` + 1 | `agent_run_recovery.py:288-304` | acquire → reload → resolve |
+| `D-REC-POST-BARRIER-ACK-01` | concurrent committed/terminal + post-resolve + `ack` + 1 | `agent_run_recovery.py:305-316` | reload/fence → ack → return；commit/resume/ack后reload=0 |
+| `D-REC-ACTIVE-COMMIT-01` | continuation active + commit + `commit_agent_call_outcome` + 1 | `agent_run_recovery.py:317-335` | resolution validation后唯一commit，随后ack → reload |
+| `D-REC-REMAINING-REL-01` | continuation remaining-waiting + release + `release_waiting` + 1 | `agent_run_recovery.py:337-350` | remaining非空时resume/model/Tool=0 |
+| `D-REC-CLEARED-RUN-01` | continuation waiting-cleared + resume + `run_claimed` + 1 | `agent_run_recovery.py:351-358` | 复用原handle/binding；无统一release，final-candidate按loop state映射 |
+| `D-CRASH-EARLY-REC-01` | crash terminal/waiting + reconcile + `reconcile_agent_run_consistency` + 1 | `agent_run_recovery.py:189-196` | reconcile后立即return；acquire/abort/resume=0 |
+| `D-CRASH-ACTIVE-ABORT-01` | crash active reserved + abort + `commit_agent_call_outcome` + N | `agent_run_recovery.py:198-232` | reconcile → acquire → reload/items → 每个outstanding按ordinal abort |
+| `D-CRASH-ACTIVE-RUN-02` | crash active + resume + `run_claimed` + 2 | `agent_run_recovery.py:234-247` | abort全部完成后唯一resume；resolver/ack=0 |
+| `D-API-LOCATOR-DURABLE-01` | API locator cache miss + rebuild + `from_safe_dict` + 1 | `runtime.py:4332-4365` | interrupt carrier miss → Run → items；从waiting result durable locator重建 |
+
 ## 5. Finding register
 
 Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F841，共172个信号。C901不自动等于需要拆分；只有结合owner、side effect和合同证据后才成为finding。P0不运行`--fix`。
@@ -140,7 +160,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 |---|---|---|---|
 | Python public/StoragePort | Core contracts、SQLite bootstrap | literal identity/signature/pickle/import tests | Checkpoint B PASS（13项新增，focused合计43项） |
 | Agent adapters/Cancellation | Agent storage、runtime-sidecar contract、runtime wiring | surface/MRO/common fixture/transaction/selector/off-shadow-enforce/AgentRun trace | Checkpoint C PASS（focused 102项） |
-| Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 补逐分支logical call-site trace | Checkpoint D pending |
+| Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 逐分支stable logical ID、order/count、durable locator trace | Checkpoint D PASS（focused 29项） |
 | MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | 补functional seam与order/count trace | Checkpoint E pending |
 | Frontend | App/taskEvents tests | 复用覆盖，缺口才加最小断言 | Checkpoint F pending |
 | Rust/Scripts | 六contract tests、migration tests、Rust quality | 记录root public surface与sequence证据 | Checkpoint G pending |
@@ -166,6 +186,7 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 | Checkpoint B public contracts | repo / Core+API+Orchestration public contract focused suite | macOS/Python 3.13 | 43/0/0 | PASS |
 | Checkpoint C repository/cancellation | repo / 8-module Storage/API/Lifecycle focused suite | macOS/Python 3.13 | 102/0/0 | PASS；另观察到1条unclosed SQLite connection ResourceWarning，不计测试失败，P0不改生产清理语义 |
 | Checkpoint C changed-test compile/Ruff | repo / 4份受影响test files | macOS/Python 3.13 | completed/0/0 | PASS |
+| Checkpoint D continuation/recovery | repo / 5-module Orchestration/Lifecycle/API focused suite | macOS/Python 3.13 | 29/0/0 | PASS |
 
 所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
 
