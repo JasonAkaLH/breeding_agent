@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from src.core.contracts import CapabilityExecutionError
 from src.core.models import Artifact, Interrupt
 
+from ._parsing import load_json_object as _load_v2_json_object
 from .input_resolution import SkillInputResolutionContext, SkillInputResolutionResult, SkillInputTextGenerator, resolve_skill_inputs_with_llm
 from .input_resolution import SkillInputSource
 from .input_schema import SkillInputField, SkillInputSchema, load_input_schemas_for_contract, validate_selected_schema_payload
@@ -936,23 +937,6 @@ def _parse_v2_llm_slot_candidates(text: str) -> dict[str, dict[str, Any]]:
             candidate = {"value": raw_candidate}
         candidates[name] = candidate
     return candidates
-
-
-def _load_v2_json_object(text: str) -> Mapping[str, Any]:
-    stripped = text.strip()
-    if not stripped:
-        raise json.JSONDecodeError("empty response", text, 0)
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start < 0 or end < start:
-            raise
-        parsed = json.loads(stripped[start : end + 1])
-    if not isinstance(parsed, Mapping):
-        raise json.JSONDecodeError("response is not a JSON object", stripped, 0)
-    return parsed
 
 
 def _validate_v2_llm_candidate(

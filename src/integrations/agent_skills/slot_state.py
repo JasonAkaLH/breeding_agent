@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from src.core.models import SlotCollection, SlotEvent
 
+from ._parsing import string_tuple as _string_tuple
 from .contract import SkillResourceRef
 from .input_schema import (
     SkillInputClarification,
@@ -1066,16 +1067,6 @@ def _redact_string(value: str) -> str:
     text = _DATABASE_URL_RE.sub("[REDACTED_URL]", text)
     text = _LOCAL_PATH_RE.sub("[REDACTED_PATH]", text)
     return text
-
-
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value.strip(),) if value.strip() else ()
-    if isinstance(value, list | tuple | set):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return ()
 
 
 def _number_or_none(value: Any) -> float | None:

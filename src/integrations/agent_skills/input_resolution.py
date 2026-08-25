@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
+from ._parsing import load_json_object as _load_json_object
 from .missing_input_interrupt import SLOT_COLLECTION_METADATA_KEY
 from .parameters import SkillParameterSpec
 
@@ -864,23 +865,6 @@ def _parse_llm_slot_candidates(text: str) -> dict[str, dict[str, Any]]:
             candidate = {"value": raw_candidate}
         candidates[name] = candidate
     return candidates
-
-
-def _load_json_object(text: str) -> Mapping[str, Any]:
-    stripped = text.strip()
-    if not stripped:
-        raise json.JSONDecodeError("empty response", text, 0)
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start < 0 or end < start:
-            raise
-        parsed = json.loads(stripped[start : end + 1])
-    if not isinstance(parsed, Mapping):
-        raise json.JSONDecodeError("response is not a JSON object", stripped, 0)
-    return parsed
 
 
 def _validate_llm_candidate(

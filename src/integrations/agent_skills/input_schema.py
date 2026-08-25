@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from ._parsing import string_tuple as _string_tuple
 from .contract import SkillContract
 
 
@@ -464,16 +465,6 @@ def _coerce_for_validation(field: SkillInputField, value: Any) -> Any | None:
     if field.type in _ARTIFACT_TYPES:
         return value if isinstance(value, Mapping) else None
     return value
-
-
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value.strip(),) if value.strip() else ()
-    if isinstance(value, list | tuple | set):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return ()
 
 
 def _float_or_none(value: Any) -> float | None:

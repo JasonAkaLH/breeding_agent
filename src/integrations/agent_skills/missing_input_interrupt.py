@@ -12,6 +12,7 @@ from src.core.enums import InterruptStatus
 from src.core.models import Interrupt, SlotCollection, SlotEvent
 from src.integrations.llm_request_options import llm_option_metadata
 
+from ._parsing import load_json_object as _load_json_object
 from .input_schema import load_input_schemas_for_contract
 from .manifest import SkillManifest
 from .parameters import SkillParameterSpec
@@ -965,23 +966,6 @@ def _iter_slot_payloads(slots: Any) -> Iterable[Mapping[str, Any]]:
         for raw_slot in slots:
             if isinstance(raw_slot, Mapping):
                 yield raw_slot
-
-
-def _load_json_object(text: str) -> Mapping[str, Any]:
-    stripped = text.strip()
-    if not stripped:
-        raise json.JSONDecodeError("empty response", text, 0)
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start < 0 or end < start:
-            raise
-        parsed = json.loads(stripped[start : end + 1])
-    if not isinstance(parsed, Mapping):
-        raise json.JSONDecodeError("response is not a JSON object", stripped, 0)
-    return parsed
 
 
 def _required_field_payload(name: str, spec: SkillParameterSpec | None) -> dict[str, Any]:

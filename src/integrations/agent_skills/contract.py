@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from ._parsing import string_tuple as _string_tuple
+
 
 class SkillContractParseError(ValueError):
     pass
@@ -471,16 +473,6 @@ def _required_string(value: Mapping[str, Any], key: str, source_path: Path) -> s
     if not text:
         raise SkillContractParseError(f"Skill contract requires field `{key}`: {source_path}")
     return text
-
-
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value.strip(),) if value.strip() else ()
-    if isinstance(value, list | tuple | set):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return ()
 
 
 def _safe_relative(root: Path, relative_path: str, *, source_path: Path, must_exist: bool) -> Path:
