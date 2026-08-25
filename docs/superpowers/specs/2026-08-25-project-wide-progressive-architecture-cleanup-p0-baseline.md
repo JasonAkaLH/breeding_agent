@@ -2,7 +2,7 @@
 
 ## 1. 状态与边界
 
-- P0状态：`active`；Checkpoint 0～F完成，Checkpoint G待开始
+- P0状态：`active`；Checkpoint 0～G完成，Checkpoint H待开始
 - P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
 - P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
 - 分支：`main`
@@ -128,6 +128,37 @@ F未发现需要新增测试的缺口；不复制现有case，不锁入UI/文案
 | `frontend/src/api/taskEvents.test.ts` | SSE terminal close、非terminal close error、全部registered event types、Interrupt answer/cancel/unknown/late-result transport | wire/parser/subscription PASS |
 | `frontend/src/domain/taskEvents.test.ts` | Agent/MCP terminal precedence、multi-waiting、replay dedupe、same-ID conflict、predecessor gap、unknown/late chain、loading_artifacts与ignored duplicate state identity | reducer/state identity PASS |
 
+### 4.4 Checkpoint G Rust crate-root public surface ledger
+
+以当前macOS/unix target的rustdoc JSON root module items建立semantic public-shape记录：每项包含canonical `crate::symbol`、kind、public visibility、outer attrs/deprecation、struct公开fields与generics/where、enum variants、function inputs/output/generics/header（`async|const|unsafe|ABI`）、const type/value及module/re-export role；去除rustdoc内部ID、impl列表和function body后canonical JSON排序并以单LF结尾取SHA-256。它不是新增export manifest；G commit与下表共同绑定当前完整签名。`cfg(not(unix))`的`serve_runtime_sidecar_unix_socket`另保留同返回类型、underscore参数名的source declaration；unix surface含2个`#[cfg(unix)]`函数。
+
+| Crate-root | Items / kinds | qualifiers / attrs | Semantic public-shape SHA-256 | symbol role |
+|---|---|---|---|---|
+| `maf_runtime_sidecar` | 69 = const3/enum2/struct54/fn8/module1/use1 | async6；cfg2；must_use1；const-fn/unsafe/extern/deprecated=0 | `3fdbccdbbd3eb608a38507f28071252f26176894cf5a7d5e3f5bbfce1fc2f6d2` | 67 root-defined + `pb` generated contract module + `RuntimeSidecarSqliteAdapter` canonical re-export |
+| `maf_skill_runtime` | 60 = const8/enum3/struct23/fn25/module1 | async3；must_use16；cfg/const-fn/unsafe/extern/deprecated=0 | `bfceb1f9284a48b26cde6d4fe8d518e82846405058de0f74f866fac777bc7a3f` | 59 root-defined + `pb` generated contract module |
+| `maf_mcp_runtime` | 87 = const39/enum7/struct27/fn14 | must_use11；async/cfg/const-fn/unsafe/extern/deprecated=0 | `1b47306f86d1bc8f512aac2c545c1c59d18fa4158c9c723ba07733586b15d829` | 87 root-defined；official SDK adapter仍为shadow-only contract |
+
+Exact root function names（签名、generics/where与attrs由上述semantic shape绑定）：
+
+- `maf_runtime_sidecar`：`runtime_sidecar_service_from_config, serve_runtime_sidecar, serve_runtime_sidecar_service, serve_runtime_sidecar_tcp, serve_runtime_sidecar_unix_socket, semantic_probe_runtime_sidecar_unix_socket, serve_runtime_sidecar_with_incoming, supported_features`。
+- `maf_skill_runtime`：`serve_skill_sandbox, serve_skill_sandbox_service, serve_skill_sandbox_with_shutdown, allowed_execution_modes, default_execution_modes, allowed_answer_modes, default_answer_mode_by_execution_mode, answer_mode_required_execution_modes, allowed_rust_adapters, forbidden_x_runtime_rust_keys, guard_public_root_path, validate_service_binding, validate_handler_allowlist, validate_rust_metadata, bundle_fingerprint, validate_policy, artifact_provenance_policy, benchmark_policy, promotion_policy, ops_policy, decommission_policy, error_code_table, skill_runtime_contract_artifact, skill_runtime_contract_json, skill_policy_validate_json`。
+- `maf_mcp_runtime`：`task_terminal_states, mcp_runtime_contract_artifact, mcp_runtime_contract_json, approved_mcp_protocol_versions, official_rust_sdk_compile_time_markers, official_rust_sdk_adapter_metadata, health, readiness, check_compatibility, map_official_rust_sdk_error, compare_official_rust_sdk_shadow, validate_json_rpc_request, sanitize_tool_output, can_retry_tool_call`。
+
+Non-function root symbols按rustdoc root order由每类digest锁定；P7如移动root-defined item，必须先用本表逐项比较canonical path/kind/signature/attrs/role，不得把private implementation变化误报为public delta。
+
+### 4.5 Checked-in Rust contracts 与 Operational Script sequence
+
+| Contract | Checked-in SHA-256 | canonical export evidence |
+|---|---|---|
+| Core `src/core/rust_contracts/core_contract.json` | `0c4d8dd2ba1b00abfa9c82ed3589aeace6c84b76c43a3450dcb6f6780d98a4ce` | Python artifact test + Rust canonical-export test PASS |
+| Lifecycle `src/lifecycle/rust_contracts/lifecycle_contract.json` | `eb974e2fcd6fee8849e3c7cf16480f33661e5ecd482d583b8930a9ad830d1f7a` | Python artifact test + Rust canonical-export test PASS |
+| Runtime Sidecar `src/storage/rust_contracts/runtime_sidecar_contract.json` | `f1bce6934894f90403116c7d7531a74a76b32453e41e6f2100174cf9c8c40ee6` | Python artifact test + Rust canonical-export test PASS |
+| Skill Runtime `src/integrations/agent_skills/rust_contracts/skill_runtime_contract.json` | `bafaa94a42bce8d17c37a590db21df04c258ccc5f5eff17dbbc93900c3fef17c` | Python artifact test + Rust canonical-export test PASS |
+| Safety `src/integrations/rust_contracts/safety_contract.json` | `aa03c9e5359b404bf131ae13376c2e5babe19f2188d12e0c4ded0e0f68f314e5` | Python artifact test + Rust canonical-export test PASS |
+| MCP Runtime `src/integrations/mcp/rust_contracts/mcp_runtime_contract.json` | `ab27de5f07098310e1349351fbbb3426a0519db1fbe37d71f7e0334e890d0233` | Python artifact test + Rust canonical-export test PASS |
+
+Migration apply固定为SQLite → PostgreSQL locked mutation → Sidecar SQLite → Sidecar semantic probe；receipt tail固定为`restore_verified → applying_sqlite → sqlite_applied → applying_postgres → postgres_applied → applying_sidecar → sidecar_applied → verified → completed`。restore-all固定为Sidecar data → PostgreSQL `pg_restore` → SQLite → Sidecar semantic probe → `restored`。新增的唯一Scripts断言直接锁上述source order与`RECEIPT_ORDER`，未执行真实migration。
+
 ## 5. Finding register
 
 Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F841，共172个信号。C901不自动等于需要拆分；只有结合owner、side effect和合同证据后才成为finding。P0不运行`--fix`。
@@ -192,7 +223,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 逐分支stable logical ID、order/count、durable locator trace | Checkpoint D PASS（focused 29项） |
 | MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | public identity、17 fault proofs、order/count、lifecycle与P4 owner trace | Checkpoint E PASS（focused 161项） |
 | Frontend | App/taskEvents tests | 复用既有覆盖；无真实缺口，不新增case | Checkpoint F PASS（3 files / 177项 + typecheck/build） |
-| Rust/Scripts | 六contract tests、migration tests、Rust quality | 记录root public surface与sequence证据 | Checkpoint G pending |
+| Rust/Scripts | 六contract tests、migration tests、Rust quality | 216 root public items、六contract bytes、migration sequence | Checkpoint G PASS（Python focused 97项；Rust fmt/clippy/test） |
 
 ## 7. PostgreSQL P5 profile
 
@@ -221,6 +252,10 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 | Checkpoint F Frontend behavior | `frontend/` / App + API/domain taskEvents | macOS/Node/Vitest | 3 files / 177/0/0 | PASS |
 | Checkpoint F Frontend typecheck | `frontend/` / `npm run typecheck` | macOS/Node/TypeScript | completed/0/0 | PASS |
 | Checkpoint F Frontend build | `frontend/` / `npm run build` | macOS/Node/Vite | completed/0/0 | PASS；保留>500 kB chunk warning，P0不做code-splitting |
+| Checkpoint G Python contracts/scripts | repo / 7-module Rust contract + migration suite | macOS/Python 3.13 | 97/0/0 | PASS |
+| Checkpoint G Rust fmt | repo / unified `cargo_fmt` gate | macOS/Rust 1.95 | completed/0/0 | PASS |
+| Checkpoint G Rust clippy | repo / workspace all-targets/all-features `-D warnings` | macOS/Rust 1.95 | completed/0/0 | PASS |
+| Checkpoint G Rust test | repo / workspace all-features | macOS/Rust 1.95 | 147/0/0 | PASS；0-test binaries/doc targets不计入ran |
 
 所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
 
@@ -229,10 +264,12 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 - 真实PostgreSQL：`N/A`，P0未触及PG业务实现；profile已为P5定义。
 - Linux Result Parser：`N/A`，P0未触及worker/resource/cleanup生产路径。
 - manylinux/PyO3：`N/A`，P0未触及bridge/packaging生产路径。
-- fuzz：`N/A`，P0未触及parser/validation/sanitizer/policy生产路径；`mcp_runtime_protocol`遗漏留给P7计划。
+- fuzz：`N/A`，P0未触及parser/validation/sanitizer/policy生产路径；`mcp_runtime_protocol.rs` target与manifest check已存在，但Ubuntu bounded fuzz-smoke workflow未执行该target，既定gap留给P7计划。
 - 真实外部MCP：`N/A`，P0未触及transport/adapter/runtime wiring。
 
 以上均不是PASS；若后续P0测试/contract变更实际触发目标平台要求，状态必须改为`platform_pending`并停止对应切片。
+
+Checkpoint G确认`native/Cargo.toml`、`native/Cargo.lock`及三目标crate manifests相对P0 start均零diff；Ubuntu、manylinux、PyO3 packaging和fuzz源码均未触及，因此不把macOS Rust PASS冒充这些平台证据。
 
 ## 10. P1 handoff（P0期间只维护约束）
 

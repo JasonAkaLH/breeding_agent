@@ -970,7 +970,7 @@ tests/orchestration/test_registry_scheduler.py	test	behavior_test	NA	-	test_lock
 tests/postgres_test_support.py	test	behavior_test	NA	-	test_lock	NA
 tests/scripts/test_migrate_legacy_mcp_config.py	test	behavior_test	NA	-	test_lock	NA
 tests/scripts/test_migrate_mcp_dispatch_aggregate.py	test	behavior_test	NA	-	test_lock	NA
-tests/scripts/test_migrate_unified_agent_loop_schema.py	test	behavior_test	NA	-	test_lock	NA
+tests/scripts/test_migrate_unified_agent_loop_schema.py	test	behavior_test	NA	P0-P7-SCRIPTS-001	test_lock	NA
 tests/scripts/test_produce_user_mcp_shadow_evidence.py	test	behavior_test	NA	-	test_lock	NA
 tests/scripts/test_unified_agent_loop_evidence_contract.py	test	behavior_test	NA	-	test_lock	NA
 tests/scripts/test_user_mcp_phase3_evidence_validator.py	test	behavior_test	NA	-	test_lock	NA

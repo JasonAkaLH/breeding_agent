@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：规范基线`bafae8d`经3轮完整审查、2轮收敛修订，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过`document-perfectization`信心门；P0实施已在`3cf44b1`激活，Checkpoint A～F完成，Checkpoint G待开始
+- 状态：规范基线`bafae8d`经3轮完整审查、2轮收敛修订，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过`document-perfectization`信心门；P0实施已在`3cf44b1`激活，Checkpoint A～G完成，Checkpoint H待开始
 - 总设计：`docs/superpowers/specs/2026-08-24-project-wide-progressive-architecture-cleanup-design.md`
 - 规范设计基线：`7b36cad70979aa4d5d6ded186dc00befa80d8054`
 - 计划编写时 HEAD：`c3ee64dc8b35b998672cb5217281e425cc0656dc`

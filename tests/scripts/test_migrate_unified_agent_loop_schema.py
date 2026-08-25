@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import inspect
 import json
 import os
 import sqlite3
@@ -15,6 +16,7 @@ from scripts.migrate_unified_agent_loop_schema import main
 from src.storage import agent_schema_migration as migration
 from src.storage.agent_schema_migration import (
     AgentSchemaMigrationError,
+    RECEIPT_ORDER,
     backup_all,
     build_report,
     load_state_descriptor,
@@ -50,6 +52,54 @@ POSTGRES_INVENTORY = {
 
 
 class AgentSchemaMigrationOperatorTest(unittest.TestCase):
+    def test_apply_receipt_and_restore_backend_orders_are_exact(self) -> None:
+        self.assertEqual(
+            RECEIPT_ORDER[2:],
+            (
+                "restore_verified",
+                "applying_sqlite",
+                "sqlite_applied",
+                "applying_postgres",
+                "postgres_applied",
+                "applying_sidecar",
+                "sidecar_applied",
+                "verified",
+                "completed",
+            ),
+        )
+        apply_source = inspect.getsource(migration.apply_all)
+        apply_markers = (
+            '_write_apply_receipt(\n            descriptor,\n            state="applying_sqlite"',
+            "_apply_sqlite_schema(descriptor.sqlite_path, sidecar=False)",
+            "receipt = _apply_postgres_locked(",
+            'state="applying_sidecar"',
+            "_apply_sqlite_schema(descriptor.sidecar_path, sidecar=True)",
+            "_probe_restored_sidecar(",
+            'state="verified"',
+            'state="completed"',
+        )
+        self.assertEqual(
+            [apply_source.count(marker) for marker in apply_markers],
+            [1] * len(apply_markers),
+        )
+        apply_positions = [apply_source.index(marker) for marker in apply_markers]
+        self.assertEqual(apply_positions, sorted(apply_positions))
+
+        restore_source = inspect.getsource(migration.restore_all)
+        restore_markers = (
+            'backup_dir / "sidecar.backup"',
+            '"pg_restore"',
+            'backup_dir / "sqlite.backup"',
+            "_probe_restored_sidecar(",
+            'state="restored"',
+        )
+        self.assertEqual(
+            [restore_source.count(marker) for marker in restore_markers],
+            [1] * len(restore_markers),
+        )
+        restore_positions = [restore_source.index(marker) for marker in restore_markers]
+        self.assertEqual(restore_positions, sorted(restore_positions))
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
