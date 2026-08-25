@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import tempfile
 import unittest
@@ -481,6 +482,111 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.adapters), 1)
         self.assertEqual(self.adapters[0].list_count, 1)
         self.assertEqual(len((await self.gateway.list_tools(first)).tools), 1)
+
+    async def test_scope_bootstrap_revalidates_endpoint_before_credentials_and_client(self) -> None:
+        order: list[str] = []
+
+        class TracingAdapter(_Adapter):
+            async def initialize(self):
+                order.append("adapter.initialize")
+                await super().initialize()
+
+            async def list_tools(self):
+                order.append("adapter.list_tools")
+                return await super().list_tools()
+
+        async def endpoint_revalidator(server):
+            order.append("endpoint.revalidate")
+            return _validated_endpoint(server)
+
+        async def credential_loader(server):
+            order.append("credentials.read")
+            return {}
+
+        async def client_factory(server, credentials, endpoint):
+            del server, credentials, endpoint
+            order.append("client.construct")
+            return TracingAdapter()
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-bootstrap-trace",
+            credential_loader=credential_loader,
+            client_factory=client_factory,
+            endpoint_revalidator=endpoint_revalidator,
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+        )
+        try:
+            await gateway.open_scope(
+                SimpleNamespace(username="alice"),
+                "task-1",
+                "server-1",
+            )
+            self.assertEqual(
+                order,
+                [
+                    "endpoint.revalidate",
+                    "credentials.read",
+                    "client.construct",
+                    "adapter.initialize",
+                    "adapter.list_tools",
+                ],
+            )
+        finally:
+            await gateway.aclose()
+
+    async def test_call_keeps_all_accepting_guards_and_registers_before_single_send(self) -> None:
+        scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"),
+            "task-1",
+            "server-1",
+        )
+        timeline: list[str] = []
+        adapter = self.adapters[0]
+        call_tool = adapter.call_tool
+
+        async def send_once(*args, **kwargs):
+            timeline.append("tool.send")
+            return await call_tool(*args, **kwargs)
+
+        adapter.call_tool = send_once
+        callbacks = MCPCallCallbacks(
+            on_created=lambda _call_ref: timeline.append("call.created"),
+            on_registered=lambda _call_ref: timeline.append("call.registered"),
+        )
+
+        outcome = await self.gateway.call_tool(
+            scope,
+            "echo",
+            {"text": "hello"},
+            callbacks,
+            authorization_verified=True,
+        )
+
+        self.assertEqual(outcome.kind.value, "completed")
+        self.assertEqual(
+            timeline,
+            ["call.created", "call.registered", "tool.send"],
+        )
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(
+            inspect.getsource(MCPGateway.call_tool).count(
+                "if not state.accepting_calls:"
+            ),
+            1,
+        )
+        self.assertEqual(
+            inspect.getsource(MCPGateway._execute_call).count(
+                "if not state.accepting_calls:"
+            ),
+            3,
+        )
 
     async def test_readonly_shadow_session_has_zero_durable_mutation(self) -> None:
         grant = UserMCPToolGrant(

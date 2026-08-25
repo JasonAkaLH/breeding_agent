@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：规范基线`bafae8d`经3轮完整审查、2轮收敛修订，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过`document-perfectization`信心门；P0实施已在`3cf44b1`激活，Checkpoint A～D完成，Checkpoint E待开始
+- 状态：规范基线`bafae8d`经3轮完整审查、2轮收敛修订，以`100/100`、`0 Blocking / 0 Major / 0 Minor`通过`document-perfectization`信心门；P0实施已在`3cf44b1`激活，Checkpoint A～E完成，Checkpoint F待开始
 - 总设计：`docs/superpowers/specs/2026-08-24-project-wide-progressive-architecture-cleanup-design.md`
 - 规范设计基线：`7b36cad70979aa4d5d6ded186dc00befa80d8054`
 - 计划编写时 HEAD：`c3ee64dc8b35b998672cb5217281e425cc0656dc`
@@ -427,7 +427,7 @@ test(agent): freeze P0 continuation and recovery traces
 只补现有覆盖没有直接断言的顺序：
 
 - Gateway bootstrap 的 endpoint revalidation → credential read → adapter/client；
-- call 的两次 accepting check、registration callback、唯一 Tool send；
+- call 当前真实的4次accepting guard（public admission 1次、execute内发送前/原始返回后/normalize后各1次）、registration callback、唯一 Tool send；
 - Coordinator reservation → may-have-dispatched → terminal/no-replay；
 - Historical reprojection 网络、credential、client调用均为0；
 - raw、pending payload、projection、CP7 candidate、credential domains不合并。

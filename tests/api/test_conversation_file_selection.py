@@ -9,6 +9,7 @@ from unittest.mock import patch
 from openpyxl import Workbook
 
 from src.api.file_selection import (
+    FileSelectionDecision,
     FileRequirementProfile,
     FileRequirementProfileError,
     FileSelectionAnswerResolver,
@@ -17,6 +18,8 @@ from src.api.file_selection import (
     candidate_from_resource,
     deterministic_file_decision,
 )
+from src.api.file_selection_runtime import ConversationFileSelectionRuntimeMixin
+from src.api.runtime import ApiRuntime
 from src.core.enums import EventVisibility
 from src.core.models import TaskInputAttachment
 
@@ -24,6 +27,14 @@ from tests.api.support import APITestCase
 
 
 class ConversationFileSelectionAPITest(APITestCase):
+    def test_file_selection_keeps_one_api_domain_and_runtime_owner(self) -> None:
+        self.assertIn(ConversationFileSelectionRuntimeMixin, ApiRuntime.__mro__)
+        self.assertEqual(
+            ConversationFileSelectionRuntimeMixin.__module__,
+            "src.api.file_selection_runtime",
+        )
+        self.assertEqual(FileSelectionDecision.__module__, "src.api.file_selection")
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         await self.reconfigure_runtime(main_agent_stream_generator=lambda _prompt: ["完成。"])

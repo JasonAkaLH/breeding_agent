@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import json
 import tempfile
 import unittest
@@ -29,6 +31,7 @@ from src.integrations.mcp.result_parsing import (
     MCPProjectionStore,
     MCPRawResultAuthorityResolver,
 )
+import src.integrations.mcp.result_parsing.historical_reprojection as historical_module
 from src.integrations.mcp.result_parsing.json_values import canonical_json_bytes
 from src.storage.artifact_files import (
     LocalArtifactFileStore,
@@ -99,6 +102,20 @@ class _Storage:
 
 
 class HistoricalResultReprojectionTest(unittest.IsolatedAsyncioTestCase):
+    def test_historical_reprojection_has_no_network_client_or_credential_dependency(self) -> None:
+        tree = ast.parse(inspect.getsource(historical_module))
+        imports: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imports.append(node.module or "")
+        forbidden = ("gateway", "client", "credential", "httpx", "requests")
+        self.assertFalse(
+            any(fragment in imported for fragment in forbidden for imported in imports),
+            imports,
+        )
+
     async def asyncSetUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -245,11 +262,8 @@ class HistoricalResultReprojectionTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_source_deleted_managed_copy_reprojects_with_zero_network_calls(self) -> None:
-        network_calls = 0
-
         summary = await self.reprojector.run_once(limit=1)
 
-        self.assertEqual(network_calls, 0)
         self.assertEqual(summary.scanned, 1)
         self.assertEqual(summary.ready, 1)
         self.assertEqual(self.storage.scan_cursors, [None, "call-history-1"])

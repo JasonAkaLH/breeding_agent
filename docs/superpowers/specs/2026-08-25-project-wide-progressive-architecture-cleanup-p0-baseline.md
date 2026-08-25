@@ -2,7 +2,7 @@
 
 ## 1. 状态与边界
 
-- P0状态：`active`；Checkpoint 0～D完成，Checkpoint E待开始
+- P0状态：`active`；Checkpoint 0～E完成，Checkpoint F待开始
 - P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
 - P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
 - 分支：`main`
@@ -101,6 +101,23 @@ Location metadata绑定Checkpoint D生产源码位置；owner内一对一搬家�
 | `D-CRASH-ACTIVE-RUN-02` | crash active + resume + `run_claimed` + 2 | `agent_run_recovery.py:234-247` | abort全部完成后唯一resume；resolver/ack=0 |
 | `D-API-LOCATOR-DURABLE-01` | API locator cache miss + rebuild + `from_safe_dict` + 1 | `runtime.py:4332-4365` | interrupt carrier miss → Run → items；从waiting result durable locator重建 |
 
+### 4.2 Checkpoint E stable logical call-site IDs
+
+| Logical ID | `entry/scenario + phase + callee + ordinal` | 当前location | Exact trace/约束 |
+|---|---|---|---|
+| `E-MCP-SELECT-01` | dispatch automatic/explicit + select + `selector.select` + 1..2 | `dispatch_coordinator.py:758,766` | normal=1；repair最多2；rejection无Tool send |
+| `E-MCP-ROUTE-01` | dispatch route-another + route + `server_router.route` + 1..2 | `dispatch_coordinator.py:2995,3000` | 只用remaining owner-scoped profiles；repair最多2 |
+| `E-MCP-RESERVE-01` | dispatch call + reserve + `reserve_mcp_call` + 1 | `dispatch_coordinator.py:2109` | reserve在registration与唯一Tool send前 |
+| `E-MCP-REGISTER-02` | dispatch call + may-have-dispatched + `mark_mcp_call_may_have_dispatched` + 2 | `dispatch_coordinator.py:2191,2483` | 普通failure=1；approval-resume registration+heartbeat=2，均保持当前幂等写 |
+| `E-MCP-SEND-03` | dispatch call + send + `gateway.call_tool` + 3 | `dispatch_coordinator.py:2220` | 原始Tool/job-start第二次调用=0；17 fault boundary按各自network delta |
+| `E-MCP-TERMINAL-04` | dispatch call + terminal/no-replay + `finish_mcp_call` + 4 | `dispatch_coordinator.py:2437,2700` | terminal或unknown/no-replay唯一闭合；不同分支不统一链 |
+| `E-GW-BOOT-01` | gateway scope + bootstrap + endpoint/credential/client + 1..5 | `gateway.py:770-795` | endpoint revalidate → credential read → client → initialize → list tools |
+| `E-GW-GUARD-01..04` | gateway call + accepting + guard + 1..4 | `gateway.py:1030,1102,1334,1343` | public admission 1次；execute发送前、raw后、normalize后各1次 |
+| `E-GW-CALLBACK-01` | gateway call + registration + callback + 1 | `gateway.py:1051-1180` | created → registered → 唯一Tool send |
+| `E-API-START-01` | API startup + pre-ready + sentinel/aggregate/dispatch/Agent recovery + 1..4 | `runtime.py:8161-8202` | sentinel → admission → aggregate → dispatch → Agent recovery；post-ready work随后 |
+| `E-API-SHUTDOWN-01` | API shutdown + close + quiesce/tasks/CP7/services/engine + 1..N | `runtime.py:9649-9725` | 固定顺序；首错仍阻断后续cleanup |
+| `E-FILE-SELECT-01` | file selection + decide/persist + candidate/LLM/TaskNode/Interrupt/events + 1..N | `file_selection_runtime.py:29-734` | P4 mixin/domain唯一owner；audit-only事件与attachment/sheet binding顺序保持 |
+
 ## 5. Finding register
 
 Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F841，共172个信号。C901不自动等于需要拆分；只有结合owner、side effect和合同证据后才成为finding。P0不运行`--fix`。
@@ -115,6 +132,8 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | `P0-P3-SKILLS-001` | `structural_candidate` | P3 | execution/missing-input/slot/input-resolution多个大模块 | schema/value/resolution/execution边界清楚；隐私/fallback不变 |
 | `P0-P3-MCP-COORDINATOR-001` | `structural_candidate` | P3 | `dispatch_coordinator.py`约3510行；`dispatch`/`_call_tool`高复杂度 | phase清晰、Coordinator唯一owner、17 fault/no-replay exact |
 | `P0-P3-MCP-GATEWAY-001` | `structural_candidate` | P3 | `gateway.py`约2382行，scope/call/catalog/shared state交织 | single shared state与external I/O owner不变 |
+| `P0-P3-GATEWAY-GUARDS-001` | `reviewed_no_change` | P3 | Gateway当前共有4个accepting guards，而非计划初始假设的2个 | 锁定public 1 + execute 3；结构迁移不得合并或删除 |
+| `P0-P3-MCP-REGISTER-HEARTBEAT-001` | `reviewed_no_change` | P3/P5 | approval-resume对may-have-dispatched执行registration+heartbeat两次幂等写，普通failure为一次 | 分场景锁call count；不得统一去重 |
 | `P0-P3-RESULT-PARSER-001` | `structural_candidate` | P3 | service/worker supervision与cleanup阶段 | decoder独立；spawn/pickle/timeout/cleanup/projection exact |
 | `P0-P4-RUNTIME-001` | `structural_candidate` | P4 | `runtime.py`约13878行；factory复杂度135 | stable facade/factory/patch seam；startup/shutdown与selector exact |
 | `P0-P4-FILE-SELECTION-001` | `structural_candidate` | P4 | bounded business authority位于API mixin/domain | 原位整理；LLM/storage/attachment/Interrupt/event exact |
@@ -161,7 +180,7 @@ Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F8
 | Python public/StoragePort | Core contracts、SQLite bootstrap | literal identity/signature/pickle/import tests | Checkpoint B PASS（13项新增，focused合计43项） |
 | Agent adapters/Cancellation | Agent storage、runtime-sidecar contract、runtime wiring | surface/MRO/common fixture/transaction/selector/off-shadow-enforce/AgentRun trace | Checkpoint C PASS（focused 102项） |
 | Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 逐分支stable logical ID、order/count、durable locator trace | Checkpoint D PASS（focused 29项） |
-| MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | 补functional seam与order/count trace | Checkpoint E pending |
+| MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | public identity、17 fault proofs、order/count、lifecycle与P4 owner trace | Checkpoint E PASS（focused 161项） |
 | Frontend | App/taskEvents tests | 复用覆盖，缺口才加最小断言 | Checkpoint F pending |
 | Rust/Scripts | 六contract tests、migration tests、Rust quality | 记录root public surface与sequence证据 | Checkpoint G pending |
 
@@ -187,6 +206,8 @@ Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清�
 | Checkpoint C repository/cancellation | repo / 8-module Storage/API/Lifecycle focused suite | macOS/Python 3.13 | 102/0/0 | PASS；另观察到1条unclosed SQLite connection ResourceWarning，不计测试失败，P0不改生产清理语义 |
 | Checkpoint C changed-test compile/Ruff | repo / 4份受影响test files | macOS/Python 3.13 | completed/0/0 | PASS |
 | Checkpoint D continuation/recovery | repo / 5-module Orchestration/Lifecycle/API focused suite | macOS/Python 3.13 | 29/0/0 | PASS |
+| Checkpoint E MCP/API authority | repo / 8-module Capability/Integration/API focused suite（含17 boundary proof调度） | macOS/Python 3.13 | 161/0/0 | PASS |
+| Checkpoint E changed-test compile/Ruff | repo / 6份受影响test files | macOS/Python 3.13 | completed/0/0 | PASS |
 
 所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
 

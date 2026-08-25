@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 import unittest
 
+import src.capabilities.mcp_dispatch as mcp_dispatch
+import src.capabilities.mcp_dispatch.executor as executor_module
+import src.capabilities.mcp_dispatch.models as models_module
+import src.capabilities.mcp_dispatch.selector as selector_module
+import src.capabilities.mcp_dispatch.server_router as server_router_module
 from src.capabilities.mcp_dispatch import (
     MCPAttachmentSummary,
     MCPBindingMode,
@@ -21,7 +26,31 @@ from src.capabilities.mcp_dispatch import (
     build_mcp_call_fingerprint,
 )
 from src.core.contracts import CapabilityExecutionRequest
+from src.integrations.mcp.dispatch_coordinator import UserMCPDispatchCoordinator
+from src.integrations.mcp.gateway import MCPGateway
+from src.integrations.mcp.selector_context import MCPDurableSelectorContextBuilder
 from src.orchestration.models import UserMCPServerProfile
+
+
+class MCPDispatchBoundedEdgeContractTest(unittest.TestCase):
+    def test_public_objects_keep_defining_identity_and_concrete_owner(self) -> None:
+        self.assertIs(mcp_dispatch.MCPDispatchExecutor, executor_module.MCPDispatchExecutor)
+        self.assertIs(mcp_dispatch.MCPDispatchOutcome, executor_module.MCPDispatchOutcome)
+        self.assertIs(mcp_dispatch.MCPSelectorContext, models_module.MCPSelectorContext)
+        self.assertIs(mcp_dispatch.MCPToolSelector, selector_module.MCPToolSelector)
+        self.assertIs(
+            mcp_dispatch.MCPServerRouter,
+            server_router_module.MCPServerRouter,
+        )
+        self.assertEqual(
+            UserMCPDispatchCoordinator.__module__,
+            "src.integrations.mcp.dispatch_coordinator",
+        )
+        self.assertEqual(MCPGateway.__module__, "src.integrations.mcp.gateway")
+        self.assertEqual(
+            MCPDurableSelectorContextBuilder.__module__,
+            "src.integrations.mcp.selector_context",
+        )
 
 
 class MCPSelectorTest(unittest.IsolatedAsyncioTestCase):

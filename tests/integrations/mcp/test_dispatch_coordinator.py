@@ -934,7 +934,12 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.status, "completed")
         self.assertEqual(call.result_ref, "result-safe")
         self.assertEqual(call.input_field_names, ("query",))
-        self.assertEqual(storage.lifecycle[0:2], ["reserve", "registered"])
+        self.assertEqual(
+            storage.lifecycle,
+            ["reserve", "registered", "registered", "finish"],
+        )
+        self.assertEqual(gateway.callback_order, ["reserved", "registered"])
+        self.assertEqual(len(gateway.calls), 1)
         self.assertEqual(gateway.listed[-1:], ["server-a"])
 
     async def test_live_recorder_gets_started_after_reserve_and_heartbeat_only(self) -> None:
@@ -1419,6 +1424,7 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             "execution_status_unknown",
         )
         self.assertEqual(next(iter(storage.calls.values())).status, "unknown")
+        self.assertEqual(storage.lifecycle, ["reserve", "registered", "finish"])
 
     async def test_validated_remote_error_after_dispatch_is_failed(self) -> None:
         storage = _FakeStorage()

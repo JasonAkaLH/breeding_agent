@@ -672,7 +672,7 @@ tests/api/test_auth_invalidation_bus.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_auth_login_and_isolation.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_authorization_username_auth.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_capabilities_list.py	test	behavior_test	NA	-	test_lock	NA
-tests/api/test_conversation_file_selection.py	test	behavior_test	NA	-	test_lock	NA
+tests/api/test_conversation_file_selection.py	test	behavior_test	NA	P0-P4-FILE-SELECTION-001	test_lock	NA
 tests/api/test_conversation_memory_runtime.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_conversation_messages_artifacts.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_conversation_titles.py	test	behavior_test	NA	-	test_lock	NA
@@ -682,7 +682,7 @@ tests/api/test_execution_singleflight.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_frontend_nginx_proxy_config.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_mcp_plaintext_audit.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_mcp_rollout_postgres_runtime_wiring.py	test	behavior_test	NA	-	test_lock	NA
-tests/api/test_mcp_runtime_registration.py	test	behavior_test	NA	-	test_lock	NA
+tests/api/test_mcp_runtime_registration.py	test	behavior_test	NA	P0-P4-RUNTIME-001	test_lock	NA
 tests/api/test_mcp_server_explicit_agent_loop.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_message_submission.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_model_edition_selection.py	test	behavior_test	NA	-	test_lock	NA
@@ -709,7 +709,7 @@ tests/api/test_task_events_sse.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_task_list.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_task_query.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_uploads.py	test	behavior_test	NA	-	test_lock	NA
-tests/api/test_user_mcp_aggregate_recovery_startup.py	test	behavior_test	NA	-	test_lock	NA
+tests/api/test_user_mcp_aggregate_recovery_startup.py	test	behavior_test	NA	P0-P4-RUNTIME-001,BEHAVIOR-API-LIFECYCLE-001	test_lock	NA
 tests/api/test_user_mcp_api.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_user_mcp_dto.py	test	behavior_test	NA	-	test_lock	NA
 tests/api/test_user_mcp_grants_and_call_control.py	test	behavior_test	NA	-	test_lock	NA
@@ -720,7 +720,7 @@ tests/api/test_user_mcp_task_assignment_restart.py	test	behavior_test	NA	-	test_
 tests/capabilities/__init__.py	test	behavior_test	NA	-	test_lock	NA
 tests/capabilities/main_agent/test_conversation_memory_prompt.py	test	behavior_test	NA	-	test_lock	NA
 tests/capabilities/main_agent/test_dependency_context.py	test	behavior_test	NA	-	test_lock	NA
-tests/capabilities/mcp_dispatch/test_selector_router_executor.py	test	behavior_test	NA	-	test_lock	NA
+tests/capabilities/mcp_dispatch/test_selector_router_executor.py	test	behavior_test	NA	P0-P3-MCP-COORDINATOR-001	test_lock	NA
 tests/capabilities/mcp_tool/test_executor.py	test	behavior_test	NA	-	test_lock	NA
 tests/capabilities/mcp_tool/test_long_task_events.py	test	behavior_test	NA	-	test_lock	NA
 tests/capabilities/skill_tool/__init__.py	test	behavior_test	NA	-	test_lock	NA
@@ -847,9 +847,9 @@ tests/integrations/mcp/test_audit.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_cp7_artifacts.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_cp7_terminal_lifecycle.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_cp7_terminal_results.py	test	behavior_test	NA	-	test_lock	NA
-tests/integrations/mcp/test_dispatch_coordinator.py	test	behavior_test	NA	-	test_lock	NA
+tests/integrations/mcp/test_dispatch_coordinator.py	test	behavior_test	NA	P0-P3-MCP-COORDINATOR-001,P0-P3-MCP-REGISTER-HEARTBEAT-001	test_lock	NA
 tests/integrations/mcp/test_durable_result_lifecycle.py	test	behavior_test	NA	-	test_lock	NA
-tests/integrations/mcp/test_historical_result_reprojection.py	test	behavior_test	NA	-	test_lock	NA
+tests/integrations/mcp/test_historical_result_reprojection.py	test	behavior_test	NA	P0-P3-RESULT-PARSER-001	test_lock	NA
 tests/integrations/mcp/test_job_workflows.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_legacy_http_sse_persistent_reader.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_legacy_http_sse_transport.py	test	behavior_test	NA	-	test_lock	NA
@@ -857,7 +857,7 @@ tests/integrations/mcp/test_legacy_mcp_config_migration.py	test	behavior_test	NA
 tests/integrations/mcp/test_legacy_migration_apply.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_mcp_adapter_contract.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_mcp_auth_header_validation.py	test	behavior_test	NA	-	test_lock	NA
-tests/integrations/mcp/test_mcp_dispatch_fault_injection.py	test	behavior_test	NA	-	test_lock	NA
+tests/integrations/mcp/test_mcp_dispatch_fault_injection.py	test	behavior_test	NA	P0-P3-MCP-COORDINATOR-001	test_lock	NA
 tests/integrations/mcp/test_mcp_durable_results.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_mcp_enforce_allowlist.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_mcp_plaintext_http_security.py	test	behavior_test	NA	-	test_lock	NA
@@ -890,7 +890,7 @@ tests/integrations/mcp/test_streamable_http_versions.py	test	behavior_test	NA	-	
 tests/integrations/mcp/test_user_mcp_config_service.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_user_mcp_credentials.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_user_mcp_endpoint_policy.py	test	behavior_test	NA	-	test_lock	NA
-tests/integrations/mcp/test_user_mcp_gateway.py	test	behavior_test	NA	-	test_lock	NA
+tests/integrations/mcp/test_user_mcp_gateway.py	test	behavior_test	NA	P0-P3-MCP-GATEWAY-001,P0-P3-GATEWAY-GUARDS-001	test_lock	NA
 tests/integrations/mcp/test_user_mcp_gateway_models.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_user_mcp_health.py	test	behavior_test	NA	-	test_lock	NA
 tests/integrations/mcp/test_user_mcp_invalidation.py	test	behavior_test	NA	-	test_lock	NA

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import tempfile
 from functools import partial
@@ -8,20 +9,73 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from src.api.runtime import ApiRuntime, build_api_runtime as _build_api_runtime
+from src.core.enums import NodeStatus, TaskStatus
+from tests.api.support import InMemoryTaskRuntimeSidecar
 
 build_api_runtime = partial(
     _build_api_runtime,
     skill_roots=(),
     public_skill_roots=(),
 )
-from src.core.enums import NodeStatus, TaskStatus
-from tests.api.support import InMemoryTaskRuntimeSidecar
 
 
 class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
+    def test_runtime_startup_and_shutdown_authority_order_is_exact(self) -> None:
+        startup_source = inspect.getsource(ApiRuntime.start)
+        startup_markers = (
+            "create_or_verify_sentinel",
+            "_admit_mcp_rollout_instance",
+            "await aggregate_reconciler.run()",
+            "await self._reconcile_mcp_dispatch_recovery()",
+            "await self._recover_agent_runs()",
+            "self._mcp_post_ready_recovery_task = asyncio.create_task",
+        )
+        self.assertEqual(
+            [startup_source.count(marker) for marker in startup_markers],
+            [1, 1, 1, 1, 1, 1],
+        )
+        startup_positions = [startup_source.index(marker) for marker in startup_markers]
+        self.assertEqual(startup_positions, sorted(startup_positions))
+
+        shutdown_source = inspect.getsource(ApiRuntime.shutdown)
+        shutdown_markers = (
+            "await self._quiesce_cp7_for_shutdown()",
+            "self._mcp_result_artifact_reconciler_task.cancel()",
+            "self._mcp_post_ready_recovery_task.cancel()",
+            "await self._close_cp7_safety()",
+            "await self.user_mcp_config_service.aclose()",
+            "self._engine.dispose()",
+        )
+        self.assertEqual(
+            [shutdown_source.count(marker) for marker in shutdown_markers],
+            [1, 1, 1, 1, 1, 1],
+        )
+        shutdown_positions = [shutdown_source.index(marker) for marker in shutdown_markers]
+        self.assertEqual(shutdown_positions, sorted(shutdown_positions))
+
+    async def test_partial_startup_and_first_shutdown_error_keep_current_cleanup_gap(self) -> None:
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = object()
+        runtime._engine = Mock()
+        runtime._master_key_sentinel_cipher = AsyncMock()
+        runtime._admit_mcp_rollout_instance = AsyncMock(
+            side_effect=RuntimeError("partial-startup-failure")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "partial-startup-failure"):
+            await runtime.start()
+        runtime._engine.dispose.assert_not_called()
+
+        runtime._quiesce_cp7_for_shutdown = AsyncMock(
+            side_effect=RuntimeError("first-shutdown-failure")
+        )
+        with self.assertRaisesRegex(RuntimeError, "first-shutdown-failure"):
+            await runtime.shutdown()
+        runtime._engine.dispose.assert_not_called()
+
     @staticmethod
     def _runtime(storage: AsyncMock) -> ApiRuntime:
         runtime = object.__new__(ApiRuntime)
