@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+mod json_rpc;
+mod registry;
+mod sanitizer;
+
 pub const COMPONENT_ID: &str = "maf_mcp_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.mcp.sidecar.v1";
 pub const SCHEMA_HASH: &str = "maf_mcp_v1_phase1_schema_hash_pending_ci";
@@ -1017,16 +1021,6 @@ pub struct JsonRpcRequestEnvelope {
     pub params: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcRawEnvelope {
-    jsonrpc: Option<String>,
-    method: Option<String>,
-    id: Option<serde_json::Value>,
-    params: Option<serde_json::Value>,
-    result: Option<serde_json::Value>,
-    error: Option<serde_json::Value>,
-}
-
 pub const MAX_JSON_RPC_BYTES: usize = 1024 * 1024;
 pub const MAX_RAW_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SANITIZED_TOOL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -1034,51 +1028,7 @@ pub const MAX_SANITIZED_TOOL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 pub fn validate_json_rpc_request(
     payload: &[u8],
 ) -> Result<JsonRpcRequestEnvelope, McpRuntimeError> {
-    if payload.len() > MAX_JSON_RPC_BYTES {
-        return Err(McpRuntimeError {
-            typed_error: TypedError::new(
-                McpRuntimeErrorCode::PayloadTooLarge,
-                "JSON-RPC payload exceeds limit",
-            ),
-        });
-    }
-    let raw: JsonRpcRawEnvelope = serde_json::from_slice(payload).map_err(|_| McpRuntimeError {
-        typed_error: TypedError::new(
-            McpRuntimeErrorCode::JsonRpcInvalid,
-            "invalid JSON-RPC payload",
-        ),
-    })?;
-    if raw.jsonrpc.as_deref() != Some("2.0") {
-        return Err(McpRuntimeError {
-            typed_error: TypedError::new(
-                McpRuntimeErrorCode::JsonRpcInvalid,
-                "JSON-RPC version must be 2.0",
-            ),
-        });
-    }
-    if raw.result.is_some() || raw.error.is_some() {
-        return Err(McpRuntimeError {
-            typed_error: TypedError::new(
-                McpRuntimeErrorCode::JsonRpcInvalid,
-                "request cannot contain result or error",
-            ),
-        });
-    }
-    let method = raw
-        .method
-        .filter(|method| !method.trim().is_empty())
-        .ok_or_else(|| McpRuntimeError {
-            typed_error: TypedError::new(
-                McpRuntimeErrorCode::JsonRpcInvalid,
-                "request method is required",
-            ),
-        })?;
-    Ok(JsonRpcRequestEnvelope {
-        jsonrpc: "2.0".to_owned(),
-        method,
-        id: raw.id,
-        params: raw.params,
-    })
+    json_rpc::validate_json_rpc_request_impl(payload)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1089,58 +1039,11 @@ pub struct SanitizedToolOutput {
 }
 
 fn redact_authority_tokens(raw: &str) -> (String, usize) {
-    let mut output = Vec::new();
-    let mut redactions = 0usize;
-    let mut skip_next_authorization_value = false;
-    for token in raw.split_whitespace() {
-        let lower = token.to_ascii_lowercase();
-        if skip_next_authorization_value {
-            output.push("[REDACTED]");
-            redactions += 1;
-            skip_next_authorization_value = lower == "bearer";
-        } else if lower.starts_with("token=")
-            || lower.starts_with("secret=")
-            || lower.starts_with("api_key=")
-            || lower.contains("token=")
-            || lower.contains("secret=")
-            || lower.contains("api_key=")
-            || lower.starts_with("authorization:")
-        {
-            output.push("[REDACTED]");
-            redactions += 1;
-            if lower == "authorization:" {
-                skip_next_authorization_value = true;
-            }
-        } else if lower == "bearer" {
-            output.push("[REDACTED]");
-            redactions += 1;
-            skip_next_authorization_value = true;
-        } else {
-            output.push(token);
-        }
-    }
-    (output.join(" "), redactions)
+    sanitizer::redact_authority_tokens(raw)
 }
 
 pub fn sanitize_tool_output(raw: &str) -> Result<SanitizedToolOutput, McpRuntimeError> {
-    if raw.len() > MAX_RAW_TOOL_OUTPUT_BYTES {
-        return Err(McpRuntimeError {
-            typed_error: TypedError::new(
-                McpRuntimeErrorCode::PayloadTooLarge,
-                "raw tool output exceeds limit",
-            ),
-        });
-    }
-    let (mut text, redaction_count) = redact_authority_tokens(raw);
-    let truncated = text.len() > MAX_SANITIZED_TOOL_OUTPUT_BYTES;
-    if truncated {
-        text.truncate(MAX_SANITIZED_TOOL_OUTPUT_BYTES);
-    }
-    Ok(SanitizedToolOutput {
-        text,
-        truncated,
-        redaction_count,
-    })
+    sanitizer::sanitize_tool_output_impl(raw)
 }
 
 #[must_use]
@@ -1152,34 +1055,6 @@ pub fn can_retry_tool_call(read_only: bool, idempotent: bool, side_effecting: bo
 pub struct BundleRegistry {
     pub active_revision: Option<String>,
     pub pending_revision: Option<String>,
-}
-
-impl BundleRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn begin_activation(&mut self, revision: impl Into<String>) {
-        self.pending_revision = Some(revision.into());
-    }
-
-    pub fn commit_pending(
-        &mut self,
-        validation_passed: bool,
-    ) -> Result<Option<String>, McpRuntimeError> {
-        if !validation_passed {
-            self.pending_revision = None;
-            return Err(McpRuntimeError {
-                typed_error: TypedError::new(
-                    McpRuntimeErrorCode::BundleActivationFailed,
-                    "bundle validation failed",
-                ),
-            });
-        }
-        self.active_revision = self.pending_revision.take();
-        Ok(self.active_revision.clone())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1200,45 +1075,6 @@ pub struct McpTaskRecord {
 #[derive(Debug, Default)]
 pub struct McpTaskRegistry {
     tasks: BTreeMap<String, McpTaskRecord>,
-}
-
-impl McpTaskRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn create_task(&mut self, task_id: impl Into<String>) -> McpTaskRecord {
-        let task_id = task_id.into();
-        let record = McpTaskRecord {
-            task_id: task_id.clone(),
-            state: McpTaskState::Pending,
-        };
-        self.tasks.insert(task_id, record.clone());
-        record
-    }
-
-    pub fn cancel_task(&mut self, task_id: &str) -> Result<McpTaskRecord, McpRuntimeError> {
-        let record = self.tasks.get_mut(task_id).ok_or_else(|| McpRuntimeError {
-            typed_error: TypedError::new(
-                McpRuntimeErrorCode::Cancelled,
-                "task is unknown or already gone",
-            ),
-        })?;
-        if matches!(
-            record.state,
-            McpTaskState::Completed | McpTaskState::Failed | McpTaskState::Cancelled
-        ) {
-            return Err(McpRuntimeError {
-                typed_error: TypedError::new(
-                    McpRuntimeErrorCode::Cancelled,
-                    "terminal task cannot be cancelled",
-                ),
-            });
-        }
-        record.state = McpTaskState::Cancelled;
-        Ok(record.clone())
-    }
 }
 
 #[cfg(test)]
