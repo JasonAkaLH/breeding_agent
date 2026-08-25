@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -13,6 +12,8 @@ from typing import Any
 from urllib.parse import quote
 
 from src.core.models import ConversationFileResource, FileUploadMessageProjection
+
+from .path_safety import sanitize_download_filename
 
 
 FILE_UPLOAD_MESSAGE_TYPE = "file_upload"
@@ -450,14 +451,6 @@ def validate_storage_component(value: str) -> str:
     if quote(text, safe="-_.:%") != text:
         raise ValueError("Invalid storage component")
     return text
-
-
-def sanitize_download_filename(value: str) -> str:
-    text = Path(str(value).replace("\\", "/")).name.strip()
-    text = re.sub(r"[\x00-\x1f\x7f]+", "_", text)
-    text = re.sub(r"[/\\]+", "_", text)
-    text = text.strip(" .")
-    return (text or "download.bin")[:200]
 
 
 def _normalize_storage_key(value: str) -> str:

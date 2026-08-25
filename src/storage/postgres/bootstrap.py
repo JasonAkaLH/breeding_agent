@@ -16,6 +16,7 @@ from src.state.postgres.schema_reconciler import (
     assert_no_forbidden_schema_sql,
     plan_postgres_schema_reconciliation,
 )
+from src.storage.sql_text import split_sql_script as _split_sql
 
 
 def bootstrap_postgres_database(engine: Engine) -> None:
@@ -50,27 +51,6 @@ def bootstrap_postgres_database(engine: Engine) -> None:
         for statement in _split_sql(index_sql_script):
             if statement.strip():
                 connection.execute(text(statement))
-
-
-def _split_sql(script: str) -> list[str]:
-    statements: list[str] = []
-    current: list[str] = []
-    in_dollar_block = False
-    for line in script.splitlines():
-        current.append(line)
-        stripped = line.strip()
-        if stripped.upper().startswith("DO $$") or " AS $$" in stripped.upper():
-            in_dollar_block = True
-        if in_dollar_block and stripped == "$$;":
-            statements.append("\n".join(current).strip())
-            current = []
-            in_dollar_block = False
-        elif not in_dollar_block and stripped.endswith(";"):
-            statements.append("\n".join(current).strip())
-            current = []
-    if current:
-        statements.append("\n".join(current).strip())
-    return statements
 
 
 def _inspect_current_schema(connection) -> SchemaInspection:

@@ -12,6 +12,8 @@ from typing import Any, Mapping
 
 from src.integrations.rust_safety_contract import normalize_storage_key
 
+from .path_safety import sanitize_download_filename
+
 
 @dataclass(slots=True, frozen=True)
 class StoredArtifactFile:
@@ -222,14 +224,6 @@ def sanitize_storage_component(value: str) -> str:
     if not text:
         raise ValueError("Storage component cannot be empty")
     return text[:160]
-
-
-def sanitize_download_filename(value: str) -> str:
-    text = Path(str(value).replace("\\", "/")).name.strip()
-    text = re.sub(r"[\x00-\x1f\x7f]+", "_", text)
-    text = re.sub(r"[/\\]+", "_", text)
-    text = text.strip(" .")
-    return (text or "download.bin")[:200]
 
 
 def build_file_storage_ref(metadata: Mapping[str, Any]) -> str:

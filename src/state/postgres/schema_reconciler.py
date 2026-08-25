@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from src.storage.sql_text import split_sql_script as _split_sql
+
 from .runtime_schema import (
     PostgresFreshCutoverSchemaManifest,
     build_runtime_mutation_trigger_schema_ddl,
@@ -392,27 +394,6 @@ def _is_safe_route_reason_extension(actual: str, expected: str) -> bool:
     actual_values = _route_reason_values(actual)
     expected_values = _route_reason_values(expected)
     return bool(actual_values) and actual_values < expected_values
-
-
-def _split_sql(script: str) -> list[str]:
-    statements: list[str] = []
-    current: list[str] = []
-    in_dollar_block = False
-    for line in script.splitlines():
-        current.append(line)
-        stripped = line.strip()
-        if stripped.upper().startswith("DO $$") or " AS $$" in stripped.upper():
-            in_dollar_block = True
-        if in_dollar_block and stripped == "$$;":
-            statements.append("\n".join(current).strip())
-            current = []
-            in_dollar_block = False
-        elif not in_dollar_block and stripped.endswith(";"):
-            statements.append("\n".join(current).strip())
-            current = []
-    if current:
-        statements.append("\n".join(current).strip())
-    return statements
 
 
 def _normalize_type(value: str) -> str:
