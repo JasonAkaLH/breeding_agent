@@ -4,7 +4,7 @@
 
 - 日期：2026-08-25
 - 分支：`main`
-- 状态：`active`
+- 状态：`complete`
 - P5 start commit：`af6e3b09d3c4f696e7a3b3ab28b32cfe5b013d7b`
 - P5 start tree：`b72ab8bf10595b0e04dcb9bad40822c6234b0b87`
 - P5 start tracked set：1061
@@ -122,3 +122,49 @@ Python Runtime Sidecar adapter tests包含在Storage full；Rust源码、Fronten
 若class/function AST不能原样迁移、metadata/DDL/manifest/table identity变化、PostgreSQL private helper移除需要修改transaction body、Lifecycle port需要扩大P1合同、真实PostgreSQL目标测试出现skip/failure、或需要修改P4/P6/P7实现，则停止该候选并保留已绿检查点。
 
 每个检查点独立commit，逆序revert即可；无schema/data rollback。巨大repository、29个C901、Sidecar lease缺口和任何业务行为修复均保持`reviewed_no_change|deferred_behavior`，不得借P5扩大目标。
+
+## 6. 实施终态
+
+### 6.1 Checkpoints
+
+| Checkpoint | Commit | 结果 |
+|---|---|---|
+| Plan/audit | `a3c52a6` | 117项baseline、2组duplicate、shared declaration/private mapper/Lifecycle边界分类闭合 |
+| Pure helpers | `5525b6b` | filename sanitizer与SQL splitter各有唯一owner，4个旧调用名为alias |
+| SQLAlchemy declarations | `1455235` | base/type decorators与60个row class移到shared owner，SQLite旧路径同object re-export |
+| Repository mappers | `18ce127` | 13 mapper/fingerprint与3 legacy helper共享；PostgreSQL不再import SQLite private helper |
+| Lifecycle ports | `26fc0d9` | 5个service采用direct/composite P1 ports，执行body零修改 |
+| Final ledger | 本文终态提交 | 七隔离库PG、Backend canonical、索引与P6 handoff闭合 |
+
+### 6.2 Gate record
+
+| Scope | ran/fail/skip | 结果 |
+|---|---:|---|
+| Python compileall `src scripts tests` | completed/0/0 | PASS |
+| Core | 48/0/0 | PASS |
+| Storage（fresh PostgreSQL 7 profiles） | 457/0/0 | PASS；Agent/MVCC/Conversation/Rollout/Legacy/Permissions/CP7均为隔离数据库 |
+| Lifecycle | 45/0/0 | PASS；新增3项窄port合同 |
+| Integrations / Agent Skills | 712+211 / 0 / 2 | PASS；2项Linux Result Parser在macOS N/A |
+| Orchestration | 112/0/0 | PASS |
+| Capabilities | 50/0/0 | PASS（Main Agent 17、MCP Dispatch 15、MCP Tool 15、Skill Tool 3） |
+| API / E2E / Observability / Scripts / Deployment | 452+7+39+63+3 / 0 / 0 | PASS |
+| Backend合计 | 2199/0/2 | PASS；真实PG将P4的7个环境skip展开为46项实际测试，P5另新增11项直接合同 |
+| Shared SQLAlchemy/SQLite focused | 87/0/0 | PASS；60/60 class AST、identity、metadata、manifest与DDL合同 |
+| Mapper/legacy AST | 13+3 exact | PASS；transaction methods与override set未改 |
+| Storage/State/Lifecycle AST exact duplicate | 0 groups | 从start 2组降为0 |
+| Storage/State/Lifecycle C901 / 全仓Ruff审计 | 29 / 162 C901 + 7 F401 + 3 F841 | 与P5 start及P0相同；未运行`--fix` |
+| Frontend / Rust source / real external MCP | N/A | P5未触及对应生产源码或外部I/O；Python Sidecar adapter测试已包含在Storage gate |
+
+PostgreSQL首次fresh 7库运行457项通过。随后在同一已被权限/schema用例修改的数据库集合上错误复跑，2个bootstrap按设计以schema drift fail-closed；未修改代码或放宽断言，而是按计划创建第二组fresh 7库，457项再次零skip通过。一次性`postgres:17`容器未挂volume，终态已停止并由`--rm`删除。
+
+### 6.3 Final invariants与handoff
+
+- P5 final tracked set为1072，排序path SHA-256为`fd6a34cc22dad3844ed83b6a337e653d7b35fe208c1b6c2f88d4a24e17c8164c`；相对start只新增本计划、6个shared private module和4份直接测试。
+- filename sanitizer和SQL splitter各只有一个body owner；artifact/conversation与bootstrap/reconciler的原函数名均解析到同一canonical function object。
+- shared base拥有唯一metadata，60个row class只在`sqlalchemy_models.py`定义；`sqlite/base.py`与`sqlite/models.py`只显式re-export同一objects，旧import路径可用。
+- row declaration的module owner有意从SQLite-private改为storage-shared；这些internal SQLAlchemy rows无公开DTO/pickle合同，table object、MRO、metadata、DDL、schema manifest与旧path object identity保持。
+- PostgreSQL repository从SQLite repository只import`SQLiteStateRepository`和`SQLiteStorage`两个公开既有facade；13个下划线mapper和3个legacy helper均由shared private module拥有。
+- `SQLiteStorage._run`、Agent独立repository transaction、session/BEGIN/commit/rollback/shield、PG override/row lock/SKIP LOCKED/CAS、CP7锁序和Sidecar wire/unsupported surface没有代码差异。
+- Lifecycle 5个service只收窄annotation/Protocol；Agent recovery/Cancellation Sidecar functional seam、storage调用次数/顺序和状态机body不变。
+- P4仍是backend mode/evidence/client availability/selector/DI唯一owner；P5 adapter selector=0。P6只接管Frontend，不得回写persistence或扩大file-selection/Interrupt authority。
+- schema/data、migration、依赖、`prod`、Frontend、Rust源码和`docker_cmd.md`正文均未触及；License Requirement无变化。
