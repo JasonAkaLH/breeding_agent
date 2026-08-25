@@ -44,6 +44,7 @@ from src.capabilities.mcp_dispatch import (
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
+from src.core.contracts import MCPRemoteTaskStoragePort
 from src.core.models import (
     Conversation,
     ConversationFileResource,
@@ -337,7 +338,12 @@ from src.orchestration.agent_loop.task_projection import (
     AgentTaskInvocationCommitPort,
 )
 from src.orchestration.agent_loop.repository import AgentRunRepository
-from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig, ResolutionGenerator
+from src.orchestration.conversation_memory import (
+    ConversationMemoryBuilder,
+    ConversationMemoryConfig,
+    ConversationMemoryStoragePort,
+    ResolutionGenerator,
+)
 from src.orchestration.models import CapabilityDescriptor, UserMCPServerProfile
 from src.orchestration.visible_message_history import INTERRUPT_VISIBLE_STREAM_STATUS, persist_interrupt_question_message
 from src.orchestration.composite_executor import CompositeExecutor
@@ -467,7 +473,7 @@ SYSTEM_MANAGED_METADATA_KEYS = frozenset(
 
 
 async def _mark_remote_continuation_dispatched(
-    storage: StoragePort,
+    storage: MCPRemoteTaskStoragePort,
     outbox,
     dispatched_at: datetime,
 ):
@@ -12913,7 +12919,7 @@ def _resolve_skill_input_text_generator(
 
 def _resolve_conversation_memory_builder(
     *,
-    storage: SQLiteStorage,
+    storage: ConversationMemoryStoragePort,
     conversation_memory_builder: ConversationMemoryBuilder | None,
     main_agent_llm_runtime: SharedLLMRuntime,
     enable_conversation_memory: bool,
