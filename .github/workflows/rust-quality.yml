@@ -334,6 +334,10 @@ jobs:
         working-directory: native/fuzz
         run: cargo +nightly fuzz run skill_runtime_policy -- -max_total_time=30
 
+      - name: cargo +nightly fuzz run mcp_runtime_protocol
+        working-directory: native/fuzz
+        run: cargo +nightly fuzz run mcp_runtime_protocol -- -max_total_time=30
+
       - name: cargo +nightly fuzz run artifact_path
         working-directory: native/fuzz
         run: cargo +nightly fuzz run artifact_path -- -max_total_time=30

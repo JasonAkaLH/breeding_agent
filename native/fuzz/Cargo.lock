@@ -953,6 +953,7 @@ dependencies = [
  "maf_data_access",
  "maf_mcp_runtime",
  "maf_skill_runtime",
+ "rmcp",
  "serde_json",
 ]
 
@@ -1437,9 +1438,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.8.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
+checksum = "0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e"
 dependencies = [
  "async-trait",
  "chrono",

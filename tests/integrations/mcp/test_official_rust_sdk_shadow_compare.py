@@ -38,6 +38,14 @@ class OfficialRustSDKShadowCompareTest(unittest.TestCase):
         self.assertIn('version = "1.7.0"', rmcp_block)
         self.assertNotIn('name = "rmcp-macros"', lock)
 
+        fuzz_lock = tomllib.loads(Path("native/fuzz/Cargo.lock").read_text(encoding="utf-8"))
+        fuzz_rmcp_versions = {
+            package["version"]
+            for package in fuzz_lock["package"]
+            if package["name"] == "rmcp"
+        }
+        self.assertEqual(fuzz_rmcp_versions, {"1.7.0"})
+
     def test_shadow_compare_accepts_2024_skipped_and_2025_status_evidence(self) -> None:
         expected_statuses = {
             "matched": "matched,skipped",

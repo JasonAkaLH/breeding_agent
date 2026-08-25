@@ -33,6 +33,7 @@ class RustQualityGateTest(unittest.TestCase):
             "rust_coverage_thresholds",
             "fuzz_cargo_check",
             "cargo_fuzz_smoke",
+            "mcp_runtime_protocol_fuzz_smoke",
             "rust_artifact_provenance_self_check",
             "skill_runtime_pyo3_wheel_smoke",
             "core_lifecycle_pyo3_wheel_smoke",
@@ -80,6 +81,10 @@ class RustQualityGateTest(unittest.TestCase):
             ["cargo", "+nightly", "fuzz", "run", "skill_runtime_policy", "--", "-max_total_time=30"],
         )
         self.assertEqual(
+            gates["mcp_runtime_protocol_fuzz_smoke"]["command"],
+            ["cargo", "+nightly", "fuzz", "run", "mcp_runtime_protocol", "--", "-max_total_time=30"],
+        )
+        self.assertEqual(
             gates["rust_artifact_provenance_self_check"]["command"],
             [sys.executable, "scripts/rust_artifact_provenance.py", "self-test"],
         )
@@ -120,6 +125,7 @@ class RustQualityGateTest(unittest.TestCase):
             "Check fuzz Cargo.lock is current",
             "cargo metadata --locked --format-version 1 > /dev/null",
             "cargo +nightly fuzz run skill_runtime_policy",
+            "cargo +nightly fuzz run mcp_runtime_protocol",
             "cargo +nightly fuzz run auth_core",
             "cargo +nightly fuzz run audit_sanitizer",
             "cargo +nightly fuzz run data_access_readonly",

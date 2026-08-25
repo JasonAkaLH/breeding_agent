@@ -119,6 +119,13 @@ def build_gates() -> list[Gate]:
             description="Bounded PRD01 fuzz smoke for the Skill Runtime policy boundary.",
         ),
         Gate(
+            name="mcp_runtime_protocol_fuzz_smoke",
+            command=["cargo", "+nightly", "fuzz", "run", "mcp_runtime_protocol", "--", "-max_total_time=30"],
+            cwd=REPO_ROOT / "native" / "fuzz",
+            required_tools=("cargo", "cargo-fuzz"),
+            description="Bounded PRD05 fuzz smoke for MCP JSON-RPC and sanitizer boundaries.",
+        ),
+        Gate(
             name="rust_artifact_provenance_self_check",
             command=[sys.executable, "scripts/rust_artifact_provenance.py", "self-test"],
             cwd=REPO_ROOT,
