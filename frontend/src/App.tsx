@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
 import { CopyOutlined, ExclamationCircleFilled, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
-import { Alert, Button, Card, ConfigProvider, Drawer, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
+import { Alert, Button, Card, ConfigProvider, Drawer, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
@@ -951,8 +951,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   async function handleLogout() {
     await api.logout().catch(() => undefined);
     clearStoredAuth();
-    const targetConversationId = conversationId;
-    const generation = beginRestoreGeneration();
+    beginRestoreGeneration();
     subscriptionRef.current?.close();
     setAuthUser(null);
     initializedWorkspaceConversationIdRef.current = null;
@@ -1718,11 +1717,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         setPendingInterrupt(refreshedInterrupt);
         updateCurrentTaskId(keepOpenTaskId);
         taskPresentationModesRef.current.set(keepOpenTaskId, interrupt.mode);
-        if (draftSnapshot.length > 0) {
-          const sentDraftIds = new Set(draftSnapshot.map((attachment) => attachment.localId));
-          setDraftAttachments((current) => current.filter((attachment) => !sentDraftIds.has(attachment.localId)));
-          setPendingUploads((current) => mergeUploadsById(current, uploadedDrafts.map((item) => item.upload)));
-        }
+        markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
         return;
       }
       const resumedTaskId = response.task_id || interrupt.taskId;
