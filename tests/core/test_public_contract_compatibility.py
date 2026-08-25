@@ -303,8 +303,10 @@ class PublicContractCompatibilityTest(unittest.TestCase):
     def test_storage_port_has_exact_async_method_signatures(self) -> None:
         actual = {
             name: str(inspect.signature(value))
-            for name, value in CoreContractsStoragePort.__dict__.items()
-            if inspect.iscoroutinefunction(value)
+            for name, value in inspect.getmembers(
+                CoreContractsStoragePort,
+                predicate=inspect.iscoroutinefunction,
+            )
         }
 
         self.assertEqual(len(actual), 259)

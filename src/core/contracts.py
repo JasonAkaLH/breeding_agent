@@ -120,7 +120,7 @@ class CapabilityExecutionResult:
 
 
 @runtime_checkable
-class StoragePort(Protocol):
+class UserMCPConfigurationStoragePort(Protocol):
     async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]: ...
 
     async def get_user_mcp_server(self, owner_user_id: str, server_id: str) -> UserMCPServer | None: ...
@@ -288,6 +288,9 @@ class StoragePort(Protocol):
         input_schema_sha256: str | None = None,
     ) -> int: ...
 
+
+@runtime_checkable
+class MCPDispatchStoragePort(Protocol):
     async def save_mcp_branch_record(self, record: MCPBranchRecord) -> MCPBranchRecord: ...
 
     async def get_mcp_branch_record(
@@ -552,6 +555,9 @@ class StoragePort(Protocol):
         remote_expected_revision: int | None = None,
     ) -> MCPTerminalResultCommitResult: ...
 
+
+@runtime_checkable
+class MCPResultLifecycleStoragePort(Protocol):
     async def recover_mcp_terminal_candidate(
         self,
         candidate_snapshot: MCPTerminalCandidateSnapshot,
@@ -634,6 +640,9 @@ class StoragePort(Protocol):
         self, result_ref: str, expected_revision: int, retry_at: datetime
     ) -> MCPDurableResultLifecycle | None: ...
 
+
+@runtime_checkable
+class MCPDispatchFinalizationStoragePort(Protocol):
     async def finalize_mcp_dispatch(
         self,
         intent_id: str,
@@ -729,6 +738,9 @@ class StoragePort(Protocol):
         self, call_id: str
     ) -> MCPExecutionTerminalProjection | None: ...
 
+
+@runtime_checkable
+class MCPLegacyRetirementStoragePort(Protocol):
     async def converge_legacy_runtime_retirement(
         self,
         task_id: str,
@@ -750,6 +762,9 @@ class StoragePort(Protocol):
         limit: int = 10_000,
     ) -> list[str]: ...
 
+
+@runtime_checkable
+class MCPCP7StoragePort(Protocol):
     async def append_mcp_cp7_safety_ledger_record(
         self, record: MCPCP7SafetyLedgerRecord
     ) -> MCPCP7SafetyLedgerRecord: ...
@@ -773,6 +788,9 @@ class StoragePort(Protocol):
         self, candidate_id: str
     ) -> MCPCP7SafetySnapshot: ...
 
+
+@runtime_checkable
+class MCPRemoteTaskStoragePort(Protocol):
     async def save_mcp_remote_task_binding(
         self, binding: MCPRemoteTaskBinding
     ) -> MCPRemoteTaskBinding: ...
@@ -1075,6 +1093,9 @@ class StoragePort(Protocol):
 
     async def expire_mcp_connection_leases(self, *, now: datetime, limit: int = 1000) -> int: ...
 
+
+@runtime_checkable
+class MCPRolloutStoragePort(Protocol):
     async def append_mcp_audit_event(self, event: MCPAuditEvent) -> MCPAuditEvent: ...
 
     async def list_mcp_audit_events(
@@ -1203,6 +1224,9 @@ class StoragePort(Protocol):
         now: datetime | None = None,
     ) -> list[MCPRolloutInstanceConfigLease]: ...
 
+
+@runtime_checkable
+class AuthStoragePort(Protocol):
     async def create_or_get_maf_master_key_validation(
         self, record: MAFMasterKeyValidation
     ) -> MAFMasterKeyValidation: ...
@@ -1246,6 +1270,9 @@ class StoragePort(Protocol):
         auth_generation_reason: str | None = None,
     ) -> AuthUserToken | None: ...
 
+
+@runtime_checkable
+class ConversationStoragePort(Protocol):
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None: ...
@@ -1413,6 +1440,9 @@ class StoragePort(Protocol):
 
     async def delete_conversation_memory_summaries_for_conversation(self, conversation_id: str) -> int: ...
 
+
+@runtime_checkable
+class PendingSkillContextStoragePort(Protocol):
     async def save_pending_skill_context(self, context: PendingSkillContext) -> PendingSkillContext: ...
 
     async def get_pending_skill_context(self, context_id: str) -> PendingSkillContext | None: ...
@@ -1425,6 +1455,9 @@ class StoragePort(Protocol):
 
     async def mark_pending_skill_context_superseded(self, conversation_id: str) -> int: ...
 
+
+@runtime_checkable
+class MessageStoragePort(Protocol):
     async def save_message(self, message: Message) -> Message: ...
 
     async def get_message(self, message_id: str) -> Message | None: ...
@@ -1446,6 +1479,9 @@ class StoragePort(Protocol):
         deleted_at: datetime,
     ) -> Message | None: ...
 
+
+@runtime_checkable
+class TaskStoragePort(Protocol):
     async def save_task(
         self, task: Task, *, expected_from_status: TaskStatus | None = None
     ) -> Task: ...
@@ -1472,6 +1508,9 @@ class StoragePort(Protocol):
 
     async def list_task_nodes_for_task(self, task_id: str) -> list[TaskNode]: ...
 
+
+@runtime_checkable
+class ArtifactStoragePort(Protocol):
     async def save_artifact(self, artifact: Artifact) -> Artifact: ...
 
     async def compare_and_set_artifact_storage_ref(
@@ -1498,6 +1537,9 @@ class StoragePort(Protocol):
         limit: int | None = None,
     ) -> list[TaskInputAttachment]: ...
 
+
+@runtime_checkable
+class EventStoragePort(Protocol):
     async def append_event(self, event: EventRecord) -> EventRecord: ...
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]: ...
@@ -1520,6 +1562,9 @@ class StoragePort(Protocol):
         limit: int | None = None,
     ) -> list[EventRecord]: ...
 
+
+@runtime_checkable
+class MailboxStoragePort(Protocol):
     async def save_mailbox_message(self, message: MailboxMessage) -> MailboxMessage: ...
 
     async def get_mailbox_message(self, message_id: str) -> MailboxMessage | None: ...
@@ -1532,6 +1577,9 @@ class StoragePort(Protocol):
 
     async def list_mailbox_deliveries_for_message(self, message_id: str) -> list[MailboxDelivery]: ...
 
+
+@runtime_checkable
+class InterruptStoragePort(Protocol):
     async def save_interrupt(self, interrupt: Interrupt) -> Interrupt: ...
 
     async def get_interrupt(self, interrupt_id: str) -> Interrupt | None: ...
@@ -1546,6 +1594,9 @@ class StoragePort(Protocol):
 
     async def list_interrupt_answers(self, interrupt_id: str) -> list[InterruptAnswer]: ...
 
+
+@runtime_checkable
+class SlotStoragePort(Protocol):
     async def save_slot_collection(self, collection: SlotCollection) -> SlotCollection: ...
 
     async def get_slot_collection(self, collection_id: str) -> SlotCollection | None: ...
@@ -1570,6 +1621,9 @@ class StoragePort(Protocol):
 
     async def get_slot_event_by_idempotency_key(self, collection_id: str, key: str) -> SlotEvent | None: ...
 
+
+@runtime_checkable
+class CheckpointStoragePort(Protocol):
     async def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint: ...
 
     async def get_checkpoint(self, checkpoint_id: str) -> Checkpoint | None: ...
@@ -1577,6 +1631,32 @@ class StoragePort(Protocol):
     async def get_checkpoint_by_resume_token(self, resume_token: str) -> Checkpoint | None: ...
 
     async def list_checkpoints_for_task(self, task_id: str) -> list[Checkpoint]: ...
+
+
+@runtime_checkable
+class StoragePort(
+    UserMCPConfigurationStoragePort,
+    MCPDispatchStoragePort,
+    MCPResultLifecycleStoragePort,
+    MCPDispatchFinalizationStoragePort,
+    MCPLegacyRetirementStoragePort,
+    MCPCP7StoragePort,
+    MCPRemoteTaskStoragePort,
+    MCPRolloutStoragePort,
+    AuthStoragePort,
+    ConversationStoragePort,
+    PendingSkillContextStoragePort,
+    MessageStoragePort,
+    TaskStoragePort,
+    ArtifactStoragePort,
+    EventStoragePort,
+    MailboxStoragePort,
+    InterruptStoragePort,
+    SlotStoragePort,
+    CheckpointStoragePort,
+    Protocol,
+):
+    """Compatibility aggregate for the narrow persistence contracts."""
 
 
 @runtime_checkable
