@@ -52,6 +52,7 @@ class AgentCallInvoker(Protocol):
         capability_id: str,
         effective_payload: Mapping[str, Any],
         cancellation: AgentCancellationToken | None,
+        lease_handle: AgentLeaseHandle,
     ) -> AgentCallExecution: ...
 
 
@@ -246,6 +247,7 @@ class AgentLoopRunner:
                     policies,
                     cancellation,
                     visibility,
+                    _handle,
                 ),
             )
             for (_, call_item, _), outcome in zip(wave, wave_results, strict=True):
@@ -286,6 +288,7 @@ class AgentLoopRunner:
         policies: Mapping[str, CapabilityInvocationPolicy],
         cancellation: AgentCancellationToken | None,
         visibility: CapabilityVisibilityContext,
+        lease_handle: AgentLeaseHandle,
     ) -> tuple[AgentCallExecution, ...]:
         async def execute(record):
             call, call_item, reservation = record
@@ -314,6 +317,7 @@ class AgentLoopRunner:
                 capability_id=capability_id,
                 effective_payload=effective,
                 cancellation=cancellation,
+                lease_handle=lease_handle,
             )
 
         return tuple(await asyncio.gather(*(execute(record) for record in wave)))

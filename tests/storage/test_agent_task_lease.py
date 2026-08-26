@@ -184,6 +184,41 @@ class _FakeLeaseStore:
 
 
 class AgentLeaseControllerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_heartbeat_waits_for_an_ownership_bound_database_operation(self) -> None:
+        renew_allowed = asyncio.Event()
+
+        async def immediate_sleep(_seconds: float) -> None:
+            await renew_allowed.wait()
+            await asyncio.sleep(0)
+
+        store = _FakeLeaseStore()
+        controller = AgentLeaseController(store, ttl_seconds=30, sleep=immediate_sleep)
+        handle = await controller.acquire("run", owner_id="worker")
+        operation_entered = asyncio.Event()
+        release_operation = asyncio.Event()
+
+        async def database_operation(lease: AgentTaskLease) -> str:
+            operation_entered.set()
+            await release_operation.wait()
+            return lease.token
+
+        operation_task = asyncio.create_task(
+            handle.run_ownership_bound(database_operation)
+        )
+        await operation_entered.wait()
+        heartbeat_task = asyncio.create_task(controller._heartbeat(handle))
+        renew_allowed.set()
+        await asyncio.sleep(0)
+        self.assertEqual(store.renew_count, 0)
+
+        release_operation.set()
+        self.assertEqual(await operation_task, "token-1")
+        while store.renew_count == 0:
+            await asyncio.sleep(0)
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        self.assertEqual(handle.current.token, "token-2")
+
     async def test_positive_ttl_and_active_phases_use_ttl_over_three_heartbeat(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive"):
             AgentLeaseController(_FakeLeaseStore(), ttl_seconds=0)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from src.core.enums import NodeStatus
@@ -11,6 +11,7 @@ from src.orchestration.agent_loop.invocation import (
     InvocationRequest,
 )
 from src.orchestration.agent_loop.continuation import AgentContinuationLocator
+from src.orchestration.agent_loop.lease import AgentLeaseHandle
 
 from .models import (
     AgentCallOutcomeStatus,
@@ -150,6 +151,7 @@ class AgentCapabilityInvoker:
             capability_id=capability_id,
             effective_payload=effective_payload,
             cancellation=cancellation,
+            lease_handle=None,
         )
 
     async def invoke(
@@ -162,6 +164,7 @@ class AgentCapabilityInvoker:
         capability_id: str,
         effective_payload: Mapping[str, Any],
         cancellation,
+        lease_handle: AgentLeaseHandle | None = None,
     ) -> AgentCallExecution:
         del call, result_reservation
         task = await self._load_task(run.task_id)
@@ -209,29 +212,48 @@ class AgentCapabilityInvoker:
                     hook_handle = await hook_handle
             except Exception:
                 hook_handle = None
-        result = await self._invocation.invoke(
-            InvocationRequest(
-                capability_id=capability_id,
-                conversation_id=run.conversation_id,
-                task_id=run.task_id,
-                node_id=node.node_id,
-                run_id=run.run_id,
-                call_item_id=call_item.item_id,
-                expected_revision=run.revision,
-                expected_claim_token=run.claim_token,
-                model_binding=run.binding,
-                cancellation=cancellation,
-                input_payload=input_payload,
-                request_metadata=metadata,
-                node_metadata=node_metadata,
-                available_server_ids=frozenset(
-                    str(value)
-                    for value in metadata.get("available_mcp_server_ids", ())
-                ),
-                pinned_server_id_present=(capability_id == "mcp.dispatch"),
-                pinned_server_id=effective_payload.get("server_id"),
+        invocation_request = InvocationRequest(
+            capability_id=capability_id,
+            conversation_id=run.conversation_id,
+            task_id=run.task_id,
+            node_id=node.node_id,
+            run_id=run.run_id,
+            call_item_id=call_item.item_id,
+            expected_revision=run.revision,
+            expected_claim_token=run.claim_token,
+            model_binding=run.binding,
+            cancellation=cancellation,
+            input_payload=input_payload,
+            request_metadata=metadata,
+            node_metadata=node_metadata,
+            available_server_ids=frozenset(
+                str(value)
+                for value in metadata.get("available_mcp_server_ids", ())
             ),
+            pinned_server_id_present=(capability_id == "mcp.dispatch"),
+            pinned_server_id=effective_payload.get("server_id"),
+        )
+
+        async def ownership_boundary(request, operation):
+            assert lease_handle is not None
+
+            async def run_with_current(lease):
+                return await operation(
+                    replace(
+                        request,
+                        expected_revision=lease.revision,
+                        expected_claim_token=lease.token,
+                    )
+                )
+
+            return await lease_handle.run_ownership_bound(run_with_current)
+
+        result = await self._invocation.invoke(
+            invocation_request,
             node,
+            ownership_boundary=(
+                ownership_boundary if lease_handle is not None else None
+            ),
         )
         if self._invocation_hook is not None and hook_handle is not None:
             try:

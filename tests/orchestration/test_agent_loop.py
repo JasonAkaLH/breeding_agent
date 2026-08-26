@@ -77,12 +77,14 @@ class _QueuedModel:
 class _RecordingInvoker:
     def __init__(self, outcomes=None, *, trace: list[str] | None = None) -> None:
         self.events = []
+        self.lease_handles = []
         self.outcomes = dict(outcomes or {})
         self.trace = trace
 
-    async def invoke(self, *, call, effective_payload, **_kwargs):
+    async def invoke(self, *, call, effective_payload, lease_handle, **_kwargs):
         if self.trace is not None:
             self.trace.append("capability.invoke")
+        self.lease_handles.append(lease_handle)
         self.events.append(f"start:{call.call_id}")
         if call.call_id == "slow":
             await asyncio.sleep(0.02)
@@ -233,6 +235,11 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len([m for m in model.requests[1].messages if m.role == "tool"]), 0)
         self.assertLess(invoker.events.index("end:slow"), invoker.events.index("start:exclusive"))
         self.assertLess(invoker.events.index("end:fast"), invoker.events.index("start:exclusive"))
+        self.assertTrue(invoker.lease_handles)
+        self.assertEqual(
+            len({id(handle) for handle in invoker.lease_handles}),
+            1,
+        )
         items = await self.repository.list_items("run-1")
         committed_results = [item for item in items if item.kind.value == "tool_result"]
         self.assertEqual([item.call_ordinal for item in committed_results], [0, 1, 2, 3])

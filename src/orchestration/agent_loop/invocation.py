@@ -15,6 +15,10 @@ from .models import AgentCancellationToken, AgentModelBinding
 
 WaveItem = TypeVar("WaveItem")
 WaveResult = TypeVar("WaveResult")
+OwnershipBoundary = Callable[
+    ["InvocationRequest", Callable[["InvocationRequest"], Awaitable[Any]]],
+    Awaitable[Any],
+]
 
 
 _SYSTEM_NODE_METADATA_KEYS = frozenset(
@@ -161,42 +165,64 @@ class CapabilityInvocationService:
         self,
         request: InvocationRequest,
         task_node: TaskNode,
+        *,
+        ownership_boundary: OwnershipBoundary | None = None,
     ) -> InvocationResult:
-        await self._commit_port.assert_execution_owned(request)
-        route_handoff = normalize_selected_mcp_route(
-            capability_id=request.capability_id,
-            input_payload=request.input_payload,
-            node_metadata=request.node_metadata,
-            pinned_server_id_present=request.pinned_server_id_present,
-            pinned_server_id=request.pinned_server_id,
-            available_server_ids=request.available_server_ids,
-        )
-        normalized_request = replace(
-            request,
-            node_metadata=dict(route_handoff.normalized_node_metadata),
-        )
-        activity_payload = node_activity_payload(
-            normalized_request.capability_id,
-            normalized_request.node_metadata,
-        )
-        if route_handoff.rejection_code is not None:
-            rejected = await self._commit_port.commit_route_rejected(
+        async def begin(owned_request: InvocationRequest):
+            await self._commit_port.assert_execution_owned(owned_request)
+            route_handoff = normalize_selected_mcp_route(
+                capability_id=owned_request.capability_id,
+                input_payload=owned_request.input_payload,
+                node_metadata=owned_request.node_metadata,
+                pinned_server_id_present=owned_request.pinned_server_id_present,
+                pinned_server_id=owned_request.pinned_server_id,
+                available_server_ids=owned_request.available_server_ids,
+            )
+            normalized_request = replace(
+                owned_request,
+                node_metadata=dict(route_handoff.normalized_node_metadata),
+            )
+            activity_payload = node_activity_payload(
+                normalized_request.capability_id,
+                normalized_request.node_metadata,
+            )
+            if route_handoff.rejection_code is not None:
+                rejected = await self._commit_port.commit_route_rejected(
+                    normalized_request,
+                    task_node,
+                    rejection_code=route_handoff.rejection_code,
+                    now=self._now(),
+                    activity_payload=activity_payload,
+                )
+                return normalized_request, activity_payload, None, InvocationResult(
+                    rejected, {}
+                )
+
+            instance = self._instance_selector.select_instance(
+                normalized_request.capability_id
+            )
+            running = await self._commit_port.start_node(
                 normalized_request,
                 task_node,
-                rejection_code=route_handoff.rejection_code,
-                now=self._now(),
-                activity_payload=activity_payload,
+                instance_id=instance.instance_id,
+                started_at=task_node.started_at or self._now(),
+                activity_payload={
+                    **activity_payload,
+                    "instance_id": instance.instance_id,
+                },
             )
-            return InvocationResult(rejected, {})
+            return normalized_request, activity_payload, running, None
 
-        instance = self._instance_selector.select_instance(normalized_request.capability_id)
-        running = await self._commit_port.start_node(
-            normalized_request,
-            task_node,
-            instance_id=instance.instance_id,
-            started_at=task_node.started_at or self._now(),
-            activity_payload={**activity_payload, "instance_id": instance.instance_id},
+        normalized_request, activity_payload, running, early_result = (
+            await self._run_ownership_boundary(
+                request,
+                begin,
+                ownership_boundary,
+            )
         )
+        if early_result is not None:
+            return early_result
+        assert running is not None
         task_snapshot = await self._commit_port.get_task_snapshot(normalized_request.task_id)
         effective_metadata = task_authoritative_metadata(
             execution_metadata(
@@ -219,63 +245,87 @@ class CapabilityInvocationService:
                 metadata=effective_metadata,
             )
         )
-        await self._commit_port.assert_execution_owned(normalized_request)
 
-        latest_task = await self._commit_port.get_task_snapshot(normalized_request.task_id)
-        latest_node = await self._commit_port.get_node_snapshot(normalized_request.node_id) or running
-        if latest_task is not None and (
-            latest_task.status != TaskStatus.RUNNING
-            or latest_task.cancel_requested_at is not None
-        ):
-            discarded = await self._commit_port.discard_late_result(
-                normalized_request,
-                latest_node,
-                result,
-                activity_payload=activity_payload,
+        async def finish(owned_request: InvocationRequest) -> InvocationResult:
+            await self._commit_port.assert_execution_owned(owned_request)
+            latest_task = await self._commit_port.get_task_snapshot(
+                owned_request.task_id
             )
-            return InvocationResult(discarded, {}, result)
+            latest_node = (
+                await self._commit_port.get_node_snapshot(owned_request.node_id)
+                or running
+            )
+            if latest_task is not None and (
+                latest_task.status != TaskStatus.RUNNING
+                or latest_task.cancel_requested_at is not None
+            ):
+                discarded = await self._commit_port.discard_late_result(
+                    owned_request,
+                    latest_node,
+                    result,
+                    activity_payload=activity_payload,
+                )
+                return InvocationResult(discarded, {}, result)
 
-        now = self._now()
-        if result.interrupt is not None or (
-            result.error is not None and result.error.code == "skill_input_missing"
-        ):
-            waiting = await self._commit_port.commit_waiting_for_input(
-                normalized_request,
+            now = self._now()
+            if result.interrupt is not None or (
+                result.error is not None
+                and result.error.code == "skill_input_missing"
+            ):
+                waiting = await self._commit_port.commit_waiting_for_input(
+                    owned_request,
+                    latest_node,
+                    result,
+                    now=now,
+                    activity_payload=activity_payload,
+                )
+                return InvocationResult(waiting, dict(result.output_payload), result)
+            if result.error is not None:
+                failed = await self._commit_port.commit_failed(
+                    owned_request,
+                    latest_node,
+                    result,
+                    now=now,
+                    activity_payload=activity_payload,
+                )
+                return InvocationResult(failed, dict(result.output_payload), result)
+            if (
+                owned_request.capability_id == "mcp.dispatch"
+                and result.output_payload.get("mcp_status")
+                == "remote_task_created"
+            ):
+                waiting = await self._commit_port.commit_waiting_for_dependency(
+                    owned_request,
+                    latest_node,
+                    result,
+                    now=now,
+                    activity_payload=activity_payload,
+                )
+                return InvocationResult(waiting, dict(result.output_payload), result)
+            completed = await self._commit_port.commit_completed(
+                owned_request,
                 latest_node,
                 result,
                 now=now,
                 activity_payload=activity_payload,
             )
-            return InvocationResult(waiting, dict(result.output_payload), result)
-        if result.error is not None:
-            failed = await self._commit_port.commit_failed(
-                normalized_request,
-                latest_node,
-                result,
-                now=now,
-                activity_payload=activity_payload,
-            )
-            return InvocationResult(failed, dict(result.output_payload), result)
-        if (
-            normalized_request.capability_id == "mcp.dispatch"
-            and result.output_payload.get("mcp_status") == "remote_task_created"
-        ):
-            waiting = await self._commit_port.commit_waiting_for_dependency(
-                normalized_request,
-                latest_node,
-                result,
-                now=now,
-                activity_payload=activity_payload,
-            )
-            return InvocationResult(waiting, dict(result.output_payload), result)
-        completed = await self._commit_port.commit_completed(
+            return InvocationResult(completed, dict(result.output_payload), result)
+
+        return await self._run_ownership_boundary(
             normalized_request,
-            latest_node,
-            result,
-            now=now,
-            activity_payload=activity_payload,
+            finish,
+            ownership_boundary,
         )
-        return InvocationResult(completed, dict(result.output_payload), result)
+
+    @staticmethod
+    async def _run_ownership_boundary(
+        request: InvocationRequest,
+        operation: Callable[[InvocationRequest], Awaitable[Any]],
+        boundary: OwnershipBoundary | None,
+    ) -> Any:
+        if boundary is None:
+            return await operation(request)
+        return await boundary(request, operation)
 
     @staticmethod
     def _utcnow_naive() -> datetime:

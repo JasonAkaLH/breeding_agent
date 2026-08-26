@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.core.contracts import (
@@ -16,6 +16,7 @@ from src.orchestration.agent_loop.invocation import (
     CapabilityInvocationService,
     InvocationRequest,
 )
+from src.orchestration.agent_loop.lease import AgentLeaseHandle
 from src.orchestration.agent_loop.capability_invoker import AgentCapabilityInvoker
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
@@ -27,6 +28,7 @@ from src.orchestration.agent_loop.models import (
     AgentRun,
     AgentRunStatus,
     AgentToolCall,
+    AgentTaskLease,
 )
 from src.orchestration.models import ExecutionInstance, InstanceState
 from src.orchestration.registry import InstanceRegistry
@@ -160,6 +162,98 @@ class _AgentFixtureCommitPort(_RecordingCommitPort):
 
 
 class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_invocation_refreshes_lease_after_long_executor_call(self) -> None:
+        instances = InstanceRegistry()
+        instances.register(
+            ExecutionInstance("instance-1", ("cap.lookup",), InstanceState.ONLINE, 0)
+        )
+        task = Task("task-1", "conv-1", "message-1", status=TaskStatus.RUNNING)
+        node = TaskNode("node-1", "task-1", "cap.lookup", status=NodeStatus.PENDING)
+        expires = datetime.now(timezone.utc) + timedelta(seconds=30)
+        handle = AgentLeaseHandle(
+            AgentTaskLease("run-1", "task-1", "worker-1", "claim-1", 3, expires)
+        )
+
+        class LeaseCheckingPort(_RecordingCommitPort):
+            def __init__(self) -> None:
+                super().__init__(task=task, node=node)
+                self.tokens: list[tuple[int | None, str | None]] = []
+
+            async def assert_execution_owned(self, request: InvocationRequest) -> None:
+                self.tokens.append(
+                    (request.expected_revision, request.expected_claim_token)
+                )
+                if (
+                    request.expected_revision != handle.current.revision
+                    or request.expected_claim_token != handle.current.token
+                ):
+                    raise AssertionError("stale Agent lease snapshot")
+                await super().assert_execution_owned(request)
+
+        port = LeaseCheckingPort()
+
+        def execute(_request: CapabilityExecutionRequest):
+            handle.current = AgentTaskLease(
+                "run-1", "task-1", "worker-1", "claim-2", 4, expires
+            )
+            return CapabilityExecutionResult(
+                "cap.lookup", "task-1", "node-1", output_payload={"answer": 42}
+            )
+
+        kernel = CapabilityInvocationService(
+            instance_selector=InstanceSelector(instances),
+            executor=FakeExecutor({"cap.lookup": execute}),
+            commit_port=port,
+        )
+
+        async def load_task(_task_id: str) -> Task:
+            return task
+
+        async def load_node(_node_id: str) -> TaskNode:
+            return node
+
+        run = AgentRun(
+            run_id="run-1",
+            task_id="task-1",
+            conversation_id="conv-1",
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding("edition-a"),
+            claim_token="claim-1",
+            revision=3,
+        )
+        call_item = AgentItem(
+            item_id="call-item-1",
+            run_id=run.run_id,
+            task_id=run.task_id,
+            sequence=1,
+            kind=AgentItemKind.TOOL_CALL,
+            state=AgentItemState.COMMITTED,
+            payload_json='{"node_id":"node-1"}',
+            payload_sha256="0" * 64,
+        )
+        invoker = AgentCapabilityInvoker(
+            invocation_service=kernel,
+            runs=object(),
+            task_loader=load_task,
+            node_loader=load_node,
+            request_metadata_loader=lambda _run: {},
+            current_user_input_loader=lambda _run: "",
+        )
+
+        outcome = await invoker.invoke(
+            run=run,
+            call=AgentToolCall("call-1", "cap_lookup", "{}", 0),
+            call_item=call_item,
+            result_reservation=object(),
+            capability_id="cap.lookup",
+            effective_payload={},
+            cancellation=None,
+            lease_handle=handle,
+        )
+
+        self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
+        self.assertEqual(port.tokens, [(3, "claim-1"), (4, "claim-2")])
+
     async def test_waiting_branches_keep_execution_revalidation_and_semantic_commit_order(
         self,
     ) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
 from .models import AgentLeaseLost, AgentRun, AgentTaskLease
@@ -16,6 +16,18 @@ ACTIVE_LEASE_PHASES = frozenset({"model_sample", "compaction", "capability_wave"
 @dataclass(slots=True)
 class AgentLeaseHandle:
     current: AgentTaskLease
+    _ownership_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+    )
+
+    async def run_ownership_bound(
+        self,
+        operation: Callable[[AgentTaskLease], Awaitable[T]],
+    ) -> T:
+        async with self._ownership_lock:
+            return await operation(self.current)
 
 
 class AgentLeaseController(Generic[T]):
@@ -80,21 +92,27 @@ class AgentLeaseController(Generic[T]):
         raise AgentLeaseLost("agent_task_lease_heartbeat_stopped")
 
     async def release_waiting(self, run_id: str, *, handle: AgentLeaseHandle) -> AgentRun:
-        return await self._store.release_waiting_task_lease(
-            run_id,
-            owner_id=handle.current.owner_id,
-            token=handle.current.token,
-        )
+        async def release(lease: AgentTaskLease) -> AgentRun:
+            return await self._store.release_waiting_task_lease(
+                run_id,
+                owner_id=lease.owner_id,
+                token=lease.token,
+            )
+
+        return await handle.run_ownership_bound(release)
 
     async def _heartbeat(self, handle: AgentLeaseHandle) -> None:
         while True:
             await self._sleep(self.heartbeat_interval_seconds)
             try:
-                handle.current = await self._store.renew_task_lease(
-                    handle.current.run_id,
-                    owner_id=handle.current.owner_id,
-                    token=handle.current.token,
-                    ttl_seconds=self.ttl_seconds,
-                )
+                async def renew(lease: AgentTaskLease) -> None:
+                    handle.current = await self._store.renew_task_lease(
+                        lease.run_id,
+                        owner_id=lease.owner_id,
+                        token=lease.token,
+                        ttl_seconds=self.ttl_seconds,
+                    )
+
+                await handle.run_ownership_bound(renew)
             except Exception as exc:
                 raise AgentLeaseLost("agent_task_lease_lost") from exc

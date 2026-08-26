@@ -93,6 +93,8 @@ class AgentTaskInvocationCommitPort:
                     and request.call_item_id in run.waiting_call_item_ids
                 )
             )
+            or request.expected_revision is None
+            or run.revision != request.expected_revision
             or run.claim_token != request.expected_claim_token
             or task is None
             or task.status != TaskStatus.RUNNING
