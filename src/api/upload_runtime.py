@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from src.core.enums import ConversationStatus, NodeStatus, TaskStatus
@@ -12,7 +13,60 @@ from src.storage.conversation_files import build_file_upload_message_projection
 from .upload_store import UploadedFileRecord, UploadValidationError
 
 
+@dataclass(slots=True, frozen=True)
+class SubmissionUploadReference:
+    upload_id: str
+    conversation_id: str
+    sha256: str
+    size_bytes: int
+    selected_sheet: str | None
+
+    def to_continuation_dict(self) -> dict[str, Any]:
+        return {
+            "upload_id": self.upload_id,
+            "conversation_id": self.conversation_id,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+            "selected_sheet": self.selected_sheet,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionUploadResolution:
+    upload_refs: tuple[SubmissionUploadReference, ...]
+    uploaded_artifacts: tuple[Mapping[str, Any], ...]
+    skill_artifacts: tuple[Mapping[str, Any], ...]
+    missing_upload_ids: tuple[str, ...]
+    pending_sheet_selections: tuple[Mapping[str, Any], ...]
+
+    def continuation_upload_refs(self) -> list[dict[str, Any]]:
+        refs_by_upload_id = {ref.upload_id: ref for ref in self.upload_refs}
+        return [
+            refs_by_upload_id[upload_id].to_continuation_dict()
+            for upload_id in sorted(refs_by_upload_id)
+        ]
+
+    def to_upload_context(self) -> dict[str, Any]:
+        return {
+            "uploaded_artifacts": [dict(item) for item in self.uploaded_artifacts],
+            "skill_artifacts": [dict(item) for item in self.skill_artifacts],
+            "missing_upload_ids": list(self.missing_upload_ids),
+            "pending_sheet_selections": [dict(item) for item in self.pending_sheet_selections],
+        }
+
+
 class ConversationUploadRuntimeMixin:
+    def _read_conversation_file_resource_bytes_exact(
+        self, resource: ConversationFileResource
+    ) -> bytes:
+        content = self.conversation_file_store.read_bytes(resource.storage_key)
+        if (
+            len(content) != resource.size_bytes
+            or hashlib.sha256(content).hexdigest() != resource.sha256
+        ):
+            raise UploadValidationError("conversation_upload_blob_drift")
+        return content
+
     async def save_upload(
         self,
         *,
@@ -245,14 +299,53 @@ class ConversationUploadRuntimeMixin:
         *,
         upload_sheet_selections: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        resolved = await self._resolve_uploads(
+            conversation_id,
+            username,
+            upload_ids,
+            upload_sheet_selections=upload_sheet_selections,
+            repair_index=True,
+            persist_sheet_selection=True,
+        )
+        return resolved.to_upload_context()
+
+    async def resolve_uploads_for_submission(
+        self,
+        conversation_id: str,
+        username: str,
+        upload_ids,
+        *,
+        upload_sheet_selections: Mapping[str, Any] | None = None,
+    ) -> SubmissionUploadResolution:
+        return await self._resolve_uploads(
+            conversation_id,
+            username,
+            upload_ids,
+            upload_sheet_selections=upload_sheet_selections,
+            repair_index=False,
+            persist_sheet_selection=False,
+        )
+
+    async def _resolve_uploads(
+        self,
+        conversation_id: str,
+        username: str,
+        upload_ids,
+        *,
+        upload_sheet_selections: Mapping[str, Any] | None,
+        repair_index: bool,
+        persist_sheet_selection: bool,
+    ) -> SubmissionUploadResolution:
         if upload_ids is None:
             upload_ids = ()
         if isinstance(upload_ids, str):
             upload_ids = [upload_ids]
         if not isinstance(upload_ids, list | tuple):
             raise UploadValidationError("metadata.upload_ids must be a list")
-        await self._repair_conversation_file_index_if_due(conversation_id, username)
+        if repair_index:
+            await self._repair_conversation_file_index_if_due(conversation_id, username)
         sheet_selections = self._normalize_upload_sheet_selections(upload_sheet_selections)
+        upload_refs: list[SubmissionUploadReference] = []
         uploaded_artifacts: list[dict[str, Any]] = []
         skill_artifacts: list[dict[str, Any]] = []
         pending_sheet_selections: list[dict[str, Any]] = []
@@ -273,12 +366,28 @@ class ConversationUploadRuntimeMixin:
                 continue
             selected_sheet = sheet_selections.get(upload_id_text)
             if selected_sheet:
-                resource = await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
+                if persist_sheet_selection:
+                    resource = await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
+                elif resource.file_type != "spreadsheet":
+                    raise UploadValidationError(
+                        f"Sheet selection is only supported for spreadsheet uploads: {resource.file_id}"
+                    )
             selected_sheet = selected_sheet or resource.selected_sheet
             record = self._upload_record_from_resource(
                 resource,
-                content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+                content_bytes=self._read_conversation_file_resource_bytes_exact(
+                    resource
+                ),
                 selected_sheet=selected_sheet,
+            )
+            upload_refs.append(
+                SubmissionUploadReference(
+                    upload_id=record.upload_id,
+                    conversation_id=record.conversation_id,
+                    sha256=record.sha256,
+                    size_bytes=record.size_bytes,
+                    selected_sheet=record.selected_sheet,
+                )
             )
             uploaded_artifacts.append(record.to_summary())
             if record.requires_sheet_selection and not selected_sheet:
@@ -289,12 +398,13 @@ class ConversationUploadRuntimeMixin:
             skill_artifact["storage_key"] = resource.storage_key
             skill_artifact["conversation_id"] = resource.conversation_id
             skill_artifacts.append(skill_artifact)
-        return {
-            "uploaded_artifacts": uploaded_artifacts,
-            "skill_artifacts": skill_artifacts,
-            "missing_upload_ids": missing_upload_ids,
-            "pending_sheet_selections": pending_sheet_selections,
-        }
+        return SubmissionUploadResolution(
+            upload_refs=tuple(upload_refs),
+            uploaded_artifacts=tuple(uploaded_artifacts),
+            skill_artifacts=tuple(skill_artifacts),
+            missing_upload_ids=tuple(missing_upload_ids),
+            pending_sheet_selections=tuple(pending_sheet_selections),
+        )
 
     async def resolve_conversation_uploads_for_message(
         self,
@@ -311,6 +421,26 @@ class ConversationUploadRuntimeMixin:
         )
         upload_ids = [resource.file_id for resource in resources if resource.status != "deleted"]
         return await self.resolve_uploads_for_message(
+            conversation_id,
+            username,
+            upload_ids,
+            upload_sheet_selections=upload_sheet_selections,
+        )
+
+    async def resolve_conversation_uploads_for_submission(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        upload_sheet_selections: Mapping[str, Any] | None = None,
+    ) -> SubmissionUploadResolution:
+        resources = await self.storage.list_conversation_file_resources(
+            conversation_id,
+            username,
+            include_deleted=False,
+        )
+        upload_ids = [resource.file_id for resource in resources if resource.status != "deleted"]
+        return await self.resolve_uploads_for_submission(
             conversation_id,
             username,
             upload_ids,

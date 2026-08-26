@@ -1330,6 +1330,53 @@ class ConversationTaskAdmissionPort(Protocol):
 
 @runtime_checkable
 class SubmissionPreparationReceiptStoragePort(Protocol):
+    async def materialize_submission_pending_skill_supersede_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        should_supersede: bool,
+        occurred_at: datetime,
+    ) -> int: ...
+
+    async def settle_submission_route_decision_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        requires_user_scoped_server: bool,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt: ...
+
+    async def materialize_submission_no_server_intent_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPInitialIntentCreateResult: ...
+
+    async def converge_submission_no_server_without_sql_task(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult: ...
+
+    async def converge_submission_no_server_handoff_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult: ...
+
     async def write_submission_preparation_component(
         self,
         *,
@@ -1363,6 +1410,14 @@ class SubmissionPreparationReceiptStoragePort(Protocol):
 @runtime_checkable
 class ConversationStoragePort(Protocol):
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
+
+    async def compare_and_set_conversation(
+        self,
+        conversation: Conversation,
+        *,
+        expected_current_task_id: str | None,
+        expected_updated_at: datetime | None,
+    ) -> Conversation | None: ...
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None: ...
 
@@ -1450,6 +1505,12 @@ class ConversationStoragePort(Protocol):
         projection: FileUploadMessageProjection,
         *,
         now: datetime,
+    ) -> ConversationFileResource: ...
+
+    async def apply_conversation_file_sheet_selection_exact(
+        self,
+        expected: ConversationFileResource,
+        updated: ConversationFileResource,
     ) -> ConversationFileResource: ...
 
     async def mark_conversation_file_resource_and_upload_message_deleted(

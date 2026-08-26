@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from src.core.enums import TaskStatus
-from src.core.models import EventRecord, Task
+from src.core.enums import EventVisibility, TaskStatus
+from src.core.models import Conversation, EventRecord, PendingSkillContext, Task
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract, mode_for_component
+from src.storage.sqlalchemy_models import EventRecordRow
 from tests.api.support import APITestCase
 from tests.api.test_user_mcp_runtime_wiring import (
     _write_task_authority_migration_evidence,
@@ -289,6 +291,15 @@ class RuntimeSidecarContractAPITest(APITestCase):
             get_agent_run_for_task = staticmethod(lambda **_kwargs: None)
             list_agent_runs = staticmethod(lambda **_kwargs: None)
             list_agent_items = staticmethod(lambda **_kwargs: None)
+            admit_submission = staticmethod(lambda **_kwargs: None)
+            claim_pending_submission = staticmethod(lambda **_kwargs: None)
+            renew_submission_claim = staticmethod(lambda **_kwargs: None)
+            acknowledge_submission_projection = staticmethod(lambda **_kwargs: None)
+            prepare_submission_handoff = staticmethod(lambda **_kwargs: None)
+            get_submission_preparation = staticmethod(lambda **_kwargs: None)
+            acknowledge_submission_handoff = staticmethod(lambda **_kwargs: None)
+            close_conversation_admission = staticmethod(lambda **_kwargs: None)
+            reserve_message_identity = staticmethod(lambda **_kwargs: None)
 
         sentinel_client = AgentReadySentinelClient()
         manifest, allowlist, metadata = self._write_runtime_sidecar_artifact_trust_files()
@@ -400,6 +411,89 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(shadow_records[-1]["payload"]["legacy_status"], "ok")
         self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "ok")
         self.assertNotIn("do-not-log", json.dumps(shadow_records[-1], ensure_ascii=False))
+
+    async def test_pending_supersede_event_uses_event_mode_router_exactly(self) -> None:
+        sidecar = _RecordingRuntimeStoreSidecarClient()
+        await self.reconfigure_runtime(
+            runtime_sidecar_client=sidecar,
+            enable_conversation_memory=False,
+        )
+        publish = AsyncMock(wraps=self.runtime.event_broker.publish)
+        self.runtime.event_broker.publish = publish
+
+        for index, mode in enumerate(("enforce", "shadow"), start=1):
+            conversation_id = f"conv-pending-event-{mode}"
+            task_id = f"task-pending-event-{mode}"
+            now = self.runtime._utcnow_naive() + timedelta(seconds=index)  # noqa: SLF001
+            await self.runtime.storage.save_conversation(
+                Conversation(
+                    conversation_id=conversation_id,
+                    username="acc-1",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await self.runtime.storage.save_pending_skill_context(
+                PendingSkillContext(
+                    context_id=f"pending-{mode}",
+                    conversation_id=conversation_id,
+                    username="acc-1",
+                    capability_id="skill.example",
+                    skill_name="example",
+                    source_task_id="old-task",
+                    source_message_id="old-message",
+                    original_user_message="private",
+                    missing_requirements=("value",),
+                    assistant_message="need value",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            count = await self.runtime.storage.materialize_submission_pending_skill_supersede_exact(
+                username="acc-1",
+                conversation_id=conversation_id,
+                task_id=task_id,
+                should_supersede=True,
+                occurred_at=now,
+            )
+            replay_count = await self.runtime.storage.materialize_submission_pending_skill_supersede_exact(
+                username="acc-1",
+                conversation_id=conversation_id,
+                task_id=task_id,
+                should_supersede=True,
+                occurred_at=now,
+            )
+            self.assertEqual((count, replay_count), (1, 1))
+            event = EventRecord(
+                event_id=self.runtime._submission_event_id(  # noqa: SLF001
+                    task_id, "pending_skill_context.superseded"
+                ),
+                conversation_id=conversation_id,
+                task_id=task_id,
+                event_type="pending_skill_context.superseded",
+                payload={"count": count, "reason": "new_forced_capability"},
+                visibility=EventVisibility.AUDIT_ONLY,
+                created_at=now,
+            )
+            with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": mode}):
+                await self.runtime._append_submission_event_exact(event)  # noqa: SLF001
+                await self.runtime._append_submission_event_exact(event)  # noqa: SLF001
+
+            with self.runtime.storage._session_factory() as session:  # noqa: SLF001
+                sql_event = session.get(EventRecordRow, event.event_id)
+            if mode == "enforce":
+                self.assertIsNone(sql_event)
+            else:
+                self.assertIsNotNone(sql_event)
+            self.assertIn(event.event_id, sidecar.durable_events)
+
+        self.assertEqual(
+            sum(
+                call.args[0].event_type == "pending_skill_context.superseded"
+                for call in publish.await_args_list
+            ),
+            2,
+        )
 
     async def test_event_enforce_retries_exact_append_without_sql_event_loader(self) -> None:
         sidecar = _RecordingRuntimeStoreSidecarClient()

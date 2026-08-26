@@ -32,10 +32,45 @@ from tests.api.support import InMemoryTaskRuntimeSidecar
 from src.storage.rust_contract import load_runtime_sidecar_contract, migration_policy
 
 
+class _EnforceAuthoritySidecar(InMemoryTaskRuntimeSidecar):
+    commit_agent_state = staticmethod(lambda **_kwargs: None)
+    get_agent_run = staticmethod(lambda **_kwargs: None)
+    get_agent_run_for_task = staticmethod(lambda **_kwargs: None)
+    list_agent_runs = staticmethod(lambda **_kwargs: None)
+    list_agent_items = staticmethod(lambda **_kwargs: None)
+    admit_submission = staticmethod(lambda **_kwargs: None)
+    claim_pending_submission = staticmethod(lambda **_kwargs: None)
+    renew_submission_claim = staticmethod(lambda **_kwargs: None)
+    acknowledge_submission_projection = staticmethod(lambda **_kwargs: None)
+    prepare_submission_handoff = staticmethod(lambda **_kwargs: None)
+    get_submission_preparation = staticmethod(lambda **_kwargs: None)
+    acknowledge_submission_handoff = staticmethod(lambda **_kwargs: None)
+    close_conversation_admission = staticmethod(lambda **_kwargs: None)
+    reserve_message_identity = staticmethod(lambda **_kwargs: None)
+
+
 def _write_task_authority_migration_evidence(root: Path) -> dict[str, str]:
     contract = load_runtime_sidecar_contract()
     policy = migration_policy()
     digest = "a" * 64
+    inventory_side = {
+        "count": 1,
+        "pk_sha256": digest,
+        "canonical_sha256": digest,
+        "finalize_empty": False,
+    }
+    inventory = {
+        "source": dict(inventory_side),
+        "destination": dict(inventory_side),
+        "ambiguity_count": 0,
+    }
+    supported_features_sha256 = hashlib.sha256(
+        json.dumps(
+            contract["supported_features"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     plan = {
         "target_schema_version": contract["schema_hash"],
         "components": {
@@ -65,6 +100,26 @@ def _write_task_authority_migration_evidence(root: Path) -> dict[str, str]:
                 "terminal_historical_remains_unassigned": True,
             },
         },
+        "submission_authority_cutover": {
+            "source_backend": "sqlite",
+            "source_identity_sha256": "1" * 64,
+            "snapshot_boundary_sha256": "2" * 64,
+            "writer_fence_sha256": "3" * 64,
+            "report_sha256": "4" * 64,
+            "tested_commit": "5" * 40,
+            "tested_tree": "6" * 40,
+            "destination_contract": {
+                "schema_hash": contract["schema_hash"],
+                "proto_hash": contract["artifact_policy"]["expected_proto_hash"],
+                "error_code_table_hash": contract["error_code_table_hash"],
+                "supported_features_sha256": supported_features_sha256,
+            },
+            "conversation_inventory": dict(inventory),
+            "message_identity_inventory": dict(inventory),
+            "active_task_inventory": dict(inventory),
+            "finalization_receipt_sha256": "7" * 64,
+            "finalized_at_ms": 1,
+        },
     }
     key = b"test-deployment-owned-key-32bytes!"
     unsigned = {
@@ -88,6 +143,7 @@ def _write_task_authority_migration_evidence(root: Path) -> dict[str, str]:
     key_path = root / "task-migration-evidence.key"
     evidence_path.write_text(json.dumps(signed), encoding="utf-8")
     key_path.write_bytes(key)
+    evidence_path.chmod(0o600)
     key_path.chmod(0o600)
     return {
         policy["task_authority_evidence_path_env"]: str(evidence_path),
@@ -433,6 +489,69 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     enable_conversation_memory=False,
                     runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
                 )
+
+    async def test_runtime_store_enforce_requires_complete_submission_authority_surface(self) -> None:
+        class MissingIdentityAuthority(_EnforceAuthoritySidecar):
+            reserve_message_identity = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
+                "MCP_ROUTING_MODE": "off",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            os.environ.update(_write_task_authority_migration_evidence(root))
+            with self.assertRaisesRegex(
+                RuntimeError, "submission_runtime_store_unavailable"
+            ):
+                build_api_runtime(
+                    database_path=root / "runtime.sqlite3",
+                    audit_log_path=root / "audit.jsonl",
+                    master_key_bytes=b"r" * 32,
+                    mcp_config={"enabled": False},
+                    enable_platform_llm=False,
+                    enable_conversation_title_llm=False,
+                    enable_conversation_memory=False,
+                    runtime_sidecar_client=MissingIdentityAuthority(),
+                )
+
+    async def test_runtime_store_enforce_retains_authenticated_submission_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
+                "MCP_ROUTING_MODE": "off",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            os.environ.update(_write_task_authority_migration_evidence(root))
+            runtime = build_api_runtime(
+                database_path=root / "runtime.sqlite3",
+                audit_log_path=root / "audit.jsonl",
+                master_key_bytes=b"r" * 32,
+                mcp_config={"enabled": False},
+                enable_platform_llm=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+                runtime_sidecar_client=_EnforceAuthoritySidecar(),
+            )
+            try:
+                self.assertEqual(
+                    runtime._expected_submission_authority_receipt_sha256,
+                    "7" * 64,
+                )
+            finally:
+                await runtime.shutdown()
 
     def test_runtime_store_enforce_fails_closed_without_migration_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(

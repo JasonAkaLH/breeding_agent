@@ -19,12 +19,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -35,8 +35,9 @@ use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 mod codec;
 mod sqlite_adapter;
 pub use sqlite_adapter::{
-    RuntimeSidecarSqliteAdapter, SubmissionAuthorityFinalizeResult,
-    SubmissionAuthorityImportRequest, SubmissionConversationImportRecord,
+    RuntimeSidecarSqliteAdapter, SUBMISSION_IMPORT_STDIN_MAX_BYTES,
+    SubmissionAuthorityFinalizeResult, SubmissionAuthorityImportRequest,
+    SubmissionConversationImportRecord,
 };
 
 pub mod pb {
@@ -74,6 +75,7 @@ use codec::{
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = RUNTIME_PROTOCOL_VERSION;
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
+const SUBMISSION_MIGRATION_WRITER_FENCE_SUFFIX: &str = ".submission-authority-migration.lock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSidecarVersion {
@@ -962,11 +964,94 @@ impl RuntimeSidecarServeConfig {
 
     pub fn build_service(&self) -> Result<RuntimeSidecarGrpcService, RuntimeSidecarError> {
         match self.sqlite_path.as_ref() {
-            Some(sqlite_path) => Ok(RuntimeSidecarGrpcService::with_sqlite_adapter(
-                RuntimeSidecarSqliteAdapter::open(sqlite_path)?,
-            )),
+            Some(sqlite_path) => {
+                let sqlite_path = canonical_runtime_sidecar_sqlite_path(sqlite_path)?;
+                let writer_fence = acquire_submission_migration_writer_fence(&sqlite_path)?;
+                Ok(
+                    RuntimeSidecarGrpcService::with_sqlite_adapter_and_writer_fence(
+                        RuntimeSidecarSqliteAdapter::open(&sqlite_path)?,
+                        writer_fence,
+                    ),
+                )
+            }
             None => Ok(RuntimeSidecarGrpcService::new()),
         }
+    }
+}
+
+fn canonical_runtime_sidecar_sqlite_path(path: &Path) -> Result<PathBuf, RuntimeSidecarError> {
+    if path.as_os_str().is_empty() {
+        return Err(config_untrusted(
+            "runtime sidecar sqlite path must be non-empty",
+        ));
+    }
+    match fs::canonicalize(path) {
+        Ok(canonical) => Ok(canonical),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(config_untrusted(
+                    "runtime sidecar sqlite path is an unresolved alias",
+                ));
+            }
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| config_untrusted("runtime sidecar sqlite path must name a file"))?;
+            let parent = path
+                .parent()
+                .filter(|value| !value.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let canonical_parent = fs::canonicalize(parent).map_err(|_| {
+                config_untrusted("runtime sidecar sqlite parent path is unavailable")
+            })?;
+            Ok(canonical_parent.join(file_name))
+        }
+        Err(_) => Err(config_untrusted(
+            "runtime sidecar sqlite path cannot be canonicalized",
+        )),
+    }
+}
+
+fn submission_migration_writer_fence_path(sqlite_path: &Path) -> PathBuf {
+    let mut value = sqlite_path.as_os_str().to_os_string();
+    value.push(SUBMISSION_MIGRATION_WRITER_FENCE_SUFFIX);
+    PathBuf::from(value)
+}
+
+fn acquire_submission_migration_writer_fence(
+    sqlite_path: &Path,
+) -> Result<Arc<fs::File>, RuntimeSidecarError> {
+    let lock_path = submission_migration_writer_fence_path(sqlite_path);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options.open(&lock_path).map_err(|_| {
+        config_untrusted("runtime sidecar submission authority writer fence is unavailable")
+    })?;
+    let metadata = lock.metadata().map_err(|_| {
+        config_untrusted("runtime sidecar submission authority writer fence is invalid")
+    })?;
+    #[cfg(unix)]
+    {
+        let expected_uid = fs::metadata(sqlite_path).ok().map(|value| value.uid());
+        if !metadata.file_type().is_file()
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o777 != 0o600
+            || expected_uid.is_some_and(|uid| metadata.uid() != uid)
+        {
+            return Err(config_untrusted(
+                "runtime sidecar submission authority writer fence is invalid",
+            ));
+        }
+    }
+    match lock.try_lock_shared() {
+        Ok(()) => Ok(Arc::new(lock)),
+        Err(fs::TryLockError::WouldBlock) => Err(migration_blocked(
+            "runtime sidecar blocked by submission authority migration writer fence",
+        )),
+        Err(fs::TryLockError::Error(_)) => Err(config_untrusted(
+            "runtime sidecar submission authority writer fence is unavailable",
+        )),
     }
 }
 
@@ -1248,17 +1333,36 @@ impl RuntimeSidecarKernel {
             }
             let entry = self
                 .submission_admissions
-                .get(&request.message_id)
+                .get_mut(&request.message_id)
                 .ok_or_else(|| write_failed("submission identity is missing its admission"))?;
             if entry.record.idempotency_key != request.idempotency_key {
                 return Ok(admission_disposition(
                     SubmissionAdmissionDisposition::MessageIdConflict,
                 ));
             }
-            let claim = entry.claim.as_ref().and_then(|claim| {
+            let mut claim = entry.claim.as_ref().and_then(|claim| {
                 (claim.owner == request.workflow_owner && claim.expires_at_ms > request.now_ms)
                     .then(|| claim.clone())
             });
+            if claim.is_none()
+                && !entry.record.closed
+                && entry.record.handoff_state == SubmissionHandoffState::Pending
+                && entry
+                    .claim
+                    .as_ref()
+                    .is_none_or(|current| current.expires_at_ms <= request.now_ms)
+            {
+                entry.claim_revision += 1;
+                let reclaimed = new_submission_claim(
+                    &request.message_id,
+                    &request.workflow_owner,
+                    request.now_ms,
+                    request.claim_ttl_ms,
+                    entry.claim_revision,
+                )?;
+                entry.claim = Some(reclaimed.clone());
+                claim = Some(reclaimed);
+            }
             return Ok(AdmitSubmissionResponse {
                 disposition: SubmissionAdmissionDisposition::IdempotentReplay,
                 admission: Some(entry.record.clone()),
@@ -3217,6 +3321,7 @@ impl From<RuntimeSidecarError> for TypedErrorEnvelope {
 pub struct RuntimeSidecarGrpcService {
     inner: Arc<Mutex<RuntimeSidecarService>>,
     sqlite_adapter: Option<Arc<RuntimeSidecarSqliteAdapter>>,
+    _submission_migration_writer_fence: Option<Arc<fs::File>>,
 }
 
 impl RuntimeSidecarGrpcService {
@@ -3225,6 +3330,7 @@ impl RuntimeSidecarGrpcService {
         Self {
             inner: Arc::new(Mutex::new(RuntimeSidecarService::new())),
             sqlite_adapter: None,
+            _submission_migration_writer_fence: None,
         }
     }
 
@@ -3239,6 +3345,7 @@ impl RuntimeSidecarGrpcService {
                 ),
             )),
             sqlite_adapter: None,
+            _submission_migration_writer_fence: None,
         }
     }
 
@@ -3247,6 +3354,18 @@ impl RuntimeSidecarGrpcService {
         Self {
             inner: Arc::new(Mutex::new(RuntimeSidecarService::new())),
             sqlite_adapter: Some(Arc::new(sqlite_adapter)),
+            _submission_migration_writer_fence: None,
+        }
+    }
+
+    fn with_sqlite_adapter_and_writer_fence(
+        sqlite_adapter: RuntimeSidecarSqliteAdapter,
+        writer_fence: Arc<fs::File>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RuntimeSidecarService::new())),
+            sqlite_adapter: Some(Arc::new(sqlite_adapter)),
+            _submission_migration_writer_fence: Some(writer_fence),
         }
     }
 

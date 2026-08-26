@@ -15,20 +15,15 @@ PARTIAL_SENTINEL = "PARTIAL_SHOULD_NOT_PERSIST_7f3a"
 
 
 class TaskCancelAPITest(APITestCase):
-    async def test_cancel_stops_execution_before_memory_and_planning_continue_after_terminal(self) -> None:
+    async def test_submission_waits_for_memory_preparation_before_agent_handoff(self) -> None:
         class BlockingMemoryBuilder:
             def __init__(self) -> None:
                 self.started = asyncio.Event()
-                self.cancelled = asyncio.Event()
                 self.release = asyncio.Event()
 
             async def build(self, request, *, username=None):
                 self.started.set()
-                try:
-                    await self.release.wait()
-                except asyncio.CancelledError:
-                    self.cancelled.set()
-                    raise
+                await self.release.wait()
                 return ConversationMemoryContext(
                     conversation_id=request.conversation_id,
                     root_message_id=request.root_message_id,
@@ -42,38 +37,44 @@ class TaskCancelAPITest(APITestCase):
             skill_roots=[],
         )
 
-        response = await self.submit_message(
-            conversation_id="conv-cancel-memory",
-            content="取消时不要继续构建记忆和规划",
-            capability_id=None,
+        submission = asyncio.create_task(
+            self.submit_message(
+                conversation_id="conv-prepare-memory",
+                content="在交接前完成记忆准备",
+                capability_id=None,
+            )
         )
-        self.assertEqual(response.status_code, 202, response.text)
-        task_id = response.json()["task_id"]
 
         async def _memory_builder_started() -> bool:
             return builder.started.is_set()
 
         await self.wait_for_condition(_memory_builder_started)
+        self.assertFalse(submission.done())
+        tasks = await self.runtime.storage.list_tasks_for_conversation(
+            "conv-prepare-memory"
+        )
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(str(tasks[0].status), "accepted")
+        self.assertIsNone(
+            await self.runtime.agent_run_repository.get_run_for_task(
+                tasks[0].task_id
+            )
+        )
 
-        cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
-        self.assertEqual(cancel_response.status_code, 202, cancel_response.text)
-        self.assertEqual(cancel_response.json()["status"], "cancelled")
-
-        async def _execution_cancelled() -> bool:
-            return builder.cancelled.is_set() and task_id not in self.runtime._running_tasks
-
-        await self.wait_for_condition(_execution_cancelled)
         builder.release.set()
+        response = await submission
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
         terminal = await self.wait_for_terminal_task(task_id)
-        self.assertEqual(terminal["status"], "cancelled")
+        self.assertEqual(terminal["status"], "completed")
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         event_types = [event.event_type for event in events]
-        self.assertIn("task.cancelled", event_types)
-        cancel_index = event_types.index("task.cancelled")
-        self.assertNotIn("conversation.memory_built", event_types[cancel_index + 1:])
-        self.assertNotIn("conversation.memory_fallback", event_types[cancel_index + 1:])
-        self.assertNotIn("agent.final_output", event_types[cancel_index + 1:])
+        self.assertLess(
+            event_types.index("conversation.memory_built"),
+            event_types.index("task.graph_created"),
+        )
 
     async def test_cancel_endpoint_drives_real_cancellation_and_audit_output(self) -> None:
         query_started = threading.Event()

@@ -486,7 +486,7 @@
       "roll_forward_runbook"
     ],
     "require_target_schema_version": true,
-    "task_authority_evidence_schema": "maf.runtime_sidecar.task_authority_migration_evidence.v1",
+    "task_authority_evidence_schema": "maf.runtime_sidecar.task_authority_migration_evidence.v2",
     "task_authority_evidence_path_env": "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH",
     "task_authority_hmac_key_path_env": "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH"
   },

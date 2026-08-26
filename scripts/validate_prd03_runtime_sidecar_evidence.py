@@ -123,7 +123,10 @@ def validate_evidence(payload: Mapping[str, Any], *, allow_pending: bool) -> dic
 def main() -> int:
     if "--task-authority-cutover-evidence" in sys.argv:
         parser = argparse.ArgumentParser(
-            description="Validate authenticated RuntimeSidecar Task authority migration evidence."
+            description=(
+                "Validate authenticated RuntimeSidecar Task and Submission authority "
+                "migration evidence."
+            )
         )
         parser.add_argument("--task-authority-cutover-evidence", type=Path, required=True)
         parser.add_argument("--hmac-key", type=Path)
@@ -144,7 +147,7 @@ def main() -> int:
         if args.json:
             print(json.dumps(result, sort_keys=True))
         else:
-            print("runtime_sidecar_task_authority_migration_evidence_ready")
+            print("runtime_sidecar_task_submission_authority_migration_evidence_ready")
         return 0
     return run_evidence_cli(
         validate_evidence,

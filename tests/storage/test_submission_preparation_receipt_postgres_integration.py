@@ -6,9 +6,15 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
-from src.core.models import Conversation, SubmissionPreparationReceiptComponent
+from src.core.models import (
+    Conversation,
+    MCPInitialIntentCreateResult,
+    MCPNoServerConvergenceResult,
+    PendingSkillContext,
+    SubmissionPreparationReceiptComponent,
+)
 from src.storage.postgres import (
     bootstrap_postgres_database,
     create_postgres_engine,
@@ -17,7 +23,11 @@ from src.storage.postgres import (
 from src.storage.postgres.repositories import PostgreSQLStorage
 from src.storage.sqlalchemy_models import (
     ConversationRow,
+    EventRecordRow,
+    MCPNoServerIntentRow,
+    PendingSkillContextRow,
     SubmissionPreparationReceiptRow,
+    TaskRow,
 )
 from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 from tests.storage.test_submission_preparation_receipt_sqlite import _canonical
@@ -47,18 +57,32 @@ class SubmissionPreparationReceiptPostgresIntegrationTest(
         suffix = uuid4().hex
         self.conversation_id = f"preparation-pg-conversation-{suffix}"
         self.task_id = f"preparation-pg-task-{suffix}"
+        self.username = f"preparation-pg-owner-{suffix}"
         self.now = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
         self.storage = PostgreSQLStorage(self.session_factory)
         await self.storage.save_conversation(
             Conversation(
                 conversation_id=self.conversation_id,
-                username="alice",
+                username=self.username,
                 created_at=self.now,
                 updated_at=self.now,
             )
         )
     async def asyncTearDown(self) -> None:
         with self.session_factory() as session:
+            session.execute(
+                delete(PendingSkillContextRow).where(
+                    PendingSkillContextRow.conversation_id == self.conversation_id
+                )
+            )
+            session.execute(
+                delete(EventRecordRow).where(EventRecordRow.task_id == self.task_id)
+            )
+            session.execute(
+                delete(MCPNoServerIntentRow).where(
+                    MCPNoServerIntentRow.task_id == self.task_id
+                )
+            )
             session.execute(
                 delete(SubmissionPreparationReceiptRow).where(
                     SubmissionPreparationReceiptRow.conversation_id
@@ -85,7 +109,7 @@ class SubmissionPreparationReceiptPostgresIntegrationTest(
             _canonical({"selected": []}),
         )
         closed = await self.storage.close_submission_preparation_receipt(
-            username="alice",
+            username=self.username,
             conversation_id=self.conversation_id,
             task_id=self.task_id,
             closed_at=self.now + timedelta(seconds=3),
@@ -124,13 +148,102 @@ class SubmissionPreparationReceiptPostgresIntegrationTest(
                 session.get(SubmissionPreparationReceiptRow, self.task_id)
             )
 
+    async def test_no_server_route_intent_and_convergence_replay_without_task(self) -> None:
+        first = await self.storage.settle_submission_route_decision_exact(
+            username=self.username,
+            conversation_id=self.conversation_id,
+            task_id=self.task_id,
+            requires_user_scoped_server=True,
+            written_at=self.now,
+        )
+        replay = await self.storage.settle_submission_route_decision_exact(
+            username=self.username,
+            conversation_id=self.conversation_id,
+            task_id=self.task_id,
+            requires_user_scoped_server=True,
+            written_at=self.now + timedelta(seconds=1),
+        )
+        self.assertEqual(first, replay)
+        self.assertIn(b'"decision":"no_server"', first.route_decision)
+        self.assertEqual(
+            await self.storage.materialize_submission_no_server_intent_exact(
+                username=self.username,
+                conversation_id=self.conversation_id,
+                task_id=self.task_id,
+                occurred_at=self.now + timedelta(seconds=2),
+            ),
+            MCPInitialIntentCreateResult.CREATED_UNAVAILABLE,
+        )
+        converged_at = self.now + timedelta(seconds=3)
+        self.assertEqual(
+            await self.storage.converge_submission_no_server_without_sql_task(
+                username=self.username,
+                conversation_id=self.conversation_id,
+                task_id=self.task_id,
+                occurred_at=converged_at,
+            ),
+            MCPNoServerConvergenceResult.CONVERGED,
+        )
+        self.assertEqual(
+            await self.storage.converge_submission_no_server_without_sql_task(
+                username=self.username,
+                conversation_id=self.conversation_id,
+                task_id=self.task_id,
+                occurred_at=converged_at,
+            ),
+            MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+        )
+        with self.session_factory() as session:
+            self.assertIsNone(session.get(TaskRow, self.task_id))
+            intent = session.scalar(
+                select(MCPNoServerIntentRow).where(
+                    MCPNoServerIntentRow.task_id == self.task_id
+                )
+            )
+            self.assertIsNotNone(intent)
+            self.assertIsNone(intent.resume_envelope_json)
+
+    async def test_pending_skill_supersede_is_transactional_and_exact(self) -> None:
+        await self.storage.save_pending_skill_context(
+            PendingSkillContext(
+                context_id=f"context-{self.task_id}",
+                conversation_id=self.conversation_id,
+                username=self.username,
+                capability_id="skill.example",
+                skill_name="example",
+                source_task_id="old-task",
+                source_message_id="old-message",
+                original_user_message="old",
+                missing_requirements=("value",),
+                assistant_message="need value",
+                created_at=self.now,
+                updated_at=self.now,
+            )
+        )
+        occurred_at = self.now + timedelta(seconds=1)
+        first = await self.storage.materialize_submission_pending_skill_supersede_exact(
+            username=self.username,
+            conversation_id=self.conversation_id,
+            task_id=self.task_id,
+            should_supersede=True,
+            occurred_at=occurred_at,
+        )
+        replay = await self.storage.materialize_submission_pending_skill_supersede_exact(
+            username=self.username,
+            conversation_id=self.conversation_id,
+            task_id=self.task_id,
+            should_supersede=True,
+            occurred_at=occurred_at,
+        )
+        self.assertEqual((first, replay), (1, 1))
+
     async def _write(
         self,
         component: SubmissionPreparationReceiptComponent,
         value: bytes,
     ):
         return await self.storage.write_submission_preparation_component(
-            username="alice",
+            username=self.username,
             conversation_id=self.conversation_id,
             task_id=self.task_id,
             component=component,

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import stat
 from collections.abc import Mapping
 from ipaddress import ip_address
 from pathlib import Path
@@ -1154,13 +1156,30 @@ def validate_runtime_sidecar_promotion_readiness(report: Mapping[str, Any]) -> d
 def validate_runtime_sidecar_migration_plan(plan: Mapping[str, Any]) -> dict[str, str]:
     """Validate state migration / backup / restore / replay evidence."""
 
-    policy = migration_policy()
     if not isinstance(plan, Mapping) or set(plan) != {
         "target_schema_version",
         "components",
         "task_authority_cutover",
+        "submission_authority_cutover",
     }:
         _raise_migration_blocked()
+    required_components = _validate_migration_plan_base(plan)
+    cutover = plan.get("task_authority_cutover")
+    _validate_task_authority_cutover(cutover)
+    submission_cutover = plan.get("submission_authority_cutover")
+    finalization_receipt_sha256 = _validate_submission_authority_cutover(
+        submission_cutover
+    )
+    return {
+        "migration": "ready",
+        "target_schema_version": str(plan["target_schema_version"]),
+        "components": ",".join(required_components),
+        "finalization_receipt_sha256": finalization_receipt_sha256,
+    }
+
+
+def _validate_migration_plan_base(plan: Mapping[str, Any]) -> list[str]:
+    policy = migration_policy()
     if (
         policy.get("require_target_schema_version") is True
         and plan.get("target_schema_version")
@@ -1182,13 +1201,7 @@ def validate_runtime_sidecar_migration_plan(plan: Mapping[str, Any]) -> dict[str
             or any(evidence.get(item) is not True for item in required_evidence)
         ):
             _raise_migration_blocked()
-    cutover = plan.get("task_authority_cutover")
-    _validate_task_authority_cutover(cutover)
-    return {
-        "migration": "ready",
-        "target_schema_version": str(plan["target_schema_version"]),
-        "components": ",".join(required_components),
-    }
+    return required_components
 
 
 def validate_runtime_sidecar_migration_evidence_artifact(
@@ -1196,10 +1209,27 @@ def validate_runtime_sidecar_migration_evidence_artifact(
     *,
     authentication_key: bytes,
 ) -> dict[str, str]:
-    """Authenticate and validate the enforce-only Task authority cutover artifact."""
+    """Authenticate and validate the enforce-only v2 authority cutover artifact."""
 
-    contract = load_runtime_sidecar_contract()
     policy = migration_policy()
+    expected_schema = "maf.runtime_sidecar.task_authority_migration_evidence.v2"
+    if policy.get("task_authority_evidence_schema") != expected_schema:
+        _raise_migration_blocked()
+    plan = _authenticate_runtime_sidecar_migration_evidence_artifact(
+        artifact,
+        authentication_key=authentication_key,
+        expected_schema=expected_schema,
+    )
+    return validate_runtime_sidecar_migration_plan(plan)
+
+
+def _authenticate_runtime_sidecar_migration_evidence_artifact(
+    artifact: Any,
+    *,
+    authentication_key: bytes,
+    expected_schema: str,
+) -> Mapping[str, Any]:
+    contract = load_runtime_sidecar_contract()
     expected_fields = {
         "schema",
         "component",
@@ -1215,7 +1245,7 @@ def validate_runtime_sidecar_migration_evidence_artifact(
     for field in ("component", "protocol_version", "schema_hash", "error_code_table_hash"):
         if artifact.get(field) != contract[field]:
             _raise_migration_blocked()
-    if artifact.get("schema") != policy["task_authority_evidence_schema"]:
+    if artifact.get("schema") != expected_schema:
         _raise_migration_blocked()
     if not _non_empty_string(artifact.get("key_id")) or len(authentication_key) < 32:
         _raise_migration_blocked()
@@ -1230,7 +1260,10 @@ def validate_runtime_sidecar_migration_evidence_artifact(
     ).hexdigest()
     if not hmac.compare_digest(signature, expected_signature):
         _raise_migration_blocked()
-    return validate_runtime_sidecar_migration_plan(artifact["migration_plan"])
+    plan = artifact.get("migration_plan")
+    if not isinstance(plan, Mapping):
+        _raise_migration_blocked()
+    return plan
 
 
 def load_runtime_sidecar_migration_evidence_artifact(
@@ -1240,23 +1273,54 @@ def load_runtime_sidecar_migration_evidence_artifact(
 ) -> dict[str, str]:
     """Load a configured evidence artifact and authenticate it before enforce cutover."""
 
-    try:
-        if (
-            evidence_path.is_symlink()
-            or authentication_key_path.is_symlink()
-            or not evidence_path.is_file()
-            or not authentication_key_path.is_file()
-            or authentication_key_path.stat().st_mode & 0o077
-        ):
-            _raise_migration_blocked()
-        artifact = json.loads(evidence_path.read_text(encoding="utf-8"))
-        authentication_key = authentication_key_path.read_bytes()
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        _raise_migration_blocked()
+    artifact, authentication_key = _load_runtime_sidecar_migration_evidence_files(
+        evidence_path,
+        authentication_key_path=authentication_key_path,
+    )
     return validate_runtime_sidecar_migration_evidence_artifact(
         artifact,
         authentication_key=authentication_key,
     )
+
+
+def load_runtime_sidecar_task_authority_v1_for_upgrade(
+    evidence_path: Path,
+    *,
+    authentication_key_path: Path,
+) -> dict[str, Any]:
+    """Load an authenticated legacy Task authority plan for offline v2 upgrade."""
+
+    artifact, authentication_key = _load_runtime_sidecar_migration_evidence_files(
+        evidence_path,
+        authentication_key_path=authentication_key_path,
+    )
+    plan = _authenticate_runtime_sidecar_migration_evidence_artifact(
+        artifact,
+        authentication_key=authentication_key,
+        expected_schema="maf.runtime_sidecar.task_authority_migration_evidence.v1",
+    )
+    if set(plan) != {
+        "target_schema_version",
+        "components",
+        "task_authority_cutover",
+    }:
+        _raise_migration_blocked()
+    _validate_migration_plan_base(plan)
+    _validate_task_authority_cutover(plan.get("task_authority_cutover"))
+    return dict(plan)
+
+
+def _load_runtime_sidecar_migration_evidence_files(
+    evidence_path: Path,
+    *,
+    authentication_key_path: Path,
+) -> tuple[Any, bytes]:
+    try:
+        artifact = json.loads(_read_regular_0600(evidence_path).decode("utf-8"))
+        authentication_key = _read_regular_0600(authentication_key_path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _raise_migration_blocked()
+    return artifact, authentication_key
 
 
 def _validate_task_authority_cutover(cutover: Any) -> None:
@@ -1305,9 +1369,131 @@ def _validate_matching_inventory(inventory: Any) -> None:
         not _non_negative_int(inventory.get("legacy_count"))
         or inventory.get("sidecar_count") != inventory.get("legacy_count")
         or not _sha256_digest(inventory.get("legacy_canonical_digest"))
-        or inventory.get("sidecar_canonical_digest") != inventory.get("legacy_canonical_digest")
+        or inventory.get("sidecar_canonical_digest")
+        != inventory.get("legacy_canonical_digest")
     ):
         _raise_migration_blocked()
+
+
+def _validate_submission_authority_cutover(cutover: Any) -> str:
+    expected_keys = {
+        "source_backend",
+        "source_identity_sha256",
+        "snapshot_boundary_sha256",
+        "writer_fence_sha256",
+        "report_sha256",
+        "tested_commit",
+        "tested_tree",
+        "destination_contract",
+        "conversation_inventory",
+        "message_identity_inventory",
+        "active_task_inventory",
+        "finalization_receipt_sha256",
+        "finalized_at_ms",
+    }
+    if not isinstance(cutover, Mapping) or set(cutover) != expected_keys:
+        _raise_migration_blocked()
+    if cutover.get("source_backend") not in {"sqlite", "postgresql"}:
+        _raise_migration_blocked()
+    for field in (
+        "source_identity_sha256",
+        "snapshot_boundary_sha256",
+        "writer_fence_sha256",
+        "report_sha256",
+        "finalization_receipt_sha256",
+    ):
+        if not _sha256_digest(cutover.get(field)):
+            _raise_migration_blocked()
+    if (
+        not _lower_hex(cutover.get("tested_commit"), length=40)
+        or not _lower_hex(cutover.get("tested_tree"), length=40)
+        or not _non_negative_int(cutover.get("finalized_at_ms"))
+    ):
+        _raise_migration_blocked()
+
+    contract = load_runtime_sidecar_contract()
+    supported_features_sha256 = hashlib.sha256(
+        json.dumps(
+            contract["supported_features"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if cutover.get("destination_contract") != {
+        "schema_hash": contract["schema_hash"],
+        "proto_hash": contract["artifact_policy"]["expected_proto_hash"],
+        "error_code_table_hash": contract["error_code_table_hash"],
+        "supported_features_sha256": supported_features_sha256,
+    }:
+        _raise_migration_blocked()
+
+    for field in (
+        "conversation_inventory",
+        "message_identity_inventory",
+        "active_task_inventory",
+    ):
+        _validate_submission_inventory(cutover.get(field))
+    return str(cutover["finalization_receipt_sha256"])
+
+
+def _validate_submission_inventory(inventory: Any) -> None:
+    if not isinstance(inventory, Mapping) or set(inventory) != {
+        "source",
+        "destination",
+        "ambiguity_count",
+    }:
+        _raise_migration_blocked()
+    source = inventory.get("source")
+    destination = inventory.get("destination")
+    _validate_submission_inventory_side(source)
+    _validate_submission_inventory_side(destination)
+    if inventory.get("ambiguity_count") != 0 or source != destination:
+        _raise_migration_blocked()
+
+
+def _validate_submission_inventory_side(side: Any) -> None:
+    if not isinstance(side, Mapping) or set(side) != {
+        "count",
+        "pk_sha256",
+        "canonical_sha256",
+        "finalize_empty",
+    }:
+        _raise_migration_blocked()
+    count = side.get("count")
+    if (
+        not _non_negative_int(count)
+        or not _sha256_digest(side.get("pk_sha256"))
+        or not _sha256_digest(side.get("canonical_sha256"))
+        or not isinstance(side.get("finalize_empty"), bool)
+        or side.get("finalize_empty") is not (count == 0)
+    ):
+        _raise_migration_blocked()
+
+
+def _read_regular_0600(path: Path) -> bytes:
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600:
+        _raise_migration_blocked()
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _raise_migration_blocked()
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            return stream.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -1316,6 +1502,14 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 def _sha256_digest(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _lower_hex(value: Any, *, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _non_negative_int(value: Any) -> bool:
@@ -1578,6 +1772,7 @@ __all__ = [
     "build_sidecar_retry_plan",
     "ensure_sidecar_write_allowed",
     "load_runtime_sidecar_migration_evidence_artifact",
+    "load_runtime_sidecar_task_authority_v1_for_upgrade",
     "runtime_sidecar_max_in_flight",
     "validate_runtime_sidecar_artifact_provenance",
     "validate_runtime_sidecar_benchmark_report",

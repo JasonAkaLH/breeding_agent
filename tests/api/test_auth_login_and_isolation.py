@@ -3,11 +3,19 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from httpx_sse import aconnect_sse
 
 from src.core.enums import ConversationStatus, MessageRole, TaskStatus
-from src.core.models import Conversation, Message, Task
+from src.core.models import (
+    Conversation,
+    ConversationAdmissionCloseDisposition,
+    ConversationAdmissionCloseResult,
+    Message,
+    Task,
+)
 
 from tests.api.support import APITestCase, blocking_mysql_adapter
 
@@ -287,6 +295,357 @@ class AuthIsolationAPITest(APITestCase):
 
         await self.wait_for_condition(physically_deleted)
 
+    async def test_delete_closes_admission_before_task_file_and_physical_mutation(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-delete-close-order",
+                username="alice",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        calls: list[str] = []
+        original_close = self.runtime.storage.close_conversation_admission
+        original_list_tasks = self.runtime.storage.list_tasks_for_conversation
+        original_delete_files = self.runtime._delete_conversation_file_artifacts
+        original_delete_physical = self.runtime.storage.delete_conversation_physical
+
+        async def close(request):
+            calls.append("close")
+            return await original_close(request)
+
+        async def list_tasks(*args, **kwargs):
+            calls.append("list_tasks")
+            return await original_list_tasks(*args, **kwargs)
+
+        async def delete_files(conversation_id: str) -> None:
+            calls.append("delete_files")
+            await original_delete_files(conversation_id)
+
+        async def delete_physical(conversation_id: str) -> dict[str, int]:
+            calls.append("delete_physical")
+            return await original_delete_physical(conversation_id)
+
+        self.runtime.storage.close_conversation_admission = close  # type: ignore[method-assign]
+        self.runtime.storage.list_tasks_for_conversation = list_tasks  # type: ignore[method-assign]
+        self.runtime._delete_conversation_file_artifacts = delete_files  # type: ignore[method-assign]
+        self.runtime.storage.delete_conversation_physical = delete_physical  # type: ignore[method-assign]
+
+        await self.runtime.delete_conversation(
+            "conv-delete-close-order", username="alice"
+        )
+
+        self.assertEqual(
+            calls,
+            ["close", "list_tasks", "delete_files", "delete_physical"],
+        )
+
+    async def test_delete_close_operation_identity_has_unambiguous_components(self) -> None:
+        self.assertNotEqual(
+            self.runtime._conversation_admission_close_operation_id("a\0b", "c"),
+            self.runtime._conversation_admission_close_operation_id("a", "b\0c"),
+        )
+
+    async def test_delete_close_conflict_stops_before_business_mutation(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-delete-close-conflict",
+                username="alice",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.runtime.storage.close_conversation_admission = AsyncMock(
+            return_value=ConversationAdmissionCloseResult(
+                disposition=ConversationAdmissionCloseDisposition.CONFLICT,
+                conversation_id="conv-delete-close-conflict",
+            )
+        )
+        self.runtime.storage.list_tasks_for_conversation = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        self.runtime._delete_conversation_file_artifacts = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        self.runtime.storage.delete_conversation_physical = AsyncMock(  # type: ignore[method-assign]
+            return_value={"conversation": 1}
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "conversation_admission_close_failed"
+        ):
+            await self.runtime.delete_conversation(
+                "conv-delete-close-conflict", username="alice"
+            )
+
+        self.runtime.storage.list_tasks_for_conversation.assert_not_awaited()
+        self.runtime._delete_conversation_file_artifacts.assert_not_awaited()
+        self.runtime.storage.delete_conversation_physical.assert_not_awaited()
+        conflicted = await self.runtime.storage.get_conversation(
+            "conv-delete-close-conflict"
+        )
+        self.assertIsNotNone(conflicted)
+        assert conflicted is not None
+        self.assertEqual(conflicted.status, ConversationStatus.DELETING_FAILED)
+
+    async def test_startup_delete_recovery_replays_close_before_physical_cleanup(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        close_requests = []
+        for conversation_id, phase in (
+            (
+                "conv-recover-before-close",
+                "closing_admission",
+            ),
+            (
+                "conv-recover-after-close",
+                "deleting_db",
+            ),
+        ):
+            await self.runtime.storage.save_conversation(
+                Conversation(
+                    conversation_id=conversation_id,
+                    username="alice",
+                    status=ConversationStatus.DELETING,
+                    delete_runner_id=f"runner:{conversation_id}",
+                    delete_requested_at=now,
+                    delete_started_at=now,
+                    delete_phase=phase,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        async def close(request):
+            close_requests.append(request)
+            disposition = (
+                ConversationAdmissionCloseDisposition.CLOSED
+                if request.conversation_id == "conv-recover-before-close"
+                else ConversationAdmissionCloseDisposition.EXACT_REPLAY
+            )
+            return ConversationAdmissionCloseResult(
+                disposition=disposition,
+                conversation_id=request.conversation_id,
+            )
+
+        self.runtime.storage.close_conversation_admission = close  # type: ignore[method-assign]
+
+        await self.runtime.recover_deleting_conversations()
+
+        self.assertIsNone(
+            await self.runtime.storage.get_conversation("conv-recover-before-close")
+        )
+        self.assertIsNone(
+            await self.runtime.storage.get_conversation("conv-recover-after-close")
+        )
+        self.assertEqual(len(close_requests), 2)
+        self.assertEqual(
+            {
+                request.operation_id
+                for request in close_requests
+            },
+            {
+                self.runtime._conversation_admission_close_operation_id(
+                    "alice", "conv-recover-before-close"
+                ),
+                self.runtime._conversation_admission_close_operation_id(
+                    "alice", "conv-recover-after-close"
+                ),
+            },
+        )
+        self.assertNotIn(
+            "runner:conv-recover-before-close",
+            {request.operation_id for request in close_requests},
+        )
+
+    async def test_transient_delete_phase_failures_remain_startup_recoverable(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        for stage in ("close", "cancel", "files", "physical"):
+            with self.subTest(stage=stage):
+                conversation_id = f"conv-delete-transient-{stage}"
+                await self.runtime.storage.save_conversation(
+                    Conversation(
+                        conversation_id=conversation_id,
+                        username="alice",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                original_close = self.runtime.storage.close_conversation_admission
+                original_list_tasks = self.runtime.storage.list_tasks_for_conversation
+                original_cancel = self.runtime.cancel_task
+                original_delete_files = self.runtime._delete_conversation_file_artifacts
+                original_delete_physical = (
+                    self.runtime.storage.delete_conversation_physical
+                )
+                close_operation_ids: list[str] = []
+                failed = False
+
+                async def close(request):
+                    nonlocal failed
+                    close_operation_ids.append(request.operation_id)
+                    if stage == "close" and not failed:
+                        failed = True
+                        raise OSError("transient close failure")
+                    return await original_close(request)
+
+                async def list_tasks(*args, **kwargs):
+                    if stage == "cancel" and not failed:
+                        return [SimpleNamespace(task_id="task-transient-cancel")]
+                    return await original_list_tasks(*args, **kwargs)
+
+                async def cancel_task(task_id: str):
+                    nonlocal failed
+                    if stage == "cancel" and not failed:
+                        failed = True
+                        raise OSError("transient cancel failure")
+                    return await original_cancel(task_id)
+
+                async def delete_files(target_conversation_id: str) -> None:
+                    nonlocal failed
+                    if stage == "files" and not failed:
+                        failed = True
+                        raise OSError("transient file failure")
+                    await original_delete_files(target_conversation_id)
+
+                async def delete_physical(
+                    target_conversation_id: str,
+                ) -> dict[str, int]:
+                    nonlocal failed
+                    if stage == "physical" and not failed:
+                        failed = True
+                        raise OSError("transient physical failure")
+                    return await original_delete_physical(target_conversation_id)
+
+                self.runtime.storage.close_conversation_admission = close  # type: ignore[method-assign]
+                self.runtime.storage.list_tasks_for_conversation = list_tasks  # type: ignore[method-assign]
+                self.runtime.cancel_task = cancel_task  # type: ignore[method-assign]
+                self.runtime._delete_conversation_file_artifacts = delete_files  # type: ignore[method-assign]
+                self.runtime.storage.delete_conversation_physical = delete_physical  # type: ignore[method-assign]
+                try:
+                    with self.assertRaises(OSError):
+                        await self.runtime.delete_conversation(
+                            conversation_id,
+                            username="alice",
+                        )
+
+                    pending = await self.runtime.storage.get_conversation(
+                        conversation_id
+                    )
+                    self.assertIsNotNone(pending)
+                    assert pending is not None
+                    self.assertEqual(pending.status, ConversationStatus.DELETING)
+                    runner_id = pending.delete_runner_id
+
+                    recovered = await self.runtime.delete_conversation(
+                        conversation_id,
+                        username="alice",
+                    )
+
+                    self.assertIsNone(
+                        await self.runtime.storage.get_conversation(conversation_id)
+                    )
+                    self.assertTrue(recovered["deleted"])
+                    self.assertEqual(len(close_operation_ids), 2)
+                    self.assertEqual(
+                        len(set(close_operation_ids)),
+                        1,
+                    )
+                    self.assertEqual(
+                        close_operation_ids[0],
+                        self.runtime._conversation_admission_close_operation_id(
+                            "alice", conversation_id
+                        ),
+                    )
+                    self.assertIsNotNone(runner_id)
+                finally:
+                    self.runtime.storage.close_conversation_admission = original_close  # type: ignore[method-assign]
+                    self.runtime.storage.list_tasks_for_conversation = original_list_tasks  # type: ignore[method-assign]
+                    self.runtime.cancel_task = original_cancel  # type: ignore[method-assign]
+                    self.runtime._delete_conversation_file_artifacts = original_delete_files  # type: ignore[method-assign]
+                    self.runtime.storage.delete_conversation_physical = original_delete_physical  # type: ignore[method-assign]
+
+    async def test_deleting_conversation_with_external_runner_still_waits(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        conversation_id = "conv-delete-external-runner"
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id=conversation_id,
+                username="alice",
+                status=ConversationStatus.DELETING,
+                delete_runner_id="external-runner",
+                delete_requested_at=now,
+                delete_started_at=now,
+                delete_phase="deleting_db",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.runtime._wait_for_external_conversation_delete = AsyncMock(  # type: ignore[method-assign]
+            return_value={"conversation_id": conversation_id, "deleted": True}
+        )
+        self.runtime._run_conversation_delete = AsyncMock()  # type: ignore[method-assign]
+
+        result = await self.runtime.delete_conversation(
+            conversation_id,
+            username="alice",
+        )
+
+        self.assertTrue(result["deleted"])
+        self.runtime._wait_for_external_conversation_delete.assert_awaited_once_with(
+            conversation_id,
+            runner_id="external-runner",
+        )
+        self.runtime._run_conversation_delete.assert_not_awaited()
+
+    async def test_startup_delete_recovery_failure_leaves_no_background_delete(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        for conversation_id in ("conv-recover-a-fails", "conv-recover-b-pending"):
+            await self.runtime.storage.save_conversation(
+                Conversation(
+                    conversation_id=conversation_id,
+                    username="alice",
+                    status=ConversationStatus.DELETING,
+                    delete_runner_id=f"runner:{conversation_id}",
+                    delete_requested_at=now,
+                    delete_started_at=now,
+                    delete_phase="closing_admission",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        close_requests = []
+
+        async def close(request):
+            close_requests.append(request)
+            return ConversationAdmissionCloseResult(
+                disposition=ConversationAdmissionCloseDisposition.CONFLICT,
+                conversation_id=request.conversation_id,
+            )
+
+        self.runtime.storage.close_conversation_admission = close  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "conversation_admission_close_failed",
+        ):
+            await self.runtime.recover_deleting_conversations()
+        await asyncio.sleep(0)
+
+        self.assertEqual(
+            [request.conversation_id for request in close_requests],
+            ["conv-recover-a-fails"],
+        )
+        pending = await self.runtime.storage.get_conversation(
+            "conv-recover-b-pending"
+        )
+        self.assertIsNotNone(pending)
+        assert pending is not None
+        self.assertEqual(pending.status, ConversationStatus.DELETING)
+        self.assertFalse(
+            any(
+                not task.done()
+                for task in self.runtime._conversation_delete_tasks.values()
+            )
+        )
+
     async def test_delete_conversation_auto_cancels_running_task_before_purge(self) -> None:
         query_started = threading.Event()
         blocking_adapter, release = blocking_mysql_adapter(started=query_started)
@@ -394,7 +753,7 @@ class AuthIsolationAPITest(APITestCase):
         self.assertEqual(await self.runtime.storage.list_messages_for_conversation("conv-race-delete"), [])
         self.assertEqual(await self.runtime.storage.list_tasks_for_conversation("conv-race-delete"), [])
 
-    async def test_delete_failure_after_waiter_cancellation_is_observed(self) -> None:
+    async def test_transient_delete_failure_after_waiter_cancellation_is_recoverable(self) -> None:
         now = datetime(2026, 5, 26, 12, 0, 0)
         await self.login("alice")
         await self.runtime.storage.save_conversation(
@@ -432,16 +791,30 @@ class AuthIsolationAPITest(APITestCase):
 
             release_delete.set()
 
-            async def marked_failed() -> bool:
-                current = await self.runtime.storage.get_conversation("conv-delete-fails-after-cancel")
-                return current is not None and current.status == ConversationStatus.DELETING_FAILED
+            async def delete_runner_stopped() -> bool:
+                task = self.runtime._conversation_delete_tasks.get(
+                    "conv-delete-fails-after-cancel"
+                )
+                return task is None or task.done()
 
-            await self.wait_for_condition(marked_failed)
+            await self.wait_for_condition(delete_runner_stopped)
+            current = await self.runtime.storage.get_conversation(
+                "conv-delete-fails-after-cancel"
+            )
+            self.assertIsNotNone(current)
+            assert current is not None
+            self.assertEqual(current.status, ConversationStatus.DELETING)
             await asyncio.sleep(0)
         finally:
             loop.set_exception_handler(previous_handler)
             self.runtime.storage.delete_conversation_physical = original_delete_physical  # type: ignore[method-assign]
 
+        await self.runtime.recover_deleting_conversations()
+        self.assertIsNone(
+            await self.runtime.storage.get_conversation(
+                "conv-delete-fails-after-cancel"
+            )
+        )
         self.assertEqual(
             [context.get("message") for context in unhandled_contexts],
             [],

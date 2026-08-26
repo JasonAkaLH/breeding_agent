@@ -95,6 +95,7 @@ EXPECTED_SIGNATURES = {
             ("mcp_cp7_maintenance_authorizer", "KEYWORD_ONLY", "Callable[[object], bool] | None", "None"),
             ("submission_admission_coordinator", "KEYWORD_ONLY", "SubmissionAdmissionCoordinator | None", "None"),
             ("prepared_agent_recovery_loader", "KEYWORD_ONLY", "PreparedAgentRecoveryLoader | None", "None"),
+            ("expected_submission_authority_receipt_sha256", "KEYWORD_ONLY", "str | None", "None"),
         ],
         "return": "None",
     },

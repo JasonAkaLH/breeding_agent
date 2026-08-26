@@ -820,17 +820,19 @@ fn test_inventory(
         let mut hasher = Sha256::new();
         hasher.update(domain.as_bytes());
         hasher.update(b"\0");
+        hasher.update(kind.as_bytes());
+        hasher.update(b"\0");
         hasher.update(bytes);
         format!("{:x}", hasher.finalize())
     };
     TestInventoryEvidence {
         count: records.len() as u32,
         pk_sha256: digest(
-            &format!("maf.submission_authority.inventory.{kind}.pk.v1"),
+            "maf.submission_authority.inventory.pk.v1",
             &serde_json::to_vec(&primary_keys).unwrap(),
         ),
         canonical_sha256: digest(
-            &format!("maf.submission_authority.inventory.{kind}.records.v1"),
+            "maf.submission_authority.inventory.rows.v1",
             &serde_json::to_vec(&records).unwrap(),
         ),
         finalize_empty: records.is_empty(),
@@ -1107,9 +1109,9 @@ fn submission_finalization_shared_vector_locks_subject_digest_and_receipt() {
             format!("{:x}", Sha256::digest(&receipt)),
         ),
         (
-            "48fd5ffba62e2e24fac246d40725f2cf836ce66beb33491488918db04c0c8c90".to_owned(),
-            "aa53b907b800f2c0e8ea86f5a62c3000e224b13b51b34a2aa0f31ceb5d5156e5".to_owned(),
-            "1d6d7be12c40d42887f5eb9095a770afc96e0da719105b40e67c90bfa43fa770".to_owned(),
+            "f2138625fa3aeb50385c3556400349706ab2b84b44b585a662032140428d9851".to_owned(),
+            "27900b488e1ecb27a6c013117a402df218ed9b89c8a7c8c137d638b73038f2a4".to_owned(),
+            "27ad3f3e10821d5e3ae634f8ec5e76e40c24df72690a20cd1c48ee963f1e0991".to_owned(),
         )
     );
 }
@@ -1302,6 +1304,21 @@ fn sqlite_submission_admission_persists_replays_before_busy_and_releases_on_clos
             SubmissionAdmissionDisposition::IdempotentReplay
         );
         assert_eq!(replayed.admission, Some(canonical_admission.clone()));
+        let mut exact_reclaim =
+            sqlite_admission_request("message-1", "candidate-task", "conversation");
+        exact_reclaim.workflow_owner = "worker-b".to_owned();
+        exact_reclaim.now_ms = 111;
+        let reclaimed = adapter
+            .admit_submission(exact_reclaim)
+            .expect("exact replay reclaims expired target");
+        assert_eq!(
+            reclaimed.disposition,
+            SubmissionAdmissionDisposition::IdempotentReplay
+        );
+        assert_eq!(
+            reclaimed.claim.expect("exact reclaimed claim").owner,
+            "worker-b"
+        );
         assert_eq!(
             adapter
                 .admit_submission(sqlite_admission_request(
@@ -1318,7 +1335,7 @@ fn sqlite_submission_admission_persists_replays_before_busy_and_releases_on_clos
     let claim = reopened
         .claim_pending_submission(ClaimPendingSubmissionRequest {
             workflow_owner: "worker-b".to_owned(),
-            now_ms: 111,
+            now_ms: 212,
             claim_ttl_ms: 100,
             after_created_at_ms: None,
             after_message_id: None,
@@ -1334,7 +1351,7 @@ fn sqlite_submission_admission_persists_replays_before_busy_and_releases_on_clos
             claim_token: claim.token,
             projection_sha256: canonical_admission.projection_sha256,
             expected_state: SubmissionProjectionState::Pending,
-            now_ms: 112,
+            now_ms: 213,
         })
         .expect("ack projection");
     assert_eq!(
@@ -1346,7 +1363,7 @@ fn sqlite_submission_admission_persists_replays_before_busy_and_releases_on_clos
             username: "owner".to_owned(),
             conversation_id: "conversation".to_owned(),
             operation_id: "delete:conversation".to_owned(),
-            now_ms: 113,
+            now_ms: 214,
         })
         .expect("close");
     assert_eq!(
@@ -1799,6 +1816,113 @@ fn sqlite_submission_offline_import_validates_active_tasks_and_legacy_identity()
 }
 
 #[test]
+fn sqlite_submission_offline_import_rolls_back_each_write_phase_fault() {
+    for (name, trigger) in [
+        (
+            "conversation",
+            "CREATE TRIGGER fail_import BEFORE INSERT ON submission_conversations BEGIN SELECT RAISE(ABORT, 'fault'); END;",
+        ),
+        (
+            "identity",
+            "CREATE TRIGGER fail_import BEFORE INSERT ON submission_message_identities BEGIN SELECT RAISE(ABORT, 'fault'); END;",
+        ),
+        (
+            "finalization",
+            "CREATE TRIGGER fail_import BEFORE UPDATE ON submission_authority_meta BEGIN SELECT RAISE(ABORT, 'fault'); END;",
+        ),
+    ] {
+        let db_path = temp_db_path(&format!("submission-import-{name}-fault"));
+        let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+        Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(trigger)
+            .unwrap();
+        let conversation = SubmissionConversationImportRecord {
+            conversation_id: "legacy-conversation".to_owned(),
+            username: "owner".to_owned(),
+            status: "active".to_owned(),
+            active_task_id: None,
+            updated_at_ms: 8,
+        };
+        let identity = MessageIdentityRecord {
+            message_id: "legacy-message".to_owned(),
+            conversation_id: "legacy-conversation".to_owned(),
+            username: "owner".to_owned(),
+            identity_kind: MessageIdentityKind::LegacyConflictOnly,
+            role: None,
+            message_type: None,
+            message_created_at_ms: None,
+            task_id: None,
+            request_fingerprint: None,
+            reserved_at_ms: 8,
+        };
+        let (digest, subject, receipt) = finalization_bundle(
+            9,
+            test_inventory(
+                "conversations",
+                vec![conversation.conversation_id.clone()],
+                vec![serde_json::json!({
+                    "active_task_id": conversation.active_task_id,
+                    "conversation_id": conversation.conversation_id,
+                    "status": conversation.status,
+                    "updated_at_ms": conversation.updated_at_ms,
+                    "username": conversation.username,
+                })],
+            ),
+            test_inventory(
+                "message_identities",
+                vec![identity.message_id.clone()],
+                vec![serde_json::json!({
+                    "conversation_id": identity.conversation_id,
+                    "identity_kind": "legacy_conflict_only",
+                    "message_created_at_ms": identity.message_created_at_ms,
+                    "message_id": identity.message_id,
+                    "message_type": identity.message_type,
+                    "request_fingerprint": identity.request_fingerprint,
+                    "reserved_at_ms": identity.reserved_at_ms,
+                    "role": identity.role,
+                    "task_id": identity.task_id,
+                    "username": identity.username,
+                })],
+            ),
+            test_inventory("active_tasks", Vec::new(), Vec::new()),
+        );
+        adapter
+            .import_and_finalize_submission_authority(SubmissionAuthorityImportRequest {
+                conversations: vec![conversation],
+                message_identities: vec![identity],
+                active_task_ids: Vec::new(),
+                finalization_subject_json: subject,
+                finalization_receipt_sha256: digest,
+                finalization_receipt_json: receipt,
+                finalized_at_ms: 9,
+            })
+            .expect_err("injected import write fault must fail");
+
+        let inspection = Connection::open(&db_path).unwrap();
+        let counts: (i64, i64) = inspection
+            .query_row(
+                "SELECT (SELECT count(*) FROM submission_conversations), (SELECT count(*) FROM submission_message_identities)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0), "{name} fault must roll back rows");
+        let state: String = inspection
+            .query_row(
+                "SELECT state FROM submission_authority_meta WHERE singleton_key=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "uninitialized", "{name} fault must roll back meta");
+        drop(inspection);
+        drop(adapter);
+        let _ = std::fs::remove_file(db_path);
+    }
+}
+
+#[test]
 fn sqlite_submission_two_connections_serialize_created_replay_and_busy() {
     let db_path = temp_db_path("submission-concurrency");
     let (digest, subject, receipt) = empty_finalization_bundle(4);
@@ -1851,6 +1975,56 @@ fn sqlite_submission_two_connections_serialize_created_replay_and_busy() {
     assert_eq!(
         busy.disposition,
         SubmissionAdmissionDisposition::ConversationBusy
+    );
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn sqlite_submission_two_connections_with_different_messages_create_once_and_busy_once() {
+    let db_path = temp_db_path("submission-concurrency-different-messages");
+    let (digest, subject, receipt) = empty_finalization_bundle(4);
+    RuntimeSidecarSqliteAdapter::open(&db_path)
+        .unwrap()
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 4)
+        .unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = [
+        ("first-message", "first-task"),
+        ("second-message", "second-task"),
+    ]
+    .into_iter()
+    .map(|(message_id, task_id)| {
+        let path = db_path.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let adapter = RuntimeSidecarSqliteAdapter::open(path).unwrap();
+            barrier.wait();
+            adapter
+                .admit_submission(sqlite_admission_request(
+                    message_id,
+                    task_id,
+                    "same-conversation",
+                ))
+                .unwrap()
+                .disposition
+        })
+    })
+    .collect::<Vec<_>>();
+    let mut dispositions = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    dispositions.sort_by_key(|value| match value {
+        SubmissionAdmissionDisposition::Created => 0,
+        SubmissionAdmissionDisposition::ConversationBusy => 1,
+        _ => 2,
+    });
+    assert_eq!(
+        dispositions,
+        vec![
+            SubmissionAdmissionDisposition::Created,
+            SubmissionAdmissionDisposition::ConversationBusy,
+        ]
     );
     let _ = std::fs::remove_file(db_path);
 }

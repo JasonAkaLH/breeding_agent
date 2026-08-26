@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from openpyxl import Workbook
 
+from src.api.dto import SubmitMessageRequest
 from src.api.file_selection import (
     FileSelectionDecision,
     FileRequirementProfile,
@@ -21,7 +22,7 @@ from src.api.file_selection import (
 from src.api.file_selection_runtime import ConversationFileSelectionRuntimeMixin
 from src.api.runtime import ApiRuntime
 from src.core.enums import EventVisibility, MessageRole
-from src.core.models import TaskInputAttachment
+from src.core.models import Task, TaskInputAttachment
 
 from tests.api.support import APITestCase
 
@@ -224,6 +225,77 @@ class ConversationFileSelectionAPITest(APITestCase):
         auto_bound = next(event for event in events if event.event_type == "conversation_file.file_selector_auto_bound")
         self.assertEqual(auto_bound.payload["selected_upload_ids"], [selected_id])
 
+    async def test_prepared_agent_request_exposes_only_selector_winner_artifacts(
+        self,
+    ) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-prepared-selector-winner-only"
+        selected_id = await self._upload_csv(
+            conversation_id, "selected.csv", "ped_id,value\nA001,1\n"
+        )
+        await self._upload_csv(
+            conversation_id, "unselected.csv", "ped_id,value\nB001,2\n"
+        )
+        captured_requests = []
+        initialize_run = self.runtime.agent_loop_orchestrator.initialize_run
+
+        async def capture_request(request):
+            captured_requests.append(request)
+            return await initialize_run(request)
+
+        self.runtime.agent_loop_orchestrator.initialize_run = capture_request
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 selected.csv。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(len(captured_requests), 1)
+        metadata = captured_requests[0].metadata
+        self.assertEqual(metadata["upload_ids"], [selected_id])
+        self.assertEqual(
+            [item["upload_id"] for item in metadata["uploaded_artifacts"]],
+            [selected_id],
+        )
+        self.assertEqual(
+            [item["upload_id"] for item in metadata["skill_artifacts"]],
+            [selected_id],
+        )
+
+    async def test_file_interrupt_exact_replay_is_independent_of_selector_cache(
+        self,
+    ) -> None:
+        capability_id = self._write_file_required_skill()
+        skill_root = self.workspace / "file-required-skill"
+        await self.reconfigure_runtime(
+            skill_roots=(skill_root,), public_skill_roots=(skill_root,)
+        )
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        captured = []
+        materialize = self.runtime.materialize_interrupt_handoff
+
+        async def capture_materialization(record, prepared):
+            captured.append((record, prepared))
+            return await materialize(record, prepared)
+
+        self.runtime.materialize_interrupt_handoff = capture_materialization
+        response = await self.submit_message(
+            conversation_id="conv-file-interrupt-exact-replay",
+            capability_id=capability_id,
+            content="执行这个 Skill。",
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(len(captured), 1)
+
+        self.runtime._submission_selector_facts.clear()
+        self.runtime._submission_file_selection_computations.clear()
+
+        replayed = await materialize(*captured[0])
+
+        self.assertEqual(replayed.kind, "interrupt")
+
     async def test_initial_message_ordinal_reference_binds_file_selector_attachment(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce_narrow"
         conversation_id = "conv-file-ordinal"
@@ -270,6 +342,117 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertNotIn("user_message", json.dumps(decision.payload, ensure_ascii=False))
         self.assertNotIn("content_base64", json.dumps(decision.payload, ensure_ascii=False))
         self.assertNotIn("storage_key", json.dumps(decision.payload, ensure_ascii=False))
+
+    async def test_file_selector_compute_is_pure_and_matches_legacy_decision(self) -> None:
+        selector_calls = 0
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            nonlocal selector_calls
+            selector_calls += 1
+            return json.dumps(
+                {
+                    "decision": "select_one",
+                    "upload_ids": [selected_id],
+                    "confidence": 0.93,
+                    "reason_code": "llm_selected",
+                }
+            )
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-selector-compute-pure"
+        selected_id = await self._upload_csv(conversation_id, "materials.csv")
+        await self._upload_csv(conversation_id, "other.csv")
+        task = Task("task-file-selector-compute-pure", conversation_id, "msg-file-selector-compute-pure")
+        request = SubmitMessageRequest(
+            conversation_id=conversation_id,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        metadata = dict(request.metadata)
+
+        with (
+            patch.object(
+                self.runtime,
+                "_record_file_selection_audit_event",
+                new=AsyncMock(side_effect=AssertionError("audit was persisted")),
+            ) as audit,
+            patch.object(
+                self.runtime,
+                "_bind_file_selection_uploads_or_open_sheet_selection",
+                new=AsyncMock(side_effect=AssertionError("attachment was bound")),
+            ) as bind,
+            patch.object(
+                self.runtime,
+                "_open_file_selection_interrupt",
+                new=AsyncMock(side_effect=AssertionError("interrupt was opened")),
+            ) as open_interrupt,
+            patch.object(
+                self.runtime,
+                "_open_sheet_selection_interrupt",
+                new=AsyncMock(side_effect=AssertionError("sheet interrupt was opened")),
+            ) as open_sheet_interrupt,
+            patch.object(
+                self.runtime.interrupt_service,
+                "open_interrupt",
+                new=AsyncMock(side_effect=AssertionError("interrupt service was written")),
+            ) as interrupt_service,
+            patch.object(
+                self.runtime,
+                "_repair_conversation_file_index_if_due",
+                new=AsyncMock(side_effect=AssertionError("index repair was attempted")),
+            ) as repair,
+            patch.object(
+                self.runtime,
+                "_apply_conversation_file_sheet_selection",
+                new=AsyncMock(side_effect=AssertionError("sheet selection was persisted")),
+            ) as persist_selection,
+        ):
+            computed = await self.runtime._compute_conversation_file_selection(
+                task=task,
+                username="acc-1",
+                request=request,
+                metadata=metadata,
+            )
+
+        self.assertIsNotNone(computed)
+        self.assertTrue(computed.triggered)
+        self.assertEqual(computed.decision.upload_ids, (selected_id,))
+        self.assertEqual(computed.decision.reason_code, "llm_selected")
+        legacy_decision = await self.runtime._conversation_file_selection_decision(
+            text=request.content,
+            profile=computed.profile,
+            candidates=computed.candidates,
+            metadata=metadata,
+        )
+        self.assertEqual(computed.decision, legacy_decision)
+        self.assertEqual(selector_calls, 2)
+        self.assertEqual(
+            computed.invoked_payload,
+            self.runtime._file_selection_invoked_payload(
+                mode=computed.mode,
+                trigger_reason=computed.trigger_reason,
+                profile=computed.profile,
+                candidates=computed.candidates,
+            ),
+        )
+        self.assertEqual(
+            computed.decision_payload,
+            self.runtime._file_selection_decision_payload(
+                mode=computed.mode,
+                trigger_reason=computed.trigger_reason,
+                profile=computed.profile,
+                candidates=computed.candidates,
+                decision=legacy_decision,
+            ),
+        )
+        audit.assert_not_awaited()
+        bind.assert_not_awaited()
+        open_interrupt.assert_not_awaited()
+        open_sheet_interrupt.assert_not_awaited()
+        interrupt_service.assert_not_awaited()
+        repair.assert_not_awaited()
+        persist_selection.assert_not_awaited()
 
     async def test_selector_audit_release_catalog_is_audit_only_and_redacted(self) -> None:
         auto_conversation = "conv-file-audit-catalog-auto"

@@ -208,6 +208,78 @@ class PostgreSQLStorage(SQLiteStorage):
             )
         )
 
+    async def settle_submission_route_decision_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        requires_user_scoped_server: bool,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        return await self._run_submission_write_with_unique_retry(
+            lambda state: state.settle_submission_route_decision_exact(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                requires_user_scoped_server=requires_user_scoped_server,
+                written_at=written_at,
+            )
+        )
+
+    async def materialize_submission_pending_skill_supersede_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        should_supersede: bool,
+        occurred_at: datetime,
+    ) -> int:
+        return await self._run_submission_write_with_unique_retry(
+            lambda state: state.materialize_submission_pending_skill_supersede_exact(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                should_supersede=should_supersede,
+                occurred_at=occurred_at,
+            )
+        )
+
+    async def materialize_submission_no_server_intent_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPInitialIntentCreateResult:
+        return await self._run_submission_write_with_unique_retry(
+            lambda state: state.materialize_submission_no_server_intent_exact(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                occurred_at=occurred_at,
+            )
+        )
+
+    async def converge_submission_no_server_without_sql_task(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult:
+        return await self._run_submission_write_with_unique_retry(
+            lambda state: state.converge_submission_no_server_without_sql_task(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                occurred_at=occurred_at,
+            )
+        )
+
     async def materialize_conversation_memory_summary_exact(
         self,
         summary: ConversationMemorySummary,

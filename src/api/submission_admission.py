@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
@@ -15,6 +15,9 @@ from src.core.contracts import (
 )
 from src.core.models import (
     SubmissionAdmissionHandle,
+    SubmissionAdmissionDisposition,
+    SubmissionAdmissionRequest,
+    SubmissionAdmissionResult,
     SubmissionAdmissionState,
     SubmissionAuthorityState,
     SubmissionClaimRenewalRequest,
@@ -24,11 +27,13 @@ from src.core.models import (
     SubmissionPreparationLookup,
     SubmissionPreparationReceipt,
     SubmissionPreparationReceiptComponent,
+    SubmissionPreparationRecord,
     SubmissionPreparationRequest,
     SubmissionPreparationState,
     SubmissionProjectionAcknowledgementRequest,
     SubmissionProjectionState,
     SubmissionRecoveryRecord,
+    Task,
 )
 from src.integrations.mcp.result_parsing.json_values import canonical_json_bytes
 from src.integrations.mcp.cp7_artifacts import mcp_no_server_intent_id
@@ -50,6 +55,9 @@ from src.storage.runtime_sidecar_facade import (
 
 
 _PREPARED_DOMAIN = b"maf.submission.prepared_execution.v1\0"
+_REQUEST_DOMAIN = b"maf.submission.request.v1\0"
+_PROJECTION_DOMAIN = b"maf.submission.projection.v1\0"
+_CONTINUATION_DOMAIN = b"maf.submission.continuation.v1\0"
 _HEX = frozenset("0123456789abcdef")
 _MAX_PREPARED_BYTES = 128 * 1024
 _DEFAULT_RECOVERY_LIMIT = 128
@@ -160,6 +168,233 @@ class SubmissionRecoveryBatchResult:
     earliest_claim_expires_at: datetime | None = None
 
 
+def build_submission_admission_request(
+    *,
+    username: str,
+    conversation_id: str,
+    message_id: str,
+    content: str,
+    task: Task,
+    conversation_created_at: datetime,
+    conversation_updated_at: datetime,
+    create_conversation_if_missing: bool,
+    message_created_at: datetime,
+    message_type: str,
+    message_metadata: Mapping[str, Any],
+    model_options: Mapping[str, Any],
+    bundle_revisions: Mapping[str, Any],
+    execution_metadata: Mapping[str, Any],
+    explicit_upload_ids: tuple[str, ...],
+    request_sheet_selections: Mapping[str, str],
+    upload_refs: tuple[Mapping[str, Any], ...],
+    mcp_binding: Mapping[str, Any] | None,
+    mcp_assignment: Mapping[str, Any] | None,
+    available_mcp_servers: tuple[UserMCPServerProfile, ...],
+    pending_context: Mapping[str, Any] | None,
+    initial_no_server_eligible: bool,
+    claim_owner: str,
+    claim_expires_at: datetime,
+) -> SubmissionAdmissionRequest:
+    """Build one closed, canonical submission request without side effects."""
+
+    if (
+        task.conversation_id != conversation_id
+        or task.root_message_id != message_id
+        or str(task.status) != "accepted"
+    ):
+        raise ValueError("submission_task_identity_invalid")
+
+    normalized_upload_ids = sorted(set(explicit_upload_ids))
+    if any(
+        not isinstance(upload_id, str) or not upload_id
+        for upload_id in normalized_upload_ids
+    ):
+        raise ValueError("submission_upload_ids_invalid")
+    normalized_request_sheets = {
+        upload_id: request_sheet_selections[upload_id]
+        for upload_id in sorted(request_sheet_selections)
+    }
+    if any(
+        not isinstance(upload_id, str)
+        or not upload_id
+        or upload_id not in normalized_upload_ids
+        or not isinstance(sheet, str)
+        or not sheet
+        for upload_id, sheet in normalized_request_sheets.items()
+    ):
+        raise ValueError("submission_sheet_selections_invalid")
+
+    upload_refs_by_id: dict[str, dict[str, Any]] = {}
+    upload_ref_keys = {
+        "upload_id",
+        "conversation_id",
+        "sha256",
+        "size_bytes",
+        "selected_sheet",
+    }
+    for raw_ref in upload_refs:
+        if set(raw_ref) != upload_ref_keys:
+            raise ValueError("submission_upload_refs_invalid")
+        ref = {key: raw_ref[key] for key in upload_ref_keys}
+        upload_id = ref["upload_id"]
+        if not isinstance(upload_id, str):
+            raise ValueError("submission_upload_refs_invalid")
+        existing = upload_refs_by_id.get(upload_id)
+        if existing is not None and existing != ref:
+            raise ValueError("submission_upload_refs_invalid")
+        upload_refs_by_id[upload_id] = ref
+    normalized_upload_refs = [
+        upload_refs_by_id[upload_id] for upload_id in sorted(upload_refs_by_id)
+    ]
+    continuation_sheets = {
+        ref["upload_id"]: ref["selected_sheet"]
+        for ref in normalized_upload_refs
+        if ref["selected_sheet"] is not None
+    }
+
+    normalized_servers_by_id: dict[str, dict[str, str]] = {}
+    for server in available_mcp_servers:
+        profile = {
+            "server_id": server.server_id,
+            "display_name": server.display_name,
+            "routing_description": server.routing_description,
+            "transport": server.transport,
+        }
+        existing = normalized_servers_by_id.get(server.server_id)
+        if existing is not None and existing != profile:
+            raise ValueError("submission_available_mcp_servers_invalid")
+        normalized_servers_by_id[server.server_id] = profile
+    normalized_servers = [
+        normalized_servers_by_id[server_id]
+        for server_id in sorted(normalized_servers_by_id)
+    ]
+
+    normalized_pending = dict(pending_context) if pending_context is not None else None
+    if normalized_pending is not None and isinstance(
+        normalized_pending.get("missing_requirements"), (list, tuple)
+    ):
+        normalized_pending["missing_requirements"] = sorted(
+            set(normalized_pending["missing_requirements"])
+        )
+
+    canonical_request = {
+        "schema": "maf.submission.request.v1",
+        "username": username,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "role": "user",
+        "content": content,
+        "routing_mode": str(task.routing_mode),
+        "requested_capability_id": task.requested_capability_id,
+        "model_edition": model_options.get("model_edition"),
+        "model_options": dict(model_options),
+        "bundle_revisions": dict(bundle_revisions),
+        "execution_metadata": dict(execution_metadata),
+        "upload_ids": normalized_upload_ids,
+        "sheet_selections": normalized_request_sheets,
+        "mcp_binding": dict(mcp_binding) if mcp_binding is not None else None,
+        "mcp_assignment": dict(mcp_assignment) if mcp_assignment is not None else None,
+        "pending_context": normalized_pending,
+    }
+    request_fingerprint = _domain_sha256(
+        _REQUEST_DOMAIN, canonical_json_bytes(canonical_request)
+    )
+
+    def timestamp(value: datetime) -> str:
+        rendered = value.isoformat()
+        return rendered[:-6] + "Z" if rendered.endswith("+00:00") else rendered
+
+    conversation_projection = canonical_json_bytes(
+        {
+            "schema": "maf.submission.conversation_projection.v1",
+            "conversation_id": conversation_id,
+            "username": username,
+            "status": "active",
+            "current_task_id": task.task_id,
+            "created_at": timestamp(conversation_created_at),
+            "updated_at": timestamp(conversation_updated_at),
+            "create_if_missing": create_conversation_if_missing,
+        }
+    )
+    message_projection = canonical_json_bytes(
+        {
+            "schema": "maf.submission.message_projection.v1",
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "role": "user",
+            "content": content,
+            "task_id": task.task_id,
+            "stream_status": "complete",
+            "message_created_at": timestamp(message_created_at),
+            "message_type": message_type,
+            "metadata": dict(message_metadata),
+            "updated_at": timestamp(message_created_at),
+        }
+    )
+    projection_sha256 = hashlib.sha256(
+        _PROJECTION_DOMAIN
+        + conversation_projection
+        + b"\0"
+        + message_projection
+    ).hexdigest()
+    continuation = canonical_json_bytes(
+        {
+            "schema": "maf.submission.continuation.v1",
+            "request_fingerprint": request_fingerprint,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "task_id": task.task_id,
+            "owner_scope": username,
+            "message_content_sha256": hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest(),
+            "routing_mode": str(task.routing_mode),
+            "requested_capability_id": task.requested_capability_id,
+            "model_options": dict(model_options),
+            "bundle_revisions": dict(bundle_revisions),
+            "execution_metadata": dict(execution_metadata),
+            "upload_refs": normalized_upload_refs,
+            "sheet_selections": continuation_sheets,
+            "mcp_binding": dict(mcp_binding) if mcp_binding is not None else None,
+            "mcp_assignment": dict(mcp_assignment) if mcp_assignment is not None else None,
+            "available_mcp_servers": normalized_servers,
+            "pending_context": normalized_pending,
+            "initial_no_server_eligible": initial_no_server_eligible,
+        }
+    )
+    continuation_sha256 = _domain_sha256(_CONTINUATION_DOMAIN, continuation)
+    validate_runtime_sidecar_submission_envelopes(
+        conversation_projection=conversation_projection,
+        message_projection=message_projection,
+        continuation=continuation,
+        projection_sha256=projection_sha256,
+        continuation_sha256=continuation_sha256,
+        username=username,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        task_id=task.task_id,
+        request_fingerprint=request_fingerprint,
+        routing_mode=str(task.routing_mode),
+        requested_capability_id=task.requested_capability_id,
+    )
+    return SubmissionAdmissionRequest(
+        username=username,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        task=task,
+        idempotency_key=f"submission:{username}:{message_id}",
+        request_fingerprint=request_fingerprint,
+        conversation_projection=conversation_projection,
+        message_projection=message_projection,
+        projection_sha256=projection_sha256,
+        continuation=continuation,
+        continuation_sha256=continuation_sha256,
+        message_created_at=message_created_at,
+        claim_owner=claim_owner,
+        claim_expires_at=claim_expires_at,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DurableSubmissionHandoff:
     kind: str
@@ -178,6 +413,8 @@ class PreparedAgentRecoveryContext:
     mcp_binding: Mapping[str, Any] | None
     mcp_assignment: Mapping[str, Any] | None
     available_mcp_servers: tuple[UserMCPServerProfile, ...]
+    upload_refs: tuple[Mapping[str, Any], ...] = ()
+    selected_upload_ids: tuple[str, ...] = ()
 
 
 class PreparedAgentRecoveryLoader(Protocol):
@@ -248,7 +485,6 @@ class SubmissionPreparedAgentRecoveryLoader:
             or prepared["owner_scope"] != username
         ):
             raise SubmissionRecoveryError("submission_prepared_agent_identity_drift")
-
         receipt = await self._receipts.get_submission_preparation_receipt(
             username=username,
             conversation_id=conversation_id,
@@ -262,55 +498,100 @@ class SubmissionPreparedAgentRecoveryLoader:
             receipt=receipt,
         )
         assert receipt is not None
-        _validate_prepared_receipt_facts(prepared, prepared, receipt)
-        current_user_input = _execution_text_from_facts(
+        return _build_prepared_agent_recovery_context(
+            preparation,
+            prepared=prepared,
+            receipt=receipt,
             root_message_content=root_message_content,
-            facts=prepared,
-            memory_component=receipt.memory_context,
-            source=prepared["execution_text_source"],
         )
-        if hashlib.sha256(current_user_input.encode("utf-8")).hexdigest() != prepared.get(
-            "execution_text_sha256"
-        ):
-            raise SubmissionRecoveryError("submission_execution_text_digest_mismatch")
 
-        memory = _parse_component(receipt.memory_context)
-        memory_context = (
-            dict(memory["prompt_payload"])
-            if isinstance(memory, Mapping)
+
+def _build_prepared_agent_recovery_context(
+    record: SubmissionRecoveryRecord | SubmissionPreparationRecord,
+    *,
+    prepared: Mapping[str, Any],
+    receipt: SubmissionPreparationReceipt,
+    root_message_content: str | None,
+) -> PreparedAgentRecoveryContext:
+    if (
+        prepared["conversation_id"] != record.conversation_id
+        or prepared["message_id"] != record.message_id
+        or prepared["task_id"] != record.task_id
+        or prepared["prepared_kind"] != "agent_run"
+        or prepared["planned_handoff_kind"] != "agent_run"
+    ):
+        raise SubmissionRecoveryError("submission_prepared_agent_identity_drift")
+    _validate_prepared_receipt_facts(prepared, prepared, receipt)
+    current_user_input = _execution_text_from_facts(
+        root_message_content=root_message_content,
+        facts=prepared,
+        memory_component=receipt.memory_context,
+        source=prepared["execution_text_source"],
+    )
+    if hashlib.sha256(current_user_input.encode("utf-8")).hexdigest() != prepared.get(
+        "execution_text_sha256"
+    ):
+        raise SubmissionRecoveryError("submission_execution_text_digest_mismatch")
+
+    memory = _parse_component(receipt.memory_context)
+    memory_context = (
+        dict(memory["prompt_payload"])
+        if isinstance(memory, Mapping)
+        and not (
+            isinstance(memory.get("event_write"), Mapping)
+            and memory["event_write"].get("event_type")
+            == "conversation.memory_fallback"
+        )
+        else None
+    )
+    selector = _parse_component(receipt.selector_decision)
+    selected_upload_ids = (
+        tuple(selector["upload_ids"])
+        if isinstance(selector, Mapping)
+        and selector.get("interrupt_kind") is None
+        else ()
+    )
+    upload_refs = tuple(dict(item) for item in prepared["upload_refs"])
+    if not set(selected_upload_ids) <= {
+        str(item["upload_id"]) for item in upload_refs
+    }:
+        raise SubmissionRecoveryError("submission_prepared_upload_ref_drift")
+    return PreparedAgentRecoveryContext(
+        username=prepared["owner_scope"],
+        current_user_input=current_user_input,
+        initial_required_tool_name=prepared["initial_required_tool_name"],
+        model_options=dict(prepared["model_options"]),
+        bundle_revisions=dict(prepared["bundle_revisions"]),
+        execution_metadata=dict(prepared["execution_metadata"]),
+        memory_context=memory_context,
+        mcp_binding=(
+            dict(prepared["mcp_binding"])
+            if isinstance(prepared["mcp_binding"], Mapping)
             else None
-        )
-        return PreparedAgentRecoveryContext(
-            username=username,
-            current_user_input=current_user_input,
-            initial_required_tool_name=prepared["initial_required_tool_name"],
-            model_options=dict(prepared["model_options"]),
-            bundle_revisions=dict(prepared["bundle_revisions"]),
-            execution_metadata=dict(prepared["execution_metadata"]),
-            memory_context=memory_context,
-            mcp_binding=(
-                dict(prepared["mcp_binding"])
-                if isinstance(prepared["mcp_binding"], Mapping)
-                else None
-            ),
-            mcp_assignment=(
-                dict(prepared["mcp_assignment"])
-                if isinstance(prepared["mcp_assignment"], Mapping)
-                else None
-            ),
-            available_mcp_servers=tuple(
-                UserMCPServerProfile(**server)
-                for server in prepared["available_mcp_servers"]
-            ),
-        )
+        ),
+        mcp_assignment=(
+            dict(prepared["mcp_assignment"])
+            if isinstance(prepared["mcp_assignment"], Mapping)
+            else None
+        ),
+        available_mcp_servers=tuple(
+            UserMCPServerProfile(**server)
+            for server in prepared["available_mcp_servers"]
+        ),
+        upload_refs=upload_refs,
+        selected_upload_ids=selected_upload_ids,
+    )
 
 
 class SubmissionPreparationCallbacks(Protocol):
     """Narrow injected seams; compute methods must not mutate durable state."""
 
-    async def compute_route_decision(
-        self, record: SubmissionRecoveryRecord, continuation: Mapping[str, Any]
-    ) -> object: ...
+    async def settle_route_decision_exact(
+        self,
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt: ...
 
     async def compute_memory_context(
         self, record: SubmissionRecoveryRecord, continuation: Mapping[str, Any]
@@ -336,6 +617,7 @@ class SubmissionPreparationCallbacks(Protocol):
         self,
         record: SubmissionRecoveryRecord,
         prepared: Mapping[str, Any],
+        context: PreparedAgentRecoveryContext,
     ) -> DurableSubmissionHandoff: ...
 
     async def materialize_interrupt_handoff(
@@ -442,7 +724,7 @@ class SubmissionAdmissionCoordinator:
         claim_owner: str,
         now: Callable[[], datetime],
         wait_until: Callable[[datetime], Awaitable[None]],
-        expected_finalization_receipt_sha256: str,
+        expected_finalization_receipt_sha256: str | None,
         claim_ttl: timedelta = timedelta(seconds=30),
         recovery_limit: int = _DEFAULT_RECOVERY_LIMIT,
     ) -> None:
@@ -450,7 +732,8 @@ class SubmissionAdmissionCoordinator:
             not claim_owner
             or claim_ttl <= timedelta(0)
             or recovery_limit < 1
-            or not _is_sha256(expected_finalization_receipt_sha256)
+            or expected_finalization_receipt_sha256 is not None
+            and not _is_sha256(expected_finalization_receipt_sha256)
         ):
             raise ValueError("submission_recovery_configuration_invalid")
         self._admission = admission
@@ -469,6 +752,176 @@ class SubmissionAdmissionCoordinator:
         ] | None = None
         self._phase = "idle"
         self._operation_lock = asyncio.Lock()
+
+    async def continue_admitted(
+        self,
+        result: SubmissionAdmissionResult,
+        *,
+        reclaim_exact: Callable[
+            [SubmissionRecoveryRecord], Awaitable[SubmissionAdmissionResult]
+        ]
+        | None = None,
+    ) -> SubmissionRecoveryBatchResult:
+        """Continue one live admission directly from its supplied claim."""
+
+        if result.disposition not in {
+            SubmissionAdmissionDisposition.CREATED,
+            SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+        }:
+            raise SubmissionRecoveryError("submission_admission_result_invalid")
+        if (
+            not result.conversation_id
+            or not result.message_id
+            or not result.task_id
+        ):
+            raise SubmissionRecoveryError("submission_admission_result_invalid")
+        record = result.record
+        if record is not None and (
+            record.conversation_id != result.conversation_id
+            or record.message_id != result.message_id
+            or record.task_id != result.task_id
+            or result.phase != record.phase
+        ):
+            raise SubmissionRecoveryError("submission_admission_result_invalid")
+        if (
+            record is not None
+            and record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF
+        ):
+            await self._retry_handed_off_wakeup(record)
+            return SubmissionRecoveryBatchResult(
+                status=SubmissionRecoveryStatus.COMPLETED,
+                recovered_count=0,
+                pending_count=0,
+            )
+        if result.handle is None:
+            if record is None:
+                raise SubmissionRecoveryError("submission_admission_result_invalid")
+            if reclaim_exact is None:
+                raise SubmissionRecoveryError("submission_exact_reclaim_missing")
+            while result.handle is None:
+                await self._wait_until(self._now() + self._claim_ttl)
+                result = await reclaim_exact(record)
+                self._validate_exact_reclaim(record, result)
+                assert result.record is not None
+                record = result.record
+                if record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF:
+                    await self._retry_handed_off_wakeup(record)
+                    return SubmissionRecoveryBatchResult(
+                        status=SubmissionRecoveryStatus.COMPLETED,
+                        recovered_count=0,
+                        pending_count=0,
+                    )
+            handle = result.handle
+            if handle is None:
+                return SubmissionRecoveryBatchResult(
+                    status=SubmissionRecoveryStatus.COMPLETED,
+                    recovered_count=0,
+                    pending_count=0,
+                )
+        else:
+            handle = result.handle
+        if (
+            record is None
+            or record.phase.admission_state is not SubmissionAdmissionState.OPEN
+            or record.phase.handoff_state is not SubmissionHandoffState.PENDING
+        ):
+            raise SubmissionRecoveryError("submission_admission_phase_invalid")
+
+        keeper = _ClaimLeaseKeeper(
+            admission=self._admission,
+            handle=handle,
+            now=self._now,
+            wait_until=self._wait_until,
+            claim_ttl=self._claim_ttl,
+        )
+        keeper.start()
+        try:
+            if (
+                record.phase.projection_state
+                is SubmissionProjectionState.PENDING
+            ):
+                projected_phase = await keeper.call(
+                    lambda current_handle: self._admission.acknowledge_submission_projection(
+                        SubmissionProjectionAcknowledgementRequest(
+                            handle=current_handle,
+                            projection_sha256=record.projection_sha256,
+                            acknowledged_at=self._now(),
+                        )
+                    )
+                )
+            else:
+                projected_phase = record.phase
+            if (
+                projected_phase.admission_state is not SubmissionAdmissionState.OPEN
+                or projected_phase.projection_state
+                is not SubmissionProjectionState.PROJECTED
+                or projected_phase.handoff_state is not SubmissionHandoffState.PENDING
+            ):
+                raise SubmissionRecoveryError(
+                    "submission_projection_ack_phase_invalid"
+                )
+            projected_record = replace(record, phase=projected_phase)
+            await self._recover_handoff(projected_record, keeper)
+            return SubmissionRecoveryBatchResult(
+                status=SubmissionRecoveryStatus.COMPLETED,
+                recovered_count=1,
+                pending_count=0,
+                after_created_at=projected_record.created_at,
+                after_message_id=projected_record.message_id,
+            )
+        finally:
+            await keeper.stop()
+
+    @staticmethod
+    def _validate_exact_reclaim(
+        expected: SubmissionRecoveryRecord,
+        result: SubmissionAdmissionResult,
+    ) -> None:
+        record = result.record
+        if (
+            result.disposition is not SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY
+            or result.conversation_id != expected.conversation_id
+            or result.message_id != expected.message_id
+            or result.task_id != expected.task_id
+            or record is None
+            or record.username != expected.username
+            or record.conversation_id != expected.conversation_id
+            or record.message_id != expected.message_id
+            or record.task_id != expected.task_id
+            or record.created_at != expected.created_at
+            or record.projection_sha256 != expected.projection_sha256
+            or record.continuation_sha256 != expected.continuation_sha256
+        ):
+            raise SubmissionRecoveryError("submission_replay_claim_identity_mismatch")
+
+    async def _retry_handed_off_wakeup(
+        self,
+        record: SubmissionRecoveryRecord,
+    ) -> None:
+        preparation = await self._admission.get_submission_preparation(
+            SubmissionPreparationLookup(
+                username=record.username,
+                conversation_id=record.conversation_id,
+                task_id=record.task_id,
+            )
+        )
+        if (
+            preparation is None
+            or preparation.conversation_id != record.conversation_id
+            or preparation.message_id != record.message_id
+            or preparation.task_id != record.task_id
+            or preparation.handoff_state is not SubmissionHandoffState.HANDED_OFF
+        ):
+            raise SubmissionRecoveryError("submission_replay_preparation_identity_mismatch")
+        if preparation.handoff_kind == "agent_run":
+            if preparation.handoff_identity != f"agent-run:{record.task_id}":
+                raise SubmissionRecoveryError("submission_handoff_identity_drift")
+            await self._callbacks.wakeup_agent(
+                record,
+                preparation.handoff_identity,
+            )
+        elif preparation.handoff_kind not in {"interrupt", "no_server_intent"}:
+            raise SubmissionRecoveryError("submission_handoff_identity_drift")
 
     async def project_pending(self) -> SubmissionRecoveryBatchResult:
         """Claim and project a private batch without invoking preparation callbacks."""
@@ -543,23 +996,22 @@ class SubmissionAdmissionCoordinator:
                 )
                 keeper.start()
                 keepers.append(keeper)
-                if record.phase.projection_state is SubmissionProjectionState.PENDING:
-                    projected_phase = await keeper.call(
-                        lambda handle: self._admission.acknowledge_submission_projection(
-                            SubmissionProjectionAcknowledgementRequest(
-                                handle=handle,
-                                projection_sha256=record.projection_sha256,
-                                acknowledged_at=self._now(),
-                            )
+                projected_phase = await keeper.call(
+                    lambda handle: self._admission.acknowledge_submission_projection(
+                        SubmissionProjectionAcknowledgementRequest(
+                            handle=handle,
+                            projection_sha256=record.projection_sha256,
+                            acknowledged_at=self._now(),
                         )
                     )
-                    if (
-                        projected_phase.projection_state
-                        is not SubmissionProjectionState.PROJECTED
-                    ):
-                        raise SubmissionRecoveryError(
-                            "submission_projection_ack_phase_invalid"
-                        )
+                )
+                if (
+                    projected_phase.projection_state
+                    is not SubmissionProjectionState.PROJECTED
+                ):
+                    raise SubmissionRecoveryError(
+                        "submission_projection_ack_phase_invalid"
+                    )
                 claimed.append((record, keeper))
                 cursor_created_at, cursor_message_id = (
                     record.created_at,
@@ -691,6 +1143,16 @@ class SubmissionAdmissionCoordinator:
                 record, continuation, prepared
             )
 
+        agent_context = (
+            _build_prepared_agent_recovery_context(
+                record,
+                prepared=prepared,
+                receipt=receipt,
+                root_message_content=_root_message_content(record),
+            )
+            if prepared["planned_handoff_kind"] == "agent_run"
+            else None
+        )
         await keeper.renew_now()
         await self._callbacks.materialize_route_decision(
             record, _required_component(receipt.route_decision)
@@ -702,7 +1164,7 @@ class SubmissionAdmissionCoordinator:
             await self._callbacks.materialize_selector_decision(
                 record, _required_component(receipt.selector_decision)
             )
-        handoff = await self._durable_handoff(record, prepared)
+        handoff = await self._durable_handoff(record, prepared, agent_context)
         _validate_handoff(record, prepared, handoff)
         await keeper.renew_now()
         handoff_phase = await keeper.call(
@@ -735,6 +1197,24 @@ class SubmissionAdmissionCoordinator:
             conversation_id=record.conversation_id,
             task_id=record.task_id,
         )
+        if receipt is None or receipt.route_decision is None:
+            await keeper.renew_now()
+            receipt = await self._callbacks.settle_route_decision_exact(
+                record, continuation, self._now()
+            )
+            await keeper.renew_now()
+        if (
+            receipt.task_id != record.task_id
+            or receipt.conversation_id != record.conversation_id
+            or receipt.route_decision is None
+            or receipt.route_decision_sha256
+            != hashlib.sha256(receipt.route_decision).hexdigest()
+        ):
+            raise SubmissionRecoveryError("submission_route_receipt_invalid")
+        _validate_component_bytes(
+            SubmissionPreparationReceiptComponent.ROUTE_DECISION,
+            receipt.route_decision,
+        )
         component_specs: tuple[
             tuple[
                 SubmissionPreparationReceiptComponent,
@@ -743,11 +1223,6 @@ class SubmissionAdmissionCoordinator:
             ],
             ...,
         ] = (
-            (
-                SubmissionPreparationReceiptComponent.ROUTE_DECISION,
-                "route_decision",
-                self._callbacks.compute_route_decision,
-            ),
             (
                 SubmissionPreparationReceiptComponent.MEMORY_CONTEXT,
                 "memory_context",
@@ -845,10 +1320,15 @@ class SubmissionAdmissionCoordinator:
         self,
         record: SubmissionRecoveryRecord,
         prepared: Mapping[str, Any],
+        agent_context: PreparedAgentRecoveryContext | None,
     ) -> DurableSubmissionHandoff:
         kind = prepared["planned_handoff_kind"]
         if kind == "agent_run":
-            return await self._callbacks.initialize_agent_handoff(record, prepared)
+            if agent_context is None:
+                raise SubmissionRecoveryError("submission_prepared_agent_context_missing")
+            return await self._callbacks.initialize_agent_handoff(
+                record, prepared, agent_context
+            )
         if kind == "interrupt":
             return await self._callbacks.materialize_interrupt_handoff(record, prepared)
         return await self._callbacks.materialize_no_server_intent_handoff(record, prepared)
@@ -909,7 +1389,16 @@ def _build_prepared_snapshot(
         if isinstance(selector, Mapping) and selector.get("interrupt_kind") is not None
         else "agent_run"
     )
-    memory_prompt = memory.get("prompt_payload") if isinstance(memory, Mapping) else None
+    memory_prompt = (
+        memory.get("prompt_payload")
+        if isinstance(memory, Mapping)
+        and not (
+            isinstance(memory.get("event_write"), Mapping)
+            and memory["event_write"].get("event_type")
+            == "conversation.memory_fallback"
+        )
+        else None
+    )
     execution_source = (
         "pending_context"
         if continuation["pending_context"] is not None
@@ -1725,6 +2214,11 @@ def _validate_prepared_receipt_facts(
         if continuation.get("pending_context") is not None
         else "memory_context"
         if isinstance(memory, Mapping)
+        and not (
+            isinstance(memory.get("event_write"), Mapping)
+            and memory["event_write"].get("event_type")
+            == "conversation.memory_fallback"
+        )
         else "root_message"
     )
     expected_servers = (
@@ -1775,6 +2269,7 @@ def _validate_no_server_component(
 
 
 __all__ = [
+    "build_submission_admission_request",
     "DurableSubmissionHandoff",
     "PreparedAgentRecoveryContext",
     "PreparedAgentRecoveryLoader",

@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock, Mock
 
 from src.api.runtime import ApiRuntime
 from src.api.submission_admission import PreparedAgentRecoveryContext
+from src.api.upload_errors import UploadValidationError
 from src.core.enums import MessageRole, TaskStatus
-from src.core.models import Conversation, Message, Task
+from src.core.models import Conversation, ConversationFileResource, Message, Task, TaskInputAttachment
 from src.orchestration.agent_loop.models import (
     AgentModelBinding,
     AgentRun,
@@ -31,12 +32,19 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         runtime.storage = object()
         runtime._engine = Mock()
         runtime._submission_admission_coordinator = coordinator
+        runtime._expected_submission_authority_receipt_sha256 = None
+        runtime._runtime_sidecar_client = SimpleNamespace(
+            claim_pending_submission=AsyncMock()
+        )
 
         async def record(name: str) -> None:
             events.append(name)
 
         runtime._master_key_sentinel_cipher = SimpleNamespace(
             create_or_verify_sentinel=lambda _storage: record("sentinel")
+        )
+        runtime.recover_deleting_conversations = lambda: record(
+            "deleting-conversations-recovered"
         )
         runtime._admit_mcp_rollout_instance = lambda: record("mcp-admit")
         for name in (
@@ -61,6 +69,106 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         runtime._recover_agent_runs = stop_after_agent_recovery_boundary
         return runtime
 
+    @staticmethod
+    def _authority_probe_response(receipt: str) -> dict[str, object]:
+        return {
+            "operation": "submission_pending_claim",
+            "found": False,
+            "admission": None,
+            "claim": None,
+            "authority_state": "finalized",
+            "finalization_receipt_sha256": receipt,
+            "error": None,
+            "pending_count": 0,
+            "earliest_claim_expires_at_ms": None,
+        }
+
+    async def test_authority_probe_runs_between_sentinel_and_delete_recovery(self) -> None:
+        events: list[str] = []
+        receipt = "7" * 64
+        runtime = self._startup_runtime(events, None)
+        runtime._expected_submission_authority_receipt_sha256 = receipt
+
+        async def claim_pending_submission(**_kwargs) -> dict[str, object]:
+            events.append("authority-probe")
+            return self._authority_probe_response(receipt)
+
+        runtime._runtime_sidecar_client = SimpleNamespace(
+            claim_pending_submission=AsyncMock(side_effect=claim_pending_submission)
+        )
+
+        with self.assertRaisesRegex(_StopStartup, "startup-boundary-reached"):
+            await runtime.start()
+
+        self.assertLess(events.index("sentinel"), events.index("authority-probe"))
+        self.assertLess(
+            events.index("authority-probe"),
+            events.index("deleting-conversations-recovered"),
+        )
+        runtime._runtime_sidecar_client.claim_pending_submission.assert_awaited_once()
+        probe = runtime._runtime_sidecar_client.claim_pending_submission.await_args.kwargs
+        self.assertEqual(probe["after_created_at_ms"], 9_223_372_036_854_775_807)
+        self.assertEqual(probe["after_message_id"], "")
+
+    async def test_authority_receipt_mismatch_blocks_before_delete_recovery(self) -> None:
+        events: list[str] = []
+        runtime = self._startup_runtime(events, None)
+        runtime._expected_submission_authority_receipt_sha256 = "7" * 64
+        runtime._runtime_sidecar_client = SimpleNamespace(
+            claim_pending_submission=AsyncMock(
+                return_value=self._authority_probe_response("8" * 64)
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "submission_authority_receipt_mismatch"
+        ):
+            await runtime.start()
+
+        self.assertEqual(events, ["sentinel"])
+
+    async def test_authority_probe_rejects_nonempty_or_unfinalized_state(self) -> None:
+        receipt = "7" * 64
+        cases = {
+            "pending": {
+                **self._authority_probe_response(receipt),
+                "pending_count": 1,
+                "earliest_claim_expires_at_ms": 9_223_372_036_854_775_807,
+            },
+            "unfinalized": {
+                **self._authority_probe_response(receipt),
+                "authority_state": "uninitialized",
+                "finalization_receipt_sha256": None,
+            },
+            "found": {
+                **self._authority_probe_response(receipt),
+                "found": True,
+            },
+        }
+        for name, response in cases.items():
+            with self.subTest(name=name):
+                events: list[str] = []
+                runtime = self._startup_runtime(events, None)
+                runtime._expected_submission_authority_receipt_sha256 = receipt
+                runtime._runtime_sidecar_client = SimpleNamespace(
+                    claim_pending_submission=AsyncMock(return_value=response)
+                )
+
+                with self.assertRaises(RuntimeError):
+                    await runtime.start()
+
+                self.assertEqual(events, ["sentinel"])
+
+    async def test_without_expected_receipt_skips_probe_and_reaches_agent_recovery(self) -> None:
+        events: list[str] = []
+        runtime = self._startup_runtime(events, None)
+
+        with self.assertRaisesRegex(_StopStartup, "startup-boundary-reached"):
+            await runtime.start()
+
+        runtime._runtime_sidecar_client.claim_pending_submission.assert_not_awaited()
+        self.assertIn("agent-recovery", events)
+
     async def test_projection_and_handoff_wrap_pre_agent_recovery_startup(self) -> None:
         events: list[str] = []
 
@@ -79,11 +187,39 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(_StopStartup, "startup-boundary-reached"):
             await runtime.start()
 
-        self.assertLess(events.index("sentinel"), events.index("submission-projected"))
+        self.assertLess(
+            events.index("sentinel"),
+            events.index("deleting-conversations-recovered"),
+        )
+        self.assertLess(
+            events.index("deleting-conversations-recovered"),
+            events.index("submission-projected"),
+        )
         self.assertLess(events.index("submission-projected"), events.index("mcp-admit"))
         self.assertLess(events.index("mcp-reconciled"), events.index("submission-handoff"))
         self.assertLess(events.index("submission-handoff"), events.index("agent-recovery"))
         self.assertNotIn("submission-abort", events)
+
+    async def test_startup_waits_for_delete_recovery_before_pending_projection(self) -> None:
+        events: list[str] = []
+        coordinator = AsyncMock()
+        runtime = self._startup_runtime(events, coordinator)
+        recovery_started = asyncio.Event()
+        release_recovery = asyncio.Event()
+
+        async def recover_deleting_conversations() -> None:
+            recovery_started.set()
+            await release_recovery.wait()
+
+        runtime.recover_deleting_conversations = recover_deleting_conversations
+        startup = asyncio.create_task(runtime.start())
+        await recovery_started.wait()
+
+        coordinator.project_pending.assert_not_awaited()
+        release_recovery.set()
+        with self.assertRaisesRegex(_StopStartup, "startup-boundary-reached"):
+            await startup
+        coordinator.project_pending.assert_awaited_once_with()
 
     async def test_failure_between_projection_and_handoff_aborts_claims(self) -> None:
         coordinator = AsyncMock()
@@ -199,6 +335,7 @@ class AgentRunLeaseRetryStartupTest(unittest.IsolatedAsyncioTestCase):
         runtime._agent_run_lease_retry_errors = {}
         runtime._agent_run_lease_retry_sleep = asyncio.sleep
         runtime._agent_run_recovery_fatal_exit = Mock()
+        runtime._clear_conversation_current_task = AsyncMock()
         return runtime, state
 
     async def test_heartbeat_extension_is_observed_before_expiry_recovery(self) -> None:
@@ -292,6 +429,125 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
     _run = staticmethod(AgentRunLeaseRetryStartupTest._run)
     _runtime = AgentRunLeaseRetryStartupTest._runtime
 
+    async def test_prepared_recovery_rejects_deleted_task_bound_upload_before_agent_recovery(self) -> None:
+        task = Task(
+            task_id="task-prepared-deleted-upload",
+            conversation_id="conversation-prepared-deleted-upload",
+            root_message_id="message-prepared-deleted-upload",
+            status=TaskStatus.RUNNING,
+        )
+        conversation = Conversation(task.conversation_id, "alice", current_task_id=task.task_id)
+        root_message = Message(
+            message_id=task.root_message_id,
+            conversation_id=task.conversation_id,
+            role=MessageRole.USER,
+            content="root text",
+            task_id=task.task_id,
+        )
+        run = AgentRun(
+            run_id=f"agent-run:{task.task_id}",
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding(
+                model_edition="test-model",
+                reasoning_effort="medium",
+                thinking_enabled=False,
+            ),
+        )
+        upload_ref = {
+            "upload_id": "upl-deleted",
+            "conversation_id": task.conversation_id,
+            "sha256": "sha-deleted",
+            "size_bytes": 12,
+            "selected_sheet": None,
+        }
+        attachment = TaskInputAttachment(
+            attachment_id="attachment-deleted",
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            source_kind="conversation_file",
+            source_upload_id="upl-deleted",
+            filename="deleted.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=12,
+            sha256="sha-deleted",
+            prompt_artifact={"upload_id": "upl-deleted", "status": "ready"},
+            skill_artifact={"upload_id": "upl-deleted", "content": "frozen"},
+        )
+        deleted_resource = ConversationFileResource(
+            file_id="upl-deleted",
+            conversation_id=task.conversation_id,
+            username="alice",
+            original_filename="deleted.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=12,
+            sha256="sha-deleted",
+            storage_key="conversation-prepared-deleted-upload/upl-deleted/original",
+            status="deleted",
+        )
+        prepared = PreparedAgentRecoveryContext(
+            username="alice",
+            current_user_input="prepared execution text",
+            initial_required_tool_name=None,
+            model_options={
+                "model_edition": "test-model",
+                "reasoning_effort": "medium",
+                "thinking_enabled": False,
+            },
+            bundle_revisions={
+                "skill_bundle_revision": None,
+                "mcp_bundle_revision": None,
+            },
+            execution_metadata={},
+            memory_context=None,
+            mcp_binding=None,
+            mcp_assignment=None,
+            available_mcp_servers=(),
+            upload_refs=(upload_ref,),
+            selected_upload_ids=("upl-deleted",),
+        )
+
+        class Storage:
+            async def get_task(_self, _task_id: str):
+                return task
+
+            async def get_conversation(_self, _conversation_id: str):
+                return conversation
+
+            async def get_message(_self, _message_id: str):
+                return root_message
+
+            async def list_task_input_attachments_for_task(_self, _task_id: str):
+                return [attachment]
+
+            async def get_conversation_file_resource(
+                _self, _conversation_id: str, _username: str, _upload_id: str
+            ):
+                return deleted_resource
+
+        recovery = AsyncMock(return_value=SimpleNamespace(run=run))
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = Storage()
+        runtime._prepared_agent_recovery_loader = SimpleNamespace(
+            load=AsyncMock(return_value=prepared)
+        )
+        runtime._agent_invocation_contexts = SimpleNamespace(merge=Mock())
+        runtime._agent_run_recovery = SimpleNamespace(recover_crashed_run=recovery)
+        runtime._skill_runtime_state = None
+        runtime._mcp_runtime_state = None
+        runtime._task_skill_bundle_revisions = {}
+        runtime._task_mcp_bundle_revisions = {}
+        runtime._agent_cancellation_token = lambda _task_id: None
+
+        with self.assertRaisesRegex(UploadValidationError, "upl-deleted"):
+            await runtime._recover_agent_run(run)
+
+        recovery.assert_not_awaited()
+        runtime._agent_invocation_contexts.merge.assert_not_called()
+
     async def test_prepared_context_bypasses_current_inputs_and_restores_exact_facts(
         self,
     ) -> None:
@@ -380,6 +636,12 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
             async def get_message(_self, message_id: str):
                 self.assertEqual(message_id, root_message.message_id)
                 return root_message
+
+            async def list_task_input_attachments_for_task(
+                _self, task_id: str
+            ):
+                self.assertEqual(task_id, task.task_id)
+                return []
 
         class RevisionState:
             def __init__(self) -> None:
@@ -591,6 +853,11 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
             async def get_message(_self, _message_id: str):
                 return root
 
+            async def list_task_input_attachments_for_task(
+                _self, _task_id: str
+            ):
+                return []
+
         class RevisionState:
             def __init__(self) -> None:
                 self.retained: list[str] = []
@@ -623,6 +890,7 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         runtime._agent_cancellation_token = lambda _task_id: None
         runtime._release_bundle_revision_with_sidecar_if_enforced = Mock()
         runtime._record_bundle_revision_shadow = Mock()
+        runtime._clear_conversation_current_task = AsyncMock()
 
         await runtime._recover_agent_run(run)
 
@@ -632,6 +900,10 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(runtime._skill_runtime_state.released, ["skill-r1"])
         self.assertEqual(runtime._mcp_runtime_state.retained, ["mcp-r1"])
         self.assertEqual(runtime._mcp_runtime_state.released, ["mcp-r1"])
+        runtime._clear_conversation_current_task.assert_awaited_once_with(
+            task.conversation_id,
+            task.task_id,
+        )
 
     async def test_observer_terminal_fast_path_releases_restored_revisions(self) -> None:
         run = AgentRun(
@@ -666,6 +938,7 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         runtime._task_mcp_bundle_revisions = {task.task_id: "mcp-old"}
         runtime._release_bundle_revision_with_sidecar_if_enforced = Mock()
         runtime._record_bundle_revision_shadow = Mock()
+        runtime._clear_conversation_current_task = AsyncMock()
 
         await runtime._observe_agent_run_lease(run.run_id)
 
@@ -673,6 +946,10 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(runtime._task_mcp_bundle_revisions, {})
         self.assertEqual(runtime._skill_runtime_state.released, ["skill-old"])
         self.assertEqual(runtime._mcp_runtime_state.released, ["mcp-old"])
+        runtime._clear_conversation_current_task.assert_awaited_once_with(
+            task.conversation_id,
+            task.task_id,
+        )
 
     def test_second_bundle_retain_failure_rolls_back_first_retain(self) -> None:
         class RevisionState:

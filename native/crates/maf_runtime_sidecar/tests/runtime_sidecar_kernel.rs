@@ -204,6 +204,60 @@ fn submission_admission_replays_before_busy_and_preserves_first_canonical_task()
 }
 
 #[test]
+fn submission_same_message_id_rejects_cross_owner_and_cross_conversation_reuse() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    kernel
+        .admit_submission(admission_request(
+            "globally-owned-message",
+            "original-task",
+            "original-conversation",
+        ))
+        .expect("create original admission");
+
+    let mut cross_owner = admission_request(
+        "globally-owned-message",
+        "cross-owner-task",
+        "original-conversation",
+    );
+    cross_owner.username = "other-owner".to_owned();
+    let mut conversation: serde_json::Value =
+        serde_json::from_slice(&cross_owner.conversation_projection_json).expect("conversation");
+    conversation["username"] = serde_json::Value::String("other-owner".to_owned());
+    cross_owner.conversation_projection_json = canonical(conversation);
+    cross_owner.projection_sha256 = domain_digest(
+        b"maf.submission.projection.v1\0",
+        &[
+            &cross_owner.conversation_projection_json,
+            b"\0",
+            &cross_owner.message_projection_json,
+        ],
+    );
+    mutate_continuation(&mut cross_owner, |value| {
+        value["owner_scope"] = serde_json::Value::String("other-owner".to_owned());
+    });
+    assert_eq!(
+        kernel
+            .admit_submission(cross_owner)
+            .expect("cross-owner Message reuse is a closed conflict")
+            .disposition,
+        SubmissionAdmissionDisposition::MessageIdConflict
+    );
+
+    let cross_conversation = admission_request(
+        "globally-owned-message",
+        "cross-conversation-task",
+        "other-conversation",
+    );
+    assert_eq!(
+        kernel
+            .admit_submission(cross_conversation)
+            .expect("cross-conversation Message reuse is a closed conflict")
+            .disposition,
+        SubmissionAdmissionDisposition::MessageIdConflict
+    );
+}
+
+#[test]
 fn submission_claim_projection_preparation_and_handoff_are_cas_closed() {
     let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
     let created = kernel
@@ -354,6 +408,47 @@ fn submission_claim_projection_preparation_and_handoff_are_cas_closed() {
     assert_eq!(empty.pending_count, 0);
     assert_eq!(empty.earliest_claim_expires_at_ms, None);
     assert_eq!(empty.finalization_receipt_sha256, Some("f".repeat(64)));
+}
+
+#[test]
+fn exact_admit_replay_reclaims_only_its_expired_target() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    kernel
+        .admit_submission(admission_request("message-a", "task-a", "conv-a"))
+        .expect("first created");
+    kernel
+        .admit_submission(admission_request("message-b", "task-b", "conv-b"))
+        .expect("target created");
+
+    let mut target = admission_request("message-b", "candidate-task", "conv-b");
+    target.workflow_owner = "worker-b".to_owned();
+    target.now_ms = 111;
+    let replay = kernel
+        .admit_submission(target)
+        .expect("exact target replay");
+
+    assert_eq!(
+        replay.disposition,
+        SubmissionAdmissionDisposition::IdempotentReplay
+    );
+    assert_eq!(
+        replay.admission.expect("target admission").message_id,
+        "message-b"
+    );
+    assert_eq!(replay.claim.expect("target claim").owner, "worker-b");
+    let other = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "worker-c".to_owned(),
+            now_ms: 111,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .expect("other pending claim");
+    assert_eq!(
+        other.admission.expect("other admission").message_id,
+        "message-a"
+    );
 }
 
 #[test]

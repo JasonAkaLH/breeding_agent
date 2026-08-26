@@ -19,6 +19,9 @@ pub const FEATURE_SUBMISSION_ADMISSION: &str = "submission_admission";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
 pub const MAX_IN_FLIGHT_CPU_MULTIPLIER: u64 = 4;
+pub const SUBMISSION_IMPORT_PAGE_ROWS: u64 = 1_000;
+pub const SUBMISSION_IMPORT_RECORD_BYTES: u64 = 64 * 1024;
+pub const SUBMISSION_IMPORT_STDIN_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationPolicy {
@@ -611,7 +614,7 @@ pub fn migration_policy() -> MigrationPolicy {
         .map(|evidence| (*evidence).to_owned())
         .collect(),
         require_target_schema_version: true,
-        task_authority_evidence_schema: "maf.runtime_sidecar.task_authority_migration_evidence.v1"
+        task_authority_evidence_schema: "maf.runtime_sidecar.task_authority_migration_evidence.v2"
             .to_owned(),
         task_authority_evidence_path_env: "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH".to_owned(),
         task_authority_hmac_key_path_env: "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH"
@@ -746,11 +749,17 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             ),
             ("submission_continuation_bytes".to_owned(), 64 * 1024 * 1024),
             ("submission_prepared_execution_bytes".to_owned(), 128 * 1024),
-            ("submission_import_page_rows".to_owned(), 1_000),
-            ("submission_import_record_bytes".to_owned(), 64 * 1024),
+            (
+                "submission_import_page_rows".to_owned(),
+                SUBMISSION_IMPORT_PAGE_ROWS,
+            ),
+            (
+                "submission_import_record_bytes".to_owned(),
+                SUBMISSION_IMPORT_RECORD_BYTES,
+            ),
             (
                 "submission_import_stdin_bytes".to_owned(),
-                1024 * 1024 * 1024,
+                SUBMISSION_IMPORT_STDIN_BYTES,
             ),
             ("grpc_max_message_bytes".to_owned(), 140 * 1024 * 1024),
         ]),
@@ -1163,6 +1172,26 @@ mod tests {
         assert_eq!(
             artifact,
             runtime_sidecar_contract_json().expect("serialize runtime sidecar contract"),
+        );
+    }
+
+    #[test]
+    fn migration_evidence_contract_requires_submission_authority_v2() {
+        assert_eq!(
+            migration_policy().task_authority_evidence_schema,
+            "maf.runtime_sidecar.task_authority_migration_evidence.v2"
+        );
+        assert_eq!(
+            SCHEMA_HASH,
+            "maf_runtime_v1_schema_20260826_event_append_exact_a4"
+        );
+        assert_eq!(
+            PROTO_HASH,
+            "maf_runtime_proto_v1_20260826_event_append_exact_a4"
+        );
+        assert_eq!(
+            ERROR_CODE_TABLE_HASH,
+            "maf_runtime_error_table_v1_idempotency_conflict_20260812"
         );
     }
 }

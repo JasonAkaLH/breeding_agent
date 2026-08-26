@@ -11,12 +11,30 @@ from unittest.mock import patch
 from sqlalchemy import inspect as inspect_schema
 from sqlalchemy.orm import Session
 
-from src.core.enums import ConversationStatus
+from src.core.enums import (
+    ConversationStatus,
+    RoutingMode,
+    TaskStatus,
+    UserMCPHealthStatus,
+    UserMCPTransport,
+)
 from src.core.models import (
     Conversation,
+    MCPInitialIntentCreateResult,
+    MCPNoServerConvergenceResult,
+    PendingSkillContext,
     SubmissionPreparationReceiptComponent,
+    Task,
+    UserMCPServer,
 )
-from src.storage.sqlalchemy_models import SubmissionPreparationReceiptRow
+from src.storage.sqlalchemy_models import (
+    EventRecordRow,
+    MCPNoServerConvergenceReceiptRow,
+    MCPNoServerIntentRow,
+    SubmissionPreparationReceiptRow,
+    TaskNodeRow,
+    TaskRow,
+)
 from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
 
@@ -280,6 +298,299 @@ class SubmissionPreparationReceiptSQLiteTest(SQLiteStorageTestCase):
                 )
         with self.session_factory() as session:
             self.assertEqual(session.query(SubmissionPreparationReceiptRow).count(), 0)
+
+    def test_route_decision_is_server_owned_and_first_observation_wins(self) -> None:
+        first = asyncio.run(
+            self.storage.settle_submission_route_decision_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                requires_user_scoped_server=True,
+                written_at=self.now,
+            )
+        )
+        route = json.loads(first.route_decision)
+        self.assertEqual(route["decision"], "no_server")
+        self.assertEqual(route["available_mcp_servers"], [])
+        self.assertEqual(len(route["owner_server_set_fingerprint"]), 64)
+
+        asyncio.run(
+            self.storage.create_user_mcp_server(
+                UserMCPServer(
+                    server_id="server-1",
+                    owner_user_id="alice",
+                    display_name="Server One",
+                    routing_description="route one",
+                    endpoint_url="https://example.test/mcp",
+                    transport=UserMCPTransport.STREAMABLE_HTTP,
+                    health_status=UserMCPHealthStatus.AVAILABLE,
+                    created_at=self.now + timedelta(seconds=1),
+                    updated_at=self.now + timedelta(seconds=1),
+                )
+            )
+        )
+        replay = asyncio.run(
+            self.storage.settle_submission_route_decision_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                requires_user_scoped_server=True,
+                written_at=self.now + timedelta(seconds=2),
+            )
+        )
+        self.assertEqual(replay, first)
+        self.assertEqual(json.loads(replay.route_decision)["decision"], "no_server")
+
+    def test_pending_skill_supersede_recovers_count_from_operation_timestamp(self) -> None:
+        context = PendingSkillContext(
+            context_id="context-1",
+            conversation_id="conversation-1",
+            username="alice",
+            capability_id="skill.example",
+            skill_name="example",
+            source_task_id="old-task",
+            source_message_id="old-message",
+            original_user_message="old",
+            missing_requirements=("value",),
+            assistant_message="need value",
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        asyncio.run(self.storage.save_pending_skill_context(context))
+        self.assertEqual(
+            asyncio.run(
+                self.storage.materialize_submission_pending_skill_supersede_exact(
+                    username="alice",
+                    conversation_id="conversation-1",
+                    task_id="task-false",
+                    should_supersede=False,
+                    occurred_at=self.now + timedelta(seconds=1),
+                )
+            ),
+            0,
+        )
+        with self.session_factory() as session:
+            self.assertEqual(session.query(EventRecordRow).count(), 0)
+
+        occurred_at = self.now + timedelta(seconds=2)
+        self.assertEqual(
+            asyncio.run(
+                self.storage.materialize_submission_pending_skill_supersede_exact(
+                    username="alice",
+                    conversation_id="conversation-1",
+                    task_id="task-1",
+                    should_supersede=True,
+                    occurred_at=occurred_at,
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.storage.materialize_submission_pending_skill_supersede_exact(
+                    username="alice",
+                    conversation_id="conversation-1",
+                    task_id="task-empty",
+                    should_supersede=True,
+                    occurred_at=occurred_at + timedelta(microseconds=1),
+                )
+            ),
+            0,
+        )
+        with self.session_factory() as session:
+            self.assertIsNone(
+                session.get(
+                    EventRecordRow,
+                    "submission-pending-skill-superseded:v1:task-empty",
+                )
+            )
+        replacement = replace(
+            context,
+            context_id="context-2",
+            source_task_id="later-task",
+            source_message_id="later-message",
+            created_at=occurred_at + timedelta(seconds=1),
+            updated_at=occurred_at + timedelta(seconds=1),
+        )
+        asyncio.run(self.storage.save_pending_skill_context(replacement))
+        self.assertEqual(
+            asyncio.run(
+                self.storage.materialize_submission_pending_skill_supersede_exact(
+                    username="alice",
+                    conversation_id="conversation-1",
+                    task_id="task-1",
+                    should_supersede=True,
+                    occurred_at=occurred_at,
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            asyncio.run(self.storage.get_pending_skill_context("context-2")).status,
+            "pending_user_input",
+        )
+        with self.session_factory() as session:
+            self.assertEqual(session.query(EventRecordRow).count(), 0)
+
+    def test_no_sql_task_intent_and_convergence_are_exact_after_faults(self) -> None:
+        asyncio.run(
+            self.storage.settle_submission_route_decision_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                requires_user_scoped_server=True,
+                written_at=self.now,
+            )
+        )
+        original_flush = Session.flush
+
+        def fail_intent(session: Session, *args: object, **kwargs: object) -> None:
+            if any(isinstance(row, MCPNoServerIntentRow) for row in session.new):
+                raise RuntimeError("intent-write-fault")
+            original_flush(session, *args, **kwargs)
+
+        with patch.object(Session, "flush", new=fail_intent):
+            with self.assertRaisesRegex(RuntimeError, "intent-write-fault"):
+                asyncio.run(
+                    self.storage.materialize_submission_no_server_intent_exact(
+                        username="alice",
+                        conversation_id="conversation-1",
+                        task_id="task-1",
+                        occurred_at=self.now + timedelta(seconds=1),
+                    )
+                )
+        with self.session_factory() as session:
+            self.assertEqual(session.query(MCPNoServerIntentRow).count(), 0)
+
+        created = asyncio.run(
+            self.storage.materialize_submission_no_server_intent_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                occurred_at=self.now + timedelta(seconds=1),
+            )
+        )
+        replay = asyncio.run(
+            self.storage.materialize_submission_no_server_intent_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                occurred_at=self.now + timedelta(seconds=1),
+            )
+        )
+        self.assertEqual(created, MCPInitialIntentCreateResult.CREATED_UNAVAILABLE)
+        self.assertEqual(replay, MCPInitialIntentCreateResult.ALREADY_CREATED)
+
+        def fail_receipt(session: Session, *args: object, **kwargs: object) -> None:
+            if any(
+                isinstance(row, MCPNoServerConvergenceReceiptRow)
+                for row in session.new
+            ):
+                raise RuntimeError("convergence-receipt-fault")
+            original_flush(session, *args, **kwargs)
+
+        converged_at = self.now + timedelta(seconds=2)
+        with patch.object(Session, "flush", new=fail_receipt):
+            with self.assertRaisesRegex(RuntimeError, "convergence-receipt-fault"):
+                asyncio.run(
+                    self.storage.converge_submission_no_server_without_sql_task(
+                        username="alice",
+                        conversation_id="conversation-1",
+                        task_id="task-1",
+                        occurred_at=converged_at,
+                    )
+                )
+        converged = asyncio.run(
+            self.storage.converge_submission_no_server_without_sql_task(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                occurred_at=converged_at,
+            )
+        )
+        converged_replay = asyncio.run(
+            self.storage.converge_submission_no_server_without_sql_task(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                occurred_at=converged_at,
+            )
+        )
+        self.assertEqual(converged, MCPNoServerConvergenceResult.CONVERGED)
+        self.assertEqual(
+            converged_replay, MCPNoServerConvergenceResult.ALREADY_CONVERGED
+        )
+        with self.session_factory() as session:
+            self.assertEqual(session.query(TaskRow).count(), 0)
+            self.assertEqual(session.query(TaskNodeRow).count(), 0)
+            self.assertEqual(session.query(MCPNoServerIntentRow).count(), 1)
+            self.assertIsNone(
+                session.query(MCPNoServerIntentRow).one().resume_envelope_json
+            )
+            self.assertEqual(session.query(EventRecordRow).count(), 2)
+            self.assertEqual(
+                session.query(MCPNoServerConvergenceReceiptRow).count(), 1
+            )
+
+    def test_sql_authority_no_server_handoff_is_atomic_and_exact(self) -> None:
+        task = Task(
+            task_id="task-sql-no-server",
+            conversation_id="conversation-1",
+            root_message_id="message-sql-no-server",
+            status=TaskStatus.ACCEPTED,
+            routing_mode=RoutingMode.FORCE_CAPABILITY,
+            requested_capability_id="mcp.dispatch",
+            summary="use mcp",
+            created_at=self.now,
+            updated_at=self.now,
+            mcp_execution_mode="user_scoped",
+            mcp_shadow_enabled=False,
+            mcp_rollout_config_version="rollout-1",
+            mcp_route_reason_code="enforce_selected",
+            mcp_rollout_mode="enforce",
+        )
+        asyncio.run(self.storage.save_task(task))
+        asyncio.run(
+            self.storage.settle_submission_route_decision_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id=task.task_id,
+                requires_user_scoped_server=True,
+                written_at=self.now,
+            )
+        )
+        occurred_at = self.now + timedelta(seconds=1)
+
+        first = asyncio.run(
+            self.storage.converge_submission_no_server_handoff_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id=task.task_id,
+                occurred_at=occurred_at,
+            )
+        )
+        replay = asyncio.run(
+            self.storage.converge_submission_no_server_handoff_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id=task.task_id,
+                occurred_at=occurred_at,
+            )
+        )
+
+        self.assertEqual(first, MCPNoServerConvergenceResult.CONVERGED)
+        self.assertEqual(replay, MCPNoServerConvergenceResult.ALREADY_CONVERGED)
+        stored = asyncio.run(self.storage.get_task(task.task_id))
+        self.assertEqual(stored.status, TaskStatus.FAILED)
+        self.assertEqual(stored.mcp_execution_mode, "unavailable")
+        self.assertEqual(stored.mcp_route_reason_code, "no_user_scoped_server")
+        with self.session_factory() as session:
+            self.assertEqual(
+                session.query(EventRecordRow)
+                .filter(EventRecordRow.task_id == task.task_id)
+                .count(),
+                2,
+            )
 
     def test_physical_delete_cleans_receipt_and_reports_count(self) -> None:
         self._write(

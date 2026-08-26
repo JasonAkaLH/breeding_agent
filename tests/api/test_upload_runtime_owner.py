@@ -11,6 +11,8 @@ from src.api.upload_runtime import ConversationUploadRuntimeMixin
 
 
 UPLOAD_RUNTIME_METHODS = {
+    "_read_conversation_file_resource_bytes_exact",
+    "_resolve_uploads",
     "_conversation_file_context_metadata_for_task",
     "_normalize_upload_sheet_selections",
     "_open_sheet_selection_interrupt",
@@ -21,7 +23,9 @@ UPLOAD_RUNTIME_METHODS = {
     "ensure_upload_allowed",
     "list_uploads",
     "resolve_conversation_uploads_for_message",
+    "resolve_conversation_uploads_for_submission",
     "resolve_uploads_for_message",
+    "resolve_uploads_for_submission",
     "save_upload",
 }
 

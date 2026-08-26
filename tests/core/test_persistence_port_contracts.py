@@ -216,12 +216,18 @@ EXPECTED_METHODS_BY_PORT = {
         "reserve_message_identity",
     ),
     "SubmissionPreparationReceiptStoragePort": (
+        "materialize_submission_pending_skill_supersede_exact",
+        "settle_submission_route_decision_exact",
+        "materialize_submission_no_server_intent_exact",
+        "converge_submission_no_server_without_sql_task",
+        "converge_submission_no_server_handoff_exact",
         "write_submission_preparation_component",
         "close_submission_preparation_receipt",
         "get_submission_preparation_receipt",
     ),
     "ConversationStoragePort": (
         "save_conversation",
+        "compare_and_set_conversation",
         "get_conversation",
         "list_conversations_for_username",
         "list_deleting_conversations",
@@ -237,6 +243,7 @@ EXPECTED_METHODS_BY_PORT = {
         "list_conversation_file_resources",
         "mark_conversation_file_resource_deleted",
         "save_conversation_file_resource_with_upload_message",
+        "apply_conversation_file_sheet_selection_exact",
         "mark_conversation_file_resource_and_upload_message_deleted",
         "compensate_failed_conversation_file_upload",
         "record_conversation_file_index_repair_required",
@@ -349,8 +356,8 @@ class PersistencePortContractsTest(unittest.TestCase):
             self.assertTrue(getattr(port, "_is_runtime_protocol", False), port_name)
             actual_names.extend(direct)
 
-        self.assertEqual(len(actual_names), 272)
-        self.assertEqual(len(set(actual_names)), 272)
+        self.assertEqual(len(actual_names), 279)
+        self.assertEqual(len(set(actual_names)), 279)
         self.assertEqual(set(actual_names), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
 
     def test_aggregate_is_thin_and_preserves_exact_inherited_surface(self) -> None:

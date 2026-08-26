@@ -4,6 +4,7 @@ from datetime import datetime
 
 from src.core.enums import ConversationStatus, MessageRole
 from src.core.models import Conversation, Message
+from src.storage.sqlite.models import ConversationRow
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.storage.support import SQLiteStorageTestCase
 
@@ -31,6 +32,68 @@ class SQLiteConversationRepositoryTest(SQLiteStorageTestCase):
 
         self.assertEqual(saved, conversation)
         self.assertEqual(loaded, conversation)
+
+    def test_conversation_cas_does_not_recreate_or_overwrite_a_newer_pointer(self) -> None:
+        original = Conversation(
+            conversation_id="conv-cas",
+            username="acc-1",
+            current_task_id="task-old",
+            created_at=datetime(2026, 4, 23, 10, 0, 0),
+            updated_at=datetime(2026, 4, 23, 10, 1, 0),
+        )
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            repo.save_conversation(original)
+            session.commit()
+
+        newer = Conversation(
+            conversation_id="conv-cas",
+            username="acc-1",
+            current_task_id="task-new",
+            created_at=original.created_at,
+            updated_at=datetime(2026, 4, 23, 10, 2, 0),
+        )
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            repo.save_conversation(newer)
+            session.commit()
+
+        cleared = Conversation(
+            conversation_id="conv-cas",
+            username="acc-1",
+            current_task_id=None,
+            created_at=original.created_at,
+            updated_at=datetime(2026, 4, 23, 10, 3, 0),
+        )
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            stale = repo.compare_and_set_conversation(
+                cleared,
+                expected_current_task_id="task-old",
+                expected_updated_at=original.updated_at,
+            )
+            session.commit()
+        self.assertIsNone(stale)
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            self.assertEqual(repo.get_conversation("conv-cas"), newer)
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            row = session.get(ConversationRow, "conv-cas")
+            session.delete(row)
+            session.commit()
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            missing = repo.compare_and_set_conversation(
+                cleared,
+                expected_current_task_id="task-new",
+                expected_updated_at=newer.updated_at,
+            )
+            session.commit()
+            self.assertIsNone(missing)
+            self.assertIsNone(repo.get_conversation("conv-cas"))
 
     def test_message_round_trip_and_conversation_listing(self) -> None:
         conversation = Conversation(conversation_id="conv-1", username="acc-1")

@@ -49,14 +49,16 @@ from src.core.contracts import MCPRemoteTaskStoragePort
 from src.core.errors import MessageIdentityConflictError
 from src.core.models import (
     Conversation,
+    ConversationAdmissionCloseDisposition,
+    ConversationAdmissionCloseRequest,
     ConversationFileResource,
+    ConversationMemorySummary,
     EventRecord,
     Interrupt,
     InterruptAnswer,
     Message,
     MCPShadowAuditSample,
     MCPRolloutInstanceConfigLease,
-    MCPInitialIntentCreateResult,
     MCPNoServerConvergenceResult,
     MCPValidatedTerminalResultCandidate,
     MCPTerminalState,
@@ -66,11 +68,22 @@ from src.core.models import (
     PendingSkillContext,
     SlotCollection,
     SlotEvent,
+    SubmissionAdmissionDisposition,
+    SubmissionPreparationReceipt,
+    SubmissionRecoveryRecord,
     Task,
     TaskInputAttachment,
     TaskNode,
 )
-from src.api.file_selection_runtime import ConversationFileSelectionRuntimeMixin
+from src.api.file_selection import (
+    FileRequirementProfile,
+    candidate_from_resource,
+    render_file_selection_question,
+)
+from src.api.file_selection_runtime import (
+    ConversationFileSelectionRuntimeMixin,
+    FileSelectionComputation,
+)
 from src.api.upload_runtime import ConversationUploadRuntimeMixin
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.agent_skills import (
@@ -190,6 +203,7 @@ from src.integrations.mcp.result_parsing import (
     MCPResultSource,
     MCPRawResultAuthorityResolver,
 )
+from src.integrations.mcp.result_parsing.json_values import canonical_json_bytes
 from src.integrations.mcp.pending_action_payloads import (
     MAX_PENDING_ACTION_ARGUMENT_BYTES,
     MCPPendingActionPayloadCipher,
@@ -302,6 +316,7 @@ from src.lifecycle.agent_run_recovery import (
     AgentRunRecoveryCoordinator,
 )
 from src.lifecycle.conversation_guard import ConversationSerialGuard
+from src.lifecycle.errors import ConversationBusyError
 from src.lifecycle.interrupt_service import InterruptService
 from src.lifecycle.mcp_presence import MCPTaskPresenceService
 from src.orchestration.answer_selection import select_final_text_artifact
@@ -345,17 +360,23 @@ from src.orchestration.agent_loop.repository import AgentRunRepository
 from src.orchestration.conversation_memory import (
     ConversationMemoryBuilder,
     ConversationMemoryConfig,
+    ConversationMemoryContext,
     ConversationMemoryStoragePort,
     ResolutionGenerator,
 )
 from src.orchestration.models import CapabilityDescriptor, UserMCPServerProfile
-from src.orchestration.visible_message_history import INTERRUPT_VISIBLE_STREAM_STATUS, persist_interrupt_question_message
+from src.orchestration.visible_message_history import (
+    INTERRUPT_VISIBLE_STREAM_STATUS,
+    interrupt_visible_message_id,
+    persist_interrupt_question_message,
+)
 from src.orchestration.composite_executor import CompositeExecutor
 from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
 from src.orchestration.instance_selector import InstanceSelector
 from src.storage import StoragePort
 from src.storage.rust_contract import (
     error_policy,
+    load_runtime_sidecar_contract,
     migration_policy,
     mode_for_component as runtime_sidecar_mode_for_component,
 )
@@ -384,9 +405,14 @@ from src.storage.conversation_files import (
     build_file_upload_message_projection,
 )
 from src.api.submission_admission import (
+    build_submission_admission_request,
+    DurableSubmissionHandoff,
     PreparedAgentRecoveryContext,
     PreparedAgentRecoveryLoader,
     SubmissionAdmissionCoordinator,
+    SubmissionPreparedAgentRecoveryLoader,
+    submission_interrupt_handoff_id,
+    submission_memory_event_id,
 )
 
 from .conversation_titles import (
@@ -418,6 +444,10 @@ from .upload_store import InMemoryUploadStore, UploadedFileRecord, UploadValidat
 
 
 logger = logging.getLogger(__name__)
+
+
+class SubmissionAdmissionUnavailableError(RuntimeError):
+    code = "submission_admission_unavailable"
 
 
 UNFINISHED_TASK_STATUSES = {
@@ -524,6 +554,7 @@ CONVERSATION_FILE_INDEX_REPAIR_REQUIRED_EVENT = "conversation_file.file_upload_i
 CONVERSATION_FILE_INDEX_REPAIR_RESOLVED_EVENT = "conversation_file.file_upload_index_repair_resolved"
 CONVERSATION_FILE_INDEX_REPAIR_FAILED_EVENT = "conversation_file.file_upload_index_repair_failed"
 CONVERSATION_FILE_SELECTOR_CONFIG_INVALID_EVENT = "conversation_file.file_selector_config_invalid"
+_SUBMISSION_INPUT_METADATA_KEY = "__maf_private_submission_input_v1"
 CONVERSATION_FILE_SELECTOR_ALLOWED_MODES = frozenset(
     {"disabled", "shadow", "enforce_narrow", "enforce_guarded_multi"}
 )
@@ -718,6 +749,7 @@ class ApiRuntime(
         mcp_cp7_maintenance_authorizer: Callable[[object], bool] | None = None,
         submission_admission_coordinator: SubmissionAdmissionCoordinator | None = None,
         prepared_agent_recovery_loader: PreparedAgentRecoveryLoader | None = None,
+        expected_submission_authority_receipt_sha256: str | None = None,
     ) -> None:
         self._engine = engine
         self._mcp_rollout_engine = mcp_rollout_engine
@@ -800,6 +832,11 @@ class ApiRuntime(
         self._mcp_cp7_maintenance_authorizer = mcp_cp7_maintenance_authorizer
         self._submission_admission_coordinator = submission_admission_coordinator
         self._prepared_agent_recovery_loader = prepared_agent_recovery_loader
+        self._submission_claim_owner = f"api-submission:{uuid4().hex}"
+        self._submission_claim_ttl = timedelta(seconds=30)
+        self._expected_submission_authority_receipt_sha256 = (
+            expected_submission_authority_receipt_sha256
+        )
         self._mcp_cp7_requests_stopped = False
         self._mcp_cp7_minute_task: asyncio.Task[None] | None = None
         self._mcp_cp7_clock = lambda: datetime.now(timezone.utc)
@@ -833,8 +870,16 @@ class ApiRuntime(
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._execution_generations: dict[str, int] = {}
         self._execution_durable_starts: dict[str, asyncio.Future[None]] = {}
+        self._submission_initialized_agent_runs: dict[str, Any] = {}
+        self._submission_woken_agent_ids: set[str] = set()
+        self._submission_wakeup_flights: dict[str, asyncio.Future[None]] = {}
+        self._submission_file_selection_computations: dict[
+            str, FileSelectionComputation
+        ] = {}
+        self._submission_selector_facts: dict[str, dict[str, Any]] = {}
         self._execution_wait_timeout_seconds = 30.0
         self._conversation_delete_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
+        self._conversation_delete_local_runner_ids: dict[str, str] = {}
         self._locally_cancelled_task_ids = local_cancelled_task_ids if local_cancelled_task_ids is not None else set()
         self._agent_cancellation_tokens: dict[str, AgentCancellationToken] = {}
         self._agent_run_lease_retry_tasks: dict[str, asyncio.Task[None]] = {}
@@ -842,6 +887,7 @@ class ApiRuntime(
         self._agent_run_lease_retry_sleep = asyncio.sleep
         self._agent_run_recovery_fatal_exit = os._exit
         self._running_title_tasks: set[asyncio.Task[None]] = set()
+        self._running_title_conversation_ids: set[str] = set()
         self._running_mcp_shadow_tasks: set[asyncio.Task[None]] = set()
         self._task_skill_bundle_revisions: dict[str, str] = {}
         self._task_mcp_bundle_revisions: dict[str, str] = {}
@@ -882,6 +928,21 @@ class ApiRuntime(
         return hashlib.sha256(
             f"agent-owner-scope-v1\0{username}".encode("utf-8")
         ).hexdigest()
+
+    @staticmethod
+    def _conversation_admission_close_operation_id(
+        username: str,
+        conversation_id: str,
+    ) -> str:
+        identity = json.dumps(
+            [username, conversation_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(
+            b"maf.conversation.admission-close.v1\0" + identity
+        ).hexdigest()
+        return f"conversation-close:{digest}"
 
     def _agent_cancellation_token(self, task_id: str) -> AgentCancellationToken:
         token = self._agent_cancellation_tokens.get(task_id)
@@ -1008,7 +1069,13 @@ class ApiRuntime(
         *,
         authenticated_username: str | None = None,
     ) -> dict[str, object]:
-        if MCP_SERVER_BINDING_METADATA_KEY not in request.metadata:
+        root_submission_replay = await self._is_existing_root_submission(
+            request.client_message_id
+        )
+        if (
+            MCP_SERVER_BINDING_METADATA_KEY not in request.metadata
+            and not root_submission_replay
+        ):
             interrupt_result = await self._try_submit_chat_as_interrupt_turn(
                 conversation_id,
                 request,
@@ -1028,6 +1095,18 @@ class ApiRuntime(
             "status": "accepted",
             "action": "task_accepted",
         }
+
+    async def _is_existing_root_submission(
+        self,
+        message_id: str | None,
+    ) -> bool:
+        if not message_id:
+            return False
+        message = await self.storage.get_message(message_id)
+        if message is None or message.task_id is None:
+            return False
+        task = await self.storage.get_task(message.task_id)
+        return task is not None and task.root_message_id == message_id
 
     async def _try_submit_chat_as_interrupt_turn(
         self,
@@ -1267,6 +1346,9 @@ class ApiRuntime(
     ) -> tuple[Message, Task]:
         if authenticated_username is None:
             raise ValueError("authenticated_username is required")
+        now = self._utcnow_naive()
+        message_id = request.client_message_id or self._make_id("msg")
+        task_id = self._make_id("task")
         bound_server_id = self._mcp_server_binding_id(request)
         cp7_safety_facade = getattr(self, "_mcp_cp7_safety_facade", None)
         if (
@@ -1281,14 +1363,24 @@ class ApiRuntime(
             self._ensure_mcp_rollout_instance_admitted()
         selected_model_edition = self._validate_requested_model_edition(request.model_edition)
         existing_conversation = await self.storage.get_conversation(conversation_id)
-        if (
-            authenticated_username is not None
-            and existing_conversation is not None
-            and existing_conversation.username != authenticated_username
-        ):
-            raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
-        if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
-            raise PermissionError(f"Conversation is not available: {conversation_id}")
+        existing_message = await self.storage.get_message(message_id)
+        conversation_context_authorized = (
+            existing_conversation is not None
+            and existing_conversation.username == authenticated_username
+            and existing_conversation.status == ConversationStatus.ACTIVE
+        )
+        if existing_message is None and existing_conversation is not None:
+            if not conversation_context_authorized:
+                raise PermissionError(
+                    f"Conversation is not available: {conversation_id}"
+                )
+        may_resolve_conversation_context = (
+            existing_message is None
+            or (
+                existing_message.conversation_id == conversation_id
+                and conversation_context_authorized
+            )
+        )
         resolved_mcp_binding = (
             await self._resolve_mcp_server_binding_preflight(
                 authenticated_username,
@@ -1299,8 +1391,10 @@ class ApiRuntime(
         )
         if resolved_mcp_binding is not None:
             self._ensure_mcp_rollout_instance_admitted()
-        await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
-        await self._conversation_guard.ensure_conversation_available(conversation_id)
+        if may_resolve_conversation_context:
+            await self._refresh_skills_for_new_conversation_if_needed(
+                conversation_id, existing_conversation
+            )
         routing_mode = self._routing_mode(request.routing_mode)
         if routing_mode == RoutingMode.FORCE_CAPABILITY and not request.capability_id:
             raise ValueError("capability_id is required when routing_mode is force_capability")
@@ -1308,12 +1402,12 @@ class ApiRuntime(
         self._ensure_supported_capability(requested_capability_id)
         explicit_force_capability = routing_mode == RoutingMode.FORCE_CAPABILITY and requested_capability_id is not None
         continued_pending_context: PendingSkillContext | None = None
-        superseded_pending_count = 0
-        if resolved_mcp_binding is not None:
-            pass
-        elif explicit_force_capability:
-            superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
-        elif requested_capability_id is None:
+        if (
+            may_resolve_conversation_context
+            and resolved_mcp_binding is None
+            and not explicit_force_capability
+            and requested_capability_id is None
+        ):
             continued_pending_context = await self.storage.get_active_pending_skill_context(conversation_id)
             if continued_pending_context is not None:
                 requested_capability_id = continued_pending_context.capability_id
@@ -1340,7 +1434,10 @@ class ApiRuntime(
             and mcp_assignment.real_path is not MCPExecutionPath.USER_SCOPED
         ):
             raise MCPBindingFeatureUnavailableError("mcp_user_scoped_runtime_unavailable")
-        if mcp_assignment.real_path is MCPExecutionPath.LEGACY:
+        if (
+            may_resolve_conversation_context
+            and mcp_assignment.real_path is MCPExecutionPath.LEGACY
+        ):
             await self._refresh_mcp_for_new_conversation_if_needed(
                 conversation_id,
                 existing_conversation,
@@ -1349,70 +1446,40 @@ class ApiRuntime(
             requested_capability_id,
             execution_mode=mcp_assignment.real_path.value,
         )
-        if resolved_mcp_binding is not None:
-            superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
-
-        upload_context = await self.resolve_uploads_for_message(
-            conversation_id,
-            authenticated_username,
-            request.metadata.get("upload_ids") or (),
-            upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
+        explicit_upload_ids = self._normalize_upload_ids(
+            request.metadata.get("upload_ids") or ()
         )
-        self._raise_missing_uploads(upload_context.get("missing_upload_ids"), context="message submission")
-        conversation_upload_context = await self.resolve_conversation_uploads_for_message(
-            conversation_id,
-            authenticated_username,
-            upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
+        request_sheet_selections = self._normalize_upload_sheet_selections(
+            request.metadata.get("upload_sheet_selections")
         )
-        now = self._utcnow_naive()
-        message_id = request.client_message_id or self._make_id("msg")
-        task_id = self._make_id("task")
-        username = authenticated_username
-
-        conversation = await self.storage.get_conversation(conversation_id)
-        if conversation is None:
-            conversation = Conversation(
-                conversation_id=conversation_id,
-                username=username,
-                current_task_id=task_id,
-                created_at=now,
-                updated_at=now,
+        selected_upload_refs: tuple[Mapping[str, Any], ...] = ()
+        if existing_message is None:
+            upload_resolution = await self.resolve_uploads_for_submission(
+                conversation_id,
+                authenticated_username,
+                explicit_upload_ids,
+                upload_sheet_selections=request_sheet_selections,
             )
-        else:
-            if authenticated_username is not None and conversation.username != authenticated_username:
-                raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
-            if conversation.status != ConversationStatus.ACTIVE:
-                raise PermissionError(f"Conversation is not available: {conversation_id}")
-            conversation = replace(conversation, username=username, current_task_id=task_id, updated_at=now)
-        try:
-            await self.storage.save_conversation(conversation)
-        except ValueError as exc:
-            if "Conversation is not available" in str(exc):
-                raise PermissionError(f"Conversation is not available: {conversation_id}") from exc
-            raise
-
-        message = Message(
-            message_id=message_id,
-            conversation_id=conversation_id,
-            role=MessageRole.USER,
-            content=request.content,
-            task_id=task_id,
-            created_at=now,
-            metadata=(
-                {
-                    MCP_SERVER_BINDING_CONTEXT_METADATA_KEY: resolved_mcp_binding.private_context(),
-                    MCP_SERVER_BADGE_METADATA_KEY: resolved_mcp_binding.public_badge(),
-                }
+            self._raise_missing_uploads(
+                upload_resolution.missing_upload_ids,
+                context="message submission",
+            )
+            conversation_upload_resolution = (
+                await self.resolve_conversation_uploads_for_submission(
+                    conversation_id,
+                    authenticated_username,
+                    upload_sheet_selections=request_sheet_selections,
+                )
+            )
+            selected_resolution = (
+                upload_resolution
                 if resolved_mcp_binding is not None
-                else {}
-            ),
-        )
-        await self.storage.save_message(message)
-        title_metadata = self._drop_user_supplied_system_metadata(request.metadata)
-        if selected_model_edition:
-            title_metadata["model_edition"] = selected_model_edition
-        await self._maybe_schedule_conversation_title_generation(conversation_id, metadata=title_metadata)
-
+                else conversation_upload_resolution
+            )
+            selected_upload_refs = tuple(
+                item.to_continuation_dict()
+                for item in selected_resolution.upload_refs
+            )
         task = Task(
             task_id=task_id,
             conversation_id=conversation_id,
@@ -1432,101 +1499,6 @@ class ApiRuntime(
         explicit_mcp_dispatch = (
             explicit_force_capability and requested_capability_id == "mcp.dispatch"
         )
-        initial_no_server = False
-        if explicit_mcp_dispatch and resolved_mcp_binding is None:
-            profiles = await self.available_user_mcp_server_profiles(
-                authenticated_username,
-                execution_mode=task.mcp_execution_mode,
-            )
-            if not profiles:
-                created = await self.storage.create_user_mcp_initial_intent(task, now)
-                if created is MCPInitialIntentCreateResult.RETRY_ROUTE:
-                    profiles = await self.available_user_mcp_server_profiles(
-                        authenticated_username,
-                        execution_mode=MCPExecutionPath.USER_SCOPED.value,
-                    )
-                    if not profiles:
-                        raise RuntimeError("mcp_initial_intent_retry_route_without_profile")
-                else:
-                    initial_no_server = True
-                    task = await self.storage.get_task(task_id) or task
-        if not initial_no_server:
-            await self.storage.save_task(task)
-        if resolved_mcp_binding is not None:
-            await self._record_event(
-                self._make_event(
-                    task_id=task_id,
-                    conversation_id=conversation_id,
-                    event_type="mcp.server_binding_resolved",
-                    payload={
-                        "safe_server_ref": self._mcp_audit_reference_signer.safe_reference(
-                            resolved_mcp_binding.server_id,
-                            context="mcp-server-binding-v1",
-                        ),
-                        "binding_mode": MCP_BINDING_MODE_EXPLICIT_COMMAND,
-                        "status": "accepted",
-                    },
-                    visibility=EventVisibility.AUDIT_ONLY,
-                    created_at=now,
-                )
-            )
-        await self._record_mcp_route_assignment_metric(task)
-        await self._record_event(
-            self._make_event(
-                task_id=task_id,
-                conversation_id=conversation_id,
-                event_type="task.accepted",
-                payload={
-                    "message_id": message_id,
-                    "status": str(task.status),
-                    **self._llm_request_metadata(
-                        self._accepted_task_llm_source_metadata(request.metadata, selected_model_edition),
-                        include_defaults=True,
-                    ),
-                    **({"model_edition": selected_model_edition} if selected_model_edition else {}),
-                },
-                created_at=now,
-            )
-        )
-        await self._record_event(
-            self._make_event(
-                task_id=task_id,
-                conversation_id=conversation_id,
-                event_type="mcp.rollout.route_assigned",
-                payload={
-                    **(
-                        {
-                            "safe_owner_ref": self._mcp_audit_reference_signer.safe_owner_reference(
-                                authenticated_username,
-                                context=mcp_assignment.config_version,
-                            )
-                        }
-                    ),
-                    "safe_task_ref": hashlib.sha256(
-                        f"{mcp_assignment.config_version}:{task_id}".encode("utf-8")
-                    ).hexdigest(),
-                    "real_path": mcp_assignment.real_path.value,
-                    "shadow_enabled": mcp_assignment.shadow_enabled,
-                    "config_version": mcp_assignment.config_version,
-                    "reason_code": mcp_assignment.reason_code.value,
-                    "rollout_mode": mcp_assignment.routing_mode.value,
-                },
-                visibility=EventVisibility.AUDIT_ONLY,
-                created_at=now,
-            )
-        )
-        if superseded_pending_count:
-            await self._record_event(
-                self._make_event(
-                    task_id=task_id,
-                    conversation_id=conversation_id,
-                    event_type="pending_skill_context.superseded",
-                    payload={"count": superseded_pending_count, "reason": "new_forced_capability"},
-                    visibility=EventVisibility.AUDIT_ONLY,
-                    created_at=now,
-                )
-            )
-
         metadata = self._drop_user_supplied_system_metadata(request.metadata)
         if resolved_mcp_binding is not None:
             metadata.update(
@@ -1539,14 +1511,8 @@ class ApiRuntime(
         if request.capability_id != requested_capability_id and request.capability_id is not None:
             metadata["requested_capability_alias"] = request.capability_id
             metadata["canonical_capability_id"] = requested_capability_id
-        execution_user_message = request.content
-        current_user_message = None
-        resolved_user_message = None
         if continued_pending_context is not None:
             metadata.update(self._pending_skill_continuation_metadata(continued_pending_context))
-            execution_user_message = self._format_pending_skill_continuation_message(continued_pending_context, request.content)
-            current_user_message = request.content
-            resolved_user_message = execution_user_message
         if requested_capability_id is not None and requested_capability_id.startswith("skill."):
             metadata["defer_task_completed_until_pending_skill_context_processed"] = True
         if self._skill_runtime_state is not None:
@@ -1557,55 +1523,6 @@ class ApiRuntime(
             and self._mcp_runtime_state is not None
         ):
             metadata["mcp_bundle_revision"] = self._mcp_runtime_state.active_revision
-        if initial_no_server:
-            outcome = await self.storage.converge_user_mcp_no_server(task_id, now)
-            if outcome not in {
-                MCPNoServerConvergenceResult.CONVERGED,
-                MCPNoServerConvergenceResult.ALREADY_CONVERGED,
-                MCPNoServerConvergenceResult.ALREADY_TERMINAL,
-            }:
-                raise RuntimeError(f"mcp_initial_no_server_convergence_failed:{outcome}")
-            return message, await self.storage.get_task(task_id) or task
-        upload_ids = request.metadata.get("upload_ids") or ()
-        explicit_upload_ids = self._normalize_upload_ids(upload_ids)
-        if upload_context["uploaded_artifacts"]:
-            await self._bind_task_input_uploads(
-                task=task,
-                username=authenticated_username,
-                upload_ids=upload_ids,
-                source_kind="message_upload",
-                source_message_id=message_id,
-                upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
-            )
-        selected_upload_context = (
-            upload_context
-            if resolved_mcp_binding is not None
-            else conversation_upload_context
-        )
-        metadata.update(self._upload_context_metadata(selected_upload_context))
-        should_run_file_selector = (
-            resolved_mcp_binding is None
-            and not explicit_upload_ids
-            and self._conversation_file_selector_mode != "disabled"
-        )
-        if should_run_file_selector and await self._maybe_handle_conversation_file_selection(
-            task=task,
-            username=authenticated_username,
-            request=request,
-            metadata=metadata,
-            requested_capability_id=requested_capability_id,
-            continued_pending_context=continued_pending_context,
-            explicit_upload_ids=explicit_upload_ids,
-        ):
-            return message, task
-        if selected_upload_context.get("pending_sheet_selections"):
-            await self._open_sheet_selection_interrupt(
-                task=task,
-                metadata=metadata,
-                pending_sheet_selections=selected_upload_context["pending_sheet_selections"],
-            )
-            return message, task
-
         visible_mcp_servers = await self.available_user_mcp_server_profiles(
             authenticated_username,
             execution_mode=task.mcp_execution_mode,
@@ -1621,23 +1538,265 @@ class ApiRuntime(
         )
         if resolved_mcp_binding is not None and len(available_mcp_servers) != 1:
             raise MCPBoundServerUnavailableError("mcp_bound_server_unavailable")
-        metadata["available_mcp_server_ids"] = [
-            profile.server_id for profile in available_mcp_servers
-        ]
-        orchestration_request = AgentExecutionRequest(
-            task_id=task_id,
-            conversation_id=conversation_id,
-            root_message_id=message_id,
-            user_message=execution_user_message,
-            owner_scope=self._agent_owner_scope(authenticated_username),
-            requested_capability_id=requested_capability_id,
-            metadata=metadata,
-            current_user_message=current_user_message,
-            resolved_user_message=resolved_user_message,
-            available_mcp_servers=available_mcp_servers,
+        model_options = self._resolve_llm_request_options(metadata)
+        model_options_payload = {
+            "model_edition": model_options.model_edition,
+            "reasoning_effort": model_options.reasoning_effort,
+            "thinking_enabled": model_options.thinking,
+        }
+        bundle_revisions = {
+            "skill_bundle_revision": metadata.get("skill_bundle_revision"),
+            "mcp_bundle_revision": metadata.get("mcp_bundle_revision"),
+        }
+        alias = (
+            request.capability_id
+            if request.capability_id is not None
+            and request.capability_id != requested_capability_id
+            else None
         )
-        await self._schedule_execution(orchestration_request)
-        return message, task
+        execution_metadata = {
+            "requested_capability_alias": alias,
+            "canonical_capability_id": requested_capability_id if alias else None,
+            "mcp_dispatch_server_id": (
+                resolved_mcp_binding.server_id if resolved_mcp_binding else None
+            ),
+            "mcp_binding_mode": (
+                resolved_mcp_binding.binding_mode if resolved_mcp_binding else None
+            ),
+            "mcp_command": (
+                resolved_mcp_binding.command if resolved_mcp_binding else None
+            ),
+            "mcp_execution_mode": mcp_assignment.real_path.value,
+            "mcp_rollout_config_version": mcp_assignment.config_version,
+            "mcp_route_reason_code": mcp_assignment.reason_code.value,
+            "mcp_rollout_mode": mcp_assignment.routing_mode.value,
+            "defer_task_completed_until_pending_skill_context_processed": (
+                True
+                if requested_capability_id is not None
+                and requested_capability_id.startswith("skill.")
+                else None
+            ),
+            "forced_by_mcp_command": (
+                True if resolved_mcp_binding is not None else None
+            ),
+            "mcp_shadow_enabled": mcp_assignment.shadow_enabled,
+        }
+        binding_payload = (
+            {
+                "server_id": resolved_mcp_binding.server_id,
+                "server_config_version": resolved_mcp_binding.server_config_version,
+                "server_security_version": resolved_mcp_binding.server_security_version,
+                "display_name": resolved_mcp_binding.display_name,
+                "command": resolved_mcp_binding.command,
+                "binding_mode": resolved_mcp_binding.binding_mode,
+            }
+            if resolved_mcp_binding is not None
+            else None
+        )
+        assignment_payload = {
+            "execution_mode": mcp_assignment.real_path.value,
+            "shadow_enabled": mcp_assignment.shadow_enabled,
+            "rollout_config_version": mcp_assignment.config_version,
+            "route_reason_code": mcp_assignment.reason_code.value,
+            "rollout_mode": mcp_assignment.routing_mode.value,
+        }
+        pending_payload = (
+            {
+                "context_id": continued_pending_context.context_id,
+                "capability_id": continued_pending_context.capability_id,
+                "original_user_message": continued_pending_context.original_user_message,
+                "assistant_message": continued_pending_context.assistant_message,
+                "missing_requirements": sorted(
+                    set(continued_pending_context.missing_requirements)
+                ),
+            }
+            if continued_pending_context is not None
+            else None
+        )
+        frozen_file_profile = self._file_requirement_profile_for_request(
+            request,
+            metadata=request.metadata,
+            requested_capability_id=requested_capability_id,
+            continued_pending_context=continued_pending_context,
+        )
+        selector_metadata: dict[str, Any] = {}
+        if frozen_file_profile.is_meaningful():
+            selector_metadata["file_selection"] = {
+                "source": frozen_file_profile.source,
+                "required": frozen_file_profile.required,
+                "allow_multiple": frozen_file_profile.allow_multiple,
+                "expected_content": list(frozen_file_profile.expected_content),
+                "supported_file_types": list(
+                    frozen_file_profile.supported_file_types
+                ),
+                "helpful_columns": list(frozen_file_profile.helpful_columns),
+                "disambiguation_hint": frozen_file_profile.disambiguation_hint,
+                "user_file_reference": frozen_file_profile.user_file_reference,
+                "context_notes": list(frozen_file_profile.context_notes),
+            }
+        message_metadata: dict[str, Any] = {
+            _SUBMISSION_INPUT_METADATA_KEY: {
+                "explicit_upload_ids": list(explicit_upload_ids),
+                "selector_metadata": selector_metadata,
+            }
+        }
+        if resolved_mcp_binding is not None:
+            message_metadata.update(
+                {
+                    MCP_SERVER_BINDING_CONTEXT_METADATA_KEY: resolved_mcp_binding.private_context(),
+                    MCP_SERVER_BADGE_METADATA_KEY: resolved_mcp_binding.public_badge(),
+                }
+            )
+        admission_request = build_submission_admission_request(
+            username=authenticated_username,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            content=request.content,
+            task=task,
+            conversation_created_at=(
+                existing_conversation.created_at
+                if existing_conversation is not None
+                and existing_conversation.created_at is not None
+                else now
+            ),
+            conversation_updated_at=now,
+            create_conversation_if_missing=existing_conversation is None,
+            message_created_at=now,
+            message_type="chat",
+            message_metadata=message_metadata,
+            model_options=model_options_payload,
+            bundle_revisions=bundle_revisions,
+            execution_metadata=execution_metadata,
+            explicit_upload_ids=explicit_upload_ids,
+            request_sheet_selections=request_sheet_selections,
+            upload_refs=selected_upload_refs,
+            mcp_binding=binding_payload,
+            mcp_assignment=assignment_payload,
+            available_mcp_servers=available_mcp_servers,
+            pending_context=pending_payload,
+            initial_no_server_eligible=(
+                explicit_mcp_dispatch and resolved_mcp_binding is None
+            ),
+            claim_owner=self._submission_claim_owner,
+            claim_expires_at=now + self._submission_claim_ttl,
+        )
+        try:
+            admitted = await self.storage.admit_submission(admission_request)
+        except Exception as exc:
+            raise SubmissionAdmissionUnavailableError() from exc
+        if admitted.disposition is SubmissionAdmissionDisposition.CONVERSATION_BUSY:
+            raise ConversationBusyError(
+                f"Conversation {conversation_id} already has an active task."
+            )
+        if admitted.disposition is SubmissionAdmissionDisposition.MESSAGE_ID_CONFLICT:
+            raise MessageIdentityConflictError()
+        if admitted.disposition is SubmissionAdmissionDisposition.CONVERSATION_NOT_AVAILABLE:
+            raise PermissionError(f"Conversation is not available: {conversation_id}")
+        if admitted.disposition not in {
+            SubmissionAdmissionDisposition.CREATED,
+            SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+        }:
+            raise SubmissionAdmissionUnavailableError()
+        record = admitted.record
+        if admitted.message_id is None or admitted.task_id is None:
+            raise SubmissionAdmissionUnavailableError()
+        if record is None:
+            if (
+                admitted.disposition
+                is not SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY
+                or admitted.handle is not None
+            ):
+                raise SubmissionAdmissionUnavailableError()
+            message = await self.storage.get_message(admitted.message_id)
+            canonical_task = await self.storage.get_task(admitted.task_id)
+            if (
+                message is None
+                or canonical_task is None
+                or message.conversation_id != admitted.conversation_id
+                or message.task_id != admitted.task_id
+                or canonical_task.conversation_id != admitted.conversation_id
+                or canonical_task.root_message_id != admitted.message_id
+            ):
+                raise SubmissionAdmissionUnavailableError()
+            return message, canonical_task
+        if (
+            admitted.message_id != record.message_id
+            or admitted.task_id != record.task_id
+            or admitted.conversation_id != record.conversation_id
+            or admitted.phase != record.phase
+            or admitted.disposition is SubmissionAdmissionDisposition.CREATED
+            and admitted.handle is None
+        ):
+            raise SubmissionAdmissionUnavailableError()
+        coordinator = self._submission_admission_coordinator
+        if coordinator is None:
+            raise SubmissionAdmissionUnavailableError()
+
+        async def reclaim_exact(
+            expected: SubmissionRecoveryRecord,
+        ) -> Any:
+            reclaim_at = self._utcnow_naive()
+            reclaimed = await self.storage.admit_submission(
+                replace(
+                    admission_request,
+                    message_created_at=reclaim_at,
+                    claim_expires_at=reclaim_at + self._submission_claim_ttl,
+                )
+            )
+            if reclaimed.message_id != expected.message_id:
+                raise RuntimeError("submission_exact_reclaim_identity_mismatch")
+            return reclaimed
+
+        try:
+            recovery = await coordinator.continue_admitted(
+                admitted,
+                reclaim_exact=reclaim_exact,
+            )
+        except Exception as exc:
+            raise SubmissionAdmissionUnavailableError() from exc
+        if recovery.recovered_count:
+            title_metadata = self._drop_user_supplied_system_metadata(
+                request.metadata
+            )
+            if selected_model_edition:
+                title_metadata["model_edition"] = selected_model_edition
+            await self._maybe_schedule_conversation_title_generation(
+                conversation_id,
+                metadata=title_metadata,
+            )
+
+        message = await self.storage.get_message(record.message_id)
+        if message is None:
+            projection = json.loads(record.message_projection.decode("utf-8"))
+            projected_metadata = dict(projection["metadata"])
+            projected_metadata.pop(_SUBMISSION_INPUT_METADATA_KEY, None)
+            message_created_at = datetime.fromisoformat(
+                str(projection["message_created_at"]).replace("Z", "+00:00")
+            ).replace(tzinfo=None)
+            message = Message(
+                message_id=record.message_id,
+                conversation_id=record.conversation_id,
+                role=MessageRole.USER,
+                content=str(projection["content"]),
+                task_id=record.task_id,
+                stream_status=str(projection["stream_status"]),
+                created_at=message_created_at,
+                message_type=str(projection["message_type"]),
+                metadata=projected_metadata,
+                updated_at=datetime.fromisoformat(
+                    str(projection["updated_at"]).replace("Z", "+00:00")
+                ).replace(tzinfo=None),
+            )
+        canonical_task = await self.storage.get_task(record.task_id)
+        if canonical_task is None:
+            canonical_task = replace(
+                task,
+                task_id=record.task_id,
+                root_message_id=record.message_id,
+                created_at=admitted.task_created_at or record.created_at,
+                updated_at=admitted.task_created_at or record.created_at,
+            )
+        return message, canonical_task
 
     async def _record_mcp_route_assignment_metric(self, task: Task) -> None:
         recorder = self._mcp_rollout_metric_recorder
@@ -2481,6 +2640,1315 @@ class ApiRuntime(
     def _metadata_list(value: Any) -> list[Any]:
         return list(value) if isinstance(value, list | tuple) else []
 
+    @staticmethod
+    def _submission_component_value(canonical_component: bytes) -> Any:
+        return json.loads(canonical_component.decode("utf-8"))
+
+    @staticmethod
+    def _submission_event_id(task_id: str, event_kind: str) -> str:
+        digest = hashlib.sha256(
+            canonical_json_bytes({"event_kind": event_kind, "task_id": task_id})
+        ).hexdigest()
+        return f"submission-event:v1:{task_id}:{digest}"
+
+    async def _append_submission_event_exact(self, event: EventRecord) -> bool:
+        saved, duplicate = await self.storage.append_event_exact(event)
+        if not duplicate:
+            await self.event_broker.publish(saved)
+        return not duplicate
+
+    @staticmethod
+    def _submission_task(
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+    ) -> Task:
+        assignment = continuation.get("mcp_assignment")
+        assignment = assignment if isinstance(assignment, Mapping) else {}
+        content = json.loads(record.message_projection.decode("utf-8"))["content"]
+        return Task(
+            task_id=record.task_id,
+            conversation_id=record.conversation_id,
+            root_message_id=record.message_id,
+            status=TaskStatus.ACCEPTED,
+            routing_mode=RoutingMode(str(continuation["routing_mode"])),
+            requested_capability_id=continuation.get("requested_capability_id"),
+            summary=str(content),
+            created_at=record.created_at,
+            updated_at=record.created_at,
+            mcp_execution_mode=assignment.get("execution_mode"),
+            mcp_shadow_enabled=assignment.get("shadow_enabled"),
+            mcp_rollout_config_version=assignment.get("rollout_config_version"),
+            mcp_route_reason_code=assignment.get("route_reason_code"),
+            mcp_rollout_mode=assignment.get("rollout_mode"),
+        )
+
+    async def settle_route_decision_exact(
+        self,
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        return await self.storage.settle_submission_route_decision_exact(
+            username=record.username,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            requires_user_scoped_server=bool(
+                continuation["initial_no_server_eligible"]
+            ),
+            written_at=written_at,
+        )
+
+    async def _submission_agent_request(
+        self,
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+        *,
+        user_message: str,
+        memory_context: Mapping[str, Any] | None = None,
+        available_mcp_servers: tuple[UserMCPServerProfile, ...] | None = None,
+        expected_upload_ids: Iterable[str] | None = None,
+    ) -> AgentExecutionRequest:
+        metadata = {
+            key: value
+            for source in (
+                continuation["execution_metadata"],
+                continuation["model_options"],
+                continuation["bundle_revisions"],
+            )
+            for key, value in source.items()
+            if value is not None
+        }
+        model_options = continuation["model_options"]
+        thinking_enabled = bool(model_options.get("thinking_enabled", False))
+        reasoning_effort = str(
+            model_options.get("reasoning_effort") or "minimal"
+        )
+        metadata.update(
+            {
+                "deep_thinking": thinking_enabled,
+                "main_agent_thinking_enabled": thinking_enabled,
+                "main_agent_reasoning_effort": reasoning_effort,
+                "requested_reasoning_effort": reasoning_effort,
+            }
+        )
+        attachment_metadata = await self._prepared_task_input_attachment_metadata(
+            record.task_id,
+            upload_refs=continuation["upload_refs"],
+            expected_upload_ids=expected_upload_ids,
+        )
+        metadata.update(attachment_metadata)
+        if memory_context is not None:
+            metadata["conversation_memory"] = dict(memory_context)
+        profiles = available_mcp_servers
+        if profiles is None:
+            profiles = tuple(
+                UserMCPServerProfile(**item)
+                for item in continuation["available_mcp_servers"]
+            )
+        metadata["available_mcp_server_ids"] = [
+            profile.server_id for profile in profiles
+        ]
+        return AgentExecutionRequest(
+            task_id=record.task_id,
+            conversation_id=record.conversation_id,
+            root_message_id=record.message_id,
+            user_message=user_message,
+            owner_scope=self._agent_owner_scope(record.username),
+            requested_capability_id=continuation.get("requested_capability_id"),
+            metadata=metadata,
+            current_user_message=(
+                memory_context.get("current_user_message")
+                if memory_context is not None
+                else None
+            ),
+            resolved_user_message=(
+                memory_context.get("resolved_user_message")
+                if memory_context is not None
+                else None
+            ),
+            memory_context=memory_context,
+            available_mcp_servers=profiles,
+        )
+
+    async def _prepared_task_input_attachment_metadata(
+        self,
+        task_id: str,
+        *,
+        upload_refs: Iterable[Mapping[str, Any]] | None = None,
+        expected_upload_ids: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        expected_ids = (
+            None
+            if expected_upload_ids is None
+            else {str(item) for item in expected_upload_ids}
+        )
+        attachments = await self.storage.list_task_input_attachments_for_task(
+            task_id
+        )
+        if not attachments:
+            if expected_ids:
+                raise RuntimeError("submission_attachment_selection_drift")
+            return {}
+        refs_by_id = (
+            {
+                str(item["upload_id"]): dict(item)
+                for item in upload_refs
+            }
+            if upload_refs is not None
+            else None
+        )
+        uploaded_artifacts: list[dict[str, Any]] = []
+        skill_artifacts: list[dict[str, Any]] = []
+        upload_ids: list[str] = []
+        observed_ids = {
+            str(attachment.source_upload_id or "").strip()
+            for attachment in attachments
+            if str(attachment.source_upload_id or "").strip()
+        }
+        if expected_ids is not None and observed_ids != expected_ids:
+            raise RuntimeError("submission_attachment_selection_drift")
+        for attachment in attachments:
+            if attachment.task_id != task_id:
+                raise RuntimeError("submission_attachment_task_drift")
+            upload_id = str(attachment.source_upload_id or "").strip()
+            if refs_by_id is not None and upload_id:
+                ref = refs_by_id.get(upload_id)
+                if (
+                    ref is None
+                    or attachment.conversation_id != ref["conversation_id"]
+                    or attachment.sha256 != ref["sha256"]
+                    or attachment.size_bytes != ref["size_bytes"]
+                    or attachment.selected_sheet != ref["selected_sheet"]
+                ):
+                    raise RuntimeError("submission_attachment_upload_ref_drift")
+            prompt_artifact = attachment.prompt_artifact
+            skill_artifact = attachment.skill_artifact
+            if not isinstance(prompt_artifact, Mapping) or not prompt_artifact:
+                raise RuntimeError("submission_attachment_prompt_artifact_missing")
+            if not isinstance(skill_artifact, Mapping) or not skill_artifact:
+                raise RuntimeError("submission_attachment_skill_artifact_missing")
+            if upload_id:
+                upload_ids.append(upload_id)
+            uploaded_artifacts.append(dict(prompt_artifact))
+            skill_artifacts.append(dict(skill_artifact))
+        return {
+            **({"upload_ids": upload_ids} if upload_ids else {}),
+            "uploaded_artifacts": uploaded_artifacts,
+            "skill_artifacts": skill_artifacts,
+        }
+
+    async def compute_memory_context(
+        self,
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+    ) -> object:
+        if self._conversation_memory_builder is None:
+            return None
+        content = str(
+            json.loads(record.message_projection.decode("utf-8"))["content"]
+        )
+        request = await self._submission_agent_request(
+            record,
+            continuation,
+            user_message=content,
+        )
+        fallback_error: Exception | None = None
+        try:
+            prepare = getattr(self._conversation_memory_builder, "prepare", None)
+            if callable(prepare):
+                preparation = await prepare(request, username=record.username)
+                context = preparation.context
+                prepared_summary = preparation.summary_write
+            else:
+                context = await self._conversation_memory_builder.build(
+                    request,
+                    username=record.username,
+                )
+                prepared_summary = None
+        except PermissionError:
+            raise
+        except Exception as exc:
+            fallback_error = exc
+            context = ConversationMemoryContext(
+                conversation_id=record.conversation_id,
+                root_message_id=record.message_id,
+                source_message_count=0,
+                current_user_message=content,
+            )
+            prepared_summary = None
+        prompt_payload = {
+            key: value
+            for key, value in context.to_prompt_payload().items()
+            if value is not None
+        }
+        summary_write: dict[str, Any] | None = None
+        memory_identity_sha256 = hashlib.sha256(b"null").hexdigest()
+        if prepared_summary is not None:
+            summary = replace(
+                prepared_summary,
+                created_at=record.created_at,
+                updated_at=record.created_at,
+            )
+            summary_subject = {
+                "schema": "maf.submission.memory_summary_write.v1",
+                "summary_id": summary.summary_id,
+                "conversation_id": summary.conversation_id,
+                "username": summary.username,
+                "covered_until_turn_id": summary.covered_until_turn_id,
+                "covered_until_message_id": summary.covered_until_message_id,
+                "covered_until_created_at": (
+                    summary.covered_until_created_at.isoformat()
+                    if summary.covered_until_created_at is not None
+                    else None
+                ),
+                "summary_text": summary.summary_text,
+                "source_message_count": summary.source_message_count,
+                "source_message_ids_hash": summary.source_message_ids_hash,
+                "estimated_tokens": summary.estimated_tokens,
+                "summary_version": summary.summary_version,
+                "compression_policy_version": summary.compression_policy_version,
+                "model_metadata_safe": dict(summary.model_metadata_safe),
+                "created_at": record.created_at.isoformat(),
+                "updated_at": record.created_at.isoformat(),
+            }
+            memory_identity_sha256 = hashlib.sha256(
+                b"maf.submission.memory_summary_write.v1\0"
+                + canonical_json_bytes(summary_subject)
+            ).hexdigest()
+            summary_write = {
+                **summary_subject,
+                "summary_sha256": memory_identity_sha256,
+            }
+        event_type = (
+            "conversation.memory_fallback"
+            if fallback_error is not None
+            else "conversation.memory_built"
+        )
+        event_payload = (
+            {
+                "fallback_reason": "memory_builder_failed",
+                "error_type": type(fallback_error).__name__,
+            }
+            if fallback_error is not None
+            else context.to_audit_payload()
+        )
+        event_business = {
+            "schema": "maf.submission.memory_event_write.v1",
+            "memory_identity_sha256": memory_identity_sha256,
+            "conversation_id": record.conversation_id,
+            "task_id": record.task_id,
+            "node_id": None,
+            "agent_id": None,
+            "event_type": event_type,
+            "payload": event_payload,
+            "visibility": str(EventVisibility.AUDIT_ONLY),
+            "created_at": record.created_at.isoformat(),
+        }
+        event_subject_sha256 = hashlib.sha256(
+            b"maf.submission.memory_event.subject.v1\0"
+            + canonical_json_bytes(event_business)
+        ).hexdigest()
+        event_subject = {
+            **event_business,
+            "event_id": submission_memory_event_id(
+                record.task_id,
+                event_type,
+                event_subject_sha256,
+            ),
+            "event_subject_sha256": event_subject_sha256,
+        }
+        event_write = {
+            **event_subject,
+            "event_sha256": hashlib.sha256(
+                b"maf.submission.memory_event_write.v1\0"
+                + canonical_json_bytes(event_subject)
+            ).hexdigest(),
+        }
+        return {
+            "schema": "maf.submission.memory_preparation.v1",
+            "prompt_payload": prompt_payload,
+            "summary_write": summary_write,
+            "event_write": event_write,
+        }
+
+    def _submission_selector_inputs(
+        self,
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], tuple[str, ...], PendingSkillContext | None]:
+        upload_refs = [dict(item) for item in continuation["upload_refs"]]
+        refs_by_id = {str(item["upload_id"]): item for item in upload_refs}
+        projection = json.loads(record.message_projection.decode("utf-8"))
+        projection_metadata = dict(projection.get("metadata") or {})
+        private_input = projection_metadata.get(_SUBMISSION_INPUT_METADATA_KEY)
+        if not isinstance(private_input, Mapping) or set(private_input) != {
+            "explicit_upload_ids",
+            "selector_metadata",
+        }:
+            raise RuntimeError("submission_selector_private_input_invalid")
+        selector_metadata = private_input["selector_metadata"]
+        if (
+            not isinstance(selector_metadata, Mapping)
+            or not set(selector_metadata)
+            <= {"file_requirement_profile", "file_selection"}
+            or any(not isinstance(value, Mapping) for value in selector_metadata.values())
+        ):
+            raise RuntimeError("submission_selector_private_input_invalid")
+        normalized_explicit_upload_ids = self._normalize_upload_ids(
+            private_input["explicit_upload_ids"]
+        )
+        if list(normalized_explicit_upload_ids) != sorted(
+            set(normalized_explicit_upload_ids)
+        ):
+            raise RuntimeError("submission_selector_private_input_invalid")
+        explicit_upload_ids = tuple(
+            upload_id
+            for upload_id in normalized_explicit_upload_ids
+            if upload_id in refs_by_id
+        )
+        if len(explicit_upload_ids) != len(normalized_explicit_upload_ids):
+            raise RuntimeError("submission_selector_upload_ref_missing")
+        pending = continuation.get("pending_context")
+        continued_pending_context = None
+        if isinstance(pending, Mapping):
+            capability_id = str(pending["capability_id"])
+            continued_pending_context = PendingSkillContext(
+                context_id=str(pending["context_id"]),
+                conversation_id=record.conversation_id,
+                username=record.username,
+                capability_id=capability_id,
+                skill_name=capability_id.removeprefix("skill."),
+                source_task_id=record.task_id,
+                source_message_id=record.message_id,
+                original_user_message=str(pending["original_user_message"]),
+                missing_requirements=tuple(pending["missing_requirements"]),
+                assistant_message=str(pending["assistant_message"]),
+                created_at=record.created_at,
+                updated_at=record.created_at,
+            )
+        return dict(selector_metadata), explicit_upload_ids, continued_pending_context
+
+    async def _submission_pending_sheet_selections(
+        self,
+        record: SubmissionRecoveryRecord,
+        refs_by_id: Mapping[str, Mapping[str, Any]],
+        upload_ids: Iterable[str],
+    ) -> list[dict[str, Any]]:
+        pending: list[dict[str, Any]] = []
+        for upload_id in upload_ids:
+            ref = refs_by_id[upload_id]
+            resource = await self.storage.get_conversation_file_resource(
+                record.conversation_id,
+                record.username,
+                upload_id,
+            )
+            if (
+                resource is None
+                or resource.status == "deleted"
+                or resource.conversation_id != ref["conversation_id"]
+                or resource.sha256 != ref["sha256"]
+                or resource.size_bytes != ref["size_bytes"]
+            ):
+                raise RuntimeError("submission_selector_upload_ref_drift")
+            if resource.requires_sheet_selection and ref["selected_sheet"] is None:
+                upload_record = self._upload_record_from_resource(
+                    resource,
+                    content_bytes=self._read_conversation_file_resource_bytes_exact(
+                        resource
+                    ),
+                )
+                pending.append(upload_record.sheet_selection_payload())
+        return pending
+
+    async def _prepare_submission_selector(
+        self,
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        upload_refs = [dict(item) for item in continuation["upload_refs"]]
+        refs_by_id = {str(item["upload_id"]): item for item in upload_refs}
+        projection = json.loads(record.message_projection.decode("utf-8"))
+        request_metadata, explicit_upload_ids, continued_pending_context = (
+            self._submission_selector_inputs(record, continuation)
+        )
+        task = self._submission_task(record, continuation)
+        request = SubmitMessageRequest.model_construct(
+            conversation_id=record.conversation_id,
+            content=str(projection["content"]),
+            routing_mode=str(continuation["routing_mode"]),
+            capability_id=continuation.get("requested_capability_id"),
+            client_message_id=record.message_id,
+            model_edition=continuation["model_options"]["model_edition"],
+            metadata=request_metadata,
+        )
+        computed = await self._compute_conversation_file_selection(
+            task=task,
+            username=record.username,
+            request=request,
+            metadata=request_metadata,
+            requested_capability_id=continuation.get("requested_capability_id"),
+            continued_pending_context=continued_pending_context,
+            explicit_upload_ids=explicit_upload_ids,
+        )
+        if computed is not None:
+            self._submission_file_selection_computations[record.task_id] = computed
+        selected = None if computed is None else computed.decision
+        if explicit_upload_ids and (computed is None or not computed.triggered):
+            decision = "select"
+            reason_code = "frozen_upload_refs"
+            upload_ids = list(explicit_upload_ids)
+            interrupt_kind = None
+        elif computed is None or not computed.triggered or computed.mode == "shadow":
+            decision = "continue"
+            reason_code = (
+                "selector_shadow_observed"
+                if computed is not None and computed.mode == "shadow"
+                else "selector_not_triggered"
+            )
+            upload_ids = []
+            interrupt_kind = None
+        elif selected is None:
+            raise RuntimeError("submission_selector_computation_incomplete")
+        elif selected.decision in {"select_one", "select_many"}:
+            upload_ids = list(selected.upload_ids)
+            if any(upload_id not in refs_by_id for upload_id in upload_ids):
+                raise RuntimeError("submission_selector_upload_ref_missing")
+            decision = selected.decision
+            reason_code = selected.reason_code or selected.decision
+            interrupt_kind = None
+        elif selected.decision == "no_file_needed":
+            decision = "continue"
+            reason_code = selected.reason_code or selected.decision
+            upload_ids = []
+            interrupt_kind = None
+        else:
+            decision = "interrupt"
+            reason_code = selected.reason_code or selected.decision
+            upload_ids = [
+                upload_id
+                for upload_id in selected.upload_ids
+                if upload_id in refs_by_id
+            ]
+            interrupt_kind = "file_selection"
+        upload_ids = sorted(set(upload_ids))
+        sheet_candidate_ids = (
+            upload_ids
+            if upload_ids or interrupt_kind == "file_selection"
+            else sorted(refs_by_id)
+        )
+        pending_sheet_selections = await self._submission_pending_sheet_selections(
+            record,
+            refs_by_id,
+            sheet_candidate_ids,
+        )
+        if pending_sheet_selections:
+            decision = "interrupt"
+            reason_code = "sheet_selection_required"
+            upload_ids = sorted(
+                {
+                    str(upload_id)
+                    for pending in pending_sheet_selections
+                    for upload_id in pending["required_upload_ids"]
+                }
+            )
+            interrupt_kind = "sheet_selection"
+        winner = {
+            "decision": decision,
+            "reason_code": reason_code,
+            "resume_action": "resume",
+            "upload_ids": upload_ids,
+            "interrupt_kind": interrupt_kind,
+        }
+        facts = {
+            "schema": "maf.submission.selector_materialization.v1",
+            "explicit_upload_ids": list(explicit_upload_ids),
+            "upload_refs": upload_refs,
+            "pending_sheet_selections": pending_sheet_selections,
+            "computation": (
+                None
+                if computed is None
+                else {
+                    "mode": computed.mode,
+                    "triggered": computed.triggered,
+                    "trigger_reason": computed.trigger_reason,
+                    "profile": {
+                        "source": computed.profile.source,
+                        "required": computed.profile.required,
+                        "allow_multiple": computed.profile.allow_multiple,
+                        "expected_content": list(computed.profile.expected_content),
+                        "supported_file_types": list(
+                            computed.profile.supported_file_types
+                        ),
+                        "helpful_columns": list(computed.profile.helpful_columns),
+                        "disambiguation_hint": computed.profile.disambiguation_hint,
+                    },
+                    "candidates": [
+                        candidate.to_prompt_safe_dict()
+                        for candidate in computed.candidates
+                    ],
+                    "decision": (
+                        None
+                        if computed.decision is None
+                        else {
+                            "decision": computed.decision.decision,
+                            "upload_ids": list(computed.decision.upload_ids),
+                            "confidence": computed.decision.confidence,
+                            "reason_code": computed.decision.reason_code,
+                        }
+                    ),
+                    "invoked_payload": computed.invoked_payload,
+                    "invalid_output_payload": computed.invalid_output_payload,
+                    "decision_payload": computed.decision_payload,
+                }
+            ),
+            "winner": winner,
+        }
+        candidate_digest = hashlib.sha256(
+            b"maf.submission.selector_winner.v1\0" + canonical_json_bytes(facts)
+        ).hexdigest()
+        self._submission_selector_facts[record.task_id] = facts
+        return {**winner, "candidate_digest": candidate_digest}, facts
+
+    async def compute_selector_decision(
+        self,
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+    ) -> object:
+        winner, _facts = await self._prepare_submission_selector(
+            record, continuation
+        )
+        return {
+            "decision": winner["decision"],
+            "reason_code": winner["reason_code"],
+            "candidate_digest": winner["candidate_digest"],
+            "resume_action": winner["resume_action"],
+            "upload_ids": winner["upload_ids"],
+            "interrupt_kind": winner["interrupt_kind"],
+        }
+
+    async def materialize_route_decision(
+        self,
+        record: SubmissionRecoveryRecord,
+        canonical_component: bytes,
+    ) -> None:
+        continuation = json.loads(record.continuation.decode("utf-8"))
+        task = self._submission_task(record, continuation)
+        existing = await self.storage.get_task(record.task_id)
+        if existing is None:
+            raise RuntimeError("submission_task_materialization_missing")
+        if (
+            existing.task_id != task.task_id
+            or existing.conversation_id != task.conversation_id
+            or existing.root_message_id != task.root_message_id
+            or existing.routing_mode != task.routing_mode
+            or existing.requested_capability_id != task.requested_capability_id
+            or existing.summary != task.summary
+            or existing.created_at != task.created_at
+            or existing.mcp_execution_mode != task.mcp_execution_mode
+            or existing.mcp_shadow_enabled != task.mcp_shadow_enabled
+            or existing.mcp_rollout_config_version
+            != task.mcp_rollout_config_version
+            or existing.mcp_route_reason_code != task.mcp_route_reason_code
+            or existing.mcp_rollout_mode != task.mcp_rollout_mode
+        ):
+            raise RuntimeError("submission_task_materialization_conflict")
+
+        accepted = EventRecord(
+            event_id=self._submission_event_id(record.task_id, "task.accepted"),
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            event_type="task.accepted",
+            payload={
+                "message_id": record.message_id,
+                "status": str(TaskStatus.ACCEPTED),
+                **(
+                    {"model_edition": continuation["model_options"]["model_edition"]}
+                    if continuation["model_options"]["model_edition"] is not None
+                    else {}
+                ),
+                "deep_thinking": continuation["model_options"]["thinking_enabled"],
+                "main_agent_thinking_enabled": continuation["model_options"]["thinking_enabled"],
+                "main_agent_reasoning_effort": continuation["model_options"]["reasoning_effort"],
+                "requested_reasoning_effort": continuation["model_options"]["reasoning_effort"],
+            },
+            visibility=EventVisibility.FRONTEND,
+            created_at=record.created_at,
+        )
+        await self._append_submission_event_exact(accepted)
+        assignment = continuation.get("mcp_assignment")
+        assignment = assignment if isinstance(assignment, Mapping) else {}
+        route = EventRecord(
+            event_id=self._submission_event_id(
+                record.task_id, "mcp.rollout.route_assigned"
+            ),
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            event_type="mcp.rollout.route_assigned",
+            payload={
+                "safe_owner_ref": self._mcp_audit_reference_signer.safe_owner_reference(
+                    record.username,
+                    context=str(assignment.get("rollout_config_version") or "submission"),
+                ),
+                "safe_task_ref": hashlib.sha256(
+                    f"{assignment.get('rollout_config_version') or 'submission'}:{record.task_id}".encode()
+                ).hexdigest(),
+                "real_path": assignment.get("execution_mode"),
+                "shadow_enabled": assignment.get("shadow_enabled"),
+                "config_version": assignment.get("rollout_config_version"),
+                "reason_code": assignment.get("route_reason_code"),
+                "rollout_mode": assignment.get("rollout_mode"),
+            },
+            visibility=EventVisibility.AUDIT_ONLY,
+            created_at=record.created_at,
+        )
+        if await self._append_submission_event_exact(route):
+            await self._record_mcp_route_assignment_metric(task)
+        binding = continuation.get("mcp_binding")
+        if isinstance(binding, Mapping):
+            await self._append_submission_event_exact(
+                EventRecord(
+                    event_id=self._submission_event_id(
+                        record.task_id, "mcp.server_binding_resolved"
+                    ),
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    event_type="mcp.server_binding_resolved",
+                    payload={
+                        "safe_server_ref": self._mcp_audit_reference_signer.safe_reference(
+                            str(binding["server_id"]),
+                            context="mcp-server-binding-v1",
+                        ),
+                        "binding_mode": binding["binding_mode"],
+                        "status": "accepted",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    created_at=record.created_at,
+                )
+            )
+        superseded_count = (
+            await self.storage.materialize_submission_pending_skill_supersede_exact(
+                username=record.username,
+                conversation_id=record.conversation_id,
+                task_id=record.task_id,
+                should_supersede=(
+                    continuation["routing_mode"]
+                    == str(RoutingMode.FORCE_CAPABILITY)
+                    or isinstance(binding, Mapping)
+                ),
+                occurred_at=record.created_at,
+            )
+        )
+        if superseded_count:
+            await self._append_submission_event_exact(
+                EventRecord(
+                    event_id=self._submission_event_id(
+                        record.task_id, "pending_skill_context.superseded"
+                    ),
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    event_type="pending_skill_context.superseded",
+                    payload={
+                        "count": superseded_count,
+                        "reason": "new_forced_capability",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    created_at=record.created_at,
+                )
+            )
+
+    async def materialize_memory_context(
+        self,
+        record: SubmissionRecoveryRecord,
+        canonical_component: bytes,
+    ) -> None:
+        value = self._submission_component_value(canonical_component)
+        if value is None:
+            return
+        summary = value["summary_write"]
+        if summary is not None:
+            materialized = ConversationMemorySummary(
+                summary_id=summary["summary_id"],
+                conversation_id=summary["conversation_id"],
+                username=summary["username"],
+                covered_until_turn_id=summary["covered_until_turn_id"],
+                covered_until_message_id=summary["covered_until_message_id"],
+                covered_until_created_at=(
+                    datetime.fromisoformat(summary["covered_until_created_at"])
+                    if summary["covered_until_created_at"] is not None
+                    else None
+                ),
+                summary_text=summary["summary_text"],
+                source_message_count=summary["source_message_count"],
+                source_message_ids_hash=summary["source_message_ids_hash"],
+                estimated_tokens=summary["estimated_tokens"],
+                summary_version=summary["summary_version"],
+                compression_policy_version=summary["compression_policy_version"],
+                model_metadata_safe=summary["model_metadata_safe"],
+                created_at=datetime.fromisoformat(summary["created_at"]),
+                updated_at=datetime.fromisoformat(summary["updated_at"]),
+            )
+            await self.storage.materialize_conversation_memory_summary_exact(
+                materialized
+            )
+        event = value["event_write"]
+        if event is not None:
+            await self._append_submission_event_exact(
+                EventRecord(
+                    event_id=event["event_id"],
+                    conversation_id=event["conversation_id"],
+                    task_id=event["task_id"],
+                    node_id=event["node_id"],
+                    agent_id=event["agent_id"],
+                    event_type=event["event_type"],
+                    payload=event["payload"],
+                    visibility=EventVisibility(event["visibility"]),
+                    created_at=datetime.fromisoformat(event["created_at"]),
+                )
+            )
+
+    async def materialize_selector_decision(
+        self,
+        record: SubmissionRecoveryRecord,
+        canonical_component: bytes,
+    ) -> None:
+        winner = self._submission_component_value(canonical_component)
+        if winner is None:
+            return
+        prepared = json.loads(record.continuation.decode("utf-8"))
+        computed = self._submission_file_selection_computations.get(record.task_id)
+        refs = {item["upload_id"]: item for item in prepared["upload_refs"]}
+        _metadata, frozen_explicit_upload_ids, _pending = (
+            self._submission_selector_inputs(record, prepared)
+        )
+        explicit_upload_ids = set(frozen_explicit_upload_ids)
+        selected_upload_ids = [
+            upload_id
+            for upload_id in winner["upload_ids"]
+            if winner["interrupt_kind"] is None or upload_id in explicit_upload_ids
+        ]
+        for upload_id in selected_upload_ids:
+            ref = refs.get(upload_id)
+            if ref is None:
+                raise RuntimeError("submission_selector_upload_ref_missing")
+            resource = await self.storage.get_conversation_file_resource(
+                record.conversation_id,
+                record.username,
+                upload_id,
+            )
+            if (
+                resource is None
+                or resource.status == "deleted"
+                or resource.conversation_id != ref["conversation_id"]
+                or resource.sha256 != ref["sha256"]
+                or resource.size_bytes != ref["size_bytes"]
+            ):
+                raise RuntimeError("submission_selector_upload_ref_drift")
+            selected_sheet = ref["selected_sheet"]
+            if selected_sheet is not None and resource.selected_sheet != selected_sheet:
+                resource = await self._apply_conversation_file_sheet_selection(
+                    resource, selected_sheet
+                )
+            upload_record = self._upload_record_from_resource(
+                resource,
+                content_bytes=self._read_conversation_file_resource_bytes_exact(
+                    resource
+                ),
+                selected_sheet=selected_sheet,
+            )
+            task = await self.storage.get_task(record.task_id)
+            if task is None:
+                raise RuntimeError("submission_selector_task_missing")
+            attachment = replace(
+                self._attachment_from_upload_record(
+                    task=task,
+                    record=upload_record,
+                    resource=resource,
+                    source_kind=(
+                        "message_upload"
+                        if upload_id in explicit_upload_ids
+                        else "file_selector"
+                    ),
+                    source_message_id=record.message_id,
+                    interrupt_answer_id=None,
+                    selected_sheet=selected_sheet,
+                ),
+                updated_at=record.created_at,
+            )
+            existing = {
+                item.attachment_id: item
+                for item in await self.storage.list_task_input_attachments_for_task(
+                    record.task_id
+                )
+            }.get(attachment.attachment_id)
+            if existing is None:
+                await self.storage.save_task_input_attachment(attachment)
+            elif existing != attachment:
+                raise RuntimeError("submission_selector_attachment_conflict")
+        if computed is not None and computed.triggered:
+            event_payloads = [
+                (
+                    "conversation_file.file_selector_invoked",
+                    computed.invoked_payload,
+                ),
+                (
+                    "conversation_file.file_selector_invalid_output",
+                    computed.invalid_output_payload,
+                ),
+                (
+                    "conversation_file.file_selector_decision_recorded",
+                    computed.decision_payload,
+                ),
+            ]
+            for event_type, payload in event_payloads:
+                if payload is None:
+                    continue
+                await self._append_submission_event_exact(
+                    EventRecord(
+                        event_id=self._submission_event_id(record.task_id, event_type),
+                        conversation_id=record.conversation_id,
+                        task_id=record.task_id,
+                        event_type=event_type,
+                        payload=dict(payload),
+                        visibility=EventVisibility.AUDIT_ONLY,
+                        created_at=record.created_at,
+                    )
+                )
+        if (
+            selected_upload_ids
+            and winner["interrupt_kind"] is None
+            and computed is not None
+            and computed.triggered
+        ):
+            auto_bound_payload: dict[str, Any] = {
+                "selected_upload_ids": list(selected_upload_ids),
+                "source": "submit_message",
+            }
+            if len(selected_upload_ids) > 1:
+                auto_bound_payload["multi_select_resolution"] = (
+                    "multi_select_auto_bound"
+                )
+            await self._append_submission_event_exact(
+                EventRecord(
+                    event_id=self._submission_event_id(
+                        record.task_id,
+                        "conversation_file.file_selector_auto_bound",
+                    ),
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    event_type="conversation_file.file_selector_auto_bound",
+                    payload=auto_bound_payload,
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    created_at=record.created_at,
+                )
+            )
+
+    async def initialize_agent_handoff(
+        self,
+        record: SubmissionRecoveryRecord,
+        prepared: Mapping[str, Any],
+        context: PreparedAgentRecoveryContext,
+    ) -> DurableSubmissionHandoff:
+        if record.task_id in self._submission_initialized_agent_runs:
+            self._submission_selector_facts.pop(record.task_id, None)
+            self._submission_file_selection_computations.pop(record.task_id, None)
+            return DurableSubmissionHandoff("agent_run", f"agent-run:{record.task_id}")
+        metadata_continuation = {
+            "execution_metadata": context.execution_metadata,
+            "model_options": context.model_options,
+            "bundle_revisions": context.bundle_revisions,
+            "upload_refs": prepared["upload_refs"],
+            "available_mcp_servers": [
+                {
+                    "server_id": item.server_id,
+                    "display_name": item.display_name,
+                    "routing_description": item.routing_description,
+                    "transport": item.transport,
+                }
+                for item in context.available_mcp_servers
+            ],
+            "requested_capability_id": prepared["requested_capability_id"],
+        }
+        request = await self._submission_agent_request(
+            record,
+            metadata_continuation,
+            user_message=context.current_user_input,
+            memory_context=context.memory_context,
+            available_mcp_servers=context.available_mcp_servers,
+            expected_upload_ids=context.selected_upload_ids,
+        )
+        self._restore_prepared_bundle_revisions(
+            task_id=record.task_id,
+            skill_revision=context.bundle_revisions.get("skill_bundle_revision"),
+            mcp_revision=context.bundle_revisions.get("mcp_bundle_revision"),
+        )
+        initialized = await self.agent_loop_orchestrator.initialize_run(request)
+        self._submission_initialized_agent_runs[record.task_id] = initialized
+        self._submission_selector_facts.pop(record.task_id, None)
+        self._submission_file_selection_computations.pop(record.task_id, None)
+        return DurableSubmissionHandoff("agent_run", f"agent-run:{record.task_id}")
+
+    async def materialize_interrupt_handoff(
+        self,
+        record: SubmissionRecoveryRecord,
+        prepared: Mapping[str, Any],
+    ) -> DurableSubmissionHandoff:
+        selector_sha256 = prepared["preparation_receipt"]["selector_decision_sha256"]
+        identity = submission_interrupt_handoff_id(record.task_id, selector_sha256)
+        receipt = await self.storage.get_submission_preparation_receipt(
+            username=record.username,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+        )
+        if receipt is None or receipt.selector_decision is None:
+            raise RuntimeError("submission_interrupt_selector_missing")
+        selector = self._submission_component_value(receipt.selector_decision)
+        continuation = json.loads(record.continuation.decode("utf-8"))
+        selector_metadata, explicit_upload_ids, _pending = (
+            self._submission_selector_inputs(record, continuation)
+        )
+        refs_by_id = {
+            str(item["upload_id"]): dict(item)
+            for item in continuation["upload_refs"]
+        }
+        persisted_profile = next(
+            (
+                selector_metadata[key]
+                for key in ("file_requirement_profile", "file_selection")
+                if isinstance(selector_metadata.get(key), Mapping)
+            ),
+            {},
+        )
+        now = record.created_at
+        interrupt_kind = selector["interrupt_kind"]
+        if interrupt_kind == "file_selection":
+            candidates = []
+            for upload_id, ref in refs_by_id.items():
+                resource = await self.storage.get_conversation_file_resource(
+                    record.conversation_id,
+                    record.username,
+                    upload_id,
+                )
+                if (
+                    resource is None
+                    or resource.status == "deleted"
+                    or resource.conversation_id != ref["conversation_id"]
+                    or resource.sha256 != ref["sha256"]
+                    or resource.size_bytes != ref["size_bytes"]
+                    or resource.selected_sheet != ref["selected_sheet"]
+                ):
+                    raise RuntimeError("submission_selector_upload_ref_drift")
+                candidates.append(candidate_from_resource(resource))
+            profile = FileRequirementProfile.from_mapping(
+                persisted_profile,
+                source="metadata",
+            )
+            node_id = f"{record.task_id}:file_selection"
+            capability_id = (
+                prepared["requested_capability_id"] or "agent.file_selection"
+            )
+            required_fields = {
+                "_file_selection": {
+                    "presentation": "natural_language",
+                    "reason_code": selector["reason_code"],
+                    "candidate_upload_ids": [
+                        candidate.upload_id for candidate in candidates
+                    ],
+                    "candidates": [
+                        candidate.to_prompt_safe_dict()
+                        for candidate in candidates
+                    ],
+                    "profile": {
+                        "source": profile.source,
+                        "required": profile.required,
+                        "allow_multiple": profile.allow_multiple,
+                        "expected_content": list(profile.expected_content),
+                        "supported_file_types": list(
+                            profile.supported_file_types
+                        ),
+                        "helpful_columns": list(profile.helpful_columns),
+                        "disambiguation_hint": profile.disambiguation_hint,
+                    },
+                },
+                "file_selection_answer": {
+                    "type": "string",
+                    "description": "请说明要使用哪个文件，或回复不用文件。",
+                },
+                "replacement_file": {
+                    "type": "artifact",
+                    "accepts_upload": True,
+                    "required": False,
+                    "description": "也可以重新上传要使用的文件。",
+                },
+            }
+            question = render_file_selection_question(
+                candidates,
+                reason_code=str(selector["reason_code"]),
+            )
+            reason_code = "file_selection_ambiguous"
+        elif interrupt_kind == "sheet_selection":
+            node_id = f"{record.task_id}:sheet_selection"
+            capability_id = (
+                prepared["requested_capability_id"] or "agent.sheet_selection"
+            )
+            required_upload_ids: list[str] = []
+            options_by_upload_id: dict[str, list[str]] = {}
+            labels_by_upload_id: dict[str, str] = {}
+            details_by_upload_id: dict[str, Any] = {}
+            pending_sheet_selections = await self._submission_pending_sheet_selections(
+                record,
+                refs_by_id,
+                selector["upload_ids"],
+            )
+            for pending in pending_sheet_selections:
+                required_upload_ids.extend(pending["required_upload_ids"])
+                options_by_upload_id.update(pending["options_by_upload_id"])
+                labels_by_upload_id.update(pending["labels_by_upload_id"])
+                details_by_upload_id.update(pending["details_by_upload_id"])
+            required_upload_ids = list(dict.fromkeys(required_upload_ids))
+            required_fields = {
+                "upload_sheet_selections": {
+                    "type": "sheet_selection",
+                    "description": "请选择每个 Excel 文件要用于执行的 sheet。",
+                    "required_upload_ids": required_upload_ids,
+                    "options_by_upload_id": options_by_upload_id,
+                    "labels_by_upload_id": labels_by_upload_id,
+                    "details_by_upload_id": details_by_upload_id,
+                }
+            }
+            question = self._sheet_selection_question(
+                labels_by_upload_id, options_by_upload_id
+            )
+            reason_code = "sheet_selection_required"
+        else:
+            raise RuntimeError("submission_interrupt_kind_invalid")
+        expected_interrupt = Interrupt(
+            interrupt_id=identity,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            node_id=node_id,
+            source_agent=capability_id,
+            source_message_id=record.message_id,
+            question=question,
+            reason_code=reason_code,
+            required_fields=required_fields,
+            created_at=now,
+        )
+        memory_component = self._submission_component_value(receipt.memory_context)
+        memory_context = (
+            dict(memory_component["prompt_payload"])
+            if isinstance(memory_component, Mapping)
+            else None
+        )
+        root_content = str(
+            json.loads(record.message_projection.decode("utf-8"))["content"]
+        )
+        resume_metadata = dict(
+            (
+                await self._submission_agent_request(
+                    record,
+                    continuation,
+                    user_message=root_content,
+                    memory_context=memory_context,
+                )
+            ).metadata
+        )
+        if interrupt_kind == "file_selection":
+            self._task_file_selection_resume_metadata[record.task_id] = (
+                resume_metadata
+            )
+        else:
+            self._task_sheet_selection_resume_metadata[record.task_id] = {
+                **resume_metadata,
+                "_file_selection_pending_upload_ids": list(
+                    selector["upload_ids"]
+                ),
+                "_file_selection_pending_source_kind": (
+                    "file_selector"
+                    if explicit_upload_ids
+                    or str(persisted_profile.get("source") or "")
+                    in {"metadata", "skill_contract", "input_schema"}
+                    else "interrupt_answer_upload"
+                ),
+            }
+        existing = await self.storage.get_interrupt(identity)
+        if existing is None:
+            node = await self.storage.get_task_node(node_id)
+            if node is None:
+                node = await self.storage.save_task_node(
+                    TaskNode(
+                        node_id=node_id,
+                        task_id=record.task_id,
+                        capability_id=capability_id,
+                        status=NodeStatus.RUNNING,
+                        started_at=now,
+                    )
+                )
+            elif (
+                node.task_id != record.task_id
+                or node.capability_id != capability_id
+                or node.started_at != now
+                or node.status
+                not in {NodeStatus.RUNNING, NodeStatus.WAITING_FOR_INPUT}
+            ):
+                raise RuntimeError("submission_interrupt_node_conflict")
+            task = await self.storage.get_task(record.task_id)
+            if task is None:
+                raise RuntimeError("submission_interrupt_task_missing")
+            if task.status == TaskStatus.ACCEPTED:
+                await self.storage.save_task(
+                    replace(task, status=TaskStatus.RUNNING, updated_at=now),
+                    expected_from_status=TaskStatus.ACCEPTED,
+                )
+            elif task.status != TaskStatus.RUNNING:
+                raise RuntimeError("submission_interrupt_task_conflict")
+            if node.status == NodeStatus.RUNNING:
+                existing = await self.interrupt_service.open_interrupt(
+                    expected_interrupt, now=now
+                )
+            else:
+                existing = await self.storage.save_interrupt(expected_interrupt)
+        if existing != expected_interrupt:
+            raise RuntimeError("submission_interrupt_materialization_conflict")
+        if interrupt_kind == "file_selection":
+            await self._append_submission_event_exact(
+                EventRecord(
+                    event_id=self._submission_event_id(
+                        record.task_id,
+                        "conversation_file.file_selector_clarification_requested",
+                    ),
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    event_type=(
+                        "conversation_file.file_selector_clarification_requested"
+                    ),
+                    payload={
+                        "reason_code": selector["reason_code"],
+                        "candidate_count": len(candidates),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    created_at=now,
+                )
+            )
+        visible_message = await persist_interrupt_question_message(
+            self.storage, existing, created_at=now
+        )
+        if (
+            visible_message is None
+            or visible_message.message_id
+            != interrupt_visible_message_id(expected_interrupt)
+            or visible_message.conversation_id != record.conversation_id
+            or visible_message.task_id != record.task_id
+            or visible_message.role != MessageRole.ASSISTANT
+            or visible_message.content != expected_interrupt.question
+            or visible_message.stream_status != INTERRUPT_VISIBLE_STREAM_STATUS
+            or visible_message.created_at != now
+            or visible_message.message_type != "chat"
+            or dict(visible_message.metadata) != {}
+        ):
+            raise RuntimeError("submission_interrupt_visible_message_conflict")
+        await self._append_submission_event_exact(
+            EventRecord(
+                event_id=self._submission_event_id(
+                    record.task_id, "node.waiting_for_input"
+                ),
+                conversation_id=record.conversation_id,
+                task_id=record.task_id,
+                node_id=node_id,
+                event_type="node.waiting_for_input",
+                payload={
+                    "reason": existing.reason_code,
+                    "reason_code": existing.reason_code,
+                    "interrupt_id": existing.interrupt_id,
+                    **(
+                        {"required_upload_ids": required_upload_ids}
+                        if interrupt_kind == "sheet_selection"
+                        else {}
+                    ),
+                },
+                created_at=now,
+            )
+        )
+        self._submission_selector_facts.pop(record.task_id, None)
+        self._submission_file_selection_computations.pop(record.task_id, None)
+        return DurableSubmissionHandoff("interrupt", identity)
+
+    async def materialize_no_server_intent_handoff(
+        self,
+        record: SubmissionRecoveryRecord,
+        prepared: Mapping[str, Any],
+    ) -> DurableSubmissionHandoff:
+        outcome = await self.storage.converge_submission_no_server_handoff_exact(
+            username=record.username,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            occurred_at=record.created_at,
+        )
+        if outcome not in {
+            MCPNoServerConvergenceResult.CONVERGED,
+            MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+            MCPNoServerConvergenceResult.ALREADY_TERMINAL,
+        }:
+            raise RuntimeError(f"submission_no_server_convergence_failed:{outcome}")
+        return DurableSubmissionHandoff(
+            "no_server_intent", mcp_no_server_intent_id(record.task_id)
+        )
+
+    async def wakeup_agent(
+        self,
+        record: SubmissionRecoveryRecord,
+        handoff_identity: str,
+    ) -> None:
+        if handoff_identity != f"agent-run:{record.task_id}":
+            raise RuntimeError("submission_agent_handoff_identity_conflict")
+        owns_flight = False
+        async with self._lock:
+            if handoff_identity in self._submission_woken_agent_ids:
+                return
+            flight = self._submission_wakeup_flights.get(handoff_identity)
+            if flight is None:
+                initialized = self._submission_initialized_agent_runs.get(
+                    record.task_id
+                )
+                if initialized is None:
+                    run = await self.agent_run_repository.get_run_for_task(
+                        record.task_id
+                    )
+                    if (
+                        run is None
+                        or run.run_id != handoff_identity
+                        or run.task_id != record.task_id
+                        or run.conversation_id != record.conversation_id
+                    ):
+                        raise RuntimeError("submission_initialized_agent_missing")
+                    self._submission_woken_agent_ids.add(handoff_identity)
+                    return
+                flight = asyncio.get_running_loop().create_future()
+                self._submission_wakeup_flights[handoff_identity] = flight
+                owns_flight = True
+        if not owns_flight:
+            await asyncio.shield(flight)
+            return
+        try:
+            await self._schedule_execution(initialized.request)
+            async with self._lock:
+                self._submission_woken_agent_ids.add(handoff_identity)
+                self._submission_wakeup_flights.pop(handoff_identity, None)
+                if (
+                    self._submission_initialized_agent_runs.get(record.task_id)
+                    is initialized
+                ):
+                    self._submission_initialized_agent_runs.pop(record.task_id, None)
+                flight.set_result(None)
+        except BaseException as exc:
+            async with self._lock:
+                if self._submission_wakeup_flights.get(handoff_identity) is flight:
+                    self._submission_wakeup_flights.pop(handoff_identity, None)
+                if not flight.done():
+                    flight.set_exception(exc)
+            if not flight.cancelled():
+                flight.exception()
+            raise
+
 
     async def _maybe_schedule_conversation_title_generation(
         self,
@@ -2504,7 +3972,10 @@ class ApiRuntime(
         title_source = build_conversation_title_source(user_messages)
         if not title_source:
             return
+        if conversation_id in self._running_title_conversation_ids:
+            return
         expected_user_message_count = len(user_messages)
+        self._running_title_conversation_ids.add(conversation_id)
         task = asyncio.create_task(
             self._generate_and_store_conversation_title(
                 conversation_id,
@@ -2514,7 +3985,12 @@ class ApiRuntime(
             )
         )
         self._running_title_tasks.add(task)
-        task.add_done_callback(self._running_title_tasks.discard)
+
+        def release_title_generation(completed: asyncio.Task[None]) -> None:
+            self._running_title_tasks.discard(completed)
+            self._running_title_conversation_ids.discard(conversation_id)
+
+        task.add_done_callback(release_title_generation)
 
     async def _generate_and_store_conversation_title(
         self,
@@ -2547,8 +4023,10 @@ class ApiRuntime(
             )
             if current_user_message_count != expected_user_message_count:
                 return
-            await self.storage.save_conversation(
-                replace(conversation, title=title, updated_at=self._utcnow_naive())
+            await self.storage.compare_and_set_conversation(
+                replace(conversation, title=title, updated_at=self._utcnow_naive()),
+                expected_current_task_id=conversation.current_task_id,
+                expected_updated_at=conversation.updated_at,
             )
 
     async def _schedule_execution(
@@ -2557,6 +4035,11 @@ class ApiRuntime(
         *,
         await_durable_start: bool = False,
     ) -> asyncio.Task[None]:
+        initialized = getattr(
+            self, "_submission_initialized_agent_runs", {}
+        ).get(request.task_id)
+        if initialized is not None and initialized.request == request:
+            return await self._schedule_initialized_execution(initialized)
         self._retain_task_skill_revision(request)
         self._retain_task_mcp_revision(request)
         async with self._lock:
@@ -2605,6 +4088,81 @@ class ApiRuntime(
             if run is None:
                 raise RuntimeError("agent_run_durable_start_missing")
         return handle
+
+    async def _schedule_initialized_execution(self, initialized: Any) -> asyncio.Task[None]:
+        request = initialized.request
+        async with self._lock:
+            existing = self._running_tasks.get(request.task_id)
+            if existing is not None and not existing.done():
+                return existing
+            if existing is not None:
+                self._running_tasks.pop(request.task_id, None)
+            active_task_count = sum(
+                1 for item in self._running_tasks.values() if not item.done()
+            )
+            BackpressureGuard(
+                max_active_tasks=DEFAULT_MAX_ACTIVE_TASKS
+            ).ensure_can_accept(active_task_count=active_task_count)
+            generation = self._execution_generations.get(request.task_id, 0) + 1
+            self._execution_generations[request.task_id] = generation
+            handle = asyncio.create_task(
+                self._run_initialized_execution(
+                    initialized,
+                    execution_generation=generation,
+                )
+            )
+            self._running_tasks[request.task_id] = handle
+            return handle
+
+    async def _run_initialized_execution(
+        self,
+        initialized: Any,
+        *,
+        execution_generation: int,
+    ) -> None:
+        request = initialized.request
+        try:
+            await self._fail_if_effective_uploads_inactive_for_execution(request)
+            await self.agent_loop_orchestrator.run_initialized(
+                initialized,
+                cancellation=self._agent_cancellation_token(request.task_id),
+            )
+            restored_cancelled_task = await self._restore_cancelled_task_if_requested(
+                request.task_id,
+                request.conversation_id,
+            )
+            if restored_cancelled_task is not None:
+                return
+        except Exception as exc:
+            if (
+                isinstance(exc, AgentStorageConflict)
+                and str(exc) == "agent_task_lease_held"
+            ):
+                return
+            restored_cancelled_task = await self._restore_cancelled_task_if_requested(
+                request.task_id,
+                request.conversation_id,
+            )
+            if restored_cancelled_task is None:
+                await self._mark_task_failed(request, exc)
+        finally:
+            try:
+                await self._clear_conversation_current_task(
+                    request.conversation_id,
+                    request.task_id,
+                )
+                await self._release_task_skill_revision_if_terminal(request.task_id)
+                await self._release_task_mcp_revision_if_terminal(request.task_id)
+            finally:
+                self._locally_cancelled_task_ids.discard(request.task_id)
+                async with self._lock:
+                    current_handle = self._running_tasks.get(request.task_id)
+                    if (
+                        current_handle is asyncio.current_task()
+                        and self._execution_generations.get(request.task_id)
+                        == execution_generation
+                    ):
+                        self._running_tasks.pop(request.task_id, None)
 
     async def _run_execution(
         self,
@@ -3039,24 +4597,22 @@ class ApiRuntime(
         return value or None
 
     async def _clear_conversation_current_task(self, conversation_id: str, task_id: str) -> None:
-        conversation = await self.storage.get_conversation(conversation_id)
-        task = await self.storage.get_task(task_id)
-        if conversation is None or task is None:
-            return
-        if conversation.current_task_id != task_id:
-            return
-        if task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
-            return
-        if conversation.status != ConversationStatus.ACTIVE:
-            return
-        try:
-            await self.storage.save_conversation(
-                replace(conversation, current_task_id=None, updated_at=self._utcnow_naive())
-            )
-        except ValueError as exc:
-            if "Conversation is not available" in str(exc):
+        async with self._lock:
+            conversation = await self.storage.get_conversation(conversation_id)
+            task = await self.storage.get_task(task_id)
+            if conversation is None or task is None:
                 return
-            raise
+            if conversation.current_task_id != task_id:
+                return
+            if task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                return
+            if conversation.status != ConversationStatus.ACTIVE:
+                return
+            await self.storage.compare_and_set_conversation(
+                replace(conversation, current_task_id=None, updated_at=self._utcnow_naive()),
+                expected_current_task_id=task_id,
+                expected_updated_at=conversation.updated_at,
+            )
 
     async def cancel_task(self, task_id: str) -> Task:
         existing_task = await self.storage.get_task(task_id)
@@ -3314,6 +4870,20 @@ class ApiRuntime(
         if existing_task is not None and not existing_task.done():
             return await asyncio.shield(existing_task)
         if conversation.status == ConversationStatus.DELETING:
+            local_runner_id = self._conversation_delete_local_runner_ids.get(
+                conversation_id
+            )
+            if local_runner_id == conversation.delete_runner_id:
+                task = self._start_conversation_delete_task(
+                    conversation,
+                    local_runner_id,
+                    name=f"delete-conversation-local-recovery:{conversation_id}",
+                )
+                try:
+                    return await asyncio.shield(task)
+                finally:
+                    if task.done():
+                        self._conversation_delete_tasks.pop(conversation_id, None)
             return await self._wait_for_external_conversation_delete(conversation_id, runner_id=conversation.delete_runner_id)
         if conversation.status != ConversationStatus.ACTIVE:
             raise ValueError(f"Unknown conversation: {conversation_id}")
@@ -3331,8 +4901,11 @@ class ApiRuntime(
             raise ValueError(f"Unknown conversation: {conversation_id}")
         if marked.status == ConversationStatus.DELETING and marked.delete_runner_id != runner_id:
             return await self._wait_for_external_conversation_delete(conversation_id, runner_id=marked.delete_runner_id)
-        task = asyncio.create_task(self._run_conversation_delete(marked, runner_id), name=f"delete-conversation:{conversation_id}")
-        self._track_conversation_delete_task(conversation_id, task)
+        task = self._start_conversation_delete_task(
+            marked,
+            runner_id,
+            name=f"delete-conversation:{conversation_id}",
+        )
         try:
             return await asyncio.shield(task)
         finally:
@@ -3357,8 +4930,11 @@ class ApiRuntime(
         )
         if marked is None:
             raise ValueError(f"Unknown failed conversation deletion: {conversation_id}")
-        task = asyncio.create_task(self._run_conversation_delete(marked, runner_id), name=f"delete-conversation-retry:{conversation_id}")
-        self._track_conversation_delete_task(conversation_id, task)
+        task = self._start_conversation_delete_task(
+            marked,
+            runner_id,
+            name=f"delete-conversation-retry:{conversation_id}",
+        )
         try:
             return await asyncio.shield(task)
         finally:
@@ -3393,11 +4969,56 @@ class ApiRuntime(
                 raise ValueError(f"Unknown conversation: {conversation_id}")
             await asyncio.sleep(0.25)
 
+    def _start_conversation_delete_task(
+        self,
+        conversation: Conversation,
+        runner_id: str,
+        *,
+        name: str,
+    ) -> asyncio.Task[dict[str, object]]:
+        self._conversation_delete_local_runner_ids[
+            conversation.conversation_id
+        ] = runner_id
+        task = asyncio.create_task(
+            self._run_conversation_delete(conversation, runner_id),
+            name=name,
+        )
+        self._track_conversation_delete_task(conversation.conversation_id, task)
+        return task
+
     async def _run_conversation_delete(self, conversation: Conversation, runner_id: str) -> dict[str, object]:
         conversation_id = conversation.conversation_id
         cancelled_task_ids: list[str] = []
         started_at = conversation.delete_started_at or self._utcnow_naive()
+        permanent_conflict = False
         try:
+            await self.storage.update_conversation_delete_phase(
+                conversation_id,
+                phase="closing_admission",
+                updated_at=self._utcnow_naive(),
+                runner_id=runner_id,
+            )
+            close_result = await self.storage.close_conversation_admission(
+                ConversationAdmissionCloseRequest(
+                    username=conversation.username,
+                    conversation_id=conversation_id,
+                    operation_id=self._conversation_admission_close_operation_id(
+                        conversation.username,
+                        conversation_id,
+                    ),
+                    closed_at=self._utcnow_naive(),
+                )
+            )
+            if (
+                close_result.conversation_id != conversation_id
+                or close_result.disposition
+                not in {
+                    ConversationAdmissionCloseDisposition.CLOSED,
+                    ConversationAdmissionCloseDisposition.EXACT_REPLAY,
+                }
+            ):
+                permanent_conflict = True
+                raise RuntimeError("conversation_admission_close_failed")
             await self.storage.update_conversation_delete_phase(
                 conversation_id,
                 phase="cancelling_tasks",
@@ -3429,6 +5050,13 @@ class ApiRuntime(
                 runner_id=runner_id,
             )
             deleted_counts = await self.storage.delete_conversation_physical(conversation_id)
+            if (
+                self._conversation_delete_local_runner_ids.get(conversation_id)
+                == runner_id
+            ):
+                self._conversation_delete_local_runner_ids.pop(
+                    conversation_id, None
+                )
             finished_at = self._utcnow_naive()
             return {
                 "conversation_id": conversation_id,
@@ -3442,6 +5070,15 @@ class ApiRuntime(
                 "error_code": None,
             }
         except Exception as exc:
+            if not permanent_conflict:
+                raise
+            if (
+                self._conversation_delete_local_runner_ids.get(conversation_id)
+                == runner_id
+            ):
+                self._conversation_delete_local_runner_ids.pop(
+                    conversation_id, None
+                )
             failed_at = self._utcnow_naive()
             phase = "failed"
             try:
@@ -3496,7 +5133,14 @@ class ApiRuntime(
             if conversation.status != ConversationStatus.ACTIVE:
                 raise ValueError(f"Unknown conversation: {conversation_id}")
             updated = replace(conversation, title=normalized_title, updated_at=self._utcnow_naive())
-            return await self.storage.save_conversation(updated)
+            saved = await self.storage.compare_and_set_conversation(
+                updated,
+                expected_current_task_id=conversation.current_task_id,
+                expected_updated_at=conversation.updated_at,
+            )
+            if saved is None:
+                raise ValueError(f"Unknown conversation: {conversation_id}")
+            return saved
 
     async def list_interrupts(self, task_id: str) -> list[dict[str, object]]:
         await self._recover_missing_v2_slot_interrupts(task_id)
@@ -4263,6 +5907,10 @@ class ApiRuntime(
             owner_scope=self._agent_owner_scope(conversation.username),
             authority_digest=locator.authority_digest,
             resolve_authority=resolve,
+        )
+        await self._clear_conversation_current_task(
+            task.conversation_id,
+            task.task_id,
         )
         return True
 
@@ -7520,7 +9168,9 @@ class ApiRuntime(
                 resource = await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
             record = self._upload_record_from_resource(
                 resource,
-                content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+                content_bytes=self._read_conversation_file_resource_bytes_exact(
+                    resource
+                ),
                 selected_sheet=selected_sheet,
             )
             attachment = self._attachment_from_upload_record(
@@ -7583,7 +9233,9 @@ class ApiRuntime(
                 resource = await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
             record = self._upload_record_from_resource(
                 resource,
-                content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+                content_bytes=self._read_conversation_file_resource_bytes_exact(
+                    resource
+                ),
                 selected_sheet=selected_sheet,
             )
             if record.requires_sheet_selection and not selected_sheet:
@@ -7663,6 +9315,11 @@ class ApiRuntime(
                 raise UploadValidationError(
                     f"Task-bound spreadsheet upload content is invalid for interrupt resume: {attachment.source_upload_id}"
                 ) from exc
+        if (
+            len(content) != attachment.size_bytes
+            or hashlib.sha256(content).hexdigest() != attachment.sha256
+        ):
+            raise UploadValidationError("task_input_attachment_blob_drift")
         normalized = normalize_selected_spreadsheet_sheet(
             filename=attachment.filename,
             content_type=attachment.content_type,
@@ -8024,7 +9681,7 @@ class ApiRuntime(
         normalized = normalize_selected_spreadsheet_sheet(
             filename=resource.original_filename,
             content_type=resource.content_type,
-            content=self.conversation_file_store.read_bytes(resource.storage_key),
+            content=self._read_conversation_file_resource_bytes_exact(resource),
             selected_sheet=sheet_name,
         )
         updated = replace(
@@ -8036,8 +9693,10 @@ class ApiRuntime(
             selected_sheet=normalized.selected_sheet or sheet_name,
             updated_at=self._utcnow_naive(),
         )
-        saved = await self.storage.save_conversation_file_resource(updated)
-        await self.refresh_file_upload_history_message(saved)
+        saved = await self.storage.apply_conversation_file_sheet_selection_exact(
+            resource,
+            updated,
+        )
         await self._rewrite_conversation_file_index_with_repair(
             saved.conversation_id,
             saved.username,
@@ -8380,6 +10039,8 @@ class ApiRuntime(
         except Exception:
             self._engine.dispose()
             raise
+        await self._verify_submission_authority_binding()
+        await self.recover_deleting_conversations()
         submission_projection_pending = False
         coordinator = getattr(self, "_submission_admission_coordinator", None)
         if coordinator is not None:
@@ -8483,7 +10144,6 @@ class ApiRuntime(
                     pass
             if self.postgres_auth_invalidation_bus is not None:
                 await self.postgres_auth_invalidation_bus.start()
-            await self.recover_deleting_conversations()
             if (
                 self._mcp_rollout_metric_recorder is not None
                 and self._mcp_rollout_zero_series_task is None
@@ -8523,6 +10183,34 @@ class ApiRuntime(
         except BaseException:
             await self._cancel_agent_run_lease_retries()
             raise
+
+    async def _verify_submission_authority_binding(self) -> None:
+        expected_receipt = getattr(
+            self, "_expected_submission_authority_receipt_sha256", None
+        )
+        if expected_receipt is None:
+            return
+        client = self._runtime_sidecar_client
+        response = client.claim_pending_submission(
+            workflow_owner="api-startup-authority-probe",
+            now_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            claim_ttl_ms=1,
+            after_created_at_ms=9_223_372_036_854_775_807,
+            after_message_id="",
+        )
+        if inspect.isawaitable(response):
+            response = await response
+        envelope = validate_runtime_sidecar_response(
+            "submission_pending_claim", response
+        )
+        if (
+            envelope.get("error") is not None
+            or envelope.get("found") is not False
+            or envelope.get("pending_count") != 0
+            or envelope.get("authority_state") != "finalized"
+            or envelope.get("finalization_receipt_sha256") != expected_receipt
+        ):
+            raise RuntimeError("submission_authority_receipt_mismatch")
 
     async def _repair_mcp_terminal_candidate_lifecycle(self) -> None:
         candidate_manager = self._mcp_terminal_candidate_lifecycle_manager
@@ -8593,7 +10281,7 @@ class ApiRuntime(
                 owner_scope,
                 user_message,
                 initial_required_tool_name,
-            ) = self._prepared_agent_recovery_values(
+            ) = await self._prepared_agent_recovery_values(
                 run=run,
                 task=task,
                 conversation=conversation,
@@ -8602,6 +10290,32 @@ class ApiRuntime(
         metadata["available_mcp_server_ids"] = [
             profile.server_id for profile in profiles
         ]
+        if run.status in {
+            AgentRunStatus.WAITING_FOR_INPUT,
+            AgentRunStatus.WAITING_FOR_DEPENDENCY,
+        }:
+            self._agent_invocation_contexts.merge(
+                run.run_id,
+                metadata={
+                    **metadata,
+                    "agent_owner_scope": owner_scope,
+                },
+                current_user_input=user_message,
+            )
+            return
+        if prepared is not None:
+            await self._fail_if_effective_uploads_inactive_for_execution(
+                AgentExecutionRequest(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    root_message_id=task.root_message_id,
+                    user_message=user_message,
+                    owner_scope=owner_scope,
+                    requested_capability_id=task.requested_capability_id,
+                    metadata=metadata,
+                    available_mcp_servers=profiles,
+                )
+            )
         self._agent_invocation_contexts.merge(
             run.run_id,
             metadata={
@@ -8610,11 +10324,6 @@ class ApiRuntime(
             },
             current_user_input=user_message,
         )
-        if run.status in {
-            AgentRunStatus.WAITING_FOR_INPUT,
-            AgentRunStatus.WAITING_FOR_DEPENDENCY,
-        }:
-            return
         trusted = tuple(
             json.dumps(
                 {key: metadata[key]},
@@ -8652,10 +10361,14 @@ class ApiRuntime(
             AgentRunStatus.FAILED,
             AgentRunStatus.CANCELLED,
         }:
+            await self._clear_conversation_current_task(
+                task.conversation_id,
+                task.task_id,
+            )
             await self._release_task_skill_revision_if_terminal(task.task_id)
             await self._release_task_mcp_revision_if_terminal(task.task_id)
 
-    def _prepared_agent_recovery_values(
+    async def _prepared_agent_recovery_values(
         self,
         *,
         run: AgentRun,
@@ -8709,6 +10422,13 @@ class ApiRuntime(
                 metadata[key] = value
         if prepared.memory_context is not None:
             metadata["conversation_memory"] = dict(prepared.memory_context)
+        metadata.update(
+            await self._prepared_task_input_attachment_metadata(
+                task.task_id,
+                upload_refs=prepared.upload_refs,
+                expected_upload_ids=prepared.selected_upload_ids,
+            )
+        )
 
         self._restore_prepared_bundle_revisions(
             task_id=task.task_id,
@@ -8824,6 +10544,12 @@ class ApiRuntime(
             if run is None:
                 raise RuntimeError("agent_startup_run_missing")
             if run.status in terminal:
+                task = await self.storage.get_task(run.task_id)
+                if task is not None:
+                    await self._clear_conversation_current_task(
+                        task.conversation_id,
+                        task.task_id,
+                    )
                 await self._release_task_skill_revision_if_terminal(run.task_id)
                 await self._release_task_mcp_revision_if_terminal(run.task_id)
                 return
@@ -9726,14 +11452,19 @@ class ApiRuntime(
         for conversation in await self.storage.list_deleting_conversations():
             if conversation.status != ConversationStatus.DELETING:
                 continue
-            if conversation.conversation_id in self._conversation_delete_tasks:
+            existing = self._conversation_delete_tasks.get(
+                conversation.conversation_id
+            )
+            if existing is not None and not existing.done():
+                await asyncio.shield(existing)
                 continue
             runner_id = conversation.delete_runner_id or self._make_id("delete")
-            task = asyncio.create_task(
-                self._run_conversation_delete(conversation, runner_id),
+            task = self._start_conversation_delete_task(
+                conversation,
+                runner_id,
                 name=f"delete-conversation-recovery:{conversation.conversation_id}",
             )
-            self._track_conversation_delete_task(conversation.conversation_id, task)
+            await asyncio.shield(task)
 
     async def _recover_user_mcp_calls(self) -> None:
         while True:
@@ -11445,6 +13176,7 @@ def build_api_runtime(
     canonical_task_authority_mode = runtime_sidecar_mode_for_component(
         "runtime_store"
     )
+    expected_submission_authority_receipt_sha256: str | None = None
     if canonical_task_authority_mode == "enforce":
         migration_contract = migration_policy()
         evidence_path_value = os.environ.get(
@@ -11458,10 +13190,13 @@ def build_api_runtime(
                 "runtime_store_migration_blocked: Rust runtime sidecar enforce authority "
                 "requires authenticated Task migration evidence"
             )
-        load_runtime_sidecar_migration_evidence_artifact(
+        migration_evidence = load_runtime_sidecar_migration_evidence_artifact(
             Path(evidence_path_value),
             authentication_key_path=Path(key_path_value),
         )
+        expected_submission_authority_receipt_sha256 = migration_evidence[
+            "finalization_receipt_sha256"
+        ]
     resolved_runtime_sidecar_client = runtime_sidecar_client or _resolve_runtime_sidecar_client_from_env(
         require_runtime_store_attestation=(
             canonical_task_authority_mode == "enforce"
@@ -11491,6 +13226,44 @@ def build_api_runtime(
             "runtime_store_unavailable: "
             f"{configured_mode} requires a Rust runtime sidecar client"
         )
+    if canonical_task_authority_mode == "enforce":
+        required_agent_methods = (
+            "commit_agent_state",
+            "get_agent_run",
+            "get_agent_run_for_task",
+            "list_agent_runs",
+            "list_agent_items",
+        )
+        if not all(
+            callable(getattr(resolved_runtime_sidecar_client, method, None))
+            for method in required_agent_methods
+        ):
+            raise RuntimeError(
+                "agent_runtime_store_unavailable: enforce mode requires Runtime Sidecar Agent authority"
+            )
+        required_submission_methods = (
+            "admit_submission",
+            "claim_pending_submission",
+            "renew_submission_claim",
+            "acknowledge_submission_projection",
+            "prepare_submission_handoff",
+            "get_submission_preparation",
+            "acknowledge_submission_handoff",
+            "close_conversation_admission",
+            "reserve_message_identity",
+        )
+        if (
+            "submission_admission"
+            not in load_runtime_sidecar_contract()["supported_features"]
+            or not all(
+                callable(getattr(resolved_runtime_sidecar_client, method, None))
+                for method in required_submission_methods
+            )
+        ):
+            raise RuntimeError(
+                "submission_runtime_store_unavailable: enforce mode requires "
+                "Runtime Sidecar submission admission authority"
+            )
     audit_sink = JsonlAuditSink(audit_log_path)
     skill_assembly_injected = skill_roots is not None or public_skill_roots is not None
     roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
@@ -11623,6 +13396,9 @@ def build_api_runtime(
             }
         storage = PostgreSQLStorage(
             primary_session_factory,
+            message_identity_authority_enabled=(
+                canonical_task_authority_mode == "enforce"
+            ),
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
             mcp_task_authority_mode=canonical_task_authority_mode,
@@ -11655,6 +13431,9 @@ def build_api_runtime(
         primary_session_factory = create_sqlite_session_factory(engine)
         storage = SQLiteStorage(
             primary_session_factory,
+            message_identity_authority_enabled=(
+                canonical_task_authority_mode == "enforce"
+            ),
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
             mcp_task_authority_mode=canonical_task_authority_mode,
@@ -11678,20 +13457,6 @@ def build_api_runtime(
         )
 
     if canonical_task_authority_mode == "enforce":
-        required_agent_methods = (
-            "commit_agent_state",
-            "get_agent_run",
-            "get_agent_run_for_task",
-            "list_agent_runs",
-            "list_agent_items",
-        )
-        if resolved_runtime_sidecar_client is None or not all(
-            callable(getattr(resolved_runtime_sidecar_client, method, None))
-            for method in required_agent_methods
-        ):
-            raise RuntimeError(
-                "agent_runtime_store_unavailable: enforce mode requires Runtime Sidecar Agent authority"
-            )
         agent_repository = RuntimeSidecarAgentRepository(
             resolved_runtime_sidecar_client
         )
@@ -13309,6 +15074,31 @@ def build_api_runtime(
         mcp_cp7_verifier_authorized=mcp_cp7_verifier_authorized,
         mcp_cp7_maintenance_authorization=mcp_cp7_maintenance_authorization,
         mcp_cp7_maintenance_authorizer=mcp_cp7_maintenance_authorizer,
+        expected_submission_authority_receipt_sha256=(
+            expected_submission_authority_receipt_sha256
+        ),
+    )
+    async def wait_until_submission_claim_deadline(deadline: datetime) -> None:
+        now = runtime._utcnow_naive()
+        if deadline.tzinfo is not None:
+            now = now.replace(tzinfo=timezone.utc)
+        await asyncio.sleep(max(0.0, (deadline - now).total_seconds()))
+
+    runtime._prepared_agent_recovery_loader = SubmissionPreparedAgentRecoveryLoader(
+        admission=storage,
+        receipts=storage,
+    )
+    runtime._submission_admission_coordinator = SubmissionAdmissionCoordinator(
+        admission=storage,
+        receipts=storage,
+        callbacks=runtime,
+        claim_owner=runtime._submission_claim_owner,
+        now=runtime._utcnow_naive,
+        wait_until=wait_until_submission_claim_deadline,
+        expected_finalization_receipt_sha256=(
+            expected_submission_authority_receipt_sha256
+        ),
+        claim_ttl=runtime._submission_claim_ttl,
     )
     runtime_holder["runtime"] = runtime
     if user_mcp_enabled:

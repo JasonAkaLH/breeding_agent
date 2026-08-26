@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
-from src.core.models import SubmissionAdmissionDisposition
+from src.core.enums import ConversationStatus
+from src.core.models import (
+    Conversation,
+    SubmissionAdmissionDisposition,
+    SubmissionProjectionAcknowledgementRequest,
+)
 from src.storage.postgres import (
     bootstrap_postgres_database,
     create_postgres_engine,
@@ -17,7 +23,10 @@ from src.storage.postgres.repositories import PostgreSQLStorage
 from src.storage.sqlalchemy_models import ConversationRow, MessageRow, TaskRow
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
-from tests.storage.test_submission_admission_sqlite import _request
+from tests.storage.test_submission_admission_sqlite import (
+    _FakeSubmissionSidecar,
+    _request,
+)
 
 
 class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
@@ -159,5 +168,95 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
                 await self.storage.admit_submission(request)
         with self.session_factory() as session:
             self.assertIsNone(session.get(ConversationRow, self.conversation_id))
+            self.assertIsNone(session.get(MessageRow, self.message_id))
+            self.assertIsNone(session.get(TaskRow, self.task_id))
+
+    async def test_enforce_projection_and_replay_never_write_sql_task(self) -> None:
+        sidecar = _FakeSubmissionSidecar()
+        storage = PostgreSQLStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            mcp_task_authority_mode="enforce",
+        )
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+
+        admitted = await storage.admit_submission(request)
+        self.assertIsNotNone(admitted.handle)
+        assert admitted.handle is not None
+        phase = await storage.acknowledge_submission_projection(
+            SubmissionProjectionAcknowledgementRequest(
+                handle=admitted.handle,
+                projection_sha256=request.projection_sha256,
+                acknowledged_at=request.message_created_at,
+            )
+        )
+        replay = await storage.admit_submission(request)
+
+        self.assertEqual(str(phase.projection_state), "projected")
+        self.assertEqual(
+            replay.disposition,
+            SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+        )
+        self.assertEqual(replay.task_id, self.task_id)
+        with self.session_factory() as session:
+            self.assertIsNotNone(session.get(ConversationRow, self.conversation_id))
+            message = session.get(MessageRow, self.message_id)
+            self.assertIsNotNone(message)
+            self.assertEqual(str(message.role), "user")
+            self.assertIsNone(session.get(TaskRow, self.task_id))
+
+    async def test_marked_deleting_row_blocks_waiting_admission_projection(self) -> None:
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        await self.storage.save_conversation(
+            Conversation(
+                conversation_id=self.conversation_id,
+                username=request.username,
+                created_at=request.message_created_at.replace(tzinfo=None),
+                updated_at=request.message_created_at.replace(tzinfo=None),
+            )
+        )
+        row_locked = threading.Event()
+        release_row = threading.Event()
+
+        def mark_deleting_while_locked() -> None:
+            with self.session_factory() as session:
+                row = session.scalar(
+                    select(ConversationRow)
+                    .where(
+                        ConversationRow.conversation_id == self.conversation_id
+                    )
+                    .with_for_update()
+                )
+                assert row is not None
+                row_locked.set()
+                if not release_row.wait(timeout=5):
+                    raise RuntimeError("postgres row-lock test timed out")
+                row.status = str(ConversationStatus.DELETING)
+                session.commit()
+
+        marker = asyncio.create_task(asyncio.to_thread(mark_deleting_while_locked))
+        self.assertTrue(await asyncio.to_thread(row_locked.wait, 5))
+        admission = asyncio.create_task(self.storage.admit_submission(request))
+        try:
+            await asyncio.sleep(0.05)
+            self.assertFalse(admission.done())
+        finally:
+            release_row.set()
+        await marker
+        result = await admission
+
+        self.assertEqual(
+            result.disposition,
+            SubmissionAdmissionDisposition.CONVERSATION_NOT_AVAILABLE,
+        )
+        with self.session_factory() as session:
             self.assertIsNone(session.get(MessageRow, self.message_id))
             self.assertIsNone(session.get(TaskRow, self.task_id))

@@ -8,6 +8,8 @@ import gzip
 from io import BytesIO, StringIO
 import json
 import unittest
+from dataclasses import FrozenInstanceError
+from unittest.mock import AsyncMock, patch
 
 from openpyxl import Workbook
 
@@ -412,11 +414,11 @@ class UploadsAPITest(APITestCase):
         )
         self.assertEqual(upload.status_code, 201, upload.text)
         upload_id = upload.json()["upload_id"]
-        scheduled: list[AgentExecutionRequest] = []
+        initialized_runs: list[object] = []
         main_agent_called = False
 
-        async def capture_execution(request: AgentExecutionRequest) -> None:
-            scheduled.append(request)
+        async def capture_execution(initialized: object) -> None:
+            initialized_runs.append(initialized)
 
         def fail_if_called(_prompt: str, **_kwargs):
             nonlocal main_agent_called
@@ -424,7 +426,7 @@ class UploadsAPITest(APITestCase):
             return "should not run"
 
         await self.reconfigure_runtime(main_agent_stream_generator=fail_if_called)
-        self.runtime._schedule_execution = capture_execution
+        self.runtime._schedule_initialized_execution = capture_execution
         response = await self.submit_message(
             conversation_id="conv-bound-delete-before-execution",
             capability_id=None,
@@ -432,7 +434,7 @@ class UploadsAPITest(APITestCase):
             metadata={"upload_ids": [upload_id]},
         )
         self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(len(initialized_runs), 1)
         task_id = response.json()["task_id"]
         attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
         self.assertEqual([attachment.source_upload_id for attachment in attachments], [upload_id])
@@ -444,7 +446,10 @@ class UploadsAPITest(APITestCase):
         )
         self.assertEqual(deleted.status_code, 200, deleted.text)
 
-        await self.runtime._run_execution(scheduled[0], active_task_count=0)
+        await self.runtime._run_initialized_execution(
+            initialized_runs[0],
+            execution_generation=1,
+        )
 
         task = await self.runtime.storage.get_task(task_id)
         self.assertEqual(str(task.status), "failed")
@@ -1013,6 +1018,159 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(after_sheet_message.created_at, before_sheet_message.created_at)
         self.assertEqual(after_sheet_message.metadata["selected_sheet"], "B")
         self.assertNotIn("requires_sheet_selection", after_sheet_message.metadata)
+
+    async def test_submission_upload_resolution_is_read_only_and_returns_safe_frozen_refs(self) -> None:
+        workbook = Workbook()
+        workbook.active.title = "Alpha"
+        workbook.active.append(["ped_id"])
+        workbook.active.append(["A001"])
+        beta = workbook.create_sheet("Beta")
+        beta.append(["ped_id"])
+        beta.append(["B001"])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-submission-upload-pure"},
+            files={
+                "file": (
+                    "materials.xlsx",
+                    buffer.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+
+        with (
+            patch.object(
+                self.runtime,
+                "_repair_conversation_file_index_if_due",
+                new=AsyncMock(side_effect=AssertionError("index repair is not pure")),
+            ) as repair,
+            patch.object(
+                self.runtime,
+                "_apply_conversation_file_sheet_selection",
+                new=AsyncMock(side_effect=AssertionError("sheet selection was persisted")),
+            ) as persist_selection,
+            patch.object(
+                self.runtime.storage,
+                "save_conversation_file_resource",
+                new=AsyncMock(side_effect=AssertionError("resource was written")),
+            ) as save_resource,
+        ):
+            resolved = await self.runtime.resolve_uploads_for_submission(
+                "conv-submission-upload-pure",
+                "acc-1",
+                [upload_id],
+                upload_sheet_selections={upload_id: "Beta"},
+            )
+
+        repair.assert_not_awaited()
+        persist_selection.assert_not_awaited()
+        save_resource.assert_not_awaited()
+        self.assertEqual(resolved.upload_refs[0].upload_id, upload_id)
+        self.assertEqual(resolved.upload_refs[0].conversation_id, "conv-submission-upload-pure")
+        self.assertEqual(resolved.upload_refs[0].sha256, upload.json()["sha256"])
+        self.assertEqual(resolved.upload_refs[0].size_bytes, upload.json()["size_bytes"])
+        self.assertEqual(resolved.upload_refs[0].selected_sheet, "Beta")
+        self.assertIn("B001", resolved.skill_artifacts[0]["content"])
+        continuation = resolved.continuation_upload_refs()
+        self.assertEqual(
+            set(continuation[0]),
+            {"upload_id", "conversation_id", "sha256", "size_bytes", "selected_sheet"},
+        )
+        serialized = json.dumps(continuation, ensure_ascii=False)
+        for forbidden in ("content", "storage_key", "path"):
+            self.assertNotIn(forbidden, serialized)
+        with self.assertRaises(FrozenInstanceError):
+            resolved.upload_refs[0].selected_sheet = "Alpha"
+        resource = await self.runtime.storage.get_conversation_file_resource(
+            "conv-submission-upload-pure", "acc-1", upload_id
+        )
+        self.assertIsNone(resource.selected_sheet)
+        self.assertTrue(resource.requires_sheet_selection)
+
+    async def test_submission_upload_resolution_rejects_blob_digest_drift(
+        self,
+    ) -> None:
+        response = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-submission-blob-drift"},
+            files={"file": ("materials.csv", "ped_id\nA001\n", "text/csv")},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        upload_id = response.json()["upload_id"]
+        resource = await self.runtime.storage.get_conversation_file_resource(
+            "conv-submission-blob-drift", "acc-1", upload_id
+        )
+        self.assertIsNotNone(resource)
+        blob = self.runtime.conversation_file_store.open_path(resource.storage_key)
+        blob.write_bytes(b"x" * resource.size_bytes)
+
+        with self.assertRaisesRegex(
+            UploadValidationError, "conversation_upload_blob_drift"
+        ):
+            await self.runtime.resolve_uploads_for_submission(
+                "conv-submission-blob-drift", "acc-1", [upload_id]
+            )
+
+    async def test_submission_conversation_refs_are_deterministically_sorted(self) -> None:
+        conversation_id = "conv-submission-upload-order"
+        first = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": conversation_id},
+            files={"file": ("first.csv", "ped_id\nA001\n", "text/csv")},
+        )
+        second = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": conversation_id},
+            files={"file": ("second.csv", "ped_id\nB001\n", "text/csv")},
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(second.status_code, 201, second.text)
+
+        with patch.object(
+            self.runtime,
+            "_repair_conversation_file_index_if_due",
+            new=AsyncMock(side_effect=AssertionError("index repair is not pure")),
+        ) as repair:
+            resolved = await self.runtime.resolve_conversation_uploads_for_submission(
+                conversation_id,
+                "acc-1",
+            )
+
+        repair.assert_not_awaited()
+        continuation_ids = [item["upload_id"] for item in resolved.continuation_upload_refs()]
+        self.assertEqual(continuation_ids, sorted((first.json()["upload_id"], second.json()["upload_id"])))
+
+    async def test_submission_resolution_preserves_missing_and_cross_conversation_behavior(self) -> None:
+        own = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-submission-owner"},
+            files={"file": ("own.csv", "ped_id\nA001\n", "text/csv")},
+        )
+        self.assertEqual(own.status_code, 201, own.text)
+        unknown_id = "upl-000000000000"
+
+        legacy_missing = await self.runtime.resolve_uploads_for_message(
+            "conv-submission-owner", "acc-1", [unknown_id]
+        )
+        pure_missing = await self.runtime.resolve_uploads_for_submission(
+            "conv-submission-owner", "acc-1", [unknown_id]
+        )
+
+        self.assertEqual(pure_missing.missing_upload_ids, tuple(legacy_missing["missing_upload_ids"]))
+        for resolver in (
+            self.runtime.resolve_uploads_for_message,
+            self.runtime.resolve_uploads_for_submission,
+        ):
+            with self.assertRaisesRegex(
+                PermissionError,
+                f"Upload does not belong to conversation: {own.json()['upload_id']}",
+            ):
+                await resolver("conv-submission-other", "acc-1", [own.json()["upload_id"]])
 
     async def test_submit_multi_sheet_upload_creates_sheet_selection_interrupt_and_resume_accepts_choice(self) -> None:
         workbook = Workbook()

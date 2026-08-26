@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from src.api.dto import SubmitMessageRequest
@@ -11,8 +11,10 @@ from src.api.file_selection import (
     FileRequirementProfile,
     FileRequirementProfileError,
     FileSelectionAnswerResolver,
+    ConversationFileCandidate,
     FileSelectionDecision,
     FileSelectionTriggerDetector,
+    RecentFileUsage,
     build_recent_usage,
     candidate_from_resource,
     deterministic_file_decision,
@@ -23,8 +25,23 @@ from src.api.file_selection import (
 from src.orchestration.visible_message_history import persist_interrupt_question_message
 from src.core.enums import EventVisibility, InterruptStatus, MessageRole, NodeStatus, TaskStatus
 from src.core.errors import MessageIdentityConflictError
-from src.core.models import Interrupt, InterruptAnswer, Message, Task, TaskNode
+from src.core.models import ConversationFileResource, Interrupt, InterruptAnswer, Message, Task, TaskNode
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
+
+
+@dataclass(slots=True, frozen=True)
+class FileSelectionComputation:
+    mode: str
+    profile: FileRequirementProfile
+    resources: tuple[ConversationFileResource, ...]
+    recent_usage: Mapping[str, RecentFileUsage]
+    candidates: tuple[ConversationFileCandidate, ...]
+    triggered: bool
+    trigger_reason: str
+    decision: FileSelectionDecision | None = None
+    invoked_payload: Mapping[str, Any] | None = None
+    invalid_output_payload: Mapping[str, Any] | None = None
+    decision_payload: Mapping[str, Any] | None = None
 
 
 class ConversationFileSelectionRuntimeMixin:
@@ -49,84 +66,37 @@ class ConversationFileSelectionRuntimeMixin:
         continued_pending_context: Any | None = None,
         explicit_upload_ids: tuple[str, ...] = (),
     ) -> bool:
-        mode = self._conversation_file_selector_mode
-        if mode == "disabled":
-            return False
-        profile = self._file_requirement_profile_for_request(
-            request,
+        computed = await self._compute_conversation_file_selection(
+            task=task,
+            username=username,
+            request=request,
             metadata=metadata,
             requested_capability_id=requested_capability_id,
             continued_pending_context=continued_pending_context,
+            explicit_upload_ids=explicit_upload_ids,
         )
-        resources = await self.storage.list_conversation_file_resources(task.conversation_id, username, include_deleted=False)
-        attachments = await self.storage.list_task_input_attachments_for_conversation(task.conversation_id, limit=100)
-        recent_usage = build_recent_usage(attachments)
-        candidates = tuple(
-            candidate_from_resource(resource, recent_usage=recent_usage.get(resource.file_id))
-            for resource in resources
-            if resource.status != "deleted"
-        )
-        detector = FileSelectionTriggerDetector()
-        if mode in {"enforce_narrow", "enforce_guarded_multi"}:
-            trigger, trigger_reason = detector.should_trigger_enforce_narrow(
-                text=request.content,
-                profile=profile,
-                has_explicit_uploads=bool(explicit_upload_ids),
-                candidates=candidates,
-            )
-        else:
-            trigger, trigger_reason = detector.should_trigger(
-                text=request.content,
-                profile=profile,
-                has_explicit_uploads=bool(explicit_upload_ids),
-                active_file_count=len(resources),
-            )
-        if not trigger:
+        if computed is None or not computed.triggered:
             return False
+        decision = computed.decision
+        if decision is None or computed.invoked_payload is None or computed.decision_payload is None:
+            raise RuntimeError("file_selection_computation_incomplete")
         await self._record_file_selection_audit_event(
             task=task,
             event_type="conversation_file.file_selector_invoked",
-            payload=self._file_selection_invoked_payload(
-                mode=mode,
-                trigger_reason=trigger_reason,
-                profile=profile,
-                candidates=candidates,
-            ),
+            payload=computed.invoked_payload,
         )
-        decision = (
-            FileSelectionDecision("no_usable_file", reason_code="no_files_in_conversation")
-            if trigger_reason == "no_files_in_conversation"
-            else await self._conversation_file_selection_decision(
-                text=request.content,
-                profile=profile,
-                candidates=candidates,
-                metadata=metadata,
-            )
-        )
-        if self._is_invalid_selector_output_decision(decision):
+        if computed.invalid_output_payload is not None:
             await self._record_file_selection_audit_event(
                 task=task,
                 event_type="conversation_file.file_selector_invalid_output",
-                payload=self._file_selection_invalid_output_payload(
-                    mode=mode,
-                    trigger_reason=trigger_reason,
-                    profile=profile,
-                    candidates=candidates,
-                    decision=decision,
-                ),
+                payload=computed.invalid_output_payload,
             )
         await self._record_file_selection_audit_event(
             task=task,
             event_type="conversation_file.file_selector_decision_recorded",
-            payload=self._file_selection_decision_payload(
-                mode=mode,
-                trigger_reason=trigger_reason,
-                profile=profile,
-                candidates=candidates,
-                decision=decision,
-            ),
+            payload=computed.decision_payload,
         )
-        if mode == "shadow":
+        if computed.mode == "shadow":
             return False
         if decision.decision == "no_file_needed":
             return False
@@ -157,11 +127,111 @@ class ConversationFileSelectionRuntimeMixin:
         await self._open_file_selection_interrupt(
             task=task,
             metadata=metadata,
-            profile=profile,
-            candidates=candidates,
+            profile=computed.profile,
+            candidates=computed.candidates,
             reason_code=decision.reason_code or decision.decision,
         )
         return True
+
+    async def _compute_conversation_file_selection(
+        self,
+        *,
+        task: Task,
+        username: str,
+        request: SubmitMessageRequest,
+        metadata: Mapping[str, Any],
+        requested_capability_id: str | None = None,
+        continued_pending_context: Any | None = None,
+        explicit_upload_ids: tuple[str, ...] = (),
+    ) -> FileSelectionComputation | None:
+        mode = self._conversation_file_selector_mode
+        if mode == "disabled":
+            return None
+        profile = self._file_requirement_profile_for_request(
+            request,
+            metadata=metadata,
+            requested_capability_id=requested_capability_id,
+            continued_pending_context=continued_pending_context,
+        )
+        resources = await self.storage.list_conversation_file_resources(task.conversation_id, username, include_deleted=False)
+        attachments = await self.storage.list_task_input_attachments_for_conversation(task.conversation_id, limit=100)
+        recent_usage = build_recent_usage(attachments)
+        candidates = tuple(
+            candidate_from_resource(resource, recent_usage=recent_usage.get(resource.file_id))
+            for resource in resources
+            if resource.status != "deleted"
+        )
+        detector = FileSelectionTriggerDetector()
+        if mode in {"enforce_narrow", "enforce_guarded_multi"}:
+            trigger, trigger_reason = detector.should_trigger_enforce_narrow(
+                text=request.content,
+                profile=profile,
+                has_explicit_uploads=bool(explicit_upload_ids),
+                candidates=candidates,
+            )
+        else:
+            trigger, trigger_reason = detector.should_trigger(
+                text=request.content,
+                profile=profile,
+                has_explicit_uploads=bool(explicit_upload_ids),
+                active_file_count=len(resources),
+            )
+        if not trigger:
+            return FileSelectionComputation(
+                mode=mode,
+                profile=profile,
+                resources=tuple(resources),
+                recent_usage=recent_usage,
+                candidates=candidates,
+                triggered=False,
+                trigger_reason=trigger_reason,
+            )
+        invoked_payload = self._file_selection_invoked_payload(
+            mode=mode,
+            trigger_reason=trigger_reason,
+            profile=profile,
+            candidates=candidates,
+        )
+        decision = (
+            FileSelectionDecision("no_usable_file", reason_code="no_files_in_conversation")
+            if trigger_reason == "no_files_in_conversation"
+            else await self._conversation_file_selection_decision(
+                text=request.content,
+                profile=profile,
+                candidates=candidates,
+                metadata=metadata,
+            )
+        )
+        invalid_output_payload = (
+            self._file_selection_invalid_output_payload(
+                mode=mode,
+                trigger_reason=trigger_reason,
+                profile=profile,
+                candidates=candidates,
+                decision=decision,
+            )
+            if self._is_invalid_selector_output_decision(decision)
+            else None
+        )
+        return FileSelectionComputation(
+            mode=mode,
+            profile=profile,
+            resources=tuple(resources),
+            recent_usage=recent_usage,
+            candidates=candidates,
+            triggered=True,
+            trigger_reason=trigger_reason,
+            decision=decision,
+            invoked_payload=invoked_payload,
+            invalid_output_payload=invalid_output_payload,
+            decision_payload=self._file_selection_decision_payload(
+                mode=mode,
+                trigger_reason=trigger_reason,
+                profile=profile,
+                candidates=candidates,
+                decision=decision,
+            ),
+        )
 
     async def _conversation_file_selection_decision(
         self,

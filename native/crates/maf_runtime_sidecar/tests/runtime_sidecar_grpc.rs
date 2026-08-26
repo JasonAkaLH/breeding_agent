@@ -25,14 +25,14 @@ fn sqlite_empty_finalization(finalized_at_ms: i64) -> (String, Vec<u8>, Vec<u8>)
         let records = serde_json::to_vec(&Vec::<serde_json::Value>::new()).unwrap();
         let digest = |suffix: &str, bytes: &[u8]| {
             let mut hasher = Sha256::new();
-            hasher.update(
-                format!("maf.submission_authority.inventory.{kind}.{suffix}.v1\0").as_bytes(),
-            );
+            hasher.update(format!("maf.submission_authority.inventory.{suffix}.v1\0").as_bytes());
+            hasher.update(kind.as_bytes());
+            hasher.update(b"\0");
             hasher.update(bytes);
             format!("{:x}", hasher.finalize())
         };
         serde_json::json!({
-            "canonical_sha256": digest("records", &records),
+            "canonical_sha256": digest("rows", &records),
             "count": 0,
             "finalize_empty": true,
             "pk_sha256": digest("pk", &pk),
@@ -87,6 +87,15 @@ fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
 
 fn pb_admit_request(prefix: &str, content: &str) -> runtime_pb::AdmitSubmissionRequest {
     let conversation_id = format!("{prefix}-conversation");
+    pb_admit_request_in_conversation(prefix, &conversation_id, content)
+}
+
+fn pb_admit_request_in_conversation(
+    prefix: &str,
+    conversation_id: &str,
+    content: &str,
+) -> runtime_pb::AdmitSubmissionRequest {
+    let conversation_id = conversation_id.to_owned();
     let task_id = format!("{prefix}-task");
     let message_id = format!("{prefix}-message");
     let canonical = |value: serde_json::Value| serde_json::to_vec(&value).expect("canonical JSON");
@@ -185,6 +194,21 @@ fn pb_admit_request(prefix: &str, content: &str) -> runtime_pb::AdmitSubmissionR
         }),
         idempotency_key: format!("submission:{message_id}"),
     }
+}
+
+fn change_pb_request_fingerprint(
+    request: &mut runtime_pb::AdmitSubmissionRequest,
+    fingerprint: &str,
+) {
+    request.request_fingerprint = fingerprint.to_owned();
+    let mut continuation: serde_json::Value =
+        serde_json::from_slice(&request.continuation_json).expect("continuation");
+    continuation["request_fingerprint"] = serde_json::Value::String(fingerprint.to_owned());
+    request.continuation_json = serde_json::to_vec(&continuation).expect("canonical continuation");
+    let mut hasher = Sha256::new();
+    hasher.update(b"maf.submission.continuation.v1\0");
+    hasher.update(&request.continuation_json);
+    request.continuation_sha256 = format!("{:x}", hasher.finalize());
 }
 
 fn pb_prepared_execution(prefix: &str) -> Vec<u8> {
@@ -447,6 +471,63 @@ async fn sqlite_submission_rpc_sequence_persists_all_admission_phases() {
         runtime_pb::ConversationAdmissionCloseDisposition::Closed as i32
     );
     let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn submission_admission_rpc_maps_all_closed_dispositions() {
+    let service =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    let request = pb_admit_request("grpc-dispositions", "hello");
+
+    let created = service
+        .admit_submission(Request::new(request.clone()))
+        .await
+        .expect("created RPC result")
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::Created as i32
+    );
+    assert!(created.error.is_none());
+
+    let replay = service
+        .admit_submission(Request::new(request.clone()))
+        .await
+        .expect("replay RPC result")
+        .into_inner();
+    assert_eq!(
+        replay.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::IdempotentReplay as i32
+    );
+    assert!(replay.error.is_none());
+
+    let busy = service
+        .admit_submission(Request::new(pb_admit_request_in_conversation(
+            "grpc-dispositions-busy",
+            "grpc-dispositions-conversation",
+            "hello",
+        )))
+        .await
+        .expect("busy RPC result")
+        .into_inner();
+    assert_eq!(
+        busy.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::ConversationBusy as i32
+    );
+    assert!(busy.error.is_none());
+
+    let mut conflict_request = request;
+    change_pb_request_fingerprint(&mut conflict_request, &"d".repeat(64));
+    let conflict = service
+        .admit_submission(Request::new(conflict_request))
+        .await
+        .expect("Message conflict RPC result")
+        .into_inner();
+    assert_eq!(
+        conflict.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::MessageIdConflict as i32
+    );
+    assert!(conflict.error.is_none());
 }
 
 #[tokio::test]

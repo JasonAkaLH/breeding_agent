@@ -6,6 +6,7 @@ import hmac
 import inspect
 import json
 import os
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -51,6 +52,8 @@ from src.storage.runtime_sidecar_facade import (
     RuntimeLeaseFacade,
     build_sidecar_retry_plan,
     ensure_sidecar_write_allowed,
+    load_runtime_sidecar_migration_evidence_artifact,
+    load_runtime_sidecar_task_authority_v1_for_upgrade,
     runtime_sidecar_max_in_flight,
     validate_runtime_sidecar_artifact_provenance,
     validate_runtime_sidecar_benchmark_report,
@@ -58,8 +61,8 @@ from src.storage.runtime_sidecar_facade import (
     validate_runtime_sidecar_decommission_readiness,
     validate_runtime_sidecar_endpoint,
     validate_runtime_sidecar_handshake,
-    validate_runtime_sidecar_migration_plan,
     validate_runtime_sidecar_migration_evidence_artifact,
+    validate_runtime_sidecar_migration_plan,
     validate_runtime_sidecar_ops_readiness,
     validate_runtime_sidecar_promotion_readiness,
     validate_runtime_sidecar_response,
@@ -93,6 +96,50 @@ def _valid_task_authority_cutover() -> dict[str, object]:
             "terminal_historical_canonical_digest": inventory_digest,
             "terminal_historical_remains_unassigned": True,
         },
+    }
+
+
+def _valid_submission_inventory(*, count: int = 1) -> dict[str, object]:
+    digest = hashlib.sha256(f"inventory:{count}".encode()).hexdigest()
+    side = {
+        "count": count,
+        "pk_sha256": digest,
+        "canonical_sha256": digest,
+        "finalize_empty": count == 0,
+    }
+    return {
+        "source": dict(side),
+        "destination": dict(side),
+        "ambiguity_count": 0,
+    }
+
+
+def _valid_submission_authority_cutover() -> dict[str, object]:
+    contract = load_runtime_sidecar_contract()
+    features = json.dumps(
+        contract["supported_features"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return {
+        "source_backend": "sqlite",
+        "source_identity_sha256": "1" * 64,
+        "snapshot_boundary_sha256": "2" * 64,
+        "writer_fence_sha256": "3" * 64,
+        "report_sha256": "4" * 64,
+        "tested_commit": "5" * 40,
+        "tested_tree": "6" * 40,
+        "destination_contract": {
+            "schema_hash": contract["schema_hash"],
+            "proto_hash": contract["artifact_policy"]["expected_proto_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "supported_features_sha256": hashlib.sha256(features).hexdigest(),
+        },
+        "conversation_inventory": _valid_submission_inventory(),
+        "message_identity_inventory": _valid_submission_inventory(),
+        "active_task_inventory": _valid_submission_inventory(),
+        "finalization_receipt_sha256": "7" * 64,
+        "finalized_at_ms": 1,
     }
 
 
@@ -2500,6 +2547,7 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             "target_schema_version": load_runtime_sidecar_contract()["schema_hash"],
             "components": component_evidence,
             "task_authority_cutover": _valid_task_authority_cutover(),
+            "submission_authority_cutover": _valid_submission_authority_cutover(),
         }
         safe = validate_runtime_sidecar_migration_plan(plan)
         self.assertEqual(safe["migration"], "ready")
@@ -2551,6 +2599,52 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                     {**plan, "task_authority_cutover": hostile_cutover}
                 )
 
+        submission_cutover = _valid_submission_authority_cutover()
+        for hostile_submission_cutover in (
+            {
+                **submission_cutover,
+                "conversation_inventory": {
+                    **submission_cutover["conversation_inventory"],
+                    "ambiguity_count": 1,
+                },
+            },
+            {
+                **submission_cutover,
+                "message_identity_inventory": {
+                    **submission_cutover["message_identity_inventory"],
+                    "destination": {
+                        **submission_cutover["message_identity_inventory"]["destination"],
+                        "count": 2,
+                    },
+                },
+            },
+            {
+                **submission_cutover,
+                "destination_contract": {
+                    **submission_cutover["destination_contract"],
+                    "schema_hash": "f" * 64,
+                },
+            },
+            {**submission_cutover, "tested_commit": "not-a-commit"},
+            {**submission_cutover, "unknown": True},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                validate_runtime_sidecar_migration_plan(
+                    {
+                        **plan,
+                        "submission_authority_cutover": hostile_submission_cutover,
+                    }
+                )
+
+        with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+            validate_runtime_sidecar_migration_plan(
+                {
+                    key: value
+                    for key, value in plan.items()
+                    if key != "submission_authority_cutover"
+                }
+            )
+
     def test_task_authority_migration_artifact_is_contract_bound_and_authenticated(self) -> None:
         contract = load_runtime_sidecar_contract()
         key = b"deployment-owned-migration-key-32bytes"
@@ -2571,19 +2665,29 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                     for component in migration_policy()["required_components"]
                 },
                 "task_authority_cutover": _valid_task_authority_cutover(),
+                "submission_authority_cutover": _valid_submission_authority_cutover(),
             },
         }
-        signature = hmac.new(
-            key,
-            json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        signed = {**artifact, "hmac_sha256": signature}
+        def sign(unsigned: dict[str, object]) -> dict[str, object]:
+            return {
+                **unsigned,
+                "hmac_sha256": hmac.new(
+                    key,
+                    json.dumps(
+                        unsigned,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
+                    hashlib.sha256,
+                ).hexdigest(),
+            }
+
+        signed = sign(artifact)
         self.assertEqual(
             validate_runtime_sidecar_migration_evidence_artifact(
                 signed, authentication_key=key
-            )["migration"],
-            "ready",
+            )["finalization_receipt_sha256"],
+            "7" * 64,
         )
         with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
             validate_runtime_sidecar_migration_evidence_artifact(
@@ -2596,6 +2700,202 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                 },
                 authentication_key=key,
             )
+
+        for invalid_unsigned in (
+            {
+                **artifact,
+                "schema": "maf.runtime_sidecar.task_authority_migration_evidence.v1",
+            },
+            {
+                **artifact,
+                "schema": "maf.runtime_sidecar.task_authority_migration_evidence.v3",
+            },
+            {**artifact, "unknown": True},
+            {
+                **artifact,
+                "migration_plan": {
+                    key: value
+                    for key, value in artifact["migration_plan"].items()
+                    if key != "submission_authority_cutover"
+                },
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                validate_runtime_sidecar_migration_evidence_artifact(
+                    sign(invalid_unsigned),
+                    authentication_key=key,
+                )
+
+    def test_task_authority_migration_artifact_loader_requires_two_regular_0600_files(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        policy = migration_policy()
+        key = b"deployment-owned-migration-key-32bytes"
+        unsigned = {
+            "schema": policy["task_authority_evidence_schema"],
+            "component": contract["component"],
+            "protocol_version": contract["protocol_version"],
+            "schema_hash": contract["schema_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "key_id": "deployment-key-v1",
+            "migration_plan": {
+                "target_schema_version": contract["schema_hash"],
+                "components": {
+                    component: {
+                        evidence: True
+                        for evidence in policy["required_evidence"]
+                    }
+                    for component in policy["required_components"]
+                },
+                "task_authority_cutover": _valid_task_authority_cutover(),
+                "submission_authority_cutover": _valid_submission_authority_cutover(),
+            },
+        }
+        artifact = {
+            **unsigned,
+            "hmac_sha256": hmac.new(
+                key,
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_path = root / "evidence.json"
+            key_path = root / "evidence.key"
+            evidence_path.write_text(json.dumps(artifact), encoding="utf-8")
+            key_path.write_bytes(key)
+            evidence_path.chmod(0o600)
+            key_path.chmod(0o600)
+            loaded = load_runtime_sidecar_migration_evidence_artifact(
+                evidence_path,
+                authentication_key_path=key_path,
+            )
+            self.assertEqual(loaded["finalization_receipt_sha256"], "7" * 64)
+
+            evidence_path.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+            evidence_path.chmod(0o600)
+            key_path.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+            key_path.chmod(0o600)
+            evidence_target = root / "evidence-target.json"
+            evidence_path.replace(evidence_target)
+            evidence_path.symlink_to(evidence_target)
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+    def test_task_authority_v1_upgrade_loader_authenticates_exact_legacy_plan(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        policy = migration_policy()
+        key = b"deployment-owned-migration-key-32bytes"
+        legacy_plan = {
+            "target_schema_version": contract["schema_hash"],
+            "components": {
+                component: {
+                    evidence: True for evidence in policy["required_evidence"]
+                }
+                for component in policy["required_components"]
+            },
+            "task_authority_cutover": _valid_task_authority_cutover(),
+        }
+        unsigned = {
+            "schema": "maf.runtime_sidecar.task_authority_migration_evidence.v1",
+            "component": contract["component"],
+            "protocol_version": contract["protocol_version"],
+            "schema_hash": contract["schema_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "key_id": "deployment-key-v1",
+            "migration_plan": legacy_plan,
+        }
+        artifact = {
+            **unsigned,
+            "hmac_sha256": hmac.new(
+                key,
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_path = root / "legacy-evidence.json"
+            key_path = root / "legacy-evidence.key"
+            evidence_path.write_text(json.dumps(artifact), encoding="utf-8")
+            key_path.write_bytes(key)
+            evidence_path.chmod(0o600)
+            key_path.chmod(0o600)
+
+            self.assertEqual(
+                load_runtime_sidecar_task_authority_v1_for_upgrade(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                ),
+                legacy_plan,
+            )
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+            for invalid_plan in (
+                {**legacy_plan, "unknown": True},
+                {
+                    **legacy_plan,
+                    "task_authority_cutover": {
+                        **legacy_plan["task_authority_cutover"],
+                        "task_inventory": {
+                            **legacy_plan["task_authority_cutover"]["task_inventory"],
+                            "sidecar_count": 2,
+                        },
+                    },
+                },
+            ):
+                invalid_unsigned = {**unsigned, "migration_plan": invalid_plan}
+                invalid_artifact = {
+                    **invalid_unsigned,
+                    "hmac_sha256": hmac.new(
+                        key,
+                        json.dumps(
+                            invalid_unsigned,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode(),
+                        hashlib.sha256,
+                    ).hexdigest(),
+                }
+                evidence_path.write_text(
+                    json.dumps(invalid_artifact),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_migration_blocked",
+                ):
+                    load_runtime_sidecar_task_authority_v1_for_upgrade(
+                        evidence_path,
+                        authentication_key_path=key_path,
+                    )
+
+            artifact["hmac_sha256"] = "0" * 64
+            evidence_path.write_text(json.dumps(artifact), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_task_authority_v1_for_upgrade(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
 
     def test_runtime_sidecar_ops_readiness_requires_runbooks_and_drills(self) -> None:
         self.assertEqual(error_policy("runtime_store_ops_readiness_blocked")["category"], "quality_gate")

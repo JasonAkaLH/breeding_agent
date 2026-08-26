@@ -197,7 +197,7 @@ class MessageIdentityInventoryTest(unittest.TestCase):
         )
         self.assertLess(upload.index(upload_prepare), upload.index(upload_insert))
 
-    def test_a5_capability_gate_is_default_off_and_not_production_wired(self) -> None:
+    def test_a6_capability_gate_is_default_off_and_enforce_only(self) -> None:
         constructor = ast.unparse(self.storage["__init__"])
         active = ast.unparse(self.storage["_message_identity_authority_active"])
         disabled_guard = "if not self._message_identity_authority_active():"
@@ -223,7 +223,11 @@ class MessageIdentityInventoryTest(unittest.TestCase):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name == "build_api_runtime"
         )
-        self.assertNotIn("message_identity_authority_enabled", ast.unparse(build))
+        self.assertIn(
+            "message_identity_authority_enabled=canonical_task_authority_mode == "
+            "'enforce'",
+            ast.unparse(build),
+        )
 
     def test_enforce_first_insert_owner_allowlist_is_closed(self) -> None:
         admission = self.storage["admit_submission"]

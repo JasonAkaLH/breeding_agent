@@ -61,6 +61,7 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         runtime.storage = object()
         runtime._engine = Mock()
         runtime._master_key_sentinel_cipher = AsyncMock()
+        runtime.recover_deleting_conversations = AsyncMock()
         runtime._admit_mcp_rollout_instance = AsyncMock(
             side_effect=RuntimeError("partial-startup-failure")
         )

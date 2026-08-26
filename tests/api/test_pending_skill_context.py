@@ -849,7 +849,7 @@ entrypoints: {run: {path: scripts/fail.py}}
         self.assertEqual(await self.runtime.storage.list_messages_for_conversation("conv-upload-other"), [])
         self.assertEqual(await self.runtime.storage.list_tasks_for_conversation("conv-upload-other"), [])
 
-    async def test_conversation_upload_resolves_artifact_slot_without_task_upload_ids(self) -> None:
+    async def test_conversation_upload_does_not_resolve_artifact_slot_without_task_attachment(self) -> None:
         upload = await self.client.post(
             "/api/v1/conversations/uploads",
             data={"conversation_id": "conv-conversation-upload-slot"},
@@ -865,32 +865,13 @@ entrypoints: {run: {path: scripts/fail.py}}
 
         self.assertEqual(response.status_code, 202, response.text)
         task_id = response.json()["task_id"]
-        ncols_interrupt = await self._wait_for_open_interrupt(task_id)
-        self.assertEqual(ncols_interrupt["reason_code"], "missing_ncols")
-        self.assertIn("ncols", self._interrupt_missing_fields(ncols_interrupt))
-        self.assertNotIn("material_data", self._interrupt_missing_fields(ncols_interrupt))
-
-        answer = await self.answer_interrupt_with_chat(
-            conversation_id="conv-conversation-upload-slot",
-            interrupt_id=ncols_interrupt["interrupt_id"],
-            content="20个田块",
+        skill_interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(skill_interrupt["reason_code"], "missing_skill_input")
+        self.assertIn(
+            "material_data", self._interrupt_missing_fields(skill_interrupt)
         )
-        self.assertEqual(answer.status_code, 202, answer.text)
-        await self.runtime._await_existing_execution(task_id)
-        terminal = await self.wait_for_terminal_task(task_id)
-        self.assertEqual(terminal["status"], "completed")
+        self.assertIn("ncols", self._interrupt_missing_fields(skill_interrupt))
         self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
-        events = await self.runtime.storage.list_events_for_task(task_id)
-        resolved_events = [event for event in events if event.event_type == "skill.input_resolved"]
-        self.assertTrue(
-            any(
-                "material_data" in event.payload.get("resolved_fields", ())
-                and "ncols" in event.payload.get("resolved_fields", ())
-                for event in resolved_events
-            )
-        )
-        event_payloads = json.dumps([event.payload for event in events], ensure_ascii=False, default=str)
-        self.assertNotIn("ped_id,hyb_check,set", event_payloads)
 
     async def test_new_force_skill_after_interrupt_answer_does_not_supersede_context(self) -> None:
         first = await self._force_need_variety("请查询", conversation_id="conv-supersede")

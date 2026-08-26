@@ -36,7 +36,7 @@ from ..dto import (
     RenameConversationRequest,
     SubmitMessageRequest,
 )
-from ..runtime import ApiRuntime
+from ..runtime import ApiRuntime, SubmissionAdmissionUnavailableError
 from ..runtime_access import runtime_from_request as _runtime
 
 router = APIRouter()
@@ -71,6 +71,11 @@ async def submit_message(body: SubmitMessageRequest, request: Request) -> Messag
             detail={"code": exc.code},
         ) from exc
     except MCPBindingFeatureUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": exc.code},
+        ) from exc
+    except SubmissionAdmissionUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": exc.code},

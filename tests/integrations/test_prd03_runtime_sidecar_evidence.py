@@ -123,6 +123,9 @@ def _valid_evidence() -> dict[str, Any]:
                 for component in migration["required_components"]
             },
             "task_authority_cutover": _valid_task_authority_cutover(),
+            "submission_authority_cutover": _valid_submission_authority_cutover(
+                contract
+            ),
         },
         "ops_readiness": {
             "observability": {item: True for item in ops["required_observability"]},
@@ -166,4 +169,46 @@ def _valid_task_authority_cutover() -> dict[str, Any]:
             "terminal_historical_canonical_digest": digest,
             "terminal_historical_remains_unassigned": True,
         },
+    }
+
+
+def _valid_submission_authority_cutover(
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    empty_inventory = {
+        "count": 0,
+        "pk_sha256": "b" * 64,
+        "canonical_sha256": "c" * 64,
+        "finalize_empty": True,
+    }
+    matching_inventory = {
+        "source": empty_inventory,
+        "destination": empty_inventory,
+        "ambiguity_count": 0,
+    }
+    return {
+        "source_backend": "sqlite",
+        "source_identity_sha256": "d" * 64,
+        "snapshot_boundary_sha256": "e" * 64,
+        "writer_fence_sha256": "f" * 64,
+        "report_sha256": "1" * 64,
+        "tested_commit": "2" * 40,
+        "tested_tree": "3" * 40,
+        "destination_contract": {
+            "schema_hash": contract["schema_hash"],
+            "proto_hash": contract["artifact_policy"]["expected_proto_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "supported_features_sha256": hashlib.sha256(
+                json.dumps(
+                    contract["supported_features"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        },
+        "conversation_inventory": matching_inventory,
+        "message_identity_inventory": matching_inventory,
+        "active_task_inventory": matching_inventory,
+        "finalization_receipt_sha256": "4" * 64,
+        "finalized_at_ms": 1,
     }

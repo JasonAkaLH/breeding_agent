@@ -1,22 +1,25 @@
 use maf_runtime_sidecar::pb::runtime::v1 as runtime_pb;
 use maf_runtime_sidecar::{COMPONENT_ID, RuntimeSidecarSqliteAdapter};
 use sha2::{Digest, Sha256};
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, symlink};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn binary_empty_finalization(finalized_at_ms: i64) -> (String, Vec<u8>, Vec<u8>) {
     let inventory = |kind: &str| {
         let hash = |suffix: &str, value: &[u8]| {
             let mut hasher = Sha256::new();
-            hasher.update(
-                format!("maf.submission_authority.inventory.{kind}.{suffix}.v1\0").as_bytes(),
-            );
+            hasher.update(format!("maf.submission_authority.inventory.{suffix}.v1\0").as_bytes());
+            hasher.update(kind.as_bytes());
+            hasher.update(b"\0");
             hasher.update(value);
             format!("{:x}", hasher.finalize())
         };
         serde_json::json!({
-            "canonical_sha256": hash("records", b"[]"),
+            "canonical_sha256": hash("rows", b"[]"),
             "count": 0,
             "finalize_empty": true,
             "pk_sha256": hash("pk", b"[]"),
@@ -157,6 +160,104 @@ fn runtime_sidecar_binary_rejects_partial_mtls_flags_without_serving() {
     assert!(stderr.contains("mTLS requires --tls-cert, --tls-key, and --client-ca"));
 }
 
+#[cfg(unix)]
+#[test]
+fn runtime_sidecar_binary_rejects_operator_fence_through_sqlite_symlink() {
+    let binary = std::env::var("CARGO_BIN_EXE_maf-runtime-sidecar")
+        .expect("runtime sidecar binary should be built for integration test");
+    let db_path = binary_temp_db();
+    let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+    drop(adapter);
+    let alias_path = db_path.with_extension("alias.sqlite");
+    symlink(&db_path, &alias_path).unwrap();
+    let lock_path = format!("{}.submission-authority-migration.lock", db_path.display());
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options.open(&lock_path).unwrap();
+    lock.lock().unwrap();
+
+    let mut child = Command::new(binary)
+        .args([
+            "--serve",
+            "127.0.0.1:0",
+            "--sqlite",
+            alias_path.to_str().unwrap(),
+        ])
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("run runtime sidecar binary");
+    let mut status = None;
+    for _ in 0..100 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if status.is_none() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    lock.unlock().unwrap();
+    let _ = std::fs::remove_file(lock_path);
+    let _ = std::fs::remove_file(alias_path);
+    let _ = std::fs::remove_file(db_path);
+    let status = status.expect("symlink alias must not bypass the operator writer fence");
+    assert!(!status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_sidecar_symlink_shared_fence_blocks_real_path_operator() {
+    let binary = std::env::var("CARGO_BIN_EXE_maf-runtime-sidecar")
+        .expect("runtime sidecar binary should be built for integration test");
+    let db_path = binary_temp_db();
+    let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+    drop(adapter);
+    let alias_path = db_path.with_extension("alias.sqlite");
+    symlink(&db_path, &alias_path).unwrap();
+    let lock_path = format!("{}.submission-authority-migration.lock", db_path.display());
+
+    let mut child = Command::new(binary)
+        .args([
+            "--serve",
+            "127.0.0.1:0",
+            "--sqlite",
+            alias_path.to_str().unwrap(),
+        ])
+        .spawn()
+        .expect("start runtime sidecar binary");
+    for _ in 0..100 {
+        if PathBuf::from(&lock_path).exists() && child.try_wait().unwrap().is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(child.try_wait().unwrap().is_none());
+    let operator_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(matches!(
+        operator_lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let alias_lock = format!(
+        "{}.submission-authority-migration.lock",
+        alias_path.display()
+    );
+    assert!(!PathBuf::from(&alias_lock).exists());
+    let _ = std::fs::remove_file(lock_path);
+    let _ = std::fs::remove_file(alias_path);
+    let _ = std::fs::remove_file(db_path);
+}
+
 #[tokio::test]
 async fn runtime_sidecar_binary_restarts_with_durable_sqlite_admission() {
     let binary = std::env::var("CARGO_BIN_EXE_maf-runtime-sidecar").unwrap();
@@ -200,6 +301,16 @@ async fn runtime_sidecar_binary_restarts_with_durable_sqlite_admission() {
         .spawn()
         .unwrap();
     let mut first_client = connect(first_addr).await;
+    let lock_path = format!("{}.submission-authority-migration.lock", db_path.display());
+    let operator_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(matches!(
+        operator_lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
     let created = first_client
         .admit_submission(request.clone())
         .await
@@ -225,6 +336,8 @@ async fn runtime_sidecar_binary_restarts_with_durable_sqlite_admission() {
     assert_eq!(blocked.earliest_claim_expires_at_ms, Some(1_001));
     first_child.kill().unwrap();
     first_child.wait().unwrap();
+    operator_lock.try_lock().unwrap();
+    operator_lock.unlock().unwrap();
 
     let second_addr = reserve_addr();
     let mut second_child = Command::new(&binary)
@@ -249,5 +362,6 @@ async fn runtime_sidecar_binary_restarts_with_durable_sqlite_admission() {
     assert_eq!(replay.admission.unwrap().task_id, "binary-task");
     second_child.kill().unwrap();
     second_child.wait().unwrap();
+    let _ = std::fs::remove_file(lock_path);
     let _ = std::fs::remove_file(db_path);
 }

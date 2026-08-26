@@ -53,3 +53,10 @@ fn submission_admission_public_surface_and_wire_limits_are_stable() {
     assert_eq!(SUBMISSION_PREPARED_EXECUTION_MAX_BYTES, 128 * 1024);
     assert!(std::hint::black_box(GRPC_MAX_MESSAGE_BYTES) >= 140 * 1024 * 1024);
 }
+
+#[test]
+fn submission_authority_import_remains_offline_only() {
+    let proto = include_str!("../../../proto/maf/runtime/v1/runtime.proto");
+    assert!(!proto.contains("ImportSubmissionAuthority"));
+    assert!(!proto.contains("FinalizeSubmissionAuthority"));
+}

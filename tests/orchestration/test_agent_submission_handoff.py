@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.core.enums import EventVisibility
@@ -165,7 +165,11 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
                 ]
             )
         self.storage = SQLiteStorage(self.sessions)
-        self.repository = SQLiteAgentRepository(self.sessions)
+        self.agent_now = datetime(2026, 8, 26, 8, 1)
+        self.repository = SQLiteAgentRepository(
+            self.sessions,
+            now_fn=lambda: self.agent_now,
+        )
         self.events = _ExactEventStore()
         self.contexts = AgentInvocationContextStore()
 
@@ -255,9 +259,15 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(task_id == "task-1" for task_id, _ in self.events.load_calls)
         )
-        self.assertTrue(
-            all(event.created_at == first.run.created_at for event in self.events.events.values())
+        self.assertEqual(
+            self.events.events["evt-agent-task-graph-created:task-1"].created_at,
+            first.run.created_at,
         )
+        self.assertEqual(
+            self.events.events["evt-agent-run-started:agent-run:task-1"].created_at,
+            first.run.created_at + timedelta(microseconds=1),
+        )
+        self.assertEqual(first.run.created_at, items[0].committed_at)
         self.assertEqual(runner.calls, [])
 
         result = await orchestrator.start_or_resume(request)
@@ -307,12 +317,19 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
         )
 
         initialized = await orchestrator.initialize_run(self._request())
+        items = await self.repository.list_items(run.run_id)
 
         self.assertEqual(initialized.run, run)
         self.assertEqual(len(self.events.events), 2)
-        self.assertTrue(
-            all(event.created_at == run.created_at for event in self.events.events.values())
+        self.assertEqual(
+            self.events.events["evt-agent-task-graph-created:task-1"].created_at,
+            run.created_at,
         )
+        self.assertEqual(
+            self.events.events["evt-agent-run-started:agent-run:task-1"].created_at,
+            run.created_at + timedelta(microseconds=1),
+        )
+        self.assertEqual(run.created_at, items[0].committed_at)
 
     async def test_initialize_repairs_task_run_and_user_item_fault_gaps(self) -> None:
         create_fault = _FailOnceRepository(self.repository, "create_run")

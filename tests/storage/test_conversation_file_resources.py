@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
 from src.core.enums import MessageRole
-from src.core.models import ConversationFileResource, FileUploadMessageProjection, Message
+from src.core.models import Conversation, ConversationFileResource, FileUploadMessageProjection, Message
 from src.storage.conversation_files import (
     FILE_UPLOAD_MESSAGE_FORBIDDEN_METADATA_KEYS,
     FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
@@ -186,6 +187,194 @@ class ConversationFileResourceRepositoryTest(SQLiteStorageTestCase):
         self.assertEqual(compensation["message_deleted"], 1)
         self.assertIsNone(resource_after)
         self.assertIsNone(message_after)
+
+    def test_sheet_selection_exact_conflicts_after_upload_delete_without_resurrection(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        resource = replace(
+            self._resource("upl-sheet-deleted", conversation_id="conv-sheet-deleted"),
+            file_type="spreadsheet",
+        )
+        asyncio.run(storage.save_conversation(Conversation(resource.conversation_id, resource.username)))
+        asyncio.run(
+            storage.save_conversation_file_resource_with_upload_message(
+                resource,
+                build_file_upload_message_projection(resource),
+                now=resource.updated_at,
+            )
+        )
+        deleted_at = resource.updated_at + timedelta(seconds=1)
+        asyncio.run(
+            storage.mark_conversation_file_resource_and_upload_message_deleted(
+                resource.conversation_id,
+                resource.username,
+                resource.file_id,
+                updated_at=deleted_at,
+            )
+        )
+        selected = replace(
+            resource,
+            selected_sheet="Beta",
+            requires_sheet_selection=False,
+            updated_at=deleted_at + timedelta(seconds=1),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "conversation_file_sheet_selection_conflict"):
+            asyncio.run(storage.apply_conversation_file_sheet_selection_exact(resource, selected))
+
+        stored = asyncio.run(storage.get_conversation_file_resource_by_id(resource.file_id))
+        message = asyncio.run(storage.get_message(file_upload_message_id(resource.file_id)))
+        self.assertEqual(stored.status, "deleted")
+        self.assertIsNone(stored.selected_sheet)
+        self.assertEqual(message.metadata["file_status"], "deleted")
+
+    def test_sheet_selection_exact_conflicts_after_conversation_delete_without_orphan(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        resource = replace(
+            self._resource("upl-sheet-orphan", conversation_id="conv-sheet-orphan"),
+            file_type="spreadsheet",
+        )
+        asyncio.run(storage.save_conversation(Conversation(resource.conversation_id, resource.username)))
+        asyncio.run(
+            storage.save_conversation_file_resource_with_upload_message(
+                resource,
+                build_file_upload_message_projection(resource),
+                now=resource.updated_at,
+            )
+        )
+        asyncio.run(storage.delete_conversation_physical(resource.conversation_id))
+        selected = replace(
+            resource,
+            selected_sheet="Beta",
+            requires_sheet_selection=False,
+            updated_at=resource.updated_at + timedelta(seconds=1),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "conversation_file_sheet_selection_conflict"):
+            asyncio.run(storage.apply_conversation_file_sheet_selection_exact(resource, selected))
+
+        self.assertIsNone(asyncio.run(storage.get_conversation_file_resource_by_id(resource.file_id)))
+        self.assertIsNone(asyncio.run(storage.get_message(file_upload_message_id(resource.file_id))))
+
+    def test_sheet_selection_exact_rejects_stale_selected_sheet_and_updated_at(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        resource = replace(
+            self._resource("upl-sheet-stale", conversation_id="conv-sheet-stale"),
+            file_type="spreadsheet",
+            requires_sheet_selection=True,
+        )
+        asyncio.run(storage.save_conversation(Conversation(resource.conversation_id, resource.username)))
+        asyncio.run(
+            storage.save_conversation_file_resource_with_upload_message(
+                resource,
+                build_file_upload_message_projection(resource),
+                now=resource.updated_at,
+            )
+        )
+        selected_alpha = replace(
+            resource,
+            selected_sheet="Alpha",
+            requires_sheet_selection=False,
+            updated_at=resource.updated_at + timedelta(seconds=1),
+        )
+        asyncio.run(storage.apply_conversation_file_sheet_selection_exact(resource, selected_alpha))
+        stale_beta = replace(
+            resource,
+            selected_sheet="Beta",
+            requires_sheet_selection=False,
+            updated_at=resource.updated_at + timedelta(seconds=2),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "conversation_file_sheet_selection_conflict"):
+            asyncio.run(storage.apply_conversation_file_sheet_selection_exact(resource, stale_beta))
+
+        stored = asyncio.run(storage.get_conversation_file_resource_by_id(resource.file_id))
+        message = asyncio.run(storage.get_message(file_upload_message_id(resource.file_id)))
+        self.assertEqual(stored.selected_sheet, "Alpha")
+        self.assertEqual(stored.updated_at, selected_alpha.updated_at)
+        self.assertEqual(message.metadata["selected_sheet"], "Alpha")
+
+    def test_sheet_selection_exact_rolls_back_resource_when_visible_message_is_deleted(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        resource = replace(
+            self._resource("upl-sheet-message-deleted", conversation_id="conv-sheet-message-deleted"),
+            file_type="spreadsheet",
+            requires_sheet_selection=True,
+        )
+        asyncio.run(storage.save_conversation(Conversation(resource.conversation_id, resource.username)))
+        asyncio.run(
+            storage.save_conversation_file_resource_with_upload_message(
+                resource,
+                build_file_upload_message_projection(resource),
+                now=resource.updated_at,
+            )
+        )
+        deleted_at = resource.updated_at + timedelta(seconds=1)
+        asyncio.run(
+            storage.mark_file_upload_message_deleted(
+                resource.conversation_id,
+                resource.file_id,
+                deleted_at=deleted_at,
+            )
+        )
+        selected = replace(
+            resource,
+            selected_sheet="Beta",
+            requires_sheet_selection=False,
+            updated_at=deleted_at + timedelta(seconds=1),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "conversation_file_sheet_selection_conflict"):
+            asyncio.run(storage.apply_conversation_file_sheet_selection_exact(resource, selected))
+
+        stored = asyncio.run(storage.get_conversation_file_resource_by_id(resource.file_id))
+        message = asyncio.run(storage.get_message(file_upload_message_id(resource.file_id)))
+        self.assertIsNone(stored.selected_sheet)
+        self.assertTrue(stored.requires_sheet_selection)
+        self.assertEqual(stored.updated_at, resource.updated_at)
+        self.assertEqual(message.metadata["file_status"], "deleted")
+
+    def test_sheet_selection_exact_rejects_visible_message_drift(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        resource = replace(
+            self._resource("upl-sheet-message-drift", conversation_id="conv-sheet-message-drift"),
+            file_type="spreadsheet",
+            requires_sheet_selection=True,
+        )
+        asyncio.run(storage.save_conversation(Conversation(resource.conversation_id, resource.username)))
+        asyncio.run(
+            storage.save_conversation_file_resource_with_upload_message(
+                resource,
+                build_file_upload_message_projection(resource),
+                now=resource.updated_at,
+            )
+        )
+        drifted_projection = replace(
+            build_file_upload_message_projection(resource),
+            metadata={
+                **build_file_upload_message_projection(resource).metadata,
+                "filename": "drifted.xlsx",
+            },
+        )
+        asyncio.run(
+            storage.upsert_file_upload_message(
+                drifted_projection,
+                now=resource.updated_at + timedelta(seconds=1),
+            )
+        )
+        selected = replace(
+            resource,
+            selected_sheet="Beta",
+            requires_sheet_selection=False,
+            updated_at=resource.updated_at + timedelta(seconds=2),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "conversation_file_sheet_selection_conflict"):
+            asyncio.run(storage.apply_conversation_file_sheet_selection_exact(resource, selected))
+
+        stored = asyncio.run(storage.get_conversation_file_resource_by_id(resource.file_id))
+        message = asyncio.run(storage.get_message(file_upload_message_id(resource.file_id)))
+        self.assertIsNone(stored.selected_sheet)
+        self.assertEqual(message.metadata["filename"], "drifted.xlsx")
 
     def test_postgresql_boolean_default_uses_false_literal(self) -> None:
         ddl = str(CreateTable(ConversationFileResourceRow.__table__).compile(dialect=postgresql.dialect()))

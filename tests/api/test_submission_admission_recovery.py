@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from src.api.submission_admission import (
     DurableSubmissionHandoff,
+    PreparedAgentRecoveryContext,
     SubmissionPreparedAgentRecoveryLoader,
     SubmissionAdmissionCoordinator,
     SubmissionRecoveryError,
@@ -18,13 +19,16 @@ from src.api.submission_admission import (
     submission_memory_event_id,
 )
 from src.core.models import (
+    SubmissionAdmissionDisposition,
     SubmissionAdmissionHandle,
     SubmissionAdmissionPhase,
+    SubmissionAdmissionResult,
     SubmissionAdmissionState,
     SubmissionAuthorityState,
     SubmissionClaimResult,
     SubmissionHandoffState,
     SubmissionPreparationReceipt,
+    SubmissionPreparationReceiptComponent,
     SubmissionPreparationRecord,
     SubmissionPreparationState,
     SubmissionProjectionState,
@@ -56,23 +60,346 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(admission.handoff_acks, ["1", "2"])
         self.assertEqual(callbacks.wakeups, ["agent-run:task-1", "agent-run:task-2"])
 
-    async def test_projection_commit_then_ack_crash_reprojects_exactly(self) -> None:
+    async def test_projected_sidecar_missing_sql_repairs_after_restart_with_fresh_claim(
+        self,
+    ) -> None:
         admission = _FakeAdmission([_record("1")], self.clock)
-        admission.fail_projection_ack_once = True
+        admission.fail_sql_projection_once_after_authority_ack = True
         receipts = _FakeReceipts()
-        callbacks = _Callbacks(admission)
-        coordinator = self._coordinator(admission, receipts, callbacks)
+        first_callbacks = _Callbacks(admission)
+        first = self._coordinator(admission, receipts, first_callbacks)
 
-        with self.assertRaisesRegex(RuntimeError, "projection_ack_crash"):
-            await coordinator.recover_pending()
-        self.assertEqual(admission.projection_writes, 1)
-        self.assertEqual(callbacks.compute_order, [])
+        with self.assertRaisesRegex(RuntimeError, "sql_projection_crash"):
+            await first.recover_pending()
+        self.assertEqual(
+            admission.entries[0].record.phase.projection_state,
+            SubmissionProjectionState.PROJECTED,
+        )
+        self.assertEqual(
+            admission.projection_ack_states, [SubmissionProjectionState.PENDING]
+        )
+        self.assertEqual(admission.sql_projection_writes, 0)
+        self.assertEqual(first_callbacks.compute_order, [])
+        first_handle = admission.claimed_handles[-1]
 
         self.clock.advance(seconds=31)
-        result = await coordinator.recover_pending()
+        second_callbacks = _Callbacks(admission)
+        second = self._coordinator(admission, receipts, second_callbacks)
+        result = await second.recover_pending()
+
         self.assertEqual(result.status, SubmissionRecoveryStatus.COMPLETED)
-        self.assertEqual(admission.projection_writes, 2)
+        self.assertNotEqual(admission.claimed_handles[-1], first_handle)
+        self.assertEqual(
+            admission.projection_ack_states,
+            [
+                SubmissionProjectionState.PENDING,
+                SubmissionProjectionState.PROJECTED,
+            ],
+        )
+        self.assertEqual(admission.sql_projection_writes, 1)
         self.assertEqual(admission.handoff_acks, ["1"])
+
+    async def test_created_continues_directly_without_pending_claim_scan(self) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        callbacks = _Callbacks(admission)
+        receipts = _FakeReceipts()
+        result = admission.admission_result(
+            disposition=SubmissionAdmissionDisposition.CREATED
+        )
+
+        recovered = await self._coordinator(
+            admission, receipts, callbacks
+        ).continue_admitted(result)
+
+        self.assertEqual(recovered.status, SubmissionRecoveryStatus.COMPLETED)
+        self.assertEqual(recovered.recovered_count, 1)
+        self.assertEqual(admission.claim_calls, 0)
+        self.assertEqual(
+            admission.projection_ack_states, [SubmissionProjectionState.PENDING]
+        )
+        self.assertEqual(receipts.route_settle_count, 1)
+        self.assertEqual(
+            receipts.generic_write_components,
+            [
+                SubmissionPreparationReceiptComponent.MEMORY_CONTEXT,
+                SubmissionPreparationReceiptComponent.SELECTOR_DECISION,
+            ],
+        )
+        self.assertEqual(admission.handoff_acks, ["1"])
+
+    async def test_sql_style_replay_handle_assists_projected_record(self) -> None:
+        base = _record("1")
+        projected = replace(
+            base,
+            phase=replace(
+                base.phase,
+                projection_state=SubmissionProjectionState.PROJECTED,
+            ),
+        )
+        admission = _FakeAdmission([projected], self.clock)
+        result = admission.admission_result(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY
+        )
+
+        recovered = await self._coordinator(
+            admission, _FakeReceipts(), _Callbacks(admission)
+        ).continue_admitted(result)
+
+        self.assertEqual(recovered.recovered_count, 1)
+        self.assertEqual(admission.claim_calls, 0)
+        self.assertEqual(admission.projection_ack_states, [])
+        self.assertEqual(admission.sql_projection_writes, 0)
+        self.assertEqual(admission.handoff_acks, ["1"])
+
+    async def test_handed_off_replay_fast_returns_and_retries_agent_wakeup(self) -> None:
+        base = _record("1")
+        handed_off = replace(
+            base,
+            phase=replace(
+                base.phase,
+                projection_state=SubmissionProjectionState.PROJECTED,
+                handoff_state=SubmissionHandoffState.HANDED_OFF,
+            ),
+        )
+        admission = _FakeAdmission([handed_off], self.clock)
+        callbacks = _Callbacks(admission)
+        result = admission.admission_result(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            with_handle=True,
+        )
+
+        recovered = await self._coordinator(
+            admission, _FakeReceipts(), callbacks
+        ).continue_admitted(result)
+
+        self.assertEqual(recovered.status, SubmissionRecoveryStatus.COMPLETED)
+        self.assertEqual(recovered.recovered_count, 0)
+        self.assertEqual(admission.claim_calls, 0)
+        self.assertEqual(admission.projection_writes, 0)
+        self.assertEqual(callbacks.compute_order, [])
+        self.assertEqual(callbacks.materialized, [])
+        self.assertEqual(callbacks.wakeups, ["agent-run:task-1"])
+
+    async def test_pending_no_handle_replay_claims_and_continues_same_admission(
+        self,
+    ) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        callbacks = _Callbacks(admission)
+        result = admission.admission_result(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            with_handle=False,
+        )
+
+        async def reclaim_exact(_record):
+            return admission.admission_result(
+                disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY
+            )
+
+        recovery = asyncio.create_task(
+            self._coordinator(
+                admission, _FakeReceipts(), callbacks
+            ).continue_admitted(result, reclaim_exact=reclaim_exact)
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(recovery.done())
+        self.clock.advance(seconds=30)
+        recovered = await recovery
+
+        self.assertEqual(recovered.recovered_count, 1)
+        self.assertEqual(admission.claim_calls, 0)
+        self.assertEqual(admission.handoff_acks, ["1"])
+
+    async def test_pending_no_handle_replay_waits_for_foreign_claim_expiry(
+        self,
+    ) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        admission.entries[0].claim_expires_at = self.clock.now() + timedelta(seconds=9)
+        result = admission.admission_result(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            with_handle=False,
+        )
+        reclaim_calls = 0
+
+        async def reclaim_exact(_record):
+            nonlocal reclaim_calls
+            reclaim_calls += 1
+            if reclaim_calls == 1:
+                return result
+            return admission.admission_result(
+                disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY
+            )
+
+        recovery = asyncio.create_task(
+            self._coordinator(
+                admission, _FakeReceipts(), _Callbacks(admission)
+            ).continue_admitted(result, reclaim_exact=reclaim_exact)
+        )
+
+        await asyncio.sleep(0)
+        self.assertFalse(recovery.done())
+        self.clock.advance(seconds=30)
+        await asyncio.sleep(0)
+        self.assertFalse(recovery.done())
+        self.clock.advance(seconds=30)
+        recovered = await recovery
+
+        self.assertEqual(recovered.recovered_count, 1)
+        self.assertEqual(admission.claim_calls, 0)
+        self.assertEqual(reclaim_calls, 2)
+        self.assertEqual(admission.handoff_acks, ["1"])
+
+    async def test_pending_no_handle_replay_never_range_claims_adjacent_admission(
+        self,
+    ) -> None:
+        first = _record("1")
+        target = replace(_record("2"), created_at=first.created_at)
+        admission = _FakeAdmission([first, target], self.clock)
+        callbacks = _Callbacks(admission)
+        result = SubmissionAdmissionResult(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            conversation_id=target.conversation_id,
+            message_id=target.message_id,
+            task_id=target.task_id,
+            message_created_at=target.created_at,
+            task_created_at=target.created_at,
+            phase=target.phase,
+            record=target,
+            handle=None,
+        )
+
+        async def reclaim_exact(_record):
+            entry = admission.entries[1]
+            handle = admission._rotate(  # noqa: SLF001
+                entry, self.clock.now() + timedelta(seconds=30)
+            )
+            return replace(result, handle=handle)
+
+        recovery = asyncio.create_task(
+            self._coordinator(
+                admission, _FakeReceipts(), callbacks
+            ).continue_admitted(result, reclaim_exact=reclaim_exact)
+        )
+        await asyncio.sleep(0)
+        self.clock.advance(seconds=30)
+        recovered = await recovery
+
+        self.assertEqual(recovered.recovered_count, 1)
+        self.assertEqual(admission.claim_calls, 0)
+        self.assertIsNone(admission.entries[0].active_handle)
+        self.assertEqual(admission.handoff_acks, ["2"])
+
+    async def test_pending_no_handle_replay_returns_only_after_concurrent_handoff(
+        self,
+    ) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        callbacks = _Callbacks(admission)
+        result = admission.admission_result(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            with_handle=False,
+        )
+        admission.entries[0].record = replace(
+            admission.entries[0].record,
+            phase=replace(
+                admission.entries[0].record.phase,
+                projection_state=SubmissionProjectionState.PROJECTED,
+                preparation_state=SubmissionPreparationState.PREPARED,
+                handoff_state=SubmissionHandoffState.HANDED_OFF,
+            ),
+        )
+
+        async def reclaim_exact(_record):
+            return admission.admission_result(
+                disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+                with_handle=False,
+            )
+
+        recovery = asyncio.create_task(
+            self._coordinator(
+                admission, _FakeReceipts(), callbacks
+            ).continue_admitted(result, reclaim_exact=reclaim_exact)
+        )
+        await asyncio.sleep(0)
+        self.clock.advance(seconds=30)
+        recovered = await recovery
+
+        self.assertEqual(recovered.recovered_count, 0)
+        self.assertEqual(admission.claim_calls, 0)
+        self.assertEqual(callbacks.compute_order, [])
+        self.assertEqual(callbacks.materialized, [])
+        self.assertEqual(callbacks.wakeups, ["agent-run:task-1"])
+
+    async def test_wakeup_failure_after_ack_is_retried_by_handed_off_replay(self) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        receipts = _FakeReceipts()
+        callbacks = _Callbacks(admission)
+        original_wakeup = callbacks.wakeup_agent
+        wakeup_attempts = 0
+
+        async def fail_once(record, identity):
+            nonlocal wakeup_attempts
+            wakeup_attempts += 1
+            if wakeup_attempts == 1:
+                raise RuntimeError("wakeup_failed")
+            await original_wakeup(record, identity)
+
+        callbacks.wakeup_agent = fail_once
+        with self.assertRaisesRegex(RuntimeError, "wakeup_failed"):
+            await self._coordinator(
+                admission, receipts, callbacks
+            ).continue_admitted(
+                admission.admission_result(
+                    disposition=SubmissionAdmissionDisposition.CREATED
+                )
+            )
+
+        handed_off = admission.entries[0].record
+        replay = SubmissionAdmissionResult(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            conversation_id=handed_off.conversation_id,
+            message_id=handed_off.message_id,
+            task_id=handed_off.task_id,
+            message_created_at=handed_off.created_at,
+            task_created_at=handed_off.created_at,
+            phase=handed_off.phase,
+            record=handed_off,
+            handle=None,
+        )
+        recovered = await self._coordinator(
+            admission, receipts, callbacks
+        ).continue_admitted(replay)
+
+        self.assertEqual(recovered.recovered_count, 0)
+        self.assertEqual(wakeup_attempts, 2)
+        self.assertEqual(callbacks.wakeups, ["agent-run:task-1"])
+
+    async def test_live_durable_callback_failure_stops_keeper_and_remains_recoverable(
+        self,
+    ) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        receipts = _FakeReceipts()
+        callbacks = _Callbacks(admission)
+        callbacks.fail_handoff_once = True
+        result = admission.admission_result(
+            disposition=SubmissionAdmissionDisposition.CREATED
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "handoff_crash"):
+            await self._coordinator(
+                admission, receipts, callbacks
+            ).continue_admitted(result)
+
+        renews = admission.renew_count
+        self.clock.advance(seconds=31)
+        await asyncio.sleep(0)
+        self.assertEqual(admission.renew_count, renews)
+        replay_callbacks = _Callbacks(admission)
+        recovered = await self._coordinator(
+            admission, receipts, replay_callbacks
+        ).recover_pending()
+
+        self.assertEqual(recovered.recovered_count, 1)
+        self.assertEqual(admission.handoff_acks, ["1"])
+        self.assertEqual(replay_callbacks.compute_order, [])
 
     async def test_partial_receipt_resumes_without_recomputing_first_component(self) -> None:
         admission = _FakeAdmission([_record("1")], self.clock)
@@ -90,6 +417,26 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(callbacks.compute_order.count("route:1"), 1)
         self.assertEqual(callbacks.compute_order.count("memory:1"), 2)
         self.assertEqual(callbacks.compute_order.count("selector:1"), 1)
+        self.assertEqual(receipts.route_settle_count, 1)
+        self.assertNotIn(
+            SubmissionPreparationReceiptComponent.ROUTE_DECISION,
+            receipts.generic_write_components,
+        )
+
+    async def test_route_settle_exact_conflict_stops_before_generic_writes(self) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        receipts = _FakeReceipts()
+        receipts.route_conflict_on_settle = _canonical(_no_server_route())
+        callbacks = _Callbacks(admission)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "submission_preparation_receipt_conflict"
+        ):
+            await self._coordinator(admission, receipts, callbacks).recover_pending()
+
+        self.assertEqual(receipts.route_settle_count, 1)
+        self.assertEqual(receipts.generic_write_components, [])
+        self.assertEqual(callbacks.compute_order, ["route:1"])
 
     async def test_prepare_winner_is_reused_without_recomputing_current_inputs(self) -> None:
         admission = _FakeAdmission([_record("1")], self.clock)
@@ -107,6 +454,7 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
         second_callbacks = _Callbacks(admission)
         await self._coordinator(admission, receipts, second_callbacks).recover_pending()
         self.assertEqual(second_callbacks.compute_order, [])
+        self.assertEqual(receipts.route_settle_count, 1)
         self.assertEqual(admission.entries[0].record.prepared_execution, prepared)
         self.assertEqual(second_callbacks.materialized, ["route:1", "memory:1", "selector:1"])
 
@@ -227,6 +575,26 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
                 empty, _FakeReceipts(), _Callbacks(empty)
             ).recover_pending()
 
+    async def test_sql_authority_accepts_finalized_claim_without_sidecar_receipt(
+        self,
+    ) -> None:
+        admission = _FakeAdmission([], self.clock)
+        admission.finalization_receipt = None
+        coordinator = SubmissionAdmissionCoordinator(
+            admission=admission,
+            receipts=_FakeReceipts(),
+            callbacks=_Callbacks(admission),
+            claim_owner="sql-worker",
+            now=self.clock.now,
+            wait_until=self.clock.wait_until,
+            expected_finalization_receipt_sha256=None,
+        )
+
+        result = await coordinator.recover_pending()
+
+        self.assertEqual(result.recovered_count, 0)
+        self.assertEqual(result.pending_count, 0)
+
     async def test_claimed_handles_renew_while_later_head_is_held(self) -> None:
         admission = _FakeAdmission([_record("1"), _record("2")], self.clock)
         admission.entries[1].claim_expires_at = self.clock.now() + timedelta(seconds=25)
@@ -276,6 +644,13 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
             root_prepared["execution_text_sha256"],
             hashlib.sha256(b"hello-1").hexdigest(),
         )
+        self.assertEqual(root_callbacks.agent_contexts[0].current_user_input, "hello-1")
+        self.assertEqual(
+            hashlib.sha256(
+                root_callbacks.agent_contexts[0].current_user_input.encode()
+            ).hexdigest(),
+            root_prepared["execution_text_sha256"],
+        )
 
         memory_admission = _FakeAdmission([_record("2")], self.clock)
         memory_callbacks = _Callbacks(memory_admission)
@@ -313,6 +688,14 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
             memory_prepared["execution_text_sha256"],
             hashlib.sha256(b"resolved memory text").hexdigest(),
         )
+        self.assertEqual(
+            memory_callbacks.agent_contexts[0].current_user_input,
+            "resolved memory text",
+        )
+        self.assertEqual(
+            memory_callbacks.agent_contexts[0].memory_context,
+            nested_memory["prompt_payload"],
+        )
 
         pending_record = _with_continuation(
             _record("3"),
@@ -337,6 +720,10 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             pending_prepared["execution_text_sha256"],
             hashlib.sha256(pending_text.encode()).hexdigest(),
+        )
+        self.assertEqual(
+            pending_callbacks.agent_contexts[0].current_user_input,
+            pending_text,
         )
 
     async def test_requested_capability_uses_provider_safe_tool_name(self) -> None:
@@ -639,6 +1026,7 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
         *,
         recovery_limit: int = 8,
     ) -> SubmissionAdmissionCoordinator:
+        callbacks.receipts = receipts
         return SubmissionAdmissionCoordinator(
             admission=admission,
             receipts=receipts,
@@ -1029,6 +1417,7 @@ class PreparedAgentRecoveryLoaderTest(unittest.IsolatedAsyncioTestCase):
         admission = _FakeAdmission([record], clock)
         receipt_store = _FakeReceipts()
         callbacks = _Callbacks(admission)
+        callbacks.receipts = receipt_store
         callbacks.memory_value = memory_value
         coordinator = SubmissionAdmissionCoordinator(
             admission=admission,
@@ -1107,10 +1496,15 @@ class _FakeAdmission:
         self.entries = [_Entry(record) for record in records]
         self.clock = clock
         self.projection_writes = 0
+        self.projection_ack_states: list[SubmissionProjectionState] = []
+        self.sql_projection_writes = 0
+        self.sql_projected_message_ids: set[str] = set()
+        self.claimed_handles: list[SubmissionAdmissionHandle] = []
+        self.claim_calls = 0
         self.handoff_acks: list[str] = []
         self.renew_count = 0
         self.stale_handle_uses = 0
-        self.fail_projection_ack_once = False
+        self.fail_sql_projection_once_after_authority_ack = False
         self.fail_handoff_ack_once = False
         self.fail_next_renew = False
         self.block_projection_ack = False
@@ -1121,6 +1515,7 @@ class _FakeAdmission:
         self._handles: dict[SubmissionAdmissionHandle, _Entry] = {}
 
     async def claim_pending_submission(self, request) -> SubmissionClaimResult:
+        self.claim_calls += 1
         candidates = [
             entry
             for entry in self.entries
@@ -1148,12 +1543,38 @@ class _FakeAdmission:
                 earliest_claim_expires_at=entry.claim_expires_at,
             )
         handle = self._rotate(entry, request.claim_expires_at)
+        self.claimed_handles.append(handle)
         return SubmissionClaimResult(
             found=True,
             authority_state=SubmissionAuthorityState.FINALIZED,
             finalization_receipt_sha256=self.finalization_receipt,
             pending_count=len(candidates),
             record=entry.record,
+            handle=handle,
+        )
+
+    def admission_result(
+        self,
+        *,
+        disposition: SubmissionAdmissionDisposition,
+        with_handle: bool = True,
+    ) -> SubmissionAdmissionResult:
+        entry = self.entries[0]
+        handle = (
+            self._rotate(entry, self.clock.now() + timedelta(seconds=30))
+            if with_handle
+            else None
+        )
+        record = entry.record
+        return SubmissionAdmissionResult(
+            disposition=disposition,
+            conversation_id=record.conversation_id,
+            message_id=record.message_id,
+            task_id=record.task_id,
+            message_created_at=record.created_at,
+            task_created_at=record.created_at,
+            phase=record.phase,
+            record=record,
             handle=handle,
         )
 
@@ -1165,15 +1586,46 @@ class _FakeAdmission:
         self.renew_count += 1
         return self._rotate(entry, request.claim_expires_at)
 
+    async def get_submission_preparation(self, request) -> SubmissionPreparationRecord | None:
+        entry = next(
+            (
+                candidate
+                for candidate in self.entries
+                if candidate.record.username == request.username
+                and candidate.record.conversation_id == request.conversation_id
+                and candidate.record.task_id == request.task_id
+            ),
+            None,
+        )
+        if entry is None:
+            return None
+        record = entry.record
+        return SubmissionPreparationRecord(
+            conversation_id=record.conversation_id,
+            message_id=record.message_id,
+            task_id=record.task_id,
+            prepared_execution=record.prepared_execution or b"",
+            prepared_execution_sha256=record.prepared_execution_sha256 or "",
+            handoff_state=record.phase.handoff_state,
+            handoff_kind=(
+                "agent_run"
+                if record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF
+                else None
+            ),
+            handoff_identity=(
+                f"agent-run:{record.task_id}"
+                if record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF
+                else None
+            ),
+        )
+
     async def acknowledge_submission_projection(self, request) -> SubmissionAdmissionPhase:
         entry = self._binding(request.handle)
         self.projection_writes += 1
+        self.projection_ack_states.append(entry.record.phase.projection_state)
         if self.block_projection_ack:
             self.projection_ack_started.set()
             await self.projection_ack_release.wait()
-        if self.fail_projection_ack_once:
-            self.fail_projection_ack_once = False
-            raise RuntimeError("projection_ack_crash")
         entry.record = replace(
             entry.record,
             phase=replace(
@@ -1181,6 +1633,12 @@ class _FakeAdmission:
                 projection_state=SubmissionProjectionState.PROJECTED,
             ),
         )
+        if self.fail_sql_projection_once_after_authority_ack:
+            self.fail_sql_projection_once_after_authority_ack = False
+            raise RuntimeError("sql_projection_crash")
+        if entry.record.message_id not in self.sql_projected_message_ids:
+            self.sql_projected_message_ids.add(entry.record.message_id)
+            self.sql_projection_writes += 1
         return entry.record.phase
 
     async def prepare_submission_handoff(self, request) -> SubmissionPreparationRecord:
@@ -1252,11 +1710,17 @@ class _FakeAdmission:
 class _FakeReceipts:
     def __init__(self) -> None:
         self.rows: dict[str, SubmissionPreparationReceipt] = {}
+        self.route_settle_count = 0
+        self.route_conflict_on_settle: bytes | None = None
+        self.generic_write_components: list[
+            SubmissionPreparationReceiptComponent
+        ] = []
 
     async def get_submission_preparation_receipt(self, **request):
         return self.rows.get(request["task_id"])
 
     async def write_submission_preparation_component(self, **request):
+        self.generic_write_components.append(request["component"])
         task_id = request["task_id"]
         now = request["written_at"]
         row = self.rows.get(task_id) or SubmissionPreparationReceipt(
@@ -1283,6 +1747,35 @@ class _FakeReceipts:
                 f"{name}_sha256": request["component_sha256"],
                 "updated_at": now,
             },
+        )
+        self.rows[task_id] = row
+        return row
+
+    async def settle_route_decision_exact(self, **request):
+        self.route_settle_count += 1
+        task_id = request["task_id"]
+        now = request["written_at"]
+        row = self.rows.get(task_id) or SubmissionPreparationReceipt(
+            task_id=task_id,
+            conversation_id=request["conversation_id"],
+            route_decision=None,
+            route_decision_sha256=None,
+            memory_context=None,
+            memory_context_sha256=None,
+            selector_decision=None,
+            selector_decision_sha256=None,
+            receipt_sha256=None,
+            created_at=now,
+            updated_at=now,
+        )
+        existing = row.route_decision or self.route_conflict_on_settle
+        if existing is not None and existing != request["canonical_json"]:
+            raise RuntimeError("submission_preparation_receipt_conflict")
+        row = replace(
+            row,
+            route_decision=request["canonical_json"],
+            route_decision_sha256=request["component_sha256"],
+            updated_at=now,
         )
         self.rows[task_id] = row
         return row
@@ -1351,6 +1844,7 @@ class _Callbacks:
         self.fail_handoff_once = False
         self.existing_agent_identity: str | None = None
         self.agent_creates = 0
+        self.agent_contexts: list[PreparedAgentRecoveryContext] = []
         self.route_value: object = {
             "schema": "maf.submission.route_decision.v1",
             "decision": "not_applicable",
@@ -1364,10 +1858,21 @@ class _Callbacks:
         self.memory_release = asyncio.Event()
         self.last_handoff_identity = ""
         self.forced_handoff_identity: str | None = None
+        self.receipts: _FakeReceipts | None = None
 
-    async def compute_route_decision(self, record, continuation):
+    async def settle_route_decision_exact(self, record, continuation, written_at):
         self._computed("route", record)
-        return self.route_value
+        if self.receipts is None:
+            raise AssertionError("route receipt store not bound")
+        canonical = _canonical(self.route_value)
+        return await self.receipts.settle_route_decision_exact(
+            username=record.username,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            canonical_json=canonical,
+            component_sha256=hashlib.sha256(canonical).hexdigest(),
+            written_at=written_at,
+        )
 
     async def compute_memory_context(self, record, continuation):
         self._computed("memory", record)
@@ -1395,7 +1900,8 @@ class _Callbacks:
         self.sink.write(f"selector:{record.task_id}", canonical_component)
         self.materialized.append(f"selector:{record.message_id}")
 
-    async def initialize_agent_handoff(self, record, prepared):
+    async def initialize_agent_handoff(self, record, prepared, context):
+        self.agent_contexts.append(context)
         if self.fail_handoff_once:
             self.fail_handoff_once = False
             raise RuntimeError("handoff_crash")

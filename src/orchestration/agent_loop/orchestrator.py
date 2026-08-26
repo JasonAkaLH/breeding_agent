@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Mapping
 
 from src.core.enums import TaskStatus
@@ -158,6 +158,11 @@ class AgentLoopOrchestrator:
         )
         run = initialized.run
         _validate_initialized_user_item(initialized, expected_run)
+        if initialized.item.committed_at is None:
+            raise AgentStorageConflict("agent_user_message_committed_at_missing")
+        started_event_at = initialized.item.committed_at
+        if run.created_at is not None and started_event_at <= run.created_at:
+            started_event_at = run.created_at + timedelta(microseconds=1)
         await self._ensure_initialization_event(
             self._make_event(
                 task_id=request.task_id,
@@ -182,7 +187,7 @@ class AgentLoopOrchestrator:
                 },
             ),
             event_id=f"evt-agent-run-started:{run.run_id}",
-            created_at=run.created_at,
+            created_at=started_event_at,
         )
         return _InitializedAgentRun(request=request, task=task, run=run)
 

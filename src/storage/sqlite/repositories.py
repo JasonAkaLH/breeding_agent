@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, NoReturn, cast
 
-from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, null, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
@@ -159,6 +159,7 @@ from src.storage.conversation_files import (
     FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
     FILE_UPLOAD_MESSAGE_TYPE,
     FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+    build_file_upload_message_projection,
     file_upload_message_audit_payload,
     file_upload_message_id,
     render_file_upload_message,
@@ -1142,20 +1143,88 @@ def _message_metadata_object(value: object) -> dict[str, Any]:
 
 _SUBMISSION_ADMISSION_RECEIPT_KEY = "__maf_private_submission_admission_v1"
 _SUBMISSION_ADMISSION_RECEIPT_SCHEMA = "maf.sql_submission_admission_receipt.v1"
+_SUBMISSION_INPUT_METADATA_KEY = "__maf_private_submission_input_v1"
+_SUBMISSION_HANDOFF_METADATA_KEY = "__maf_private_submission_handoff_v1"
+_SUBMISSION_HANDOFF_METADATA_SCHEMA = "maf.sql_submission_handoff.v1"
+_SUBMISSION_PROJECTION_DOMAIN = b"maf.submission.projection.v1\0"
+_SUBMISSION_CONTINUATION_DOMAIN = b"maf.submission.continuation.v1\0"
 
 
-def _public_message_metadata(value: object) -> dict[str, Any]:
+def _projection_message_metadata(value: object) -> dict[str, Any]:
     metadata = _message_metadata_object(value)
     metadata.pop(_SUBMISSION_ADMISSION_RECEIPT_KEY, None)
+    metadata.pop(_SUBMISSION_HANDOFF_METADATA_KEY, None)
     return metadata
 
 
-def _submission_private_receipt(request: SubmissionAdmissionRequest) -> dict[str, str]:
+def _public_message_metadata(value: object) -> dict[str, Any]:
+    metadata = _projection_message_metadata(value)
+    metadata.pop(_SUBMISSION_INPUT_METADATA_KEY, None)
+    return metadata
+
+
+def _submission_private_receipt(request: SubmissionAdmissionRequest) -> dict[str, Any]:
     return {
         "schema": _SUBMISSION_ADMISSION_RECEIPT_SCHEMA,
         "request_fingerprint": request.request_fingerprint,
         "idempotency_key": request.idempotency_key,
     }
+
+
+def _submission_private_handoff(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise RuntimeError("submission_preparation_corrupt")
+    result = dict(value)
+    expected_keys = {
+        "schema",
+        "prepared_execution",
+        "prepared_execution_sha256",
+        "handoff_state",
+        "handoff_kind",
+        "handoff_identity",
+    }
+    if (
+        set(result) != expected_keys
+        or result.get("schema") != _SUBMISSION_HANDOFF_METADATA_SCHEMA
+        or not isinstance(result.get("prepared_execution"), str)
+        or not isinstance(result.get("prepared_execution_sha256"), str)
+        or result.get("handoff_state") not in {
+            str(SubmissionHandoffState.PENDING),
+            str(SubmissionHandoffState.HANDED_OFF),
+        }
+        or (
+            result.get("handoff_state") == str(SubmissionHandoffState.PENDING)
+            and (
+                result.get("handoff_kind") is not None
+                or result.get("handoff_identity") is not None
+            )
+        )
+        or (
+            result.get("handoff_state") == str(SubmissionHandoffState.HANDED_OFF)
+            and (
+                result.get("handoff_kind")
+                not in {"agent_run", "interrupt", "no_server_intent"}
+                or not isinstance(result.get("handoff_identity"), str)
+                or not result["handoff_identity"]
+            )
+        )
+    ):
+        raise RuntimeError("submission_preparation_corrupt")
+    prepared = result["prepared_execution"].encode("utf-8")
+    try:
+        _canonical_json_object(
+            prepared,
+            context="submission_prepared_execution",
+        )
+    except ValueError as exc:
+        raise RuntimeError("submission_preparation_corrupt") from exc
+    if hashlib.sha256(b"maf.submission.prepared_execution.v1\0" + prepared).hexdigest() != result[
+        "prepared_execution_sha256"
+    ]:
+        raise RuntimeError("submission_preparation_corrupt")
+    return result
 
 
 def _canonical_json_object(payload: bytes, *, context: str) -> dict[str, Any]:
@@ -1228,7 +1297,7 @@ def _message_projection_identity(row: MessageRow) -> tuple[Any, ...]:
         row.stream_status,
         row.created_at,
         _message_type_value(row.message_type),
-        _public_message_metadata(row.message_metadata),
+        _projection_message_metadata(row.message_metadata),
         row.updated_at,
     )
 
@@ -1249,30 +1318,58 @@ def _sql_submission_result(
     request: SubmissionAdmissionRequest,
     task: Task,
     message_created_at: datetime | None,
+    private_receipt: Mapping[str, Any],
+    private_handoff: Mapping[str, Any] | None = None,
 ) -> SubmissionAdmissionResult:
+    handoff = _submission_private_handoff(private_handoff)
     phase = SubmissionAdmissionPhase(
         admission_state=SubmissionAdmissionState.OPEN,
         projection_state=SubmissionProjectionState.PROJECTED,
-        preparation_state=SubmissionPreparationState.PENDING,
-        handoff_state=SubmissionHandoffState.PENDING,
+        preparation_state=(
+            SubmissionPreparationState.PREPARED
+            if handoff is not None
+            else SubmissionPreparationState.PENDING
+        ),
+        handoff_state=(
+            SubmissionHandoffState(handoff["handoff_state"])
+            if handoff is not None
+            else SubmissionHandoffState.PENDING
+        ),
     )
-    record = None
-    if disposition is SubmissionAdmissionDisposition.CREATED:
-        record = SubmissionRecoveryRecord(
-            username=request.username,
-            conversation_id=request.conversation_id,
-            message_id=request.message_id,
-            task_id=task.task_id,
-            conversation_projection=request.conversation_projection,
-            message_projection=request.message_projection,
-            projection_sha256=request.projection_sha256,
-            continuation=request.continuation,
-            continuation_sha256=request.continuation_sha256,
-            prepared_execution=None,
-            prepared_execution_sha256=None,
-            phase=phase,
-            created_at=task.created_at or request.message_created_at,
-        )
+    expected_receipt_keys = {
+        "schema",
+        "request_fingerprint",
+        "idempotency_key",
+    }
+    if set(private_receipt) != expected_receipt_keys:
+        raise RuntimeError("submission_admission_receipt_corrupt")
+    if (
+        private_receipt.get("schema") != _SUBMISSION_ADMISSION_RECEIPT_SCHEMA
+        or private_receipt.get("request_fingerprint") != request.request_fingerprint
+        or private_receipt.get("idempotency_key") != request.idempotency_key
+    ):
+        raise RuntimeError("submission_admission_receipt_corrupt")
+    record = SubmissionRecoveryRecord(
+        username=request.username,
+        conversation_id=request.conversation_id,
+        message_id=request.message_id,
+        task_id=task.task_id,
+        conversation_projection=request.conversation_projection,
+        message_projection=request.message_projection,
+        projection_sha256=request.projection_sha256,
+        continuation=request.continuation,
+        continuation_sha256=request.continuation_sha256,
+        prepared_execution=(
+            None
+            if handoff is None
+            else handoff["prepared_execution"].encode("utf-8")
+        ),
+        prepared_execution_sha256=(
+            None if handoff is None else handoff["prepared_execution_sha256"]
+        ),
+        phase=phase,
+        created_at=task.created_at or request.message_created_at,
+    )
     return SubmissionAdmissionResult(
         disposition=disposition,
         conversation_id=request.conversation_id,
@@ -1283,6 +1380,94 @@ def _sql_submission_result(
         phase=phase,
         record=record,
     )
+
+
+def _canonical_sql_replay_request(
+    request: SubmissionAdmissionRequest,
+    *,
+    conversation: ConversationRow,
+    message: MessageRow,
+    task: Task,
+) -> SubmissionAdmissionRequest:
+    """Bind exact retry facts to the first durable SQL identity and timestamps."""
+
+    if message.created_at is None or task.created_at is None:
+        raise RuntimeError("submission_admission_identity_corrupt")
+
+    def timestamp(value: datetime) -> str:
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return aware.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    conversation_projection = _canonical_json_object(
+        request.conversation_projection,
+        context="submission_conversation_projection",
+    )
+    message_projection = _canonical_json_object(
+        request.message_projection,
+        context="submission_message_projection",
+    )
+    continuation = _canonical_json_object(
+        request.continuation,
+        context="submission_continuation",
+    )
+    conversation_projection.update(
+        {
+            "current_task_id": task.task_id,
+            "created_at": timestamp(conversation.created_at or message.created_at),
+            "updated_at": timestamp(message.created_at),
+        }
+    )
+    message_projection.update(
+        {
+            "message_id": message.message_id,
+            "task_id": task.task_id,
+            "message_created_at": timestamp(message.created_at),
+            "updated_at": timestamp(message.created_at),
+        }
+    )
+    continuation.update(
+        {
+            "message_id": message.message_id,
+            "task_id": task.task_id,
+        }
+    )
+    def canonical_submission_json(value: Mapping[str, Any]) -> bytes:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    conversation_bytes = canonical_submission_json(conversation_projection)
+    message_bytes = canonical_submission_json(message_projection)
+    continuation_bytes = canonical_submission_json(continuation)
+    canonical = replace(
+        request,
+        message_id=message.message_id,
+        task=replace(
+            request.task,
+            task_id=task.task_id,
+            root_message_id=message.message_id,
+            created_at=task.created_at,
+            updated_at=task.created_at,
+        ),
+        conversation_projection=conversation_bytes,
+        message_projection=message_bytes,
+        projection_sha256=hashlib.sha256(
+            _SUBMISSION_PROJECTION_DOMAIN
+            + conversation_bytes
+            + b"\0"
+            + message_bytes
+        ).hexdigest(),
+        continuation=continuation_bytes,
+        continuation_sha256=hashlib.sha256(
+            _SUBMISSION_CONTINUATION_DOMAIN + continuation_bytes
+        ).hexdigest(),
+        message_created_at=message.created_at,
+    )
+    _submission_projection_values(canonical)
+    return canonical
 
 
 def _message_type_value(value: object) -> str:
@@ -2117,6 +2302,70 @@ def _row_to_submission_preparation_receipt(
     )
 
 
+def _submission_route_decision(
+    receipt: SubmissionPreparationReceipt,
+) -> Mapping[str, Any]:
+    content = receipt.route_decision
+    if content is None:
+        raise RuntimeError("submission_route_decision_not_available")
+    try:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("submission_route_decision_corrupt") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema",
+            "decision",
+            "owner_server_set_fingerprint",
+            "available_mcp_servers",
+        }
+        or value.get("schema") != "maf.submission.route_decision.v1"
+        or value.get("decision")
+        not in {"retry_route", "no_server", "not_applicable"}
+        or not isinstance(value.get("available_mcp_servers"), list)
+    ):
+        raise RuntimeError("submission_route_decision_corrupt")
+    decision = value["decision"]
+    fingerprint = value["owner_server_set_fingerprint"]
+    profiles = value["available_mcp_servers"]
+    previous = ""
+    for profile in profiles:
+        if (
+            not isinstance(profile, dict)
+            or set(profile)
+            != {"server_id", "display_name", "routing_description", "transport"}
+            or not isinstance(profile.get("server_id"), str)
+            or not profile["server_id"]
+            or profile["server_id"] <= previous
+            or not isinstance(profile.get("display_name"), str)
+            or not profile["display_name"]
+            or not isinstance(profile.get("routing_description"), str)
+            or not isinstance(profile.get("transport"), str)
+            or not profile["transport"]
+        ):
+            raise RuntimeError("submission_route_decision_corrupt")
+        previous = profile["server_id"]
+    if (
+        (decision == "retry_route" and (not _is_bare_sha256(fingerprint) or not profiles))
+        or (decision == "no_server" and (not _is_bare_sha256(fingerprint) or profiles))
+        or (decision == "not_applicable" and (fingerprint is not None or profiles))
+    ):
+        raise RuntimeError("submission_route_decision_corrupt")
+    return value
+
+
+def _bare_owner_server_set_fingerprint(value: str) -> str:
+    prefix = "sha256:"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise RuntimeError("user_mcp_owner_guard_fingerprint_corrupt")
+    bare = value.removeprefix(prefix)
+    if not _is_bare_sha256(bare):
+        raise RuntimeError("user_mcp_owner_guard_fingerprint_corrupt")
+    return bare
+
+
 class SQLiteStateRepository:
     _validate_mcp_legacy_migration_record = staticmethod(
         _validate_mcp_legacy_migration_record
@@ -2422,6 +2671,34 @@ class SQLiteStateRepository:
         self._session.flush()
         return _row_to_conversation(merged)
 
+    def compare_and_set_conversation(
+        self,
+        conversation: Conversation,
+        *,
+        expected_current_task_id: str | None,
+        expected_updated_at: datetime | None,
+    ) -> Conversation | None:
+        result = self._session.execute(
+            update(ConversationRow)
+            .where(
+                ConversationRow.conversation_id == conversation.conversation_id,
+                ConversationRow.username == conversation.username,
+                ConversationRow.status == str(conversation.status),
+                ConversationRow.current_task_id == expected_current_task_id,
+                ConversationRow.updated_at == expected_updated_at,
+            )
+            .values(
+                current_task_id=conversation.current_task_id,
+                title=conversation.title,
+                updated_at=conversation.updated_at,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        self._session.flush()
+        row = self._session.get(ConversationRow, conversation.conversation_id)
+        return None if row is None else _row_to_conversation(row)
+
     def get_conversation(self, conversation_id: str) -> Conversation | None:
         row = self._session.get(ConversationRow, conversation_id)
         return None if row is None else _row_to_conversation(row)
@@ -2708,6 +2985,53 @@ class SQLiteStateRepository:
         self._session.flush()
         return count
 
+    def materialize_submission_pending_skill_supersede_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        should_supersede: bool,
+        occurred_at: datetime,
+    ) -> int:
+        self._lock_active_conversation_owner(
+            username=username,
+            conversation_id=conversation_id,
+        )
+        if not should_supersede:
+            return 0
+        rows = self._session.scalars(
+            select(PendingSkillContextRow)
+            .where(
+                PendingSkillContextRow.conversation_id == conversation_id,
+                or_(
+                    PendingSkillContextRow.status == "pending_user_input",
+                    and_(
+                        PendingSkillContextRow.status == "superseded",
+                        PendingSkillContextRow.updated_at == occurred_at,
+                    ),
+                ),
+            )
+            .order_by(PendingSkillContextRow.context_id)
+            .with_for_update()
+        ).all()
+        if not rows:
+            return 0
+        exact_replay_rows = [
+            row
+            for row in rows
+            if row.status == "superseded" and row.updated_at == occurred_at
+        ]
+        if exact_replay_rows:
+            return len(exact_replay_rows)
+        pending_rows = [row for row in rows if row.status == "pending_user_input"]
+        for row in pending_rows:
+            row.status = "superseded"
+            row.updated_at = occurred_at
+        count = len(pending_rows)
+        self._session.flush()
+        return count
+
     def _mark_pending_skill_context_status(
         self,
         context_id: str,
@@ -2805,6 +3129,340 @@ class SQLiteStateRepository:
         row.updated_at = written_at
         self._session.flush()
         return _row_to_submission_preparation_receipt(row)
+
+    def settle_submission_route_decision_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        requires_user_scoped_server: bool,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        self._lock_active_conversation_owner(
+            username=username,
+            conversation_id=conversation_id,
+        )
+        row = self._session.scalar(
+            select(SubmissionPreparationReceiptRow)
+            .where(SubmissionPreparationReceiptRow.task_id == task_id)
+            .with_for_update()
+        )
+        if row is not None:
+            if row.conversation_id != conversation_id:
+                raise RuntimeError("submission_preparation_receipt_conflict")
+            receipt = _row_to_submission_preparation_receipt(row)
+            if receipt.route_decision is not None:
+                _submission_route_decision(receipt)
+                return receipt
+
+        if requires_user_scoped_server:
+            guard = self._lock_mcp_owner_guard(username, written_at)
+            servers = self._session.scalars(
+                select(UserMCPServerRow)
+                .where(UserMCPServerRow.owner_user_id == username)
+                .order_by(UserMCPServerRow.server_id)
+                .with_for_update()
+            ).all()
+            fingerprint = _mcp_owner_server_set_fingerprint(servers)
+            if guard.server_set_fingerprint != fingerprint:
+                raise RuntimeError("user_mcp_owner_guard_fingerprint_corrupt")
+            profiles = [
+                {
+                    "server_id": server.server_id,
+                    "display_name": server.display_name,
+                    "routing_description": server.routing_description,
+                    "transport": str(server.transport),
+                }
+                for server in servers
+                if _mcp_server_is_available(server)
+            ]
+            decision = "retry_route" if profiles else "no_server"
+            owner_fingerprint: str | None = _bare_owner_server_set_fingerprint(
+                fingerprint
+            )
+        else:
+            decision = "not_applicable"
+            owner_fingerprint = None
+            profiles = []
+        canonical = json.dumps(
+            {
+                "schema": "maf.submission.route_decision.v1",
+                "decision": decision,
+                "owner_server_set_fingerprint": owner_fingerprint,
+                "available_mcp_servers": profiles,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return self.write_submission_preparation_component(
+            username=username,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            component=SubmissionPreparationReceiptComponent.ROUTE_DECISION,
+            canonical_json=canonical,
+            component_sha256=hashlib.sha256(canonical).hexdigest(),
+            written_at=written_at,
+        )
+
+    def materialize_submission_no_server_intent_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPInitialIntentCreateResult:
+        self._lock_active_conversation_owner(
+            username=username,
+            conversation_id=conversation_id,
+        )
+        receipt_row = self._session.scalar(
+            select(SubmissionPreparationReceiptRow)
+            .where(SubmissionPreparationReceiptRow.task_id == task_id)
+            .with_for_update()
+        )
+        if receipt_row is None or receipt_row.conversation_id != conversation_id:
+            raise RuntimeError("submission_preparation_receipt_not_available")
+        route = _submission_route_decision(
+            _row_to_submission_preparation_receipt(receipt_row)
+        )
+        if route["decision"] != "no_server":
+            raise RuntimeError("submission_no_server_route_required")
+        fingerprint = f"sha256:{route['owner_server_set_fingerprint']}"
+        intent_id = mcp_no_server_intent_id(task_id)
+        evidence = canonical_sha256(
+            {
+                "intent_id": intent_id,
+                "owner_user_id": username,
+                "server_set_fingerprint": fingerprint,
+                "task_id": task_id,
+                "trigger": "initial_no_profile",
+            }
+        )
+        existing = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        expected = {
+            "owner_user_id": username,
+            "task_id": task_id,
+            "node_id": None,
+            "trigger": "initial_no_profile",
+            "requested_server_id": None,
+            "requested_server_config_version": None,
+            "requested_server_security_version": None,
+            "owner_server_set_fingerprint": fingerprint,
+            "resume_envelope_json": None,
+            "resume_envelope_sha256": None,
+            "evidence_sha256": evidence,
+            "created_at": occurred_at,
+        }
+        if existing is not None:
+            _require_exact_row(existing, expected, "mcp_no_server_intent_conflict")
+            if existing.status not in {"unavailable", "converged"}:
+                raise RuntimeError("mcp_no_server_intent_conflict")
+            return MCPInitialIntentCreateResult.ALREADY_CREATED
+        insert_values = dict(expected)
+        insert_values["resume_envelope_json"] = null()
+        self._session.add(
+            MCPNoServerIntentRow(
+                intent_id=intent_id,
+                status="unavailable",
+                revision=0,
+                updated_at=occurred_at,
+                terminal_at=None,
+                **insert_values,
+            )
+        )
+        self._session.flush()
+        return MCPInitialIntentCreateResult.CREATED_UNAVAILABLE
+
+    def converge_submission_no_server_without_sql_task(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult:
+        self._lock_active_conversation_owner(
+            username=username,
+            conversation_id=conversation_id,
+        )
+        receipt_row = self._session.scalar(
+            select(SubmissionPreparationReceiptRow)
+            .where(SubmissionPreparationReceiptRow.task_id == task_id)
+            .with_for_update()
+        )
+        if receipt_row is None or receipt_row.conversation_id != conversation_id:
+            raise RuntimeError("submission_preparation_receipt_not_available")
+        route = _submission_route_decision(
+            _row_to_submission_preparation_receipt(receipt_row)
+        )
+        if route["decision"] != "no_server":
+            raise RuntimeError("submission_no_server_route_required")
+        if self._session.scalar(
+            select(func.count()).select_from(TaskRow).where(TaskRow.task_id == task_id)
+        ):
+            raise RuntimeError("submission_no_server_sql_task_present")
+
+        intent_id = mcp_no_server_intent_id(task_id)
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        if intent is None:
+            raise RuntimeError("mcp_no_server_intent_missing")
+        fingerprint = f"sha256:{route['owner_server_set_fingerprint']}"
+        intent_evidence = canonical_sha256(
+            {
+                "intent_id": intent_id,
+                "owner_user_id": username,
+                "server_set_fingerprint": fingerprint,
+                "task_id": task_id,
+                "trigger": "initial_no_profile",
+            }
+        )
+        _require_exact_row(
+            intent,
+            {
+                "owner_user_id": username,
+                "task_id": task_id,
+                "node_id": None,
+                "trigger": "initial_no_profile",
+                "requested_server_id": None,
+                "requested_server_config_version": None,
+                "requested_server_security_version": None,
+                "owner_server_set_fingerprint": fingerprint,
+                "resume_envelope_json": None,
+                "resume_envelope_sha256": None,
+                "evidence_sha256": intent_evidence,
+            },
+            "mcp_no_server_intent_conflict",
+        )
+        if intent.status not in {"unavailable", "converged"}:
+            raise RuntimeError("mcp_no_server_intent_conflict")
+
+        convergence_id = f"mcp-no-server:v1:{task_id}"
+        runtime_event_id = f"{convergence_id}:01-runtime-unavailable"
+        failed_event_id = f"{convergence_id}:02-task-failed"
+        convergence_evidence = canonical_sha256(
+            {
+                "intent_evidence_sha256": intent.evidence_sha256,
+                "intent_id": intent.intent_id,
+                "task_id": task_id,
+            }
+        )
+        expected_receipt = {
+            "task_id": task_id,
+            "intent_id": intent_id,
+            "owner_user_id": username,
+            "terminal_code": "mcp_runtime_unavailable",
+            "evidence_sha256": convergence_evidence,
+            "runtime_unavailable_event_id": runtime_event_id,
+            "task_failed_event_id": failed_event_id,
+            "committed_at": occurred_at,
+        }
+        existing_receipt = self._session.scalar(
+            select(MCPNoServerConvergenceReceiptRow)
+            .where(MCPNoServerConvergenceReceiptRow.idempotency_key == convergence_id)
+            .with_for_update()
+        )
+        if existing_receipt is not None:
+            _require_exact_row(
+                existing_receipt,
+                expected_receipt,
+                "mcp_no_server_convergence_receipt_conflict",
+            )
+        self._insert_or_compare_event(
+            event_id=runtime_event_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            node_id=None,
+            event_type="mcp.runtime_unavailable",
+            payload={"status": "unavailable", "reason_code": "no_user_scoped_server"},
+            created_at=occurred_at,
+        )
+        self._insert_or_compare_event(
+            event_id=failed_event_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            node_id=None,
+            event_type="task.failed",
+            payload={"code": "mcp_runtime_unavailable"},
+            created_at=occurred_at,
+        )
+        if intent.status == "unavailable":
+            intent.status = "converged"
+            intent.revision = int(intent.revision) + 1
+            intent.updated_at = occurred_at
+            intent.terminal_at = occurred_at
+        elif (
+            int(intent.revision) != 1
+            or intent.updated_at != occurred_at
+            or intent.terminal_at != occurred_at
+        ):
+            raise RuntimeError("mcp_no_server_intent_conflict")
+        if existing_receipt is None:
+            self._session.add(
+                MCPNoServerConvergenceReceiptRow(
+                    idempotency_key=convergence_id,
+                    **expected_receipt,
+                )
+            )
+        self._session.flush()
+        return (
+            MCPNoServerConvergenceResult.ALREADY_CONVERGED
+            if existing_receipt is not None
+            else MCPNoServerConvergenceResult.CONVERGED
+        )
+
+    def converge_submission_no_server_with_sql_task_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult:
+        self.materialize_submission_no_server_intent_exact(
+            username=username,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            occurred_at=occurred_at,
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == task_id).with_for_update()
+        )
+        if task is None or task.conversation_id != conversation_id:
+            raise RuntimeError("submission_no_server_task_missing")
+        if task.status == str(TaskStatus.ACCEPTED):
+            if (
+                task.mcp_execution_mode != "user_scoped"
+                or task.mcp_shadow_enabled is not False
+                or task.mcp_rollout_mode != "enforce"
+            ):
+                raise RuntimeError("submission_no_server_task_conflict")
+            task.mcp_execution_mode = "unavailable"
+            task.mcp_shadow_enabled = False
+            task.mcp_route_reason_code = "no_user_scoped_server"
+            task.mcp_rollout_mode = "enforce"
+            task.updated_at = occurred_at
+            self._session.flush()
+        elif (
+            task.status != str(TaskStatus.FAILED)
+            or task.mcp_execution_mode != "unavailable"
+            or task.mcp_shadow_enabled is not False
+            or task.mcp_route_reason_code != "no_user_scoped_server"
+            or task.mcp_rollout_mode != "enforce"
+        ):
+            raise RuntimeError("submission_no_server_task_conflict")
+        return self.converge_user_mcp_no_server(task_id, occurred_at)
 
     def close_submission_preparation_receipt(
         self,
@@ -3140,6 +3798,104 @@ class SQLiteStateRepository:
             allow_message_insert=True,
         )
 
+    def apply_conversation_file_sheet_selection_exact(
+        self,
+        expected: ConversationFileResource,
+        updated: ConversationFileResource,
+    ) -> ConversationFileResource:
+        conflict = "conversation_file_sheet_selection_conflict"
+        try:
+            self._require_active_conversation_identity(
+                expected.conversation_id,
+                username=expected.username,
+            )
+        except PermissionError as exc:
+            raise RuntimeError(conflict) from exc
+        row = self._session.scalar(
+            select(ConversationFileResourceRow)
+            .where(ConversationFileResourceRow.file_id == expected.file_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or expected.status != "active"
+            or expected.file_type != "spreadsheet"
+            or _row_to_conversation_file_resource(row) != expected
+        ):
+            raise RuntimeError(conflict)
+        expected_projection = build_file_upload_message_projection(expected)
+        expected_message_metadata = safe_file_upload_message_metadata(
+            expected_projection.metadata,
+            upload_id=expected.file_id,
+        )
+        message_row = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == file_upload_message_id(expected.file_id))
+            .with_for_update()
+        )
+        if (
+            message_row is None
+            or message_row.conversation_id != expected.conversation_id
+            or _message_type_value(message_row.message_type)
+            != FILE_UPLOAD_MESSAGE_TYPE
+            or str(message_row.role) != str(MessageRole.SYSTEM)
+            or message_row.task_id is not None
+            or message_row.stream_status != "complete"
+            or not _same_message_datetime(
+                message_row.created_at,
+                expected_projection.created_at,
+            )
+            or _message_metadata_object(message_row.message_metadata)
+            != expected_message_metadata
+            or message_row.content
+            != render_file_upload_message(expected_message_metadata)
+        ):
+            raise RuntimeError(conflict)
+        preserved_fields = (
+            "file_id",
+            "conversation_id",
+            "username",
+            "original_filename",
+            "content_type",
+            "file_type",
+            "size_bytes",
+            "sha256",
+            "storage_key",
+            "description_status",
+            "description_summary",
+            "description_ref",
+            "status",
+            "created_at",
+        )
+        if (
+            updated.status != "active"
+            or updated.requires_sheet_selection
+            or not str(updated.selected_sheet or "").strip()
+            or updated.updated_at is None
+            or any(
+                getattr(updated, field) != getattr(expected, field)
+                for field in preserved_fields
+            )
+        ):
+            raise RuntimeError(conflict)
+        row.preview = dict(updated.preview)
+        row.normalized_filename = updated.normalized_filename
+        row.normalized_content_type = updated.normalized_content_type
+        row.requires_sheet_selection = updated.requires_sheet_selection
+        row.selected_sheet = updated.selected_sheet
+        row.updated_at = updated.updated_at
+        self._session.flush()
+        try:
+            self._upsert_file_upload_message(
+                build_file_upload_message_projection(updated),
+                now=updated.updated_at,
+                allow_insert=False,
+                expected_active_username=expected.username,
+            )
+        except (PermissionError, RuntimeError, ValueError) as exc:
+            raise RuntimeError(conflict) from exc
+        return _row_to_conversation_file_resource(row)
+
     def _save_conversation_file_resource_with_upload_message(
         self,
         resource: ConversationFileResource,
@@ -3389,7 +4145,11 @@ class SQLiteStateRepository:
                 username=expected_active_username,
             )
         incoming_metadata = _message_metadata_object(message.metadata)
-        if _SUBMISSION_ADMISSION_RECEIPT_KEY in incoming_metadata:
+        if (
+            _SUBMISSION_ADMISSION_RECEIPT_KEY in incoming_metadata
+            or _SUBMISSION_INPUT_METADATA_KEY in incoming_metadata
+            or _SUBMISSION_HANDOFF_METADATA_KEY in incoming_metadata
+        ):
             raise ValueError("message_private_metadata_reserved")
         existing = self._session.scalar(
             select(MessageRow)
@@ -3433,16 +4193,22 @@ class SQLiteStateRepository:
                 )
             ):
                 raise MessageIdentityConflictError()
-            private_receipt = _message_metadata_object(
-                existing.message_metadata
-            ).get(_SUBMISSION_ADMISSION_RECEIPT_KEY)
+            private_metadata = {
+                key: value
+                for key, value in _message_metadata_object(
+                    existing.message_metadata
+                ).items()
+                if key
+                in {
+                    _SUBMISSION_ADMISSION_RECEIPT_KEY,
+                    _SUBMISSION_INPUT_METADATA_KEY,
+                    _SUBMISSION_HANDOFF_METADATA_KEY,
+                }
+            }
             existing.content = message.content
             existing.stream_status = message.stream_status
             existing.message_metadata = incoming_metadata
-            if private_receipt is not None:
-                existing.message_metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY] = (
-                    private_receipt
-                )
+            existing.message_metadata.update(private_metadata)
             existing.updated_at = message.updated_at
         self._session.flush()
         return _row_to_message(existing)
@@ -3503,10 +4269,21 @@ class SQLiteStateRepository:
             )
 
         if conversation.current_task_id is not None:
-            return _submission_disposition(
-                SubmissionAdmissionDisposition.CONVERSATION_BUSY,
-                request.conversation_id,
+            pointed_task = self._session.scalar(
+                select(TaskRow)
+                .where(TaskRow.task_id == conversation.current_task_id)
+                .with_for_update()
             )
+            if (
+                pointed_task is None
+                or pointed_task.conversation_id != request.conversation_id
+                or pointed_task.status not in _TERMINAL_TASK_STATUSES
+            ):
+                return _submission_disposition(
+                    SubmissionAdmissionDisposition.CONVERSATION_BUSY,
+                    request.conversation_id,
+                )
+            conversation.current_task_id = None
         if self._session.get(TaskRow, request.task.task_id) is not None:
             return _submission_disposition(
                 SubmissionAdmissionDisposition.MESSAGE_ID_CONFLICT,
@@ -3514,7 +4291,10 @@ class SQLiteStateRepository:
             )
 
         metadata = _message_metadata_object(message_projection.get("metadata"))
-        if _SUBMISSION_ADMISSION_RECEIPT_KEY in metadata:
+        if (
+            _SUBMISSION_ADMISSION_RECEIPT_KEY in metadata
+            or _SUBMISSION_HANDOFF_METADATA_KEY in metadata
+        ):
             raise ValueError("submission_message_private_metadata_invalid")
         metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY] = _submission_private_receipt(
             request
@@ -3551,6 +4331,7 @@ class SQLiteStateRepository:
             request=request,
             task=saved_task,
             message_created_at=message.created_at,
+            private_receipt=metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY],
         )
 
     def project_submission_admission(
@@ -3598,7 +4379,6 @@ class SQLiteStateRepository:
                 conversation_projection.get("created_at"),
                 context="submission_conversation_created_at",
             )
-            or conversation.current_task_id not in {None, record.task_id}
         ):
             raise RuntimeError("submission_projection_conflict")
         else:
@@ -3614,6 +4394,11 @@ class SQLiteStateRepository:
             .with_for_update()
         )
         expected_metadata = _message_metadata_object(message_projection.get("metadata"))
+        if (
+            _SUBMISSION_ADMISSION_RECEIPT_KEY in expected_metadata
+            or _SUBMISSION_HANDOFF_METADATA_KEY in expected_metadata
+        ):
+            raise RuntimeError("submission_projection_conflict")
         if existing is None:
             self._session.add(
                 MessageRow(
@@ -3674,7 +4459,10 @@ class SQLiteStateRepository:
         )
         task = self._session.get(TaskRow, message.task_id) if message.task_id else None
         if (
-            receipt != _submission_private_receipt(request)
+            not isinstance(receipt, Mapping)
+            or receipt.get("schema") != _SUBMISSION_ADMISSION_RECEIPT_SCHEMA
+            or receipt.get("request_fingerprint") != request.request_fingerprint
+            or receipt.get("idempotency_key") != request.idempotency_key
             or message.conversation_id != request.conversation_id
             or conversation is None
             or conversation.username != request.username
@@ -3683,7 +4471,7 @@ class SQLiteStateRepository:
             or _message_type_value(message.message_type)
             != _message_type_value(message_projection.get("message_type"))
             or _public_message_metadata(message.message_metadata)
-            != _message_metadata_object(message_projection.get("metadata"))
+            != _public_message_metadata(message_projection.get("metadata"))
             or task is None
             or not _same_submission_task(_row_to_task(task), request.task)
         ):
@@ -3691,11 +4479,169 @@ class SQLiteStateRepository:
                 SubmissionAdmissionDisposition.MESSAGE_ID_CONFLICT,
                 request.conversation_id,
             )
-        return _sql_submission_result(
+        canonical_request = _canonical_sql_replay_request(
+            request,
+            conversation=conversation,
+            message=message,
+            task=_row_to_task(task),
+        )
+        result = _sql_submission_result(
             disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
-            request=request,
+            request=canonical_request,
             task=_row_to_task(task),
             message_created_at=message.created_at,
+            private_receipt=cast(Mapping[str, Any], receipt),
+            private_handoff=_submission_private_handoff(
+                _message_metadata_object(message.message_metadata).get(
+                    _SUBMISSION_HANDOFF_METADATA_KEY
+                )
+            ),
+        )
+        if _row_to_task(task).status in {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }:
+            return replace(result, phase=None, record=None)
+        return result
+
+    def prepare_submission_handoff_sql(
+        self,
+        *,
+        record: SubmissionRecoveryRecord,
+        prepared_execution: bytes,
+        prepared_execution_sha256: str,
+    ) -> SubmissionPreparationRecord:
+        message = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == record.message_id)
+            .with_for_update()
+        )
+        if (
+            message is None
+            or message.conversation_id != record.conversation_id
+            or message.task_id != record.task_id
+        ):
+            raise RuntimeError("submission_preparation_conflict")
+        try:
+            prepared_text = prepared_execution.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("submission_preparation_conflict") from exc
+        metadata = _message_metadata_object(message.message_metadata)
+        existing = _submission_private_handoff(
+            metadata.get(_SUBMISSION_HANDOFF_METADATA_KEY)
+        )
+        candidate = {
+            "schema": _SUBMISSION_HANDOFF_METADATA_SCHEMA,
+            "prepared_execution": prepared_text,
+            "prepared_execution_sha256": prepared_execution_sha256,
+            "handoff_state": str(SubmissionHandoffState.PENDING),
+            "handoff_kind": None,
+            "handoff_identity": None,
+        }
+        _submission_private_handoff(candidate)
+        if existing is not None:
+            if (
+                existing["prepared_execution"] != prepared_text
+                or existing["prepared_execution_sha256"]
+                != prepared_execution_sha256
+            ):
+                raise RuntimeError("submission_preparation_conflict")
+        else:
+            metadata[_SUBMISSION_HANDOFF_METADATA_KEY] = candidate
+            message.message_metadata = metadata
+            self._session.flush()
+        return SubmissionPreparationRecord(
+            conversation_id=record.conversation_id,
+            message_id=record.message_id,
+            task_id=record.task_id,
+            prepared_execution=prepared_execution,
+            prepared_execution_sha256=prepared_execution_sha256,
+            handoff_state=SubmissionHandoffState.PENDING,
+        )
+
+    def acknowledge_submission_handoff_sql(
+        self,
+        *,
+        record: SubmissionRecoveryRecord,
+        prepared_execution_sha256: str,
+        handoff_kind: str,
+        handoff_identity: str,
+    ) -> SubmissionAdmissionPhase:
+        message = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == record.message_id)
+            .with_for_update()
+        )
+        if (
+            message is None
+            or message.conversation_id != record.conversation_id
+            or message.task_id != record.task_id
+        ):
+            raise RuntimeError("submission_handoff_conflict")
+        metadata = _message_metadata_object(message.message_metadata)
+        existing = _submission_private_handoff(
+            metadata.get(_SUBMISSION_HANDOFF_METADATA_KEY)
+        )
+        if (
+            existing is None
+            or existing["prepared_execution_sha256"]
+            != prepared_execution_sha256
+        ):
+            raise RuntimeError("submission_handoff_conflict")
+        candidate = {
+            **existing,
+            "handoff_state": str(SubmissionHandoffState.HANDED_OFF),
+            "handoff_kind": handoff_kind,
+            "handoff_identity": handoff_identity,
+        }
+        _submission_private_handoff(candidate)
+        if existing["handoff_state"] == str(SubmissionHandoffState.HANDED_OFF):
+            if existing != candidate:
+                raise RuntimeError("submission_handoff_conflict")
+        else:
+            metadata[_SUBMISSION_HANDOFF_METADATA_KEY] = candidate
+            message.message_metadata = metadata
+            self._session.flush()
+        return replace(
+            record.phase,
+            preparation_state=SubmissionPreparationState.PREPARED,
+            handoff_state=SubmissionHandoffState.HANDED_OFF,
+        )
+
+    def get_submission_preparation_sql(
+        self,
+        request: SubmissionPreparationLookup,
+    ) -> SubmissionPreparationRecord | None:
+        task = self._session.get(TaskRow, request.task_id)
+        if task is None or task.conversation_id != request.conversation_id:
+            return None
+        message = self._session.get(MessageRow, task.root_message_id)
+        if (
+            message is None
+            or message.conversation_id != request.conversation_id
+            or message.task_id != request.task_id
+        ):
+            return None
+        conversation = self._session.get(ConversationRow, request.conversation_id)
+        if conversation is None or conversation.username != request.username:
+            return None
+        private = _submission_private_handoff(
+            _message_metadata_object(message.message_metadata).get(
+                _SUBMISSION_HANDOFF_METADATA_KEY
+            )
+        )
+        if private is None:
+            return None
+        return SubmissionPreparationRecord(
+            conversation_id=request.conversation_id,
+            message_id=message.message_id,
+            task_id=request.task_id,
+            prepared_execution=private["prepared_execution"].encode("utf-8"),
+            prepared_execution_sha256=private["prepared_execution_sha256"],
+            handoff_state=SubmissionHandoffState(private["handoff_state"]),
+            handoff_kind=private["handoff_kind"],
+            handoff_identity=private["handoff_identity"],
         )
 
     def get_message(self, message_id: str) -> Message | None:
@@ -16424,6 +17370,112 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def settle_submission_route_decision_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        requires_user_scoped_server: bool,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        return await self._run(
+            lambda state, collab: state.settle_submission_route_decision_exact(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                requires_user_scoped_server=requires_user_scoped_server,
+                written_at=written_at,
+            )
+        )
+
+    async def materialize_submission_no_server_intent_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPInitialIntentCreateResult:
+        return await self._run(
+            lambda state, collab: state.materialize_submission_no_server_intent_exact(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                occurred_at=occurred_at,
+            )
+        )
+
+    async def converge_submission_no_server_without_sql_task(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult:
+        return await self._run(
+            lambda state, collab: state.converge_submission_no_server_without_sql_task(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                occurred_at=occurred_at,
+            )
+        )
+
+    async def converge_submission_no_server_handoff_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult:
+        if self._task_authority_mode() != "enforce":
+            return await self._run(
+                lambda state, collab: state.converge_submission_no_server_with_sql_task_exact(
+                    username=username,
+                    conversation_id=conversation_id,
+                    task_id=task_id,
+                    occurred_at=occurred_at,
+                )
+            )
+
+        await self.materialize_submission_no_server_intent_exact(
+            username=username,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            occurred_at=occurred_at,
+        )
+        task = await self.get_task(task_id)
+        if task is None or task.conversation_id != conversation_id:
+            raise RuntimeError("submission_no_server_task_missing")
+        conversation = await self.get_conversation(conversation_id)
+        if conversation is None or conversation.username != username:
+            raise RuntimeError("submission_no_server_task_missing")
+        terminal = replace(
+            task,
+            status=TaskStatus.FAILED,
+            mcp_execution_mode="unavailable",
+            mcp_shadow_enabled=False,
+            mcp_route_reason_code="no_user_scoped_server",
+            mcp_rollout_mode="enforce",
+            updated_at=occurred_at,
+        )
+        if task.status == TaskStatus.ACCEPTED:
+            task = await self.save_task(
+                terminal,
+                expected_from_status=TaskStatus.ACCEPTED,
+            )
+        if task != terminal:
+            raise RuntimeError("submission_no_server_task_conflict")
+        return await self.converge_submission_no_server_without_sql_task(
+            username=username,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            occurred_at=occurred_at,
+        )
+
     async def close_submission_preparation_receipt(
         self,
         *,
@@ -16458,6 +17510,21 @@ class SQLiteStorage(StoragePort):
 
     async def save_conversation(self, conversation: Conversation) -> Conversation:
         return await self._run(lambda state, collab: state.save_conversation(conversation))
+
+    async def compare_and_set_conversation(
+        self,
+        conversation: Conversation,
+        *,
+        expected_current_task_id: str | None,
+        expected_updated_at: datetime | None,
+    ) -> Conversation | None:
+        return await self._run(
+            lambda state, collab: state.compare_and_set_conversation(
+                conversation,
+                expected_current_task_id=expected_current_task_id,
+                expected_updated_at=expected_updated_at,
+            )
+        )
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None:
         return await self._run(lambda state, collab: state.get_conversation(conversation_id))
@@ -16643,6 +17710,18 @@ class SQLiteStorage(StoragePort):
             )
             raise
 
+    async def apply_conversation_file_sheet_selection_exact(
+        self,
+        expected: ConversationFileResource,
+        updated: ConversationFileResource,
+    ) -> ConversationFileResource:
+        return await self._run(
+            lambda state, collab: state.apply_conversation_file_sheet_selection_exact(
+                expected,
+                updated,
+            )
+        )
+
     async def mark_conversation_file_resource_and_upload_message_deleted(
         self,
         conversation_id: str,
@@ -16815,13 +17894,36 @@ class SQLiteStorage(StoragePort):
     async def mark_pending_skill_context_superseded(self, conversation_id: str) -> int:
         return await self._run(lambda state, collab: state.mark_pending_skill_context_superseded(conversation_id, updated_at=_utcnow_naive()))
 
+    async def materialize_submission_pending_skill_supersede_exact(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        should_supersede: bool,
+        occurred_at: datetime,
+    ) -> int:
+        return await self._run(
+            lambda state, collab: state.materialize_submission_pending_skill_supersede_exact(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                should_supersede=should_supersede,
+                occurred_at=occurred_at,
+            )
+        )
+
     async def admit_submission(
         self, request: SubmissionAdmissionRequest
     ) -> SubmissionAdmissionResult:
         _submission_projection_values(request)
         if self._task_authority_mode() != "enforce":
             result = await self._run_submission_admission(request)
-            if result.record is not None:
+            if (
+                result.record is not None
+                and result.record.phase.handoff_state
+                is SubmissionHandoffState.PENDING
+            ):
                 handle = self._new_submission_handle(
                     mode="sql",
                     message_id=result.record.message_id,
@@ -16976,10 +18078,17 @@ class SQLiteStorage(StoragePort):
         binding = self._submission_binding(request.handle)
         if binding["mode"] == "sql":
             current = binding["record"]
+            prepared = await self._run(
+                lambda state, collab: state.prepare_submission_handoff_sql(
+                    record=current,
+                    prepared_execution=request.prepared_execution,
+                    prepared_execution_sha256=request.prepared_execution_sha256,
+                )
+            )
             updated = replace(
                 current,
-                prepared_execution=request.prepared_execution,
-                prepared_execution_sha256=request.prepared_execution_sha256,
+                prepared_execution=prepared.prepared_execution,
+                prepared_execution_sha256=prepared.prepared_execution_sha256,
                 phase=replace(
                     current.phase,
                     preparation_state=SubmissionPreparationState.PREPARED,
@@ -16999,13 +18108,18 @@ class SQLiteStorage(StoragePort):
             )
             updated = _submission_recovery_record(response["admission"])
         binding["record"] = updated
-        return _submission_preparation_record(updated, response if binding["mode"] != "sql" else None)
+        return _submission_preparation_record(
+            updated,
+            response if binding["mode"] != "sql" else None,
+        )
 
     async def get_submission_preparation(
         self, request: SubmissionPreparationLookup
     ) -> SubmissionPreparationRecord | None:
         if self._task_authority_mode() != "enforce":
-            return None
+            return await self._run(
+                lambda state, collab: state.get_submission_preparation_sql(request)
+            )
         client = self._submission_sidecar_client("submission_preparation_get")
         response = await _resolve_runtime_sidecar_call(
             client.get_submission_preparation(
@@ -17024,9 +18138,13 @@ class SQLiteStorage(StoragePort):
     ) -> SubmissionAdmissionPhase:
         binding = self._submission_binding(request.handle)
         if binding["mode"] == "sql":
-            phase = replace(
-                binding["record"].phase,
-                handoff_state=SubmissionHandoffState.HANDED_OFF,
+            phase = await self._run(
+                lambda state, collab: state.acknowledge_submission_handoff_sql(
+                    record=binding["record"],
+                    prepared_execution_sha256=request.prepared_execution_sha256,
+                    handoff_kind=request.handoff_kind,
+                    handoff_identity=request.handoff_identity,
+                )
             )
         else:
             client = self._submission_sidecar_client(
@@ -17168,7 +18286,10 @@ class SQLiteStorage(StoragePort):
             )
         handle = None
         claim = response.get("claim")
-        if isinstance(claim, Mapping):
+        if (
+            isinstance(claim, Mapping)
+            and record.phase.handoff_state is SubmissionHandoffState.PENDING
+        ):
             handle = self._new_submission_handle(
                 mode="sidecar",
                 message_id=record.message_id,

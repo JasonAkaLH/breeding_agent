@@ -461,6 +461,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         conversation_id: str = "conv-1",
         content: str = "查询某个品种的基因型信息",
         capability_id: str | None = GENERIC_DATA_SKILL_ID,
+        client_message_id: str | None = None,
         metadata: dict | None = None,
     ) -> httpx.Response:
         request_metadata = dict(metadata or {})
@@ -470,15 +471,18 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             routing_mode = "force_capability"
             request_metadata.setdefault("forced_by_slash_command", True)
             request_metadata.setdefault("slash_command", f"/{capability_id.removeprefix('skill.').replace('_', '-')}")
+        body = {
+            "conversation_id": conversation_id,
+            "content": content,
+            "routing_mode": routing_mode,
+            "capability_id": request_capability_id,
+            "metadata": request_metadata,
+        }
+        if client_message_id is not None:
+            body["client_message_id"] = client_message_id
         return await self.client.post(
             "/api/v1/conversations/chat-messages",
-            json={
-                "conversation_id": conversation_id,
-                "content": content,
-                "routing_mode": routing_mode,
-                "capability_id": request_capability_id,
-                "metadata": request_metadata,
-            },
+            json=body,
         )
 
     async def answer_interrupt_with_chat(

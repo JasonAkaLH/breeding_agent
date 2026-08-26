@@ -18,7 +18,8 @@ use crate::{
     validate_task_node_update, validate_task_record, validate_task_update, write_failed,
 };
 use maf_runtime_store::{
-    PROTO_HASH, RuntimeSidecarError, RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease,
+    PROTO_HASH, RuntimeSidecarError, RuntimeSidecarErrorCode, SCHEMA_HASH,
+    SUBMISSION_IMPORT_RECORD_BYTES, SUBMISSION_IMPORT_STDIN_BYTES, TaskLease,
 };
 use maf_task_dispatcher::TaskSubmitResult;
 use rusqlite::{Connection, OptionalExtension, types::Value};
@@ -28,6 +29,35 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+pub const SUBMISSION_IMPORT_STDIN_MAX_BYTES: usize = SUBMISSION_IMPORT_STDIN_BYTES as usize;
+const SUBMISSION_IMPORT_RECORD_MAX_BYTES: usize = SUBMISSION_IMPORT_RECORD_BYTES as usize;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfflineSubmissionImportRequest {
+    schema: String,
+    source_backend: String,
+    source_identity_sha256: String,
+    snapshot_boundary_sha256: String,
+    writer_fence_sha256: String,
+    report_sha256: String,
+    schema_hash: String,
+    proto_hash: String,
+    supported_features_sha256: String,
+    inventories: OfflineSubmissionInventories,
+    conversations: Vec<SubmissionConversationImportRecord>,
+    message_identities: Vec<MessageIdentityRecord>,
+    finalization_receipt_sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfflineSubmissionInventories {
+    conversations: SubmissionInventoryEvidence,
+    message_identities: SubmissionInventoryEvidence,
+    active_tasks: SubmissionInventoryEvidence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionAuthorityFinalizeResult {
     pub exact_replay: bool,
@@ -36,7 +66,8 @@ pub struct SubmissionAuthorityFinalizeResult {
     pub finalized_at_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubmissionConversationImportRecord {
     pub conversation_id: String,
     pub username: String,
@@ -57,6 +88,7 @@ pub struct SubmissionAuthorityImportRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubmissionInventoryEvidence {
     count: u32,
     pk_sha256: String,
@@ -1417,6 +1449,102 @@ impl RuntimeSidecarSqliteAdapter {
         })
     }
 
+    pub fn import_submission_authority_from_stdin(
+        &self,
+        request_json: &[u8],
+        finalized_at_ms: i64,
+    ) -> Result<Vec<u8>, RuntimeSidecarError> {
+        let input = parse_offline_submission_import_request(request_json)?;
+        self.import_offline_submission_authority(input, finalized_at_ms)
+    }
+
+    pub fn import_submission_authority_file_from_stdin(
+        path: impl AsRef<Path>,
+        request_json: &[u8],
+        finalized_at_ms: i64,
+    ) -> Result<Vec<u8>, RuntimeSidecarError> {
+        let input = parse_offline_submission_import_request(request_json)?;
+        Self::open(path)?.import_offline_submission_authority(input, finalized_at_ms)
+    }
+
+    fn import_offline_submission_authority(
+        &self,
+        input: OfflineSubmissionImportRequest,
+        finalized_at_ms: i64,
+    ) -> Result<Vec<u8>, RuntimeSidecarError> {
+        if finalized_at_ms < 0 {
+            return Err(write_failed(
+                "submission authority finalization time is invalid",
+            ));
+        }
+        let conversation_inventory = conversation_inventory_evidence(&input.conversations)?;
+        let message_inventory = message_identity_inventory_evidence(&input.message_identities)?;
+        if conversation_inventory != input.inventories.conversations
+            || message_inventory != input.inventories.message_identities
+        {
+            return Err(write_failed(
+                "submission authority source inventory digest mismatch",
+            ));
+        }
+        let active_task_ids = input
+            .conversations
+            .iter()
+            .filter_map(|record| record.active_task_id.clone())
+            .collect::<Vec<_>>();
+        validate_active_task_id_inventory(&active_task_ids, &input.inventories.active_tasks)?;
+        let subject_json = build_finalization_subject(
+            &input,
+            &conversation_inventory,
+            &message_inventory,
+            &input.inventories.active_tasks,
+        )?;
+        let finalization_receipt_sha256 = finalization_subject_digest(&subject_json);
+        if finalization_receipt_sha256 != input.finalization_receipt_sha256 {
+            return Err(write_failed(
+                "submission authority finalization subject digest mismatch",
+            ));
+        }
+        let destination_schema_sha256 = {
+            let connection = self.lock_connection()?;
+            verify_submission_authority_schema(&connection)?;
+            let finalized = connection
+                .query_row(
+                    "SELECT state='finalized' FROM submission_authority_meta WHERE singleton_key=1",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| sqlite_error("read submission authority state failed", error))?;
+            if !finalized
+                && active_task_inventory_evidence(&connection)? != input.inventories.active_tasks
+            {
+                return Err(write_failed(
+                    "submission authority active Task inventory digest mismatch",
+                ));
+            }
+            submission_authority_schema_manifest_sha256()
+        };
+        let receipt_json = build_finalization_receipt(
+            &input,
+            &finalization_receipt_sha256,
+            finalized_at_ms,
+            &destination_schema_sha256,
+            &conversation_inventory,
+            &message_inventory,
+            &input.inventories.active_tasks,
+        )?;
+        let result =
+            self.import_and_finalize_submission_authority(SubmissionAuthorityImportRequest {
+                conversations: input.conversations,
+                message_identities: input.message_identities,
+                active_task_ids,
+                finalization_subject_json: subject_json,
+                finalization_receipt_sha256,
+                finalization_receipt_json: receipt_json,
+                finalized_at_ms,
+            })?;
+        render_offline_submission_import_result(&result)
+    }
+
     pub fn import_and_finalize_submission_authority(
         &self,
         request: SubmissionAuthorityImportRequest,
@@ -1535,6 +1663,15 @@ impl RuntimeSidecarSqliteAdapter {
         for identity in &request.message_identities {
             insert_message_identity(&transaction, identity)?;
         }
+        verify_submission_authority_schema(&transaction)?;
+        if stored_conversation_inventory_evidence(&transaction)? != conversation_inventory
+            || stored_message_identity_inventory_evidence(&transaction)? != message_inventory
+            || active_task_inventory_evidence(&transaction)? != declared_active_inventory
+        {
+            return Err(write_failed(
+                "submission authority destination inventory digest mismatch",
+            ));
+        }
         transaction
             .execute(
                 "UPDATE submission_authority_meta SET state='finalized', finalization_receipt_sha256=?1, finalization_receipt_json=?2, finalized_at_ms=?3 WHERE singleton_key=1 AND state='uninitialized'",
@@ -1592,9 +1729,39 @@ impl RuntimeSidecarSqliteAdapter {
                     SubmissionAdmissionDisposition::MessageIdConflict,
                 ));
             }
-            let visible_claim = claim.filter(|claim| {
+            let mut visible_claim = claim.filter(|claim| {
                 claim.owner == request.workflow_owner && claim.expires_at_ms > request.now_ms
             });
+            if visible_claim.is_none()
+                && !record.closed
+                && record.handoff_state == SubmissionHandoffState::Pending
+            {
+                let claim = new_submission_claim(
+                    &request.message_id,
+                    &request.workflow_owner,
+                    request.now_ms,
+                    request.claim_ttl_ms,
+                    request.now_ms as u64 + 1,
+                )?;
+                let updated = transaction
+                    .execute(
+                        r"UPDATE submission_admissions SET claim_owner=?2, claim_token=?3,
+                           claim_expires_at_ms=?4
+                           WHERE message_id=?1 AND admission_state='open' AND handoff_state='pending'
+                             AND (claim_token IS NULL OR claim_expires_at_ms <= ?5)",
+                        rusqlite::params![
+                            &request.message_id,
+                            &claim.owner,
+                            &claim.token,
+                            claim.expires_at_ms,
+                            request.now_ms
+                        ],
+                    )
+                    .map_err(|error| sqlite_error("reclaim exact submission failed", error))?;
+                if updated == 1 {
+                    visible_claim = Some(claim);
+                }
+            }
             transaction.commit().map_err(|error| {
                 sqlite_error("commit exact submission admission replay failed", error)
             })?;
@@ -2535,33 +2702,41 @@ impl RuntimeSidecarSqliteAdapter {
     }
 }
 
+const SUBMISSION_AUTHORITY_SCHEMA_MANIFEST: [(&str, &str); 6] = [
+    (
+        "submission_authority_meta",
+        "a7311e68510f7e982f6010eb7093a04f7a7a76feac8b4fd4939fb5c8154eb52f",
+    ),
+    (
+        "submission_conversations",
+        "ee7fb9f658280cda0cfc9d757704d44e3bee5dc5f996a90ea82c8a3b39811a0b",
+    ),
+    (
+        "submission_message_identities",
+        "0aeed21ac9fdb8cfe599e4eccb32fb41f52c60ddd996d12353d09e7ab341effd",
+    ),
+    (
+        "submission_admissions",
+        "dbb94f60f848bb48fe20306788071ec6183116a7a51657dae871d3cb73a253d8",
+    ),
+    (
+        "submission_admissions_pending_idx",
+        "e73752709bcf8267e0f9b4aaf0ac3f8366015c3add13105917f808f979396a34",
+    ),
+    (
+        "submission_message_identities_conversation_idx",
+        "e87625657d6e018b7f0dae2d59fbb8f50bfe356686757d091d27b21adab91b8d",
+    ),
+];
+
+fn submission_authority_schema_manifest_sha256() -> String {
+    let manifest = serde_json::to_vec(&SUBMISSION_AUTHORITY_SCHEMA_MANIFEST)
+        .expect("submission authority schema manifest is serializable");
+    format!("{:x}", Sha256::digest(manifest))
+}
+
 fn verify_submission_authority_schema(connection: &Connection) -> Result<(), RuntimeSidecarError> {
-    for (name, expected_sha256) in [
-        (
-            "submission_authority_meta",
-            "a7311e68510f7e982f6010eb7093a04f7a7a76feac8b4fd4939fb5c8154eb52f",
-        ),
-        (
-            "submission_conversations",
-            "ee7fb9f658280cda0cfc9d757704d44e3bee5dc5f996a90ea82c8a3b39811a0b",
-        ),
-        (
-            "submission_message_identities",
-            "0aeed21ac9fdb8cfe599e4eccb32fb41f52c60ddd996d12353d09e7ab341effd",
-        ),
-        (
-            "submission_admissions",
-            "dbb94f60f848bb48fe20306788071ec6183116a7a51657dae871d3cb73a253d8",
-        ),
-        (
-            "submission_admissions_pending_idx",
-            "e73752709bcf8267e0f9b4aaf0ac3f8366015c3add13105917f808f979396a34",
-        ),
-        (
-            "submission_message_identities_conversation_idx",
-            "e87625657d6e018b7f0dae2d59fbb8f50bfe356686757d091d27b21adab91b8d",
-        ),
-    ] {
+    for (name, expected_sha256) in SUBMISSION_AUTHORITY_SCHEMA_MANIFEST {
         verify_normalized_schema_sql(connection, name, expected_sha256)?;
     }
     verify_submission_table_info(connection)?;
@@ -3259,6 +3434,256 @@ fn finalized_submission_authority_replay(
     }))
 }
 
+fn parse_offline_submission_import_request(
+    request_json: &[u8],
+) -> Result<OfflineSubmissionImportRequest, RuntimeSidecarError> {
+    validate_submission_import_stdin_bytes(request_json.len() as u64)?;
+    let value: serde_json::Value = serde_json::from_slice(request_json)
+        .map_err(|_| write_failed("submission authority import request JSON is invalid"))?;
+    let canonical = serde_json::to_vec(&value)
+        .map_err(|_| write_failed("submission authority import request cannot be encoded"))?;
+    if canonical != request_json {
+        return Err(write_failed(
+            "submission authority import request is not canonical",
+        ));
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| write_failed("submission authority import request must be an object"))?;
+    validate_exact_record_keys(
+        object.get("conversations"),
+        &[
+            "conversation_id",
+            "username",
+            "status",
+            "active_task_id",
+            "updated_at_ms",
+        ],
+    )?;
+    validate_exact_record_keys(
+        object.get("message_identities"),
+        &[
+            "message_id",
+            "conversation_id",
+            "username",
+            "identity_kind",
+            "role",
+            "message_type",
+            "message_created_at_ms",
+            "task_id",
+            "request_fingerprint",
+            "reserved_at_ms",
+        ],
+    )?;
+    let request: OfflineSubmissionImportRequest = serde_json::from_value(value)
+        .map_err(|_| write_failed("submission authority import request shape is invalid"))?;
+    if request.schema != "maf.submission_authority.import_request.v1"
+        || !matches!(request.source_backend.as_str(), "sqlite" | "postgresql")
+        || request.schema_hash != SCHEMA_HASH
+        || request.proto_hash != PROTO_HASH
+        || [
+            &request.source_identity_sha256,
+            &request.snapshot_boundary_sha256,
+            &request.writer_fence_sha256,
+            &request.report_sha256,
+            &request.supported_features_sha256,
+            &request.finalization_receipt_sha256,
+        ]
+        .into_iter()
+        .any(|value| !is_lower_sha256(value))
+    {
+        return Err(write_failed(
+            "submission authority import request fields are invalid",
+        ));
+    }
+    let supported_features = serde_json::to_vec(&crate::supported_features())
+        .map_err(|_| write_failed("submission authority features cannot be encoded"))?;
+    if request.supported_features_sha256 != format!("{:x}", Sha256::digest(supported_features)) {
+        return Err(write_failed(
+            "submission authority import feature digest is invalid",
+        ));
+    }
+    for inventory in [
+        &request.inventories.conversations,
+        &request.inventories.message_identities,
+        &request.inventories.active_tasks,
+    ] {
+        validate_submission_inventory_evidence_shape(inventory)?;
+    }
+    for count in [
+        request.conversations.len(),
+        request.message_identities.len(),
+    ] {
+        validate_submission_import_count(count as u64)?;
+    }
+    if request
+        .conversations
+        .windows(2)
+        .any(|pair| pair[0].conversation_id >= pair[1].conversation_id)
+        || request
+            .message_identities
+            .windows(2)
+            .any(|pair| pair[0].message_id >= pair[1].message_id)
+    {
+        return Err(write_failed(
+            "submission authority import arrays must be sorted and unique",
+        ));
+    }
+    for value in request
+        .conversations
+        .iter()
+        .map(serde_json::to_value)
+        .chain(request.message_identities.iter().map(serde_json::to_value))
+    {
+        let value = value
+            .map_err(|_| write_failed("submission authority import record cannot be encoded"))?;
+        validate_submission_import_record_bytes(
+            serde_json::to_vec(&value)
+                .map_err(|_| write_failed("submission authority import record cannot be encoded"))?
+                .len() as u64,
+        )?;
+    }
+    Ok(request)
+}
+
+fn validate_submission_inventory_evidence_shape(
+    inventory: &SubmissionInventoryEvidence,
+) -> Result<(), RuntimeSidecarError> {
+    if !is_lower_sha256(&inventory.pk_sha256)
+        || !is_lower_sha256(&inventory.canonical_sha256)
+        || inventory.finalize_empty != (inventory.count == 0)
+    {
+        return Err(write_failed(
+            "submission authority import inventory is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_record_keys(
+    records: Option<&serde_json::Value>,
+    expected: &[&str],
+) -> Result<(), RuntimeSidecarError> {
+    let records = records
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| write_failed("submission authority import record array is invalid"))?;
+    let expected = expected
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for record in records {
+        let actual = record
+            .as_object()
+            .ok_or_else(|| write_failed("submission authority import record is invalid"))?
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual != expected {
+            return Err(write_failed(
+                "submission authority import record fields are invalid",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_submission_import_count(count: u64) -> Result<(), RuntimeSidecarError> {
+    u32::try_from(count)
+        .map(|_| ())
+        .map_err(|_| write_failed("submission authority import count exceeds u32"))
+}
+
+fn validate_submission_import_record_bytes(byte_count: u64) -> Result<(), RuntimeSidecarError> {
+    if byte_count > SUBMISSION_IMPORT_RECORD_MAX_BYTES as u64 {
+        Err(write_failed(
+            "submission authority import record exceeds 64 KiB",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_submission_import_stdin_bytes(byte_count: u64) -> Result<(), RuntimeSidecarError> {
+    if byte_count > SUBMISSION_IMPORT_STDIN_MAX_BYTES as u64 {
+        Err(write_failed("submission authority import exceeds 1 GiB"))
+    } else {
+        Ok(())
+    }
+}
+
+fn build_finalization_subject(
+    input: &OfflineSubmissionImportRequest,
+    conversations: &SubmissionInventoryEvidence,
+    message_identities: &SubmissionInventoryEvidence,
+    active_tasks: &SubmissionInventoryEvidence,
+) -> Result<Vec<u8>, RuntimeSidecarError> {
+    let supported_features = serde_json::to_vec(&crate::supported_features())
+        .map_err(|_| write_failed("submission authority features cannot be encoded"))?;
+    serde_json::to_vec(&serde_json::json!({
+        "active_task_inventory": active_tasks,
+        "conversation_inventory": conversations,
+        "message_identity_inventory": message_identities,
+        "proto_hash": PROTO_HASH,
+        "report_sha256": input.report_sha256,
+        "schema": "maf.submission_authority.finalization_subject.v1",
+        "schema_hash": SCHEMA_HASH,
+        "snapshot_boundary_sha256": input.snapshot_boundary_sha256,
+        "source_backend": input.source_backend,
+        "source_identity_sha256": input.source_identity_sha256,
+        "supported_features_sha256": format!("{:x}", Sha256::digest(supported_features)),
+        "writer_fence_sha256": input.writer_fence_sha256,
+    }))
+    .map_err(|_| write_failed("submission authority subject cannot be encoded"))
+}
+
+fn finalization_subject_digest(subject_json: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"maf.submission_authority.finalization.v1\0");
+    hasher.update(subject_json);
+    format!("{:x}", hasher.finalize())
+}
+
+fn build_finalization_receipt(
+    input: &OfflineSubmissionImportRequest,
+    finalization_receipt_sha256: &str,
+    finalized_at_ms: i64,
+    destination_schema_sha256: &str,
+    conversations: &SubmissionInventoryEvidence,
+    message_identities: &SubmissionInventoryEvidence,
+    active_tasks: &SubmissionInventoryEvidence,
+) -> Result<Vec<u8>, RuntimeSidecarError> {
+    serde_json::to_vec(&serde_json::json!({
+        "destination_schema_sha256": destination_schema_sha256,
+        "finalization_receipt_sha256": finalization_receipt_sha256,
+        "finalized_at_ms": finalized_at_ms,
+        "inventories": {
+            "active_tasks": active_tasks,
+            "conversations": conversations,
+            "message_identities": message_identities,
+        },
+        "result": "finalized",
+        "schema": "maf.submission_authority.import_receipt.v1",
+        "snapshot_boundary_sha256": input.snapshot_boundary_sha256,
+        "source_identity_sha256": input.source_identity_sha256,
+        "writer_fence_sha256": input.writer_fence_sha256,
+    }))
+    .map_err(|_| write_failed("submission authority receipt cannot be encoded"))
+}
+
+fn render_offline_submission_import_result(
+    result: &SubmissionAuthorityFinalizeResult,
+) -> Result<Vec<u8>, RuntimeSidecarError> {
+    let mut value: serde_json::Value = serde_json::from_slice(&result.finalization_receipt_json)
+        .map_err(|_| write_failed("stored submission authority receipt is invalid"))?;
+    value["result"] = serde_json::Value::String(if result.exact_replay {
+        "exact_replay".to_owned()
+    } else {
+        "finalized".to_owned()
+    });
+    serde_json::to_vec(&value)
+        .map_err(|_| write_failed("submission authority result cannot be encoded"))
+}
+
 fn empty_inventory_evidence(kind: &str) -> SubmissionInventoryEvidence {
     inventory_evidence(kind, &[], &[]).expect("empty inventory is canonical")
 }
@@ -3276,20 +3701,16 @@ fn inventory_evidence(
         let mut hasher = Sha256::new();
         hasher.update(domain.as_bytes());
         hasher.update(b"\0");
+        hasher.update(kind.as_bytes());
+        hasher.update(b"\0");
         hasher.update(bytes);
         format!("{:x}", hasher.finalize())
     };
     Ok(SubmissionInventoryEvidence {
         count: u32::try_from(records.len())
             .map_err(|_| write_failed("submission authority inventory count exceeds u32"))?,
-        pk_sha256: digest(
-            &format!("maf.submission_authority.inventory.{kind}.pk.v1"),
-            &pk_json,
-        ),
-        canonical_sha256: digest(
-            &format!("maf.submission_authority.inventory.{kind}.records.v1"),
-            &records_json,
-        ),
+        pk_sha256: digest("maf.submission_authority.inventory.pk.v1", &pk_json),
+        canonical_sha256: digest("maf.submission_authority.inventory.rows.v1", &records_json),
         finalize_empty: records.is_empty(),
     })
 }
@@ -3347,6 +3768,49 @@ fn message_identity_inventory_evidence(
     inventory_evidence("message_identities", &primary_keys, &canonical)
 }
 
+fn stored_conversation_inventory_evidence(
+    connection: &Connection,
+) -> Result<SubmissionInventoryEvidence, RuntimeSidecarError> {
+    let mut statement = connection
+        .prepare("SELECT conversation_id, username, status, active_task_id, updated_at_ms FROM submission_conversations ORDER BY conversation_id")
+        .map_err(|error| sqlite_error("prepare stored Conversation inventory failed", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(SubmissionConversationImportRecord {
+                conversation_id: row.get(0)?,
+                username: row.get(1)?,
+                status: row.get(2)?,
+                active_task_id: row.get(3)?,
+                updated_at_ms: row.get(4)?,
+            })
+        })
+        .map_err(|error| sqlite_error("query stored Conversation inventory failed", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("read stored Conversation inventory failed", error))?;
+    conversation_inventory_evidence(&rows)
+}
+
+fn stored_message_identity_inventory_evidence(
+    connection: &Connection,
+) -> Result<SubmissionInventoryEvidence, RuntimeSidecarError> {
+    let mut statement = connection
+        .prepare("SELECT message_id FROM submission_message_identities ORDER BY message_id")
+        .map_err(|error| sqlite_error("prepare stored Message inventory failed", error))?;
+    let message_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("query stored Message inventory failed", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("read stored Message inventory failed", error))?;
+    let mut identities = Vec::with_capacity(message_ids.len());
+    for message_id in message_ids {
+        identities.push(
+            message_identity_by_id(connection, &message_id)?
+                .ok_or_else(|| write_failed("stored Message inventory row is missing"))?,
+        );
+    }
+    message_identity_inventory_evidence(&identities)
+}
+
 fn active_task_inventory_evidence(
     connection: &Connection,
 ) -> Result<SubmissionInventoryEvidence, RuntimeSidecarError> {
@@ -3356,10 +3820,12 @@ fn active_task_inventory_evidence(
     for task_id in &primary_keys {
         let task = task_record_by_id(connection, task_id)?
             .ok_or_else(|| write_failed("active Task inventory row is missing"))?;
-        records.push(
-            serde_json::to_value(task)
-                .map_err(|_| write_failed("active Task inventory cannot be encoded"))?,
-        );
+        let record = serde_json::to_value(task)
+            .map_err(|_| write_failed("active Task inventory cannot be encoded"))?;
+        let record_bytes = serde_json::to_vec(&record)
+            .map_err(|_| write_failed("active Task inventory cannot be encoded"))?;
+        validate_submission_import_record_bytes(record_bytes.len() as u64)?;
+        records.push(record);
     }
     inventory_evidence("active_tasks", &primary_keys, &records)
 }
@@ -3380,7 +3846,7 @@ fn validate_active_task_id_inventory(
     let bytes = serde_json::to_vec(&primary_keys)
         .map_err(|_| write_failed("active Task PK inventory cannot be encoded"))?;
     let mut hasher = Sha256::new();
-    hasher.update(b"maf.submission_authority.inventory.active_tasks.pk.v1\0");
+    hasher.update(b"maf.submission_authority.inventory.pk.v1\0active_tasks\0");
     hasher.update(bytes);
     if declared.count != primary_keys.len() as u32
         || declared.finalize_empty != primary_keys.is_empty()
@@ -4630,5 +5096,79 @@ fn sqlite_error_kind(error: &rusqlite::Error) -> &'static str {
         rusqlite::Error::IntegralValueOutOfRange(_, _) => "integral_value_out_of_range",
         rusqlite::Error::ToSqlConversionFailure(_) => "to_sql_conversion_failure",
         _ => "sqlite_error",
+    }
+}
+
+#[cfg(test)]
+mod offline_submission_import_limit_tests {
+    use super::*;
+
+    #[test]
+    fn offline_import_limits_accept_exact_boundaries_and_reject_the_next_value() {
+        assert!(validate_submission_import_count(u32::MAX as u64).is_ok());
+        assert!(validate_submission_import_count(u32::MAX as u64 + 1).is_err());
+        assert!(
+            validate_submission_import_record_bytes(SUBMISSION_IMPORT_RECORD_MAX_BYTES as u64)
+                .is_ok()
+        );
+        assert!(
+            validate_submission_import_record_bytes(SUBMISSION_IMPORT_RECORD_MAX_BYTES as u64 + 1)
+                .is_err()
+        );
+        assert!(
+            validate_submission_import_stdin_bytes(SUBMISSION_IMPORT_STDIN_MAX_BYTES as u64)
+                .is_ok()
+        );
+        assert!(
+            validate_submission_import_stdin_bytes(SUBMISSION_IMPORT_STDIN_MAX_BYTES as u64 + 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn offline_import_shared_vector_locks_request_subject_digest_and_receipt_bytes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/runtime_sidecar_submission_import_vectors.json"
+        )))
+        .expect("shared import vector");
+        let vector = &fixture["empty_sqlite"];
+        let request_json = vector["request_canonical_json"].as_str().unwrap();
+        let input = parse_offline_submission_import_request(request_json.as_bytes()).unwrap();
+        let conversations = empty_inventory_evidence("conversations");
+        let message_identities = empty_inventory_evidence("message_identities");
+        let active_tasks = empty_inventory_evidence("active_tasks");
+        let subject =
+            build_finalization_subject(&input, &conversations, &message_identities, &active_tasks)
+                .unwrap();
+        assert_eq!(
+            subject,
+            vector["subject_canonical_json"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+        );
+        let digest = finalization_subject_digest(&subject);
+        assert_eq!(
+            digest,
+            vector["finalization_receipt_sha256"].as_str().unwrap()
+        );
+        let receipt = build_finalization_receipt(
+            &input,
+            &digest,
+            7,
+            &submission_authority_schema_manifest_sha256(),
+            &conversations,
+            &message_identities,
+            &active_tasks,
+        )
+        .unwrap();
+        assert_eq!(
+            receipt,
+            vector["receipt_canonical_json"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+        );
     }
 }

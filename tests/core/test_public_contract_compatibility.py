@@ -60,6 +60,8 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "clear_user_mcp_tool_grants": "(self, owner_user_id: 'str', server_id: 'str') -> 'int'",
   "close_conversation_admission": "(self, request: 'ConversationAdmissionCloseRequest') -> 'ConversationAdmissionCloseResult'",
   "close_submission_preparation_receipt": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', closed_at: 'datetime') -> 'SubmissionPreparationReceipt'",
+  "converge_submission_no_server_without_sql_task": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', occurred_at: 'datetime') -> 'MCPNoServerConvergenceResult'",
+  "converge_submission_no_server_handoff_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', occurred_at: 'datetime') -> 'MCPNoServerConvergenceResult'",
   "commit_authoritative_mcp_terminal_result": "(self, call_id: 'str', candidate_id: 'str', occurred_at: 'datetime') -> 'MCPTerminalResultCommitResult'",
   "commit_mcp_call_terminal": "(self, call_id: 'str', candidate_id: 'str', outbox_id: 'str', expected_outbox_revision: 'int', claim_owner: 'str | None', claim_token: 'str | None', candidate_snapshot: 'MCPTerminalCandidateSnapshot', result_snapshot: 'MCPDurableResultSnapshot | None', occurred_at: 'datetime', *, remote_binding_ref: 'str | None' = None, remote_claim_owner: 'str | None' = None, remote_claim_token: 'str | None' = None, remote_expected_revision: 'int | None' = None) -> 'MCPTerminalResultCommitResult'",
   "compare_and_set_artifact_storage_ref": "(self, artifact_id: 'str', expected_storage_ref: 'str', replacement_storage_ref: 'str') -> 'bool'",
@@ -221,6 +223,8 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "mark_pending_skill_context_cancelled": "(self, context_id: 'str') -> 'PendingSkillContext | None'",
   "mark_pending_skill_context_consumed": "(self, context_id: 'str') -> 'PendingSkillContext | None'",
   "mark_pending_skill_context_superseded": "(self, conversation_id: 'str') -> 'int'",
+  "materialize_submission_no_server_intent_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', occurred_at: 'datetime') -> 'MCPInitialIntentCreateResult'",
+  "materialize_submission_pending_skill_supersede_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', should_supersede: 'bool', occurred_at: 'datetime') -> 'int'",
   "mark_user_mcp_server_deleted": "(self, owner_user_id: 'str', server_id: 'str', *, deleted_at: 'datetime') -> 'UserMCPServer | None'",
   "pause_mcp_remote_task_for_input": "(self, owner_user_id: 'str', task_id: 'str', safe_remote_task_ref: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', input_requests: 'Mapping[str, Any]', conversation_id: 'str', source_message_id: 'str', updated_at: 'datetime') -> 'MCPRemoteTaskBinding | None'",
   "produce_mcp_cp7_safety_snapshot": "(self, candidate_id: 'str') -> 'MCPCP7SafetySnapshot'",
@@ -253,8 +257,10 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "save_auth_user_token": "(self, token: 'AuthUserToken', *, auth_generation_reason: 'str | None' = None) -> 'AuthUserToken'",
   "save_checkpoint": "(self, checkpoint: 'Checkpoint') -> 'Checkpoint'",
   "save_conversation": "(self, conversation: 'Conversation') -> 'Conversation'",
+  "compare_and_set_conversation": "(self, conversation: 'Conversation', *, expected_current_task_id: 'str | None', expected_updated_at: 'datetime | None') -> 'Conversation | None'",
   "save_conversation_file_resource": "(self, resource: 'ConversationFileResource') -> 'ConversationFileResource'",
   "save_conversation_file_resource_with_upload_message": "(self, resource: 'ConversationFileResource', projection: 'FileUploadMessageProjection', *, now: 'datetime') -> 'ConversationFileResource'",
+  "apply_conversation_file_sheet_selection_exact": "(self, expected: 'ConversationFileResource', updated: 'ConversationFileResource') -> 'ConversationFileResource'",
   "save_conversation_memory_summary": "(self, summary: 'ConversationMemorySummary') -> 'ConversationMemorySummary'",
   "save_interrupt": "(self, interrupt: 'Interrupt') -> 'Interrupt'",
   "save_interrupt_answer": "(self, interrupt_answer: 'InterruptAnswer') -> 'InterruptAnswer'",
@@ -273,6 +279,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "save_task_input_attachment": "(self, attachment: 'TaskInputAttachment') -> 'TaskInputAttachment'",
   "save_task_node": "(self, node: 'TaskNode', *, expected_from_status: 'NodeStatus | None' = None) -> 'TaskNode'",
   "save_user_mcp_tool_grant": "(self, grant: 'UserMCPToolGrant') -> 'UserMCPToolGrant'",
+  "settle_submission_route_decision_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', requires_user_scoped_server: 'bool', written_at: 'datetime') -> 'SubmissionPreparationReceipt'",
   "set_mcp_rollout_metric_bucket": "(self, bucket: 'MCPRolloutMetricBucket') -> 'MCPRolloutMetricBucket'",
   "summarize_mcp_durable_result_backfill": "(self, now: 'datetime') -> 'Mapping[str, int]'",
   "suspend_mcp_for_approval": "(self, intent_id: 'str', outbox_id: 'str', expected_intent_revision: 'int', expected_outbox_revision: 'int', claim_owner: 'str', claim_token: 'str', action: 'MCPPendingToolAction', interrupt: 'Interrupt', payload_snapshot: 'MCPPendingActionPayloadSnapshot', occurred_at: 'datetime') -> 'MCPApprovalSuspendResult'",
@@ -322,7 +329,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 272)
+        self.assertEqual(len(actual), 279)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(
