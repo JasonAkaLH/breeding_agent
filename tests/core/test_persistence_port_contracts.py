@@ -204,6 +204,17 @@ EXPECTED_METHODS_BY_PORT = {
         "clear_auth_user_token",
         "rotate_auth_user_token",
     ),
+    "ConversationTaskAdmissionPort": (
+        "admit_submission",
+        "claim_pending_submission",
+        "renew_submission_claim",
+        "acknowledge_submission_projection",
+        "prepare_submission_handoff",
+        "get_submission_preparation",
+        "acknowledge_submission_handoff",
+        "close_conversation_admission",
+        "reserve_message_identity",
+    ),
     "ConversationStoragePort": (
         "save_conversation",
         "get_conversation",
@@ -332,8 +343,8 @@ class PersistencePortContractsTest(unittest.TestCase):
             self.assertTrue(getattr(port, "_is_runtime_protocol", False), port_name)
             actual_names.extend(direct)
 
-        self.assertEqual(len(actual_names), 259)
-        self.assertEqual(len(set(actual_names)), 259)
+        self.assertEqual(len(actual_names), 268)
+        self.assertEqual(len(set(actual_names)), 268)
         self.assertEqual(set(actual_names), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
 
     def test_aggregate_is_thin_and_preserves_exact_inherited_surface(self) -> None:

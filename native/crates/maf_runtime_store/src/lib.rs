@@ -8,7 +8,7 @@ pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
 pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260823_agent_only";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260823_agent_only";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260826_submission_admission_a1";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
@@ -365,6 +365,14 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
         "bundle_revision_pin",
         "bundle_revision_release",
         "agent_state_commit",
+        "submission_admit",
+        "submission_pending_claim",
+        "submission_claim_renew",
+        "submission_projection_acknowledge",
+        "submission_handoff_prepare",
+        "submission_handoff_acknowledge",
+        "conversation_admission_close",
+        "message_identity_reserve",
     ]
     .into_iter()
     .map(write_operation)
@@ -381,6 +389,7 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
             "agent_run_get",
             "agent_item_list",
             "agent_final_projection_get",
+            "submission_preparation_get",
         ]
         .into_iter()
         .map(|name| OperationPolicy {
@@ -725,6 +734,17 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             ("replay_page_events".to_owned(), 1_000),
             ("replay_page_bytes".to_owned(), 1024 * 1024),
             ("shutdown_drain_ms".to_owned(), 30_000),
+            (
+                "submission_conversation_projection_bytes".to_owned(),
+                64 * 1024,
+            ),
+            (
+                "submission_message_projection_bytes".to_owned(),
+                64 * 1024 * 1024,
+            ),
+            ("submission_continuation_bytes".to_owned(), 64 * 1024 * 1024),
+            ("submission_prepared_execution_bytes".to_owned(), 128 * 1024),
+            ("grpc_max_message_bytes".to_owned(), 140 * 1024 * 1024),
         ]),
         retry_policy: retry_policy(),
         config_policy: config_policy(),
@@ -755,7 +775,14 @@ mod tests {
 
     #[test]
     fn write_operations_fail_closed_without_python_fallback() {
-        for operation in operation_policies()
+        let operations = operation_policies();
+        let claim = operations
+            .iter()
+            .find(|operation| operation.name == "submission_pending_claim")
+            .expect("pending submission claim operation");
+        assert_eq!(claim.kind, "write");
+        assert!(claim.idempotency_required);
+        for operation in operations
             .into_iter()
             .filter(|operation| operation.kind == "write")
         {

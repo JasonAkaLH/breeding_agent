@@ -1,7 +1,7 @@
 use maf_runtime_sidecar::pb::common::v1 as common_pb;
 use maf_runtime_sidecar::pb::runtime::v1 as runtime_pb;
 use maf_runtime_sidecar::{
-    COMPONENT_ID, RuntimeSidecarGrpcService, RuntimeSidecarServeConfig,
+    COMPONENT_ID, GRPC_MAX_MESSAGE_BYTES, RuntimeSidecarGrpcService, RuntimeSidecarServeConfig,
     RuntimeSidecarSqliteAdapter, runtime_sidecar_service_from_config,
     serve_runtime_sidecar_with_incoming,
 };
@@ -9,13 +9,170 @@ use maf_runtime_sidecar::{
 use maf_runtime_sidecar::{
     semantic_probe_runtime_sidecar_unix_socket, serve_runtime_sidecar_unix_socket,
 };
+use prost::Message as _;
 use runtime_pb::runtime_sidecar_server::RuntimeSidecar;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::Request;
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
+    let target_content_bytes = 49 * 1024 * 1024;
+    let mut content = "\"\\中".to_owned();
+    content.push_str(&"a".repeat(target_content_bytes - content.len()));
+    let canonical = |value: serde_json::Value| serde_json::to_vec(&value).expect("canonical JSON");
+    let conversation = canonical(serde_json::json!({
+        "conversation_id": "large-conversation",
+        "create_if_missing": true,
+        "created_at": "2026-08-26T00:00:00Z",
+        "current_task_id": "large-task",
+        "schema": "maf.submission.conversation_projection.v1",
+        "status": "active",
+        "updated_at": "2026-08-26T00:00:00Z",
+        "username": "owner"
+    }));
+    let message = canonical(serde_json::json!({
+        "content": &content,
+        "conversation_id": "large-conversation",
+        "message_created_at": "2026-08-26T00:00:00Z",
+        "message_id": "large-message",
+        "message_type": "text",
+        "metadata": {},
+        "role": "user",
+        "schema": "maf.submission.message_projection.v1",
+        "stream_status": "complete",
+        "task_id": "large-task",
+        "updated_at": "2026-08-26T00:00:00Z"
+    }));
+    let continuation = canonical(serde_json::json!({
+        "available_mcp_servers": [],
+        "bundle_revisions": {"mcp_bundle_revision": null, "skill_bundle_revision": null},
+        "conversation_id": "large-conversation",
+        "execution_metadata": {
+            "requested_capability_alias": null,
+            "canonical_capability_id": null,
+            "mcp_dispatch_server_id": null,
+            "mcp_binding_mode": null,
+            "mcp_command": null,
+            "mcp_execution_mode": null,
+            "mcp_rollout_config_version": null,
+            "mcp_route_reason_code": null,
+            "mcp_rollout_mode": null,
+            "defer_task_completed_until_pending_skill_context_processed": null,
+            "forced_by_mcp_command": null,
+            "mcp_shadow_enabled": null
+        },
+        "initial_no_server_eligible": false,
+        "mcp_assignment": null,
+        "mcp_binding": null,
+        "message_content_sha256": format!("{:x}", Sha256::digest(content.as_bytes())),
+        "message_id": "large-message",
+        "model_options": {"model_edition": null, "reasoning_effort": "medium", "thinking_enabled": false},
+        "owner_scope": "owner",
+        "pending_context": null,
+        "request_fingerprint": "a".repeat(64),
+        "requested_capability_id": null,
+        "routing_mode": "auto",
+        "schema": "maf.submission.continuation.v1",
+        "sheet_selections": {},
+        "task_id": "large-task",
+        "upload_refs": []
+    }));
+    let mut projection_hasher = Sha256::new();
+    projection_hasher.update(b"maf.submission.projection.v1\0");
+    projection_hasher.update(&conversation);
+    projection_hasher.update(b"\0");
+    projection_hasher.update(&message);
+    let mut continuation_hasher = Sha256::new();
+    continuation_hasher.update(b"maf.submission.continuation.v1\0");
+    continuation_hasher.update(&continuation);
+    runtime_pb::AdmitSubmissionRequest {
+        message_id: "large-message".to_owned(),
+        task_id: "large-task".to_owned(),
+        conversation_id: "large-conversation".to_owned(),
+        username: "owner".to_owned(),
+        request_fingerprint: "a".repeat(64),
+        conversation_projection_json: conversation,
+        message_projection_json: message,
+        projection_sha256: format!("{:x}", projection_hasher.finalize()),
+        continuation_json: continuation,
+        continuation_sha256: format!("{:x}", continuation_hasher.finalize()),
+        message_created_at_ms: 1,
+        workflow_owner: "large-worker".to_owned(),
+        now_ms: 1,
+        claim_ttl_ms: 1_000,
+        task: Some(runtime_pb::TaskRecord {
+            task_id: "large-task".to_owned(),
+            conversation_id: "large-conversation".to_owned(),
+            root_message_id: "large-message".to_owned(),
+            status: "accepted".to_owned(),
+            routing_mode: "auto".to_owned(),
+            requested_capability_id: None,
+            summary: None,
+            cancel_requested_at: None,
+            created_at: Some("2026-08-26T00:00:00Z".to_owned()),
+            updated_at: None,
+            assignment: None,
+        }),
+        idempotency_key: "submission:large-message".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn submission_identity_rpc_round_trips_in_memory_and_is_migration_blocked_on_sqlite() {
+    assert!(std::hint::black_box(GRPC_MAX_MESSAGE_BYTES) >= 140 * 1024 * 1024);
+    let request = runtime_pb::ReserveMessageIdentityRequest {
+        identity: Some(runtime_pb::MessageIdentityRecord {
+            message_id: "grpc-file-message".to_owned(),
+            conversation_id: "grpc-file-conversation".to_owned(),
+            username: "owner".to_owned(),
+            identity_kind: runtime_pb::MessageIdentityKind::FileVisible as i32,
+            role: Some("assistant".to_owned()),
+            message_type: Some("file".to_owned()),
+            message_created_at_ms: Some(1),
+            task_id: None,
+            request_fingerprint: None,
+            reserved_at_ms: 2,
+        }),
+    };
+    let in_memory =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    let created = in_memory
+        .reserve_message_identity(Request::new(request.clone()))
+        .await
+        .expect("reserve in-memory identity")
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::MessageIdentityDisposition::Created as i32
+    );
+    let exact = in_memory
+        .reserve_message_identity(Request::new(request.clone()))
+        .await
+        .expect("exact in-memory identity")
+        .into_inner();
+    assert_eq!(
+        exact.disposition,
+        runtime_pb::MessageIdentityDisposition::ExactReplay as i32
+    );
+
+    let db_path = temp_db_path("grpc-submission-a1-blocked");
+    let sqlite = RuntimeSidecarGrpcService::with_sqlite_adapter(
+        RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter"),
+    );
+    let blocked = sqlite
+        .reserve_message_identity(Request::new(request))
+        .await
+        .expect("typed migration response")
+        .into_inner();
+    assert_eq!(
+        blocked.error.expect("migration error").code,
+        "runtime_store_migration_blocked"
+    );
+}
 
 fn pb_task(status: &str) -> runtime_pb::TaskRecord {
     runtime_pb::TaskRecord {
@@ -553,6 +710,57 @@ async fn sidecar_listener_accepts_generated_grpc_client_on_loopback() {
 
     let _ = shutdown_tx.send(());
     server.await.expect("server task");
+}
+
+#[tokio::test]
+async fn tonic_transport_round_trips_near_fifty_mib_escaped_multibyte_admission() {
+    let request = large_pb_admit_request();
+    assert!(request.encoded_len() > 49 * 1024 * 1024);
+    assert!(request.encoded_len() < GRPC_MAX_MESSAGE_BYTES);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let service =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        serve_runtime_sidecar_with_incoming(service, incoming, async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .expect("serve large-message runtime sidecar")
+    });
+    let endpoint = format!("http://{addr}");
+    let channel = tonic::transport::Endpoint::from_shared(endpoint)
+        .expect("large-message endpoint")
+        .connect()
+        .await
+        .expect("connect large-message client");
+    let mut client = runtime_pb::runtime_sidecar_client::RuntimeSidecarClient::new(channel)
+        .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES)
+        .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES);
+    let response = client
+        .admit_submission(request)
+        .await
+        .expect("near-50MiB admission transport roundtrip")
+        .into_inner();
+    assert_eq!(
+        response.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::Created as i32
+    );
+    assert!(response.error.is_none());
+    assert!(
+        response
+            .admission
+            .expect("large admission")
+            .message_projection_json
+            .len()
+            > 49 * 1024 * 1024
+    );
+    let _ = shutdown_tx.send(());
+    server.await.expect("large-message server task");
 }
 
 #[cfg(unix)]

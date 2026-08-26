@@ -1,8 +1,18 @@
 use crate::{
-    AgentItemRecord, AgentRunRecord, AgentStateResponse, ArtifactRecord, ArtifactResponse,
-    BundleRevisionResponse, EventCursor, HealthState, Idempotency, LeaseResponse,
-    ListArtifactsForTaskResponse, ReadinessState, RuntimeSidecarError, RuntimeSidecarVersion,
-    TaskNodeRecord, TaskRecord, TaskRouteAssignment, TypedErrorEnvelope, common_pb, runtime_pb,
+    AcknowledgeSubmissionHandoffRequest, AcknowledgeSubmissionProjectionRequest,
+    AdmitSubmissionRequest, AdmitSubmissionResponse, AgentItemRecord, AgentRunRecord,
+    AgentStateResponse, ArtifactRecord, ArtifactResponse, BundleRevisionResponse,
+    ClaimPendingSubmissionRequest, ClaimPendingSubmissionResponse,
+    CloseConversationAdmissionRequest, CloseConversationAdmissionResponse,
+    ConversationAdmissionCloseDisposition, EventCursor, GetSubmissionPreparationRequest,
+    GetSubmissionPreparationResponse, HealthState, Idempotency, LeaseResponse,
+    ListArtifactsForTaskResponse, MessageIdentityDisposition, MessageIdentityKind,
+    MessageIdentityRecord, PrepareSubmissionHandoffRequest, ReadinessState,
+    RenewSubmissionClaimRequest, ReserveMessageIdentityRequest, ReserveMessageIdentityResponse,
+    RuntimeSidecarError, RuntimeSidecarVersion, SubmissionAdmissionDisposition,
+    SubmissionAdmissionRecord, SubmissionAdmissionResponse, SubmissionClaim,
+    SubmissionHandoffState, SubmissionPreparationState, SubmissionProjectionState, TaskNodeRecord,
+    TaskRecord, TaskRouteAssignment, TypedErrorEnvelope, common_pb, runtime_pb,
 };
 
 pub(super) fn pb_idempotency_key(idempotency: Option<runtime_pb::Idempotency>) -> String {
@@ -366,6 +376,415 @@ pub(super) fn bundle_revision_response_to_pb(
             .map(|result| result.revision.clone())
             .unwrap_or_default(),
         released: result.as_ref().is_some_and(|result| result.released),
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+fn submission_projection_state_from_pb(
+    value: i32,
+) -> Result<SubmissionProjectionState, RuntimeSidecarError> {
+    match runtime_pb::SubmissionProjectionState::try_from(value) {
+        Ok(runtime_pb::SubmissionProjectionState::Pending) => {
+            Ok(SubmissionProjectionState::Pending)
+        }
+        Ok(runtime_pb::SubmissionProjectionState::Projected) => {
+            Ok(SubmissionProjectionState::Projected)
+        }
+        _ => Err(crate::write_failed(
+            "SubmissionProjectionState is outside the closed contract",
+        )),
+    }
+}
+
+fn submission_preparation_state_from_pb(
+    value: i32,
+) -> Result<SubmissionPreparationState, RuntimeSidecarError> {
+    match runtime_pb::SubmissionPreparationState::try_from(value) {
+        Ok(runtime_pb::SubmissionPreparationState::Pending) => {
+            Ok(SubmissionPreparationState::Pending)
+        }
+        Ok(runtime_pb::SubmissionPreparationState::Prepared) => {
+            Ok(SubmissionPreparationState::Prepared)
+        }
+        _ => Err(crate::write_failed(
+            "SubmissionPreparationState is outside the closed contract",
+        )),
+    }
+}
+
+fn submission_handoff_state_from_pb(
+    value: i32,
+) -> Result<SubmissionHandoffState, RuntimeSidecarError> {
+    match runtime_pb::SubmissionHandoffState::try_from(value) {
+        Ok(runtime_pb::SubmissionHandoffState::Pending) => Ok(SubmissionHandoffState::Pending),
+        Ok(runtime_pb::SubmissionHandoffState::HandedOff) => Ok(SubmissionHandoffState::HandedOff),
+        _ => Err(crate::write_failed(
+            "SubmissionHandoffState is outside the closed contract",
+        )),
+    }
+}
+
+fn submission_projection_state_to_pb(value: SubmissionProjectionState) -> i32 {
+    match value {
+        SubmissionProjectionState::Pending => runtime_pb::SubmissionProjectionState::Pending as i32,
+        SubmissionProjectionState::Projected => {
+            runtime_pb::SubmissionProjectionState::Projected as i32
+        }
+    }
+}
+
+fn submission_preparation_state_to_pb(value: SubmissionPreparationState) -> i32 {
+    match value {
+        SubmissionPreparationState::Pending => {
+            runtime_pb::SubmissionPreparationState::Pending as i32
+        }
+        SubmissionPreparationState::Prepared => {
+            runtime_pb::SubmissionPreparationState::Prepared as i32
+        }
+    }
+}
+
+fn submission_handoff_state_to_pb(value: SubmissionHandoffState) -> i32 {
+    match value {
+        SubmissionHandoffState::Pending => runtime_pb::SubmissionHandoffState::Pending as i32,
+        SubmissionHandoffState::HandedOff => runtime_pb::SubmissionHandoffState::HandedOff as i32,
+    }
+}
+
+fn message_identity_kind_from_pb(value: i32) -> MessageIdentityKind {
+    match runtime_pb::MessageIdentityKind::try_from(value) {
+        Ok(runtime_pb::MessageIdentityKind::Submission) => MessageIdentityKind::Submission,
+        Ok(runtime_pb::MessageIdentityKind::Interrupt) => MessageIdentityKind::Interrupt,
+        Ok(runtime_pb::MessageIdentityKind::ServerInternal) => MessageIdentityKind::ServerInternal,
+        Ok(runtime_pb::MessageIdentityKind::FileVisible) => MessageIdentityKind::FileVisible,
+        Ok(runtime_pb::MessageIdentityKind::LegacyConflictOnly) => {
+            MessageIdentityKind::LegacyConflictOnly
+        }
+        _ => MessageIdentityKind::LegacyConflictOnly,
+    }
+}
+
+fn message_identity_kind_to_pb(value: MessageIdentityKind) -> i32 {
+    match value {
+        MessageIdentityKind::Submission => runtime_pb::MessageIdentityKind::Submission as i32,
+        MessageIdentityKind::Interrupt => runtime_pb::MessageIdentityKind::Interrupt as i32,
+        MessageIdentityKind::ServerInternal => {
+            runtime_pb::MessageIdentityKind::ServerInternal as i32
+        }
+        MessageIdentityKind::FileVisible => runtime_pb::MessageIdentityKind::FileVisible as i32,
+        MessageIdentityKind::LegacyConflictOnly => {
+            runtime_pb::MessageIdentityKind::LegacyConflictOnly as i32
+        }
+    }
+}
+
+fn submission_claim_to_pb(claim: SubmissionClaim) -> runtime_pb::SubmissionClaim {
+    runtime_pb::SubmissionClaim {
+        owner: claim.owner,
+        token: claim.token,
+        expires_at_ms: claim.expires_at_ms,
+    }
+}
+
+fn message_identity_from_pb(identity: runtime_pb::MessageIdentityRecord) -> MessageIdentityRecord {
+    MessageIdentityRecord {
+        message_id: identity.message_id,
+        conversation_id: identity.conversation_id,
+        username: identity.username,
+        identity_kind: message_identity_kind_from_pb(identity.identity_kind),
+        role: identity.role,
+        message_type: identity.message_type,
+        message_created_at_ms: identity.message_created_at_ms,
+        task_id: identity.task_id,
+        request_fingerprint: identity.request_fingerprint,
+        reserved_at_ms: identity.reserved_at_ms,
+    }
+}
+
+fn message_identity_to_pb(identity: MessageIdentityRecord) -> runtime_pb::MessageIdentityRecord {
+    runtime_pb::MessageIdentityRecord {
+        message_id: identity.message_id,
+        conversation_id: identity.conversation_id,
+        username: identity.username,
+        identity_kind: message_identity_kind_to_pb(identity.identity_kind),
+        role: identity.role,
+        message_type: identity.message_type,
+        message_created_at_ms: identity.message_created_at_ms,
+        task_id: identity.task_id,
+        request_fingerprint: identity.request_fingerprint,
+        reserved_at_ms: identity.reserved_at_ms,
+    }
+}
+
+fn submission_admission_to_pb(
+    admission: SubmissionAdmissionRecord,
+) -> runtime_pb::SubmissionAdmissionRecord {
+    runtime_pb::SubmissionAdmissionRecord {
+        message_id: admission.message_id,
+        task_id: admission.task_id,
+        conversation_id: admission.conversation_id,
+        username: admission.username,
+        request_fingerprint: admission.request_fingerprint,
+        conversation_projection_json: admission.conversation_projection_json,
+        message_projection_json: admission.message_projection_json,
+        projection_sha256: admission.projection_sha256,
+        continuation_json: admission.continuation_json,
+        continuation_sha256: admission.continuation_sha256,
+        projection_state: submission_projection_state_to_pb(admission.projection_state),
+        preparation_state: submission_preparation_state_to_pb(admission.preparation_state),
+        prepared_execution_json: admission.prepared_execution_json,
+        prepared_execution_sha256: admission.prepared_execution_sha256,
+        handoff_state: submission_handoff_state_to_pb(admission.handoff_state),
+        handoff_kind: admission.handoff_kind,
+        handoff_identity: admission.handoff_identity,
+        created_at_ms: admission.created_at_ms,
+        updated_at_ms: admission.updated_at_ms,
+        closed: admission.closed,
+        task: Some(task_record_to_pb(admission.task)),
+        idempotency_key: admission.idempotency_key,
+    }
+}
+
+pub(super) fn admit_submission_request_from_pb(
+    request: runtime_pb::AdmitSubmissionRequest,
+) -> Result<AdmitSubmissionRequest, RuntimeSidecarError> {
+    let task = request
+        .task
+        .ok_or_else(|| crate::write_failed("AdmitSubmission TaskRecord is required"))?;
+    Ok(AdmitSubmissionRequest {
+        message_id: request.message_id,
+        task_id: request.task_id,
+        conversation_id: request.conversation_id,
+        username: request.username,
+        request_fingerprint: request.request_fingerprint,
+        conversation_projection_json: request.conversation_projection_json,
+        message_projection_json: request.message_projection_json,
+        projection_sha256: request.projection_sha256,
+        continuation_json: request.continuation_json,
+        continuation_sha256: request.continuation_sha256,
+        message_created_at_ms: request.message_created_at_ms,
+        workflow_owner: request.workflow_owner,
+        now_ms: request.now_ms,
+        claim_ttl_ms: request.claim_ttl_ms,
+        task: task_record_from_pb(task),
+        idempotency_key: request.idempotency_key,
+    })
+}
+
+pub(super) fn admit_submission_response_to_pb(
+    response: AdmitSubmissionResponse,
+) -> runtime_pb::AdmitSubmissionResponse {
+    let disposition = match response.disposition {
+        SubmissionAdmissionDisposition::Created => {
+            runtime_pb::SubmissionAdmissionDisposition::Created
+        }
+        SubmissionAdmissionDisposition::IdempotentReplay => {
+            runtime_pb::SubmissionAdmissionDisposition::IdempotentReplay
+        }
+        SubmissionAdmissionDisposition::ConversationBusy => {
+            runtime_pb::SubmissionAdmissionDisposition::ConversationBusy
+        }
+        SubmissionAdmissionDisposition::MessageIdConflict => {
+            runtime_pb::SubmissionAdmissionDisposition::MessageIdConflict
+        }
+        SubmissionAdmissionDisposition::ConversationNotAvailable => {
+            runtime_pb::SubmissionAdmissionDisposition::ConversationNotAvailable
+        }
+    };
+    runtime_pb::AdmitSubmissionResponse {
+        disposition: disposition as i32,
+        admission: response.admission.map(submission_admission_to_pb),
+        claim: response.claim.map(submission_claim_to_pb),
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+pub(super) fn claim_pending_request_from_pb(
+    request: runtime_pb::ClaimPendingSubmissionRequest,
+) -> ClaimPendingSubmissionRequest {
+    ClaimPendingSubmissionRequest {
+        workflow_owner: request.workflow_owner,
+        now_ms: request.now_ms,
+        claim_ttl_ms: request.claim_ttl_ms,
+        after_created_at_ms: request.after_created_at_ms,
+        after_message_id: request.after_message_id,
+    }
+}
+
+pub(super) fn claim_pending_response_to_pb(
+    response: ClaimPendingSubmissionResponse,
+) -> runtime_pb::ClaimPendingSubmissionResponse {
+    runtime_pb::ClaimPendingSubmissionResponse {
+        found: response.found,
+        admission: response.admission.map(submission_admission_to_pb),
+        claim: response.claim.map(submission_claim_to_pb),
+        authority_state: response.authority_state,
+        finalization_receipt_sha256: response.finalization_receipt_sha256,
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+pub(super) fn renew_claim_request_from_pb(
+    request: runtime_pb::RenewSubmissionClaimRequest,
+) -> RenewSubmissionClaimRequest {
+    RenewSubmissionClaimRequest {
+        message_id: request.message_id,
+        workflow_owner: request.workflow_owner,
+        claim_token: request.claim_token,
+        now_ms: request.now_ms,
+        claim_ttl_ms: request.claim_ttl_ms,
+    }
+}
+
+pub(super) fn projection_ack_request_from_pb(
+    request: runtime_pb::AcknowledgeSubmissionProjectionRequest,
+) -> Result<AcknowledgeSubmissionProjectionRequest, RuntimeSidecarError> {
+    Ok(AcknowledgeSubmissionProjectionRequest {
+        message_id: request.message_id,
+        workflow_owner: request.workflow_owner,
+        claim_token: request.claim_token,
+        projection_sha256: request.projection_sha256,
+        expected_state: submission_projection_state_from_pb(request.expected_state)?,
+        now_ms: request.now_ms,
+    })
+}
+
+pub(super) fn prepare_handoff_request_from_pb(
+    request: runtime_pb::PrepareSubmissionHandoffRequest,
+) -> Result<PrepareSubmissionHandoffRequest, RuntimeSidecarError> {
+    Ok(PrepareSubmissionHandoffRequest {
+        message_id: request.message_id,
+        workflow_owner: request.workflow_owner,
+        claim_token: request.claim_token,
+        prepared_execution_json: request.prepared_execution_json,
+        prepared_execution_sha256: request.prepared_execution_sha256,
+        expected_state: submission_preparation_state_from_pb(request.expected_state)?,
+        now_ms: request.now_ms,
+    })
+}
+
+pub(super) fn get_preparation_request_from_pb(
+    request: runtime_pb::GetSubmissionPreparationRequest,
+) -> GetSubmissionPreparationRequest {
+    GetSubmissionPreparationRequest {
+        username: request.username,
+        conversation_id: request.conversation_id,
+        task_id: request.task_id,
+    }
+}
+
+pub(super) fn handoff_ack_request_from_pb(
+    request: runtime_pb::AcknowledgeSubmissionHandoffRequest,
+) -> Result<AcknowledgeSubmissionHandoffRequest, RuntimeSidecarError> {
+    Ok(AcknowledgeSubmissionHandoffRequest {
+        message_id: request.message_id,
+        workflow_owner: request.workflow_owner,
+        claim_token: request.claim_token,
+        prepared_execution_sha256: request.prepared_execution_sha256,
+        handoff_kind: request.handoff_kind,
+        handoff_identity: request.handoff_identity,
+        expected_state: submission_handoff_state_from_pb(request.expected_state)?,
+        now_ms: request.now_ms,
+    })
+}
+
+pub(super) fn close_request_from_pb(
+    request: runtime_pb::CloseConversationAdmissionRequest,
+) -> CloseConversationAdmissionRequest {
+    CloseConversationAdmissionRequest {
+        username: request.username,
+        conversation_id: request.conversation_id,
+        operation_id: request.operation_id,
+        now_ms: request.now_ms,
+    }
+}
+
+pub(super) fn reserve_request_from_pb(
+    request: runtime_pb::ReserveMessageIdentityRequest,
+) -> Result<ReserveMessageIdentityRequest, RuntimeSidecarError> {
+    let identity = request
+        .identity
+        .ok_or_else(|| crate::write_failed("MessageIdentityRecord is required"))?;
+    Ok(ReserveMessageIdentityRequest {
+        identity: message_identity_from_pb(identity),
+    })
+}
+
+pub(super) fn submission_claim_response_to_pb(
+    result: Result<SubmissionClaim, TypedErrorEnvelope>,
+) -> runtime_pb::SubmissionClaimResponse {
+    match result {
+        Ok(claim) => runtime_pb::SubmissionClaimResponse {
+            claim: Some(submission_claim_to_pb(claim)),
+            error: None,
+        },
+        Err(error) => runtime_pb::SubmissionClaimResponse {
+            claim: None,
+            error: Some(typed_error_to_pb(error)),
+        },
+    }
+}
+
+pub(super) fn submission_admission_response_to_pb(
+    response: SubmissionAdmissionResponse,
+) -> runtime_pb::SubmissionAdmissionResponse {
+    runtime_pb::SubmissionAdmissionResponse {
+        admission: response.admission.map(submission_admission_to_pb),
+        duplicate: response.duplicate,
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+pub(super) fn get_preparation_response_to_pb(
+    response: GetSubmissionPreparationResponse,
+) -> runtime_pb::GetSubmissionPreparationResponse {
+    runtime_pb::GetSubmissionPreparationResponse {
+        found: response.found,
+        admission: response.admission.map(submission_admission_to_pb),
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+pub(super) fn close_response_to_pb(
+    response: CloseConversationAdmissionResponse,
+) -> runtime_pb::CloseConversationAdmissionResponse {
+    let disposition = match response.disposition {
+        ConversationAdmissionCloseDisposition::Closed => {
+            runtime_pb::ConversationAdmissionCloseDisposition::Closed
+        }
+        ConversationAdmissionCloseDisposition::ExactReplay => {
+            runtime_pb::ConversationAdmissionCloseDisposition::ExactReplay
+        }
+        ConversationAdmissionCloseDisposition::ConversationNotAvailable => {
+            runtime_pb::ConversationAdmissionCloseDisposition::ConversationNotAvailable
+        }
+        ConversationAdmissionCloseDisposition::Conflict => {
+            runtime_pb::ConversationAdmissionCloseDisposition::Conflict
+        }
+    };
+    runtime_pb::CloseConversationAdmissionResponse {
+        disposition: disposition as i32,
+        revision: response.revision,
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+pub(super) fn reserve_response_to_pb(
+    response: ReserveMessageIdentityResponse,
+) -> runtime_pb::ReserveMessageIdentityResponse {
+    let disposition = match response.disposition {
+        MessageIdentityDisposition::Created => runtime_pb::MessageIdentityDisposition::Created,
+        MessageIdentityDisposition::ExactReplay => {
+            runtime_pb::MessageIdentityDisposition::ExactReplay
+        }
+        MessageIdentityDisposition::Conflict => runtime_pb::MessageIdentityDisposition::Conflict,
+        MessageIdentityDisposition::ConversationNotAvailable => {
+            runtime_pb::MessageIdentityDisposition::ConversationNotAvailable
+        }
+    };
+    runtime_pb::ReserveMessageIdentityResponse {
+        disposition: disposition as i32,
+        identity: response.identity.map(message_identity_to_pb),
         error: response.error.map(typed_error_to_pb),
     }
 }

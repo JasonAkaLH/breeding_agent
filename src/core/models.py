@@ -1276,6 +1276,234 @@ class AuthUserToken:
     updated_at: datetime | None = None
 
 
+class SubmissionAdmissionDisposition(StrEnum):
+    CREATED = "created"
+    IDEMPOTENT_REPLAY = "idempotent_replay"
+    CONVERSATION_BUSY = "conversation_busy"
+    MESSAGE_ID_CONFLICT = "message_id_conflict"
+    CONVERSATION_NOT_AVAILABLE = "conversation_not_available"
+
+
+class SubmissionAdmissionState(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class SubmissionProjectionState(StrEnum):
+    PENDING = "pending"
+    PROJECTED = "projected"
+
+
+class SubmissionPreparationState(StrEnum):
+    PENDING = "pending"
+    PREPARED = "prepared"
+
+
+class SubmissionHandoffState(StrEnum):
+    PENDING = "pending"
+    HANDED_OFF = "handed_off"
+
+
+class SubmissionAuthorityState(StrEnum):
+    UNINITIALIZED = "uninitialized"
+    FINALIZED = "finalized"
+
+
+class MessageIdentityKind(StrEnum):
+    SUBMISSION = "submission"
+    INTERRUPT = "interrupt"
+    SERVER_INTERNAL = "server_internal"
+    FILE_VISIBLE = "file_visible"
+    LEGACY_CONFLICT_ONLY = "legacy_conflict_only"
+
+
+class MessageIdentityDisposition(StrEnum):
+    CREATED = "created"
+    EXACT_REPLAY = "exact_replay"
+    CONFLICT = "conflict"
+    CONVERSATION_NOT_AVAILABLE = "conversation_not_available"
+
+
+class ConversationAdmissionCloseDisposition(StrEnum):
+    CLOSED = "closed"
+    EXACT_REPLAY = "exact_replay"
+    CONVERSATION_NOT_AVAILABLE = "conversation_not_available"
+    CONFLICT = "conflict"
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionAdmissionPhase:
+    admission_state: SubmissionAdmissionState
+    projection_state: SubmissionProjectionState
+    preparation_state: SubmissionPreparationState
+    handoff_state: SubmissionHandoffState
+
+
+class SubmissionAdmissionHandle:
+    """Data-free capability whose claim secret remains adapter-owned."""
+
+    __slots__ = ("__weakref__",)
+
+    def __repr__(self) -> str:
+        return "SubmissionAdmissionHandle(<opaque>)"
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionAdmissionRequest:
+    username: str
+    conversation_id: str
+    message_id: str
+    task: Task
+    idempotency_key: str
+    request_fingerprint: str
+    conversation_projection: bytes
+    message_projection: bytes
+    projection_sha256: str
+    continuation: bytes
+    continuation_sha256: str
+    message_created_at: datetime
+    claim_owner: str
+    claim_expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionAdmissionResult:
+    disposition: SubmissionAdmissionDisposition
+    conversation_id: str
+    message_id: str | None = None
+    task_id: str | None = None
+    message_created_at: datetime | None = None
+    task_created_at: datetime | None = None
+    phase: SubmissionAdmissionPhase | None = None
+    record: SubmissionRecoveryRecord | None = field(default=None, repr=False)
+    handle: SubmissionAdmissionHandle | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionRecoveryRecord:
+    username: str
+    conversation_id: str
+    message_id: str
+    task_id: str
+    conversation_projection: bytes
+    message_projection: bytes
+    projection_sha256: str
+    continuation: bytes
+    continuation_sha256: str
+    prepared_execution: bytes | None
+    prepared_execution_sha256: str | None
+    phase: SubmissionAdmissionPhase
+    created_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionClaimRequest:
+    claim_owner: str
+    now: datetime
+    claim_expires_at: datetime
+    after_created_at: datetime | None = None
+    after_message_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionClaimResult:
+    found: bool
+    authority_state: SubmissionAuthorityState
+    finalization_receipt_sha256: str | None
+    record: SubmissionRecoveryRecord | None = None
+    handle: SubmissionAdmissionHandle | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionClaimRenewalRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    now: datetime
+    claim_expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionProjectionAcknowledgementRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    projection_sha256: str
+    acknowledged_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    prepared_execution: bytes
+    prepared_execution_sha256: str
+    prepared_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationLookup:
+    username: str
+    conversation_id: str
+    task_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationRecord:
+    conversation_id: str
+    message_id: str
+    task_id: str
+    prepared_execution: bytes
+    prepared_execution_sha256: str
+    handoff_state: SubmissionHandoffState
+    handoff_kind: str | None = None
+    handoff_identity: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionHandoffAcknowledgementRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    prepared_execution_sha256: str
+    handoff_kind: str
+    handoff_identity: str
+    acknowledged_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class ConversationAdmissionCloseRequest:
+    username: str
+    conversation_id: str
+    operation_id: str
+    closed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class ConversationAdmissionCloseResult:
+    disposition: ConversationAdmissionCloseDisposition
+    conversation_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class MessageIdentityReservationRequest:
+    username: str
+    conversation_id: str
+    message_id: str
+    identity_kind: MessageIdentityKind
+    role: MessageRole | None
+    message_type: str | None
+    message_created_at: datetime | None
+    task_id: str | None
+    request_fingerprint: str | None
+    reserved_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MessageIdentityReservationResult:
+    disposition: MessageIdentityDisposition
+    message_id: str
+    conversation_id: str
+    identity_kind: MessageIdentityKind
+    role: MessageRole | None
+    message_type: str | None
+    message_created_at: datetime | None
+    task_id: str | None
+
+
 @dataclass(slots=True, frozen=True)
 class Message:
     message_id: str

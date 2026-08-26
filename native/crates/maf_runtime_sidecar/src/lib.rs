@@ -54,11 +54,17 @@ use pb::common::v1 as common_pb;
 use pb::runtime::v1 as runtime_pb;
 
 use codec::{
-    agent_item_record_from_pb, agent_item_record_to_pb, agent_run_record_from_pb,
-    agent_run_record_to_pb, agent_state_response_to_pb, artifact_from_pb, artifact_response_to_pb,
-    bundle_revision_response_to_pb, cursor_to_pb, health_state_to_pb, idempotency_from_pb,
-    lease_response_to_pb, list_artifacts_response_to_pb, missing_features_from_error,
-    pb_idempotency_key, readiness_state_to_pb, task_node_record_from_pb, task_node_record_to_pb,
+    admit_submission_request_from_pb, admit_submission_response_to_pb, agent_item_record_from_pb,
+    agent_item_record_to_pb, agent_run_record_from_pb, agent_run_record_to_pb,
+    agent_state_response_to_pb, artifact_from_pb, artifact_response_to_pb,
+    bundle_revision_response_to_pb, claim_pending_request_from_pb, claim_pending_response_to_pb,
+    close_request_from_pb, close_response_to_pb, cursor_to_pb, get_preparation_request_from_pb,
+    get_preparation_response_to_pb, handoff_ack_request_from_pb, health_state_to_pb,
+    idempotency_from_pb, lease_response_to_pb, list_artifacts_response_to_pb,
+    missing_features_from_error, pb_idempotency_key, prepare_handoff_request_from_pb,
+    projection_ack_request_from_pb, readiness_state_to_pb, renew_claim_request_from_pb,
+    reserve_request_from_pb, reserve_response_to_pb, submission_admission_response_to_pb,
+    submission_claim_response_to_pb, task_node_record_from_pb, task_node_record_to_pb,
     task_record_from_pb, task_record_to_pb, typed_error_to_pb, version_to_pb,
 };
 
@@ -189,6 +195,255 @@ pub struct TaskRecord {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub assignment: Option<TaskRouteAssignment>,
+}
+
+pub const SUBMISSION_CONVERSATION_PROJECTION_MAX_BYTES: usize = 64 * 1024;
+pub const SUBMISSION_MESSAGE_PROJECTION_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub const SUBMISSION_CONTINUATION_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub const SUBMISSION_PREPARED_EXECUTION_MAX_BYTES: usize = 128 * 1024;
+pub const GRPC_MAX_MESSAGE_BYTES: usize = 140 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionAdmissionDisposition {
+    Created,
+    IdempotentReplay,
+    ConversationBusy,
+    MessageIdConflict,
+    ConversationNotAvailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionProjectionState {
+    Pending,
+    Projected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionPreparationState {
+    Pending,
+    Prepared,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionHandoffState {
+    Pending,
+    HandedOff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageIdentityKind {
+    Submission,
+    Interrupt,
+    ServerInternal,
+    FileVisible,
+    LegacyConflictOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageIdentityDisposition {
+    Created,
+    ExactReplay,
+    Conflict,
+    ConversationNotAvailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAdmissionCloseDisposition {
+    Closed,
+    ExactReplay,
+    ConversationNotAvailable,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmissionClaim {
+    pub owner: String,
+    pub token: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageIdentityRecord {
+    pub message_id: String,
+    pub conversation_id: String,
+    pub username: String,
+    pub identity_kind: MessageIdentityKind,
+    pub role: Option<String>,
+    pub message_type: Option<String>,
+    pub message_created_at_ms: Option<i64>,
+    pub task_id: Option<String>,
+    pub request_fingerprint: Option<String>,
+    pub reserved_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmissionAdmissionRecord {
+    pub message_id: String,
+    pub task_id: String,
+    pub conversation_id: String,
+    pub username: String,
+    pub request_fingerprint: String,
+    pub conversation_projection_json: Vec<u8>,
+    pub message_projection_json: Vec<u8>,
+    pub projection_sha256: String,
+    pub continuation_json: Vec<u8>,
+    pub continuation_sha256: String,
+    pub projection_state: SubmissionProjectionState,
+    pub preparation_state: SubmissionPreparationState,
+    pub prepared_execution_json: Option<Vec<u8>>,
+    pub prepared_execution_sha256: Option<String>,
+    pub handoff_state: SubmissionHandoffState,
+    pub handoff_kind: Option<String>,
+    pub handoff_identity: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub closed: bool,
+    pub task: TaskRecord,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmitSubmissionRequest {
+    pub message_id: String,
+    pub task_id: String,
+    pub conversation_id: String,
+    pub username: String,
+    pub request_fingerprint: String,
+    pub conversation_projection_json: Vec<u8>,
+    pub message_projection_json: Vec<u8>,
+    pub projection_sha256: String,
+    pub continuation_json: Vec<u8>,
+    pub continuation_sha256: String,
+    pub message_created_at_ms: i64,
+    pub workflow_owner: String,
+    pub now_ms: i64,
+    pub claim_ttl_ms: i64,
+    pub task: TaskRecord,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmitSubmissionResponse {
+    pub disposition: SubmissionAdmissionDisposition,
+    pub admission: Option<SubmissionAdmissionRecord>,
+    pub claim: Option<SubmissionClaim>,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimPendingSubmissionRequest {
+    pub workflow_owner: String,
+    pub now_ms: i64,
+    pub claim_ttl_ms: i64,
+    pub after_created_at_ms: Option<i64>,
+    pub after_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimPendingSubmissionResponse {
+    pub found: bool,
+    pub admission: Option<SubmissionAdmissionRecord>,
+    pub claim: Option<SubmissionClaim>,
+    pub authority_state: String,
+    pub finalization_receipt_sha256: Option<String>,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewSubmissionClaimRequest {
+    pub message_id: String,
+    pub workflow_owner: String,
+    pub claim_token: String,
+    pub now_ms: i64,
+    pub claim_ttl_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmissionAdmissionResponse {
+    pub admission: Option<SubmissionAdmissionRecord>,
+    pub duplicate: bool,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcknowledgeSubmissionProjectionRequest {
+    pub message_id: String,
+    pub workflow_owner: String,
+    pub claim_token: String,
+    pub projection_sha256: String,
+    pub expected_state: SubmissionProjectionState,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepareSubmissionHandoffRequest {
+    pub message_id: String,
+    pub workflow_owner: String,
+    pub claim_token: String,
+    pub prepared_execution_json: Vec<u8>,
+    pub prepared_execution_sha256: String,
+    pub expected_state: SubmissionPreparationState,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetSubmissionPreparationRequest {
+    pub username: String,
+    pub conversation_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetSubmissionPreparationResponse {
+    pub found: bool,
+    pub admission: Option<SubmissionAdmissionRecord>,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcknowledgeSubmissionHandoffRequest {
+    pub message_id: String,
+    pub workflow_owner: String,
+    pub claim_token: String,
+    pub prepared_execution_sha256: String,
+    pub handoff_kind: String,
+    pub handoff_identity: String,
+    pub expected_state: SubmissionHandoffState,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseConversationAdmissionRequest {
+    pub username: String,
+    pub conversation_id: String,
+    pub operation_id: String,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseConversationAdmissionResponse {
+    pub disposition: ConversationAdmissionCloseDisposition,
+    pub revision: u64,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReserveMessageIdentityRequest {
+    pub identity: MessageIdentityRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReserveMessageIdentityResponse {
+    pub disposition: MessageIdentityDisposition,
+    pub identity: Option<MessageIdentityRecord>,
+    pub error: Option<TypedErrorEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,6 +989,23 @@ struct NodeTransitionReceipt {
     result: NodeTransitionResult,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubmissionConversationGuard {
+    username: String,
+    available: bool,
+    revision: u64,
+    active_task_id: Option<String>,
+    close_operation_id: Option<String>,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubmissionAdmissionEntry {
+    record: SubmissionAdmissionRecord,
+    claim: Option<SubmissionClaim>,
+    claim_revision: u64,
+}
+
 #[derive(Debug)]
 pub struct RuntimeSidecarKernel {
     dispatcher: TaskDispatcher,
@@ -759,6 +1031,11 @@ pub struct RuntimeSidecarKernel {
     artifact_idempotency: BTreeMap<String, ArtifactRecord>,
     cancellation_idempotency: BTreeMap<String, bool>,
     bundle_revision_idempotency: BTreeMap<String, BundleRevisionResult>,
+    submission_conversations: BTreeMap<String, SubmissionConversationGuard>,
+    submission_message_identities: BTreeMap<String, MessageIdentityRecord>,
+    submission_admissions: BTreeMap<String, SubmissionAdmissionEntry>,
+    submission_idempotency_keys: BTreeMap<String, String>,
+    submission_authority_finalization_receipt_sha256: Option<String>,
     compatibility_handshake_passed: bool,
     shutdown_drain_started_at_ms: Option<i64>,
 }
@@ -796,6 +1073,11 @@ impl RuntimeSidecarKernel {
             artifact_idempotency: BTreeMap::new(),
             cancellation_idempotency: BTreeMap::new(),
             bundle_revision_idempotency: BTreeMap::new(),
+            submission_conversations: BTreeMap::new(),
+            submission_message_identities: BTreeMap::new(),
+            submission_admissions: BTreeMap::new(),
+            submission_idempotency_keys: BTreeMap::new(),
+            submission_authority_finalization_receipt_sha256: None,
             compatibility_handshake_passed: false,
             shutdown_drain_started_at_ms: None,
         }
@@ -909,6 +1191,636 @@ impl RuntimeSidecarKernel {
         Ok(result)
     }
 
+    #[must_use]
+    pub fn new_with_finalized_submission_authority(
+        finalization_receipt_sha256: impl Into<String>,
+    ) -> Self {
+        let mut kernel = Self::new();
+        kernel.submission_authority_finalization_receipt_sha256 =
+            Some(finalization_receipt_sha256.into());
+        kernel
+    }
+
+    pub fn admit_submission(
+        &mut self,
+        request: AdmitSubmissionRequest,
+    ) -> Result<AdmitSubmissionResponse, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        if self
+            .submission_authority_finalization_receipt_sha256
+            .is_none()
+        {
+            return Err(migration_blocked(
+                "submission authority must be finalized before online admission",
+            ));
+        }
+        validate_admit_submission_request(&request)?;
+        let message_projection: serde_json::Value =
+            serde_json::from_slice(&request.message_projection_json)
+                .map_err(|_| write_failed("message projection JSON is invalid"))?;
+        let message_role = message_projection["role"]
+            .as_str()
+            .ok_or_else(|| write_failed("message projection role is invalid"))?
+            .to_owned();
+        let message_type = message_projection["message_type"]
+            .as_str()
+            .ok_or_else(|| write_failed("message projection type is invalid"))?
+            .to_owned();
+
+        if let Some(identity) = self.submission_message_identities.get(&request.message_id) {
+            let is_replay = identity.identity_kind == MessageIdentityKind::Submission
+                && identity.conversation_id == request.conversation_id
+                && identity.username == request.username
+                && identity.role.as_deref() == Some(message_role.as_str())
+                && identity.message_type.as_deref() == Some(message_type.as_str())
+                && identity.request_fingerprint.as_deref()
+                    == Some(request.request_fingerprint.as_str());
+            if !is_replay {
+                return Ok(admission_disposition(
+                    SubmissionAdmissionDisposition::MessageIdConflict,
+                ));
+            }
+            let entry = self
+                .submission_admissions
+                .get(&request.message_id)
+                .ok_or_else(|| write_failed("submission identity is missing its admission"))?;
+            if entry.record.idempotency_key != request.idempotency_key {
+                return Ok(admission_disposition(
+                    SubmissionAdmissionDisposition::MessageIdConflict,
+                ));
+            }
+            let claim = entry.claim.as_ref().and_then(|claim| {
+                (claim.owner == request.workflow_owner && claim.expires_at_ms > request.now_ms)
+                    .then(|| claim.clone())
+            });
+            return Ok(AdmitSubmissionResponse {
+                disposition: SubmissionAdmissionDisposition::IdempotentReplay,
+                admission: Some(entry.record.clone()),
+                claim,
+                error: None,
+            });
+        }
+
+        if self
+            .submission_idempotency_keys
+            .get(&request.idempotency_key)
+            .is_some_and(|message_id| message_id != &request.message_id)
+        {
+            return Err(idempotency_conflict(
+                "submission idempotency key is bound to a different Message",
+            ));
+        }
+
+        if let Some(guard) = self.submission_conversations.get(&request.conversation_id)
+            && (guard.username != request.username || !guard.available)
+        {
+            return Ok(admission_disposition(
+                SubmissionAdmissionDisposition::ConversationNotAvailable,
+            ));
+        }
+
+        if self
+            .submission_conversations
+            .get(&request.conversation_id)
+            .and_then(|guard| guard.active_task_id.as_ref())
+            .is_some()
+        {
+            return Ok(admission_disposition(
+                SubmissionAdmissionDisposition::ConversationBusy,
+            ));
+        }
+        if self.tasks.contains_key(&request.task_id)
+            || self
+                .submission_admissions
+                .values()
+                .any(|entry| entry.record.task_id == request.task_id)
+        {
+            return Err(idempotency_conflict(
+                "submission Task identity is already authoritative",
+            ));
+        }
+
+        let claim = new_submission_claim(
+            &request.message_id,
+            &request.workflow_owner,
+            request.now_ms,
+            request.claim_ttl_ms,
+            1,
+        )?;
+        let identity = MessageIdentityRecord {
+            message_id: request.message_id.clone(),
+            conversation_id: request.conversation_id.clone(),
+            username: request.username.clone(),
+            identity_kind: MessageIdentityKind::Submission,
+            role: Some(message_role),
+            message_type: Some(message_type),
+            message_created_at_ms: Some(request.message_created_at_ms),
+            task_id: Some(request.task_id.clone()),
+            request_fingerprint: Some(request.request_fingerprint.clone()),
+            reserved_at_ms: request.now_ms,
+        };
+        let record = SubmissionAdmissionRecord {
+            message_id: request.message_id.clone(),
+            task_id: request.task_id.clone(),
+            conversation_id: request.conversation_id.clone(),
+            username: request.username.clone(),
+            request_fingerprint: request.request_fingerprint,
+            conversation_projection_json: request.conversation_projection_json,
+            message_projection_json: request.message_projection_json,
+            projection_sha256: request.projection_sha256,
+            continuation_json: request.continuation_json,
+            continuation_sha256: request.continuation_sha256,
+            projection_state: SubmissionProjectionState::Pending,
+            preparation_state: SubmissionPreparationState::Pending,
+            prepared_execution_json: None,
+            prepared_execution_sha256: None,
+            handoff_state: SubmissionHandoffState::Pending,
+            handoff_kind: None,
+            handoff_identity: None,
+            created_at_ms: request.now_ms,
+            updated_at_ms: request.now_ms,
+            closed: false,
+            task: request.task.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+        };
+        self.submission_conversations
+            .entry(request.conversation_id.clone())
+            .and_modify(|guard| {
+                guard.active_task_id = Some(request.task_id.clone());
+                guard.revision += 1;
+                guard.updated_at_ms = request.now_ms;
+            })
+            .or_insert(SubmissionConversationGuard {
+                username: request.username,
+                available: true,
+                revision: 1,
+                active_task_id: Some(request.task_id.clone()),
+                close_operation_id: None,
+                updated_at_ms: request.now_ms,
+            });
+        self.submission_message_identities
+            .insert(request.message_id.clone(), identity);
+        self.tasks.insert(request.task_id, request.task);
+        self.submission_admissions.insert(
+            request.message_id,
+            SubmissionAdmissionEntry {
+                record: record.clone(),
+                claim: Some(claim.clone()),
+                claim_revision: 1,
+            },
+        );
+        self.submission_idempotency_keys
+            .insert(request.idempotency_key, record.message_id.clone());
+        Ok(AdmitSubmissionResponse {
+            disposition: SubmissionAdmissionDisposition::Created,
+            admission: Some(record),
+            claim: Some(claim),
+            error: None,
+        })
+    }
+
+    pub fn claim_pending_submission(
+        &mut self,
+        request: ClaimPendingSubmissionRequest,
+    ) -> Result<ClaimPendingSubmissionResponse, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        let receipt = self
+            .submission_authority_finalization_receipt_sha256
+            .clone();
+        if receipt.is_none() {
+            return Err(migration_blocked(
+                "submission authority must be finalized before recovery claims",
+            ));
+        }
+        validate_claim_timing(
+            &request.workflow_owner,
+            request.now_ms,
+            request.claim_ttl_ms,
+        )?;
+        if request.after_created_at_ms.is_some() != request.after_message_id.is_some() {
+            return Err(write_failed(
+                "submission recovery cursor fields must be all-or-none",
+            ));
+        }
+        let mut candidates = self
+            .submission_admissions
+            .iter()
+            .filter(|(_, entry)| {
+                !entry.record.closed
+                    && entry.record.handoff_state != SubmissionHandoffState::HandedOff
+                    && entry
+                        .claim
+                        .as_ref()
+                        .is_none_or(|claim| claim.expires_at_ms <= request.now_ms)
+            })
+            .map(|(message_id, entry)| (entry.record.created_at_ms, message_id.clone()))
+            .filter(|(created_at_ms, message_id)| {
+                match (
+                    request.after_created_at_ms,
+                    request.after_message_id.as_deref(),
+                ) {
+                    (None, None) => true,
+                    (Some(after), Some(after_id)) => {
+                        (*created_at_ms, message_id.as_str()) > (after, after_id)
+                    }
+                    _ => false,
+                }
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        let Some((_, message_id)) = candidates.into_iter().next() else {
+            return Ok(ClaimPendingSubmissionResponse {
+                found: false,
+                admission: None,
+                claim: None,
+                authority_state: "finalized".to_owned(),
+                finalization_receipt_sha256: receipt,
+                error: None,
+            });
+        };
+        let entry = self
+            .submission_admissions
+            .get_mut(&message_id)
+            .ok_or_else(|| write_failed("pending submission disappeared"))?;
+        entry.claim_revision += 1;
+        let claim = new_submission_claim(
+            &message_id,
+            &request.workflow_owner,
+            request.now_ms,
+            request.claim_ttl_ms,
+            entry.claim_revision,
+        )?;
+        entry.claim = Some(claim.clone());
+        Ok(ClaimPendingSubmissionResponse {
+            found: true,
+            admission: Some(entry.record.clone()),
+            claim: Some(claim),
+            authority_state: "finalized".to_owned(),
+            finalization_receipt_sha256: receipt,
+            error: None,
+        })
+    }
+
+    pub fn renew_submission_claim(
+        &mut self,
+        request: RenewSubmissionClaimRequest,
+    ) -> Result<SubmissionClaim, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        validate_claim_timing(
+            &request.workflow_owner,
+            request.now_ms,
+            request.claim_ttl_ms,
+        )?;
+        let entry = self
+            .submission_admissions
+            .get_mut(&request.message_id)
+            .ok_or_else(|| idempotency_conflict("submission claim identity is unknown"))?;
+        if entry.record.closed || entry.record.handoff_state == SubmissionHandoffState::HandedOff {
+            return Err(idempotency_conflict(
+                "closed or handed-off submission claims cannot be renewed",
+            ));
+        }
+        validate_submission_claim(
+            entry,
+            &request.workflow_owner,
+            &request.claim_token,
+            request.now_ms,
+        )?;
+        entry.claim_revision += 1;
+        let claim = new_submission_claim(
+            &request.message_id,
+            &request.workflow_owner,
+            request.now_ms,
+            request.claim_ttl_ms,
+            entry.claim_revision,
+        )?;
+        entry.claim = Some(claim.clone());
+        Ok(claim)
+    }
+
+    pub fn acknowledge_submission_projection(
+        &mut self,
+        request: AcknowledgeSubmissionProjectionRequest,
+    ) -> Result<(SubmissionAdmissionRecord, bool), RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        let entry = self.submission_entry_for_claim_mut(
+            &request.message_id,
+            &request.workflow_owner,
+            &request.claim_token,
+            request.now_ms,
+        )?;
+        if entry.record.projection_sha256 != request.projection_sha256 {
+            return Err(idempotency_conflict(
+                "submission projection digest mismatch",
+            ));
+        }
+        if entry.record.projection_state == SubmissionProjectionState::Projected {
+            return Ok((entry.record.clone(), true));
+        }
+        if request.expected_state != SubmissionProjectionState::Pending {
+            return Err(idempotency_conflict(
+                "submission projection expected state mismatch",
+            ));
+        }
+        entry.record.projection_state = SubmissionProjectionState::Projected;
+        entry.record.updated_at_ms = request.now_ms;
+        Ok((entry.record.clone(), false))
+    }
+
+    pub fn prepare_submission_handoff(
+        &mut self,
+        request: PrepareSubmissionHandoffRequest,
+    ) -> Result<(SubmissionAdmissionRecord, bool), RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        validate_prepared_execution(
+            &request.prepared_execution_json,
+            &request.prepared_execution_sha256,
+        )?;
+        let prepared: serde_json::Value = serde_json::from_slice(&request.prepared_execution_json)
+            .map_err(|_| write_failed("prepared execution JSON is invalid"))?;
+        let entry = self.submission_entry_for_claim_mut(
+            &request.message_id,
+            &request.workflow_owner,
+            &request.claim_token,
+            request.now_ms,
+        )?;
+        if prepared["message_id"].as_str() != Some(entry.record.message_id.as_str())
+            || prepared["task_id"].as_str() != Some(entry.record.task_id.as_str())
+            || prepared["conversation_id"].as_str() != Some(entry.record.conversation_id.as_str())
+            || prepared["owner_scope"].as_str() != Some(entry.record.username.as_str())
+            || prepared["requested_capability_id"].as_str()
+                != entry.record.task.requested_capability_id.as_deref()
+        {
+            return Err(write_failed("prepared execution identity mismatch"));
+        }
+        if entry.record.projection_state != SubmissionProjectionState::Projected {
+            return Err(idempotency_conflict(
+                "submission must be projected before preparation",
+            ));
+        }
+        if entry.record.preparation_state == SubmissionPreparationState::Prepared {
+            if entry.record.prepared_execution_json.as_deref()
+                != Some(request.prepared_execution_json.as_slice())
+                || entry.record.prepared_execution_sha256.as_deref()
+                    != Some(request.prepared_execution_sha256.as_str())
+            {
+                return Err(idempotency_conflict(
+                    "submission prepared snapshot is immutable",
+                ));
+            }
+            return Ok((entry.record.clone(), true));
+        }
+        if request.expected_state != SubmissionPreparationState::Pending {
+            return Err(idempotency_conflict(
+                "submission preparation expected state mismatch",
+            ));
+        }
+        entry.record.preparation_state = SubmissionPreparationState::Prepared;
+        entry.record.prepared_execution_json = Some(request.prepared_execution_json);
+        entry.record.prepared_execution_sha256 = Some(request.prepared_execution_sha256);
+        entry.record.updated_at_ms = request.now_ms;
+        Ok((entry.record.clone(), false))
+    }
+
+    #[must_use]
+    pub fn get_submission_preparation(
+        &self,
+        request: &GetSubmissionPreparationRequest,
+    ) -> Option<SubmissionAdmissionRecord> {
+        self.submission_admissions.values().find_map(|entry| {
+            (entry.record.username == request.username
+                && entry.record.conversation_id == request.conversation_id
+                && entry.record.task_id == request.task_id
+                && entry.record.preparation_state == SubmissionPreparationState::Prepared)
+                .then(|| entry.record.clone())
+        })
+    }
+
+    pub fn acknowledge_submission_handoff(
+        &mut self,
+        request: AcknowledgeSubmissionHandoffRequest,
+    ) -> Result<(SubmissionAdmissionRecord, bool), RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        if !matches!(
+            request.handoff_kind.as_str(),
+            "agent_run" | "interrupt" | "no_server_intent"
+        ) || request.handoff_identity.trim().is_empty()
+        {
+            return Err(write_failed("submission handoff identity is invalid"));
+        }
+        let entry = self
+            .submission_admissions
+            .get_mut(&request.message_id)
+            .ok_or_else(|| idempotency_conflict("submission admission is unknown"))?;
+        validate_submission_claim(
+            entry,
+            &request.workflow_owner,
+            &request.claim_token,
+            request.now_ms,
+        )?;
+        if entry.record.closed {
+            return Err(idempotency_conflict("submission admission is closed"));
+        }
+        if entry.record.preparation_state != SubmissionPreparationState::Prepared
+            || entry.record.prepared_execution_sha256.as_deref()
+                != Some(request.prepared_execution_sha256.as_str())
+        {
+            return Err(idempotency_conflict(
+                "submission prepared handoff digest mismatch",
+            ));
+        }
+        if entry.record.handoff_state == SubmissionHandoffState::HandedOff {
+            if entry.record.handoff_kind.as_deref() != Some(request.handoff_kind.as_str())
+                || entry.record.handoff_identity.as_deref()
+                    != Some(request.handoff_identity.as_str())
+            {
+                return Err(idempotency_conflict(
+                    "submission durable handoff is immutable",
+                ));
+            }
+            return Ok((entry.record.clone(), true));
+        }
+        if request.expected_state != SubmissionHandoffState::Pending {
+            return Err(idempotency_conflict(
+                "submission handoff expected state mismatch",
+            ));
+        }
+        entry.record.handoff_state = SubmissionHandoffState::HandedOff;
+        entry.record.handoff_kind = Some(request.handoff_kind);
+        entry.record.handoff_identity = Some(request.handoff_identity);
+        entry.record.updated_at_ms = request.now_ms;
+        Ok((entry.record.clone(), false))
+    }
+
+    pub fn close_conversation_admission(
+        &mut self,
+        request: CloseConversationAdmissionRequest,
+    ) -> Result<CloseConversationAdmissionResponse, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        if request.username.trim().is_empty()
+            || request.conversation_id.trim().is_empty()
+            || request.operation_id.trim().is_empty()
+        {
+            return Err(write_failed("conversation close identity is invalid"));
+        }
+        let Some(guard) = self
+            .submission_conversations
+            .get_mut(&request.conversation_id)
+        else {
+            return Ok(CloseConversationAdmissionResponse {
+                disposition: ConversationAdmissionCloseDisposition::ConversationNotAvailable,
+                revision: 0,
+                error: None,
+            });
+        };
+        if guard.username != request.username {
+            return Ok(CloseConversationAdmissionResponse {
+                disposition: ConversationAdmissionCloseDisposition::ConversationNotAvailable,
+                revision: guard.revision,
+                error: None,
+            });
+        }
+        if !guard.available {
+            let disposition =
+                if guard.close_operation_id.as_deref() == Some(request.operation_id.as_str()) {
+                    ConversationAdmissionCloseDisposition::ExactReplay
+                } else {
+                    ConversationAdmissionCloseDisposition::Conflict
+                };
+            return Ok(CloseConversationAdmissionResponse {
+                disposition,
+                revision: guard.revision,
+                error: None,
+            });
+        }
+        guard.available = false;
+        guard.close_operation_id = Some(request.operation_id);
+        guard.revision += 1;
+        guard.updated_at_ms = request.now_ms;
+        let active_task_id = guard.active_task_id.take();
+        let revision = guard.revision;
+        let should_cancel_active_task = active_task_id.as_ref().is_some_and(|task_id| {
+            self.submission_admissions.values().any(|entry| {
+                entry.record.task_id == *task_id
+                    && entry.record.handoff_state != SubmissionHandoffState::HandedOff
+            })
+        });
+        for entry in self.submission_admissions.values_mut().filter(|entry| {
+            entry.record.conversation_id == request.conversation_id
+                && entry.record.handoff_state != SubmissionHandoffState::HandedOff
+        }) {
+            entry.record.closed = true;
+            entry.record.updated_at_ms = request.now_ms;
+            entry.claim = None;
+        }
+        if should_cancel_active_task
+            && let Some(task_id) = active_task_id
+            && let Some(task) = self.tasks.get_mut(&task_id)
+            && task.status == "accepted"
+        {
+            let mut cancelling = task.clone();
+            cancelling.status = "cancelling".to_owned();
+            cancelling.cancel_requested_at = Some(request.now_ms.to_string());
+            cancelling.updated_at = Some(request.now_ms.to_string());
+            validate_task_update(task, &cancelling)?;
+            let mut cancelled = cancelling.clone();
+            cancelled.status = "cancelled".to_owned();
+            validate_task_update(&cancelling, &cancelled)?;
+            *task = cancelled;
+            if let Some(entry) = self
+                .submission_admissions
+                .values_mut()
+                .find(|entry| entry.record.task_id == task_id)
+            {
+                entry.record.task = task.clone();
+            }
+        }
+        Ok(CloseConversationAdmissionResponse {
+            disposition: ConversationAdmissionCloseDisposition::Closed,
+            revision,
+            error: None,
+        })
+    }
+
+    pub fn reserve_message_identity(
+        &mut self,
+        request: ReserveMessageIdentityRequest,
+    ) -> Result<ReserveMessageIdentityResponse, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        if self
+            .submission_authority_finalization_receipt_sha256
+            .is_none()
+        {
+            return Err(migration_blocked(
+                "submission authority must be finalized before Message identity reservation",
+            ));
+        }
+        validate_message_identity(&request.identity, false)?;
+        if let Some(existing) = self
+            .submission_message_identities
+            .get(&request.identity.message_id)
+        {
+            let exact = message_identity_is_exact_replay(existing, &request.identity);
+            return Ok(ReserveMessageIdentityResponse {
+                disposition: if exact {
+                    MessageIdentityDisposition::ExactReplay
+                } else {
+                    MessageIdentityDisposition::Conflict
+                },
+                identity: exact.then(|| existing.clone()),
+                error: None,
+            });
+        }
+        if let Some(guard) = self
+            .submission_conversations
+            .get(&request.identity.conversation_id)
+            && (guard.username != request.identity.username || !guard.available)
+        {
+            return Ok(ReserveMessageIdentityResponse {
+                disposition: MessageIdentityDisposition::ConversationNotAvailable,
+                identity: None,
+                error: None,
+            });
+        }
+        self.submission_conversations
+            .entry(request.identity.conversation_id.clone())
+            .or_insert(SubmissionConversationGuard {
+                username: request.identity.username.clone(),
+                available: true,
+                revision: 1,
+                active_task_id: None,
+                close_operation_id: None,
+                updated_at_ms: request.identity.reserved_at_ms,
+            });
+        self.submission_message_identities.insert(
+            request.identity.message_id.clone(),
+            request.identity.clone(),
+        );
+        Ok(ReserveMessageIdentityResponse {
+            disposition: MessageIdentityDisposition::Created,
+            identity: Some(request.identity),
+            error: None,
+        })
+    }
+
+    fn submission_entry_for_claim_mut(
+        &mut self,
+        message_id: &str,
+        owner: &str,
+        token: &str,
+        now_ms: i64,
+    ) -> Result<&mut SubmissionAdmissionEntry, RuntimeSidecarError> {
+        let entry = self
+            .submission_admissions
+            .get_mut(message_id)
+            .ok_or_else(|| idempotency_conflict("submission admission is unknown"))?;
+        validate_submission_claim(entry, owner, token, now_ms)?;
+        if entry.record.closed {
+            return Err(idempotency_conflict("submission admission is closed"));
+        }
+        Ok(entry)
+    }
+
     pub fn submit_task(
         &mut self,
         task_id: impl Into<String>,
@@ -962,6 +1874,7 @@ impl RuntimeSidecarKernel {
             })?;
         }
         self.tasks.insert(task.task_id.clone(), task.clone());
+        self.sync_submission_task_and_release_terminal_guard(&task);
         self.task_record_idempotency
             .insert(idempotency_key, task.clone());
         Ok((task, false))
@@ -1136,6 +2049,7 @@ impl RuntimeSidecarKernel {
         }
         if let Some(task) = &request.task {
             self.tasks.insert(task.task_id.clone(), task.clone());
+            self.sync_submission_task_and_release_terminal_guard(task);
         }
         self.agent_state_idempotency.insert(
             idempotency_key,
@@ -1150,6 +2064,23 @@ impl RuntimeSidecarKernel {
             },
         );
         Ok((run, request.items, false))
+    }
+
+    fn sync_submission_task_and_release_terminal_guard(&mut self, task: &TaskRecord) {
+        if let Some(entry) = self
+            .submission_admissions
+            .values_mut()
+            .find(|entry| entry.record.task_id == task.task_id)
+        {
+            entry.record.task = task.clone();
+        }
+        if matches!(task.status.as_str(), "completed" | "failed" | "cancelled")
+            && let Some(guard) = self.submission_conversations.get_mut(&task.conversation_id)
+            && guard.active_task_id.as_deref() == Some(task.task_id.as_str())
+        {
+            guard.active_task_id = None;
+            guard.revision += 1;
+        }
     }
 
     #[must_use]
@@ -1587,6 +2518,17 @@ impl RuntimeSidecarService {
     }
 
     #[must_use]
+    pub fn new_with_finalized_submission_authority(
+        finalization_receipt_sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            kernel: RuntimeSidecarKernel::new_with_finalized_submission_authority(
+                finalization_receipt_sha256,
+            ),
+        }
+    }
+
+    #[must_use]
     pub fn version(&self) -> RuntimeSidecarVersion {
         self.kernel.version()
     }
@@ -1980,6 +2922,119 @@ impl RuntimeSidecarService {
             },
         }
     }
+
+    pub fn admit_submission(&mut self, request: AdmitSubmissionRequest) -> AdmitSubmissionResponse {
+        self.kernel
+            .admit_submission(request)
+            .unwrap_or_else(|error| {
+                let mut response =
+                    admission_disposition(SubmissionAdmissionDisposition::ConversationNotAvailable);
+                response.error = Some(error.into());
+                response
+            })
+    }
+
+    pub fn claim_pending_submission(
+        &mut self,
+        request: ClaimPendingSubmissionRequest,
+    ) -> ClaimPendingSubmissionResponse {
+        self.kernel
+            .claim_pending_submission(request)
+            .unwrap_or_else(|error| ClaimPendingSubmissionResponse {
+                found: false,
+                admission: None,
+                claim: None,
+                authority_state: "uninitialized".to_owned(),
+                finalization_receipt_sha256: None,
+                error: Some(error.into()),
+            })
+    }
+
+    pub fn renew_submission_claim(
+        &mut self,
+        request: RenewSubmissionClaimRequest,
+    ) -> Result<SubmissionClaim, TypedErrorEnvelope> {
+        self.kernel
+            .renew_submission_claim(request)
+            .map_err(Into::into)
+    }
+
+    pub fn acknowledge_submission_projection(
+        &mut self,
+        request: AcknowledgeSubmissionProjectionRequest,
+    ) -> SubmissionAdmissionResponse {
+        submission_admission_result(self.kernel.acknowledge_submission_projection(request))
+    }
+
+    pub fn prepare_submission_handoff(
+        &mut self,
+        request: PrepareSubmissionHandoffRequest,
+    ) -> SubmissionAdmissionResponse {
+        submission_admission_result(self.kernel.prepare_submission_handoff(request))
+    }
+
+    #[must_use]
+    pub fn get_submission_preparation(
+        &self,
+        request: &GetSubmissionPreparationRequest,
+    ) -> GetSubmissionPreparationResponse {
+        let admission = self.kernel.get_submission_preparation(request);
+        GetSubmissionPreparationResponse {
+            found: admission.is_some(),
+            admission,
+            error: None,
+        }
+    }
+
+    pub fn acknowledge_submission_handoff(
+        &mut self,
+        request: AcknowledgeSubmissionHandoffRequest,
+    ) -> SubmissionAdmissionResponse {
+        submission_admission_result(self.kernel.acknowledge_submission_handoff(request))
+    }
+
+    pub fn close_conversation_admission(
+        &mut self,
+        request: CloseConversationAdmissionRequest,
+    ) -> CloseConversationAdmissionResponse {
+        self.kernel
+            .close_conversation_admission(request)
+            .unwrap_or_else(|error| CloseConversationAdmissionResponse {
+                disposition: ConversationAdmissionCloseDisposition::Conflict,
+                revision: 0,
+                error: Some(error.into()),
+            })
+    }
+
+    pub fn reserve_message_identity(
+        &mut self,
+        request: ReserveMessageIdentityRequest,
+    ) -> ReserveMessageIdentityResponse {
+        self.kernel
+            .reserve_message_identity(request)
+            .unwrap_or_else(|error| ReserveMessageIdentityResponse {
+                disposition: MessageIdentityDisposition::Conflict,
+                identity: None,
+                error: Some(error.into()),
+            })
+    }
+}
+
+fn submission_admission_result(
+    result: Result<(SubmissionAdmissionRecord, bool), RuntimeSidecarError>,
+) -> SubmissionAdmissionResponse {
+    match result {
+        Ok((admission, duplicate)) => SubmissionAdmissionResponse {
+            admission: Some(admission),
+            duplicate,
+            error: None,
+        },
+        Err(error) => SubmissionAdmissionResponse {
+            admission: None,
+            duplicate: false,
+            error: Some(error.into()),
+        },
+    }
 }
 
 impl From<RuntimeSidecarError> for TypedErrorEnvelope {
@@ -2005,6 +3060,20 @@ impl RuntimeSidecarGrpcService {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(RuntimeSidecarService::new())),
+            sqlite_adapter: None,
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_finalized_submission_authority(
+        finalization_receipt_sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(
+                RuntimeSidecarService::new_with_finalized_submission_authority(
+                    finalization_receipt_sha256,
+                ),
+            )),
             sqlite_adapter: None,
         }
     }
@@ -2997,6 +4066,205 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
             response,
         )))
     }
+
+    async fn admit_submission(
+        &self,
+        request: tonic::Request<runtime_pb::AdmitSubmissionRequest>,
+    ) -> Result<tonic::Response<runtime_pb::AdmitSubmissionResponse>, tonic::Status> {
+        let response = if self.sqlite_adapter.is_some() {
+            AdmitSubmissionResponse {
+                disposition: SubmissionAdmissionDisposition::ConversationNotAvailable,
+                admission: None,
+                claim: None,
+                error: Some(sqlite_submission_migration_blocked().into()),
+            }
+        } else {
+            match admit_submission_request_from_pb(request.into_inner()) {
+                Ok(request) => self.lock()?.admit_submission(request),
+                Err(error) => AdmitSubmissionResponse {
+                    disposition: SubmissionAdmissionDisposition::ConversationNotAvailable,
+                    admission: None,
+                    claim: None,
+                    error: Some(error.into()),
+                },
+            }
+        };
+        Ok(tonic::Response::new(admit_submission_response_to_pb(
+            response,
+        )))
+    }
+
+    async fn claim_pending_submission(
+        &self,
+        request: tonic::Request<runtime_pb::ClaimPendingSubmissionRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ClaimPendingSubmissionResponse>, tonic::Status> {
+        let response = if self.sqlite_adapter.is_some() {
+            ClaimPendingSubmissionResponse {
+                found: false,
+                admission: None,
+                claim: None,
+                authority_state: "uninitialized".to_owned(),
+                finalization_receipt_sha256: None,
+                error: Some(sqlite_submission_migration_blocked().into()),
+            }
+        } else {
+            self.lock()?
+                .claim_pending_submission(claim_pending_request_from_pb(request.into_inner()))
+        };
+        Ok(tonic::Response::new(claim_pending_response_to_pb(response)))
+    }
+
+    async fn renew_submission_claim(
+        &self,
+        request: tonic::Request<runtime_pb::RenewSubmissionClaimRequest>,
+    ) -> Result<tonic::Response<runtime_pb::SubmissionClaimResponse>, tonic::Status> {
+        let result = if self.sqlite_adapter.is_some() {
+            Err(TypedErrorEnvelope::from(
+                sqlite_submission_migration_blocked(),
+            ))
+        } else {
+            self.lock()?
+                .renew_submission_claim(renew_claim_request_from_pb(request.into_inner()))
+        };
+        Ok(tonic::Response::new(submission_claim_response_to_pb(
+            result,
+        )))
+    }
+
+    async fn acknowledge_submission_projection(
+        &self,
+        request: tonic::Request<runtime_pb::AcknowledgeSubmissionProjectionRequest>,
+    ) -> Result<tonic::Response<runtime_pb::SubmissionAdmissionResponse>, tonic::Status> {
+        let response = if self.sqlite_adapter.is_some() {
+            migration_blocked_submission_response()
+        } else {
+            match projection_ack_request_from_pb(request.into_inner()) {
+                Ok(request) => self.lock()?.acknowledge_submission_projection(request),
+                Err(error) => SubmissionAdmissionResponse {
+                    admission: None,
+                    duplicate: false,
+                    error: Some(error.into()),
+                },
+            }
+        };
+        Ok(tonic::Response::new(submission_admission_response_to_pb(
+            response,
+        )))
+    }
+
+    async fn prepare_submission_handoff(
+        &self,
+        request: tonic::Request<runtime_pb::PrepareSubmissionHandoffRequest>,
+    ) -> Result<tonic::Response<runtime_pb::SubmissionAdmissionResponse>, tonic::Status> {
+        let response = if self.sqlite_adapter.is_some() {
+            migration_blocked_submission_response()
+        } else {
+            match prepare_handoff_request_from_pb(request.into_inner()) {
+                Ok(request) => self.lock()?.prepare_submission_handoff(request),
+                Err(error) => SubmissionAdmissionResponse {
+                    admission: None,
+                    duplicate: false,
+                    error: Some(error.into()),
+                },
+            }
+        };
+        Ok(tonic::Response::new(submission_admission_response_to_pb(
+            response,
+        )))
+    }
+
+    async fn get_submission_preparation(
+        &self,
+        request: tonic::Request<runtime_pb::GetSubmissionPreparationRequest>,
+    ) -> Result<tonic::Response<runtime_pb::GetSubmissionPreparationResponse>, tonic::Status> {
+        let response = if self.sqlite_adapter.is_some() {
+            GetSubmissionPreparationResponse {
+                found: false,
+                admission: None,
+                error: Some(sqlite_submission_migration_blocked().into()),
+            }
+        } else {
+            self.lock()?
+                .get_submission_preparation(&get_preparation_request_from_pb(request.into_inner()))
+        };
+        Ok(tonic::Response::new(get_preparation_response_to_pb(
+            response,
+        )))
+    }
+
+    async fn acknowledge_submission_handoff(
+        &self,
+        request: tonic::Request<runtime_pb::AcknowledgeSubmissionHandoffRequest>,
+    ) -> Result<tonic::Response<runtime_pb::SubmissionAdmissionResponse>, tonic::Status> {
+        let response = if self.sqlite_adapter.is_some() {
+            migration_blocked_submission_response()
+        } else {
+            match handoff_ack_request_from_pb(request.into_inner()) {
+                Ok(request) => self.lock()?.acknowledge_submission_handoff(request),
+                Err(error) => SubmissionAdmissionResponse {
+                    admission: None,
+                    duplicate: false,
+                    error: Some(error.into()),
+                },
+            }
+        };
+        Ok(tonic::Response::new(submission_admission_response_to_pb(
+            response,
+        )))
+    }
+
+    async fn close_conversation_admission(
+        &self,
+        request: tonic::Request<runtime_pb::CloseConversationAdmissionRequest>,
+    ) -> Result<tonic::Response<runtime_pb::CloseConversationAdmissionResponse>, tonic::Status>
+    {
+        let response = if self.sqlite_adapter.is_some() {
+            CloseConversationAdmissionResponse {
+                disposition: ConversationAdmissionCloseDisposition::Conflict,
+                revision: 0,
+                error: Some(sqlite_submission_migration_blocked().into()),
+            }
+        } else {
+            self.lock()?
+                .close_conversation_admission(close_request_from_pb(request.into_inner()))
+        };
+        Ok(tonic::Response::new(close_response_to_pb(response)))
+    }
+
+    async fn reserve_message_identity(
+        &self,
+        request: tonic::Request<runtime_pb::ReserveMessageIdentityRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ReserveMessageIdentityResponse>, tonic::Status> {
+        let response = if self.sqlite_adapter.is_some() {
+            ReserveMessageIdentityResponse {
+                disposition: MessageIdentityDisposition::Conflict,
+                identity: None,
+                error: Some(sqlite_submission_migration_blocked().into()),
+            }
+        } else {
+            match reserve_request_from_pb(request.into_inner()) {
+                Ok(request) => self.lock()?.reserve_message_identity(request),
+                Err(error) => ReserveMessageIdentityResponse {
+                    disposition: MessageIdentityDisposition::Conflict,
+                    identity: None,
+                    error: Some(error.into()),
+                },
+            }
+        };
+        Ok(tonic::Response::new(reserve_response_to_pb(response)))
+    }
+}
+
+fn sqlite_submission_migration_blocked() -> RuntimeSidecarError {
+    migration_blocked("submission admission SQLite authority is unavailable before A2 migration")
+}
+
+fn migration_blocked_submission_response() -> SubmissionAdmissionResponse {
+    SubmissionAdmissionResponse {
+        admission: None,
+        duplicate: false,
+        error: Some(sqlite_submission_migration_blocked().into()),
+    }
 }
 
 pub fn runtime_sidecar_service_from_config(
@@ -3022,7 +4290,7 @@ pub async fn serve_runtime_sidecar_service(
     service: RuntimeSidecarGrpcService,
 ) -> Result<(), tonic::transport::Error> {
     tonic::transport::Server::builder()
-        .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
+        .add_service(runtime_sidecar_grpc_server(service))
         .serve(listen_addr)
         .await
 }
@@ -3037,7 +4305,7 @@ pub async fn serve_runtime_sidecar_tcp(
         builder = builder.tls_config(tls_config.to_server_tls_config()?)?;
     }
     builder
-        .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
+        .add_service(runtime_sidecar_grpc_server(service))
         .serve(listen_addr)
         .await?;
     Ok(())
@@ -3057,7 +4325,7 @@ pub async fn serve_runtime_sidecar_unix_socket(
     let listener = tokio::net::UnixListener::bind(socket_path)?;
     let incoming = UnixListenerStream::new(listener);
     tonic::transport::Server::builder()
-        .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
+        .add_service(runtime_sidecar_grpc_server(service))
         .serve_with_incoming(incoming)
         .await?;
     Ok(())
@@ -3137,9 +4405,17 @@ where
     F: Future<Output = ()>,
 {
     tonic::transport::Server::builder()
-        .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
+        .add_service(runtime_sidecar_grpc_server(service))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await
+}
+
+fn runtime_sidecar_grpc_server(
+    service: RuntimeSidecarGrpcService,
+) -> runtime_pb::runtime_sidecar_server::RuntimeSidecarServer<RuntimeSidecarGrpcService> {
+    runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES)
 }
 
 #[must_use]
@@ -3348,6 +4624,853 @@ fn task_status_transition_allowed(from: &str, to: &str) -> bool {
             ) | ("running", "cancelling" | "completed" | "failed")
                 | ("cancelling", "cancelled")
         )
+}
+
+fn admission_disposition(disposition: SubmissionAdmissionDisposition) -> AdmitSubmissionResponse {
+    AdmitSubmissionResponse {
+        disposition,
+        admission: None,
+        claim: None,
+        error: None,
+    }
+}
+
+fn validate_claim_timing(
+    owner: &str,
+    now_ms: i64,
+    claim_ttl_ms: i64,
+) -> Result<(), RuntimeSidecarError> {
+    if owner.trim().is_empty() || now_ms < 0 || claim_ttl_ms <= 0 {
+        return Err(write_failed("submission claim timing or owner is invalid"));
+    }
+    now_ms
+        .checked_add(claim_ttl_ms)
+        .ok_or_else(|| write_failed("submission claim expiry overflows"))?;
+    Ok(())
+}
+
+fn new_submission_claim(
+    message_id: &str,
+    owner: &str,
+    now_ms: i64,
+    claim_ttl_ms: i64,
+    revision: u64,
+) -> Result<SubmissionClaim, RuntimeSidecarError> {
+    validate_claim_timing(owner, now_ms, claim_ttl_ms)?;
+    let expires_at_ms = now_ms + claim_ttl_ms;
+    let token = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "maf.submission.claim.v1\0{message_id}\0{owner}\0{revision}\0{now_ms}"
+        ))
+    );
+    Ok(SubmissionClaim {
+        owner: owner.to_owned(),
+        token,
+        expires_at_ms,
+    })
+}
+
+fn validate_submission_claim(
+    entry: &SubmissionAdmissionEntry,
+    owner: &str,
+    token: &str,
+    now_ms: i64,
+) -> Result<(), RuntimeSidecarError> {
+    let claim = entry
+        .claim
+        .as_ref()
+        .ok_or_else(|| idempotency_conflict("submission admission has no active claim"))?;
+    if claim.owner != owner || claim.token != token || claim.expires_at_ms <= now_ms {
+        return Err(idempotency_conflict(
+            "submission claim owner, token, or expiry mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_admit_submission_request(
+    request: &AdmitSubmissionRequest,
+) -> Result<(), RuntimeSidecarError> {
+    if request.message_id.trim().is_empty()
+        || request.task_id.trim().is_empty()
+        || request.conversation_id.trim().is_empty()
+        || request.username.trim().is_empty()
+        || request.workflow_owner.trim().is_empty()
+        || request.idempotency_key.trim().is_empty()
+        || !is_sha256(&request.request_fingerprint)
+        || request.message_created_at_ms < 0
+    {
+        return Err(write_failed("submission admission identity is invalid"));
+    }
+    validate_claim_timing(
+        &request.workflow_owner,
+        request.now_ms,
+        request.claim_ttl_ms,
+    )?;
+    validate_task_record(&request.task)?;
+    if request.task.task_id != request.task_id
+        || request.task.conversation_id != request.conversation_id
+        || request.task.root_message_id != request.message_id
+        || request.task.status != "accepted"
+    {
+        return Err(write_failed(
+            "submission Task identity or initial status is invalid",
+        ));
+    }
+    validate_canonical_json_object(
+        &request.conversation_projection_json,
+        SUBMISSION_CONVERSATION_PROJECTION_MAX_BYTES,
+        &[
+            "schema",
+            "conversation_id",
+            "username",
+            "status",
+            "current_task_id",
+            "created_at",
+            "updated_at",
+            "create_if_missing",
+        ],
+        "conversation projection",
+    )?;
+    validate_canonical_json_object(
+        &request.message_projection_json,
+        SUBMISSION_MESSAGE_PROJECTION_MAX_BYTES,
+        &[
+            "schema",
+            "message_id",
+            "conversation_id",
+            "role",
+            "content",
+            "task_id",
+            "stream_status",
+            "message_created_at",
+            "message_type",
+            "metadata",
+            "updated_at",
+        ],
+        "message projection",
+    )?;
+    validate_canonical_json_object(
+        &request.continuation_json,
+        SUBMISSION_CONTINUATION_MAX_BYTES,
+        &[
+            "schema",
+            "request_fingerprint",
+            "conversation_id",
+            "message_id",
+            "task_id",
+            "owner_scope",
+            "message_content_sha256",
+            "routing_mode",
+            "requested_capability_id",
+            "model_options",
+            "bundle_revisions",
+            "execution_metadata",
+            "upload_refs",
+            "sheet_selections",
+            "mcp_binding",
+            "mcp_assignment",
+            "available_mcp_servers",
+            "pending_context",
+            "initial_no_server_eligible",
+        ],
+        "submission continuation",
+    )?;
+    let expected_projection = domain_digest(
+        b"maf.submission.projection.v1\0",
+        &[
+            &request.conversation_projection_json,
+            b"\0",
+            &request.message_projection_json,
+        ],
+    );
+    if request.projection_sha256 != expected_projection
+        || request.continuation_sha256
+            != domain_digest(
+                b"maf.submission.continuation.v1\0",
+                &[&request.continuation_json],
+            )
+    {
+        return Err(write_failed(
+            "submission projection or continuation digest mismatch",
+        ));
+    }
+    validate_projection_identity(request)?;
+    Ok(())
+}
+
+fn validate_projection_identity(
+    request: &AdmitSubmissionRequest,
+) -> Result<(), RuntimeSidecarError> {
+    let conversation: serde_json::Value =
+        serde_json::from_slice(&request.conversation_projection_json)
+            .map_err(|_| write_failed("conversation projection JSON is invalid"))?;
+    let message: serde_json::Value = serde_json::from_slice(&request.message_projection_json)
+        .map_err(|_| write_failed("message projection JSON is invalid"))?;
+    let continuation: serde_json::Value = serde_json::from_slice(&request.continuation_json)
+        .map_err(|_| write_failed("submission continuation JSON is invalid"))?;
+    let conversation_object = exact_object(
+        &conversation,
+        &[
+            "schema",
+            "conversation_id",
+            "username",
+            "status",
+            "current_task_id",
+            "created_at",
+            "updated_at",
+            "create_if_missing",
+        ],
+        "conversation projection",
+    )?;
+    let message_object = exact_object(
+        &message,
+        &[
+            "schema",
+            "message_id",
+            "conversation_id",
+            "role",
+            "content",
+            "task_id",
+            "stream_status",
+            "message_created_at",
+            "message_type",
+            "metadata",
+            "updated_at",
+        ],
+        "message projection",
+    )?;
+    let continuation_object = exact_object(
+        &continuation,
+        &[
+            "schema",
+            "request_fingerprint",
+            "conversation_id",
+            "message_id",
+            "task_id",
+            "owner_scope",
+            "message_content_sha256",
+            "routing_mode",
+            "requested_capability_id",
+            "model_options",
+            "bundle_revisions",
+            "execution_metadata",
+            "upload_refs",
+            "sheet_selections",
+            "mcp_binding",
+            "mcp_assignment",
+            "available_mcp_servers",
+            "pending_context",
+            "initial_no_server_eligible",
+        ],
+        "submission continuation",
+    )?;
+    let content = message_object["content"]
+        .as_str()
+        .ok_or_else(|| write_failed("message projection content must be a string"))?;
+    let content_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+    if conversation["schema"].as_str() != Some("maf.submission.conversation_projection.v1")
+        || conversation["status"].as_str() != Some("active")
+        || conversation["create_if_missing"].as_bool().is_none()
+        || conversation_object["created_at"].as_str().is_none()
+        || conversation_object["updated_at"].as_str().is_none()
+        || conversation["conversation_id"].as_str() != Some(request.conversation_id.as_str())
+        || conversation["username"].as_str() != Some(request.username.as_str())
+        || conversation["current_task_id"].as_str() != Some(request.task_id.as_str())
+        || message["schema"].as_str() != Some("maf.submission.message_projection.v1")
+        || message["message_id"].as_str() != Some(request.message_id.as_str())
+        || message["conversation_id"].as_str() != Some(request.conversation_id.as_str())
+        || message["task_id"].as_str() != Some(request.task_id.as_str())
+        || message["role"].as_str() != Some("user")
+        || message["stream_status"].as_str() != Some("complete")
+        || message_object["message_created_at"].as_str().is_none()
+        || non_empty_string(message_object, "message_type", "message projection").is_err()
+        || !message["metadata"].is_object()
+        || message_object["updated_at"].as_str().is_none()
+        || continuation["schema"].as_str() != Some("maf.submission.continuation.v1")
+        || continuation["request_fingerprint"].as_str()
+            != Some(request.request_fingerprint.as_str())
+        || continuation["conversation_id"].as_str() != Some(request.conversation_id.as_str())
+        || continuation["message_id"].as_str() != Some(request.message_id.as_str())
+        || continuation["task_id"].as_str() != Some(request.task_id.as_str())
+        || continuation["owner_scope"].as_str() != Some(request.username.as_str())
+        || continuation["message_content_sha256"].as_str() != Some(content_sha256.as_str())
+        || continuation["routing_mode"].as_str() != Some(request.task.routing_mode.as_str())
+        || !is_nullable_string(&continuation["requested_capability_id"])
+        || continuation["requested_capability_id"].as_str()
+            != request.task.requested_capability_id.as_deref()
+        || continuation["initial_no_server_eligible"]
+            .as_bool()
+            .is_none()
+    {
+        return Err(write_failed("submission envelope identity mismatch"));
+    }
+    validate_model_options(&continuation["model_options"])?;
+    validate_bundle_revisions(&continuation["bundle_revisions"])?;
+    validate_execution_metadata(&continuation["execution_metadata"])?;
+    validate_safe_references(continuation_object, &request.conversation_id)?;
+    reject_forbidden_keys(&message["metadata"])?;
+    Ok(())
+}
+
+fn validate_prepared_execution(bytes: &[u8], digest: &str) -> Result<(), RuntimeSidecarError> {
+    validate_canonical_json_object(
+        bytes,
+        SUBMISSION_PREPARED_EXECUTION_MAX_BYTES,
+        &[
+            "schema",
+            "task_id",
+            "conversation_id",
+            "message_id",
+            "prepared_kind",
+            "owner_scope",
+            "execution_text_source",
+            "execution_text_sha256",
+            "requested_capability_id",
+            "initial_required_tool_name",
+            "model_options",
+            "bundle_revisions",
+            "execution_metadata",
+            "preparation_receipt",
+            "upload_refs",
+            "sheet_selections",
+            "mcp_binding",
+            "mcp_assignment",
+            "available_mcp_servers",
+            "pending_context",
+            "planned_handoff_kind",
+        ],
+        "prepared execution",
+    )?;
+    if digest != domain_digest(b"maf.submission.prepared_execution.v1\0", &[bytes]) {
+        return Err(write_failed("prepared execution digest mismatch"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| write_failed("prepared execution JSON is invalid"))?;
+    let object = exact_object(
+        &value,
+        &[
+            "schema",
+            "task_id",
+            "conversation_id",
+            "message_id",
+            "prepared_kind",
+            "owner_scope",
+            "execution_text_source",
+            "execution_text_sha256",
+            "requested_capability_id",
+            "initial_required_tool_name",
+            "model_options",
+            "bundle_revisions",
+            "execution_metadata",
+            "preparation_receipt",
+            "upload_refs",
+            "sheet_selections",
+            "mcp_binding",
+            "mcp_assignment",
+            "available_mcp_servers",
+            "pending_context",
+            "planned_handoff_kind",
+        ],
+        "prepared execution",
+    )?;
+    let prepared_kind = non_empty_string(object, "prepared_kind", "prepared execution")?;
+    if value["schema"].as_str() != Some("maf.submission.prepared_execution.v1")
+        || !matches!(
+            prepared_kind,
+            "agent_run" | "interrupt" | "no_server_intent"
+        )
+        || value["planned_handoff_kind"].as_str() != Some(prepared_kind)
+        || !matches!(
+            value["execution_text_source"].as_str(),
+            Some("root_message" | "pending_context" | "memory_context")
+        )
+        || value["execution_text_sha256"]
+            .as_str()
+            .is_none_or(|sha| !is_sha256(sha))
+        || non_empty_string(object, "task_id", "prepared execution").is_err()
+        || non_empty_string(object, "conversation_id", "prepared execution").is_err()
+        || non_empty_string(object, "message_id", "prepared execution").is_err()
+        || non_empty_string(object, "owner_scope", "prepared execution").is_err()
+        || !is_nullable_string(&value["requested_capability_id"])
+        || !is_nullable_string(&value["initial_required_tool_name"])
+    {
+        return Err(write_failed("prepared execution closed values are invalid"));
+    }
+    validate_model_options(&value["model_options"])?;
+    validate_bundle_revisions(&value["bundle_revisions"])?;
+    validate_execution_metadata(&value["execution_metadata"])?;
+    validate_safe_references(
+        object,
+        value["conversation_id"].as_str().unwrap_or_default(),
+    )?;
+    let receipt = exact_object(
+        &value["preparation_receipt"],
+        &[
+            "task_id",
+            "receipt_sha256",
+            "route_decision_sha256",
+            "memory_context_sha256",
+            "selector_decision_sha256",
+        ],
+        "preparation receipt",
+    )?;
+    if receipt["task_id"].as_str() != value["task_id"].as_str()
+        || [
+            "receipt_sha256",
+            "route_decision_sha256",
+            "memory_context_sha256",
+            "selector_decision_sha256",
+        ]
+        .iter()
+        .any(|key| receipt[*key].as_str().is_none_or(|sha| !is_sha256(sha)))
+    {
+        return Err(write_failed("preparation receipt binding is invalid"));
+    }
+    Ok(())
+}
+
+fn exact_object<'a>(
+    value: &'a serde_json::Value,
+    expected_keys: &[&str],
+    label: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, RuntimeSidecarError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| write_failed(&format!("{label} must be an object")))?;
+    if object.keys().map(String::as_str).collect::<BTreeSet<_>>()
+        != expected_keys.iter().copied().collect::<BTreeSet<_>>()
+    {
+        return Err(write_failed(&format!("{label} fields are invalid")));
+    }
+    Ok(object)
+}
+
+fn non_empty_string<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    label: &str,
+) -> Result<&'a str, RuntimeSidecarError> {
+    object[key]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| write_failed(&format!("{label} {key} is invalid")))
+}
+
+fn is_nullable_string(value: &serde_json::Value) -> bool {
+    value.is_null() || value.is_string()
+}
+
+fn validate_model_options(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    let object = exact_object(
+        value,
+        &["model_edition", "reasoning_effort", "thinking_enabled"],
+        "model options",
+    )?;
+    if !is_nullable_string(&object["model_edition"])
+        || non_empty_string(object, "reasoning_effort", "model options").is_err()
+        || object["thinking_enabled"].as_bool().is_none()
+    {
+        return Err(write_failed("model options values are invalid"));
+    }
+    Ok(())
+}
+
+fn validate_bundle_revisions(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    let object = exact_object(
+        value,
+        &["skill_bundle_revision", "mcp_bundle_revision"],
+        "bundle revisions",
+    )?;
+    if !is_nullable_string(&object["skill_bundle_revision"])
+        || !is_nullable_string(&object["mcp_bundle_revision"])
+    {
+        return Err(write_failed("bundle revision values are invalid"));
+    }
+    Ok(())
+}
+
+fn validate_execution_metadata(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    let object = exact_object(
+        value,
+        &[
+            "requested_capability_alias",
+            "canonical_capability_id",
+            "mcp_dispatch_server_id",
+            "mcp_binding_mode",
+            "mcp_command",
+            "mcp_execution_mode",
+            "mcp_rollout_config_version",
+            "mcp_route_reason_code",
+            "mcp_rollout_mode",
+            "defer_task_completed_until_pending_skill_context_processed",
+            "forced_by_mcp_command",
+            "mcp_shadow_enabled",
+        ],
+        "execution metadata",
+    )?;
+    for key in [
+        "requested_capability_alias",
+        "canonical_capability_id",
+        "mcp_dispatch_server_id",
+        "mcp_binding_mode",
+        "mcp_command",
+        "mcp_execution_mode",
+        "mcp_rollout_config_version",
+        "mcp_route_reason_code",
+        "mcp_rollout_mode",
+    ] {
+        if !is_nullable_string(&object[key]) {
+            return Err(write_failed("execution metadata string value is invalid"));
+        }
+    }
+    for key in [
+        "defer_task_completed_until_pending_skill_context_processed",
+        "forced_by_mcp_command",
+        "mcp_shadow_enabled",
+    ] {
+        if !(object[key].is_null() || object[key].is_boolean()) {
+            return Err(write_failed("execution metadata boolean value is invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_safe_references(
+    object: &serde_json::Map<String, serde_json::Value>,
+    conversation_id: &str,
+) -> Result<(), RuntimeSidecarError> {
+    let uploads = object["upload_refs"]
+        .as_array()
+        .ok_or_else(|| write_failed("upload refs must be an array"))?;
+    let mut previous_upload_id: Option<&str> = None;
+    let mut selected_sheets = BTreeMap::new();
+    for upload in uploads {
+        let upload = exact_object(
+            upload,
+            &[
+                "upload_id",
+                "conversation_id",
+                "sha256",
+                "size_bytes",
+                "selected_sheet",
+            ],
+            "upload ref",
+        )?;
+        let upload_id = non_empty_string(upload, "upload_id", "upload ref")?;
+        if previous_upload_id.is_some_and(|previous| previous >= upload_id)
+            || upload["conversation_id"].as_str() != Some(conversation_id)
+            || upload["sha256"].as_str().is_none_or(|sha| !is_sha256(sha))
+            || upload["size_bytes"].as_u64().is_none()
+            || !is_nullable_string(&upload["selected_sheet"])
+            || upload["selected_sheet"].as_str().is_some_and(str::is_empty)
+        {
+            return Err(write_failed("upload refs are not closed, sorted, or bound"));
+        }
+        previous_upload_id = Some(upload_id);
+        if let Some(sheet) = upload["selected_sheet"].as_str() {
+            selected_sheets.insert(upload_id, sheet);
+        }
+    }
+    let sheets = object["sheet_selections"]
+        .as_object()
+        .ok_or_else(|| write_failed("sheet selections must be an object"))?;
+    if sheets.len() != selected_sheets.len()
+        || selected_sheets.iter().any(|(upload_id, sheet)| {
+            sheets.get(*upload_id).and_then(serde_json::Value::as_str) != Some(*sheet)
+        })
+    {
+        return Err(write_failed("sheet selections do not match upload refs"));
+    }
+    validate_mcp_binding(&object["mcp_binding"])?;
+    validate_mcp_assignment(&object["mcp_assignment"])?;
+    validate_available_mcp_servers(&object["available_mcp_servers"])?;
+    validate_pending_context(&object["pending_context"])?;
+    reject_forbidden_keys(&serde_json::Value::Object(object.clone()))?;
+    Ok(())
+}
+
+fn validate_mcp_binding(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let object = exact_object(
+        value,
+        &[
+            "server_id",
+            "server_config_version",
+            "server_security_version",
+            "display_name",
+            "command",
+            "binding_mode",
+        ],
+        "MCP binding",
+    )?;
+    if ["server_id", "display_name", "command", "binding_mode"]
+        .iter()
+        .any(|key| non_empty_string(object, key, "MCP binding").is_err())
+        || ["server_config_version", "server_security_version"]
+            .iter()
+            .any(|key| object[*key].as_u64().is_none_or(|value| value == 0))
+    {
+        return Err(write_failed("MCP binding values are invalid"));
+    }
+    Ok(())
+}
+
+fn validate_mcp_assignment(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let object = exact_object(
+        value,
+        &[
+            "execution_mode",
+            "shadow_enabled",
+            "rollout_config_version",
+            "route_reason_code",
+            "rollout_mode",
+        ],
+        "MCP assignment",
+    )?;
+    if !matches!(
+        object["execution_mode"].as_str(),
+        Some("legacy" | "user_scoped" | "unavailable")
+    ) || !matches!(
+        object["rollout_mode"].as_str(),
+        Some("off" | "shadow" | "enforce")
+    ) || object["shadow_enabled"].as_bool().is_none()
+        || non_empty_string(object, "rollout_config_version", "MCP assignment").is_err()
+        || non_empty_string(object, "route_reason_code", "MCP assignment").is_err()
+    {
+        return Err(write_failed("MCP assignment values are invalid"));
+    }
+    Ok(())
+}
+
+fn validate_available_mcp_servers(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    let servers = value
+        .as_array()
+        .ok_or_else(|| write_failed("available MCP servers must be an array"))?;
+    let mut previous_server_id: Option<&str> = None;
+    for server in servers {
+        let object = exact_object(
+            server,
+            &[
+                "server_id",
+                "display_name",
+                "routing_description",
+                "transport",
+            ],
+            "available MCP server",
+        )?;
+        let server_id = non_empty_string(object, "server_id", "available MCP server")?;
+        if previous_server_id.is_some_and(|previous| previous >= server_id)
+            || ["display_name", "transport"]
+                .iter()
+                .any(|key| non_empty_string(object, key, "available MCP server").is_err())
+            || object["routing_description"].as_str().is_none()
+        {
+            return Err(write_failed(
+                "available MCP servers are invalid or unsorted",
+            ));
+        }
+        previous_server_id = Some(server_id);
+    }
+    Ok(())
+}
+
+fn validate_pending_context(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let object = exact_object(
+        value,
+        &[
+            "context_id",
+            "capability_id",
+            "original_user_message",
+            "assistant_message",
+            "missing_requirements",
+        ],
+        "pending context",
+    )?;
+    if ["context_id", "capability_id"]
+        .iter()
+        .any(|key| non_empty_string(object, key, "pending context").is_err())
+        || object["original_user_message"].as_str().is_none()
+        || object["assistant_message"].as_str().is_none()
+    {
+        return Err(write_failed("pending context values are invalid"));
+    }
+    let requirements = object["missing_requirements"]
+        .as_array()
+        .ok_or_else(|| write_failed("pending requirements must be an array"))?;
+    let mut previous: Option<&str> = None;
+    for requirement in requirements {
+        let requirement = requirement
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| write_failed("pending requirement is invalid"))?;
+        if previous.is_some_and(|previous| previous >= requirement) {
+            return Err(write_failed(
+                "pending requirements must be sorted and unique",
+            ));
+        }
+        previous = Some(requirement);
+    }
+    Ok(())
+}
+
+fn reject_forbidden_keys(value: &serde_json::Value) -> Result<(), RuntimeSidecarError> {
+    const FORBIDDEN: &[&str] = &[
+        "credential",
+        "credentials",
+        "password",
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "file_content",
+        "base64",
+        "tool_arguments",
+        "llm_prompt",
+        "provider_response",
+    ];
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, nested) in object {
+                if FORBIDDEN.contains(&key.as_str()) {
+                    return Err(write_failed(
+                        "submission envelope contains a forbidden field",
+                    ));
+                }
+                reject_forbidden_keys(nested)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                reject_forbidden_keys(item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_canonical_json_object(
+    bytes: &[u8],
+    max_bytes: usize,
+    expected_keys: &[&str],
+    label: &str,
+) -> Result<(), RuntimeSidecarError> {
+    if bytes.is_empty() || bytes.len() > max_bytes {
+        return Err(write_failed(&format!(
+            "{label} exceeds its closed size contract"
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| write_failed(&format!("{label} JSON is invalid")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| write_failed(&format!("{label} must be an object")))?;
+    let actual = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = expected_keys.iter().copied().collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(write_failed(&format!("{label} fields are invalid")));
+    }
+    let canonical = serde_json::to_vec(&value)
+        .map_err(|_| write_failed(&format!("{label} cannot be canonicalized")))?;
+    if canonical != bytes {
+        return Err(write_failed(&format!("{label} JSON is not canonical")));
+    }
+    Ok(())
+}
+
+fn domain_digest(prefix: &[u8], parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prefix);
+    for part in parts {
+        hasher.update(part);
+    }
+    format!("{:#x}", hasher.finalize())
+        .trim_start_matches("0x")
+        .to_owned()
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_message_identity(
+    identity: &MessageIdentityRecord,
+    allow_submission: bool,
+) -> Result<(), RuntimeSidecarError> {
+    if identity.message_id.trim().is_empty()
+        || identity.conversation_id.trim().is_empty()
+        || identity.username.trim().is_empty()
+        || identity.reserved_at_ms < 0
+        || (!allow_submission && identity.identity_kind == MessageIdentityKind::Submission)
+        || identity.identity_kind == MessageIdentityKind::LegacyConflictOnly
+    {
+        return Err(write_failed(
+            "Message identity is outside the online closed contract",
+        ));
+    }
+    let task_required = matches!(
+        identity.identity_kind,
+        MessageIdentityKind::Interrupt | MessageIdentityKind::ServerInternal
+    );
+    if task_required && identity.task_id.as_deref().is_none_or(str::is_empty) {
+        return Err(write_failed("Message identity kind requires task_id"));
+    }
+    if identity.role.as_deref().is_none_or(str::is_empty)
+        || identity.message_type.as_deref().is_none_or(str::is_empty)
+        || identity.message_created_at_ms.is_none()
+    {
+        return Err(write_failed(
+            "Message immutable identity fields are missing",
+        ));
+    }
+    if identity.identity_kind == MessageIdentityKind::Interrupt {
+        if identity
+            .request_fingerprint
+            .as_deref()
+            .is_none_or(|value| !is_sha256(value))
+        {
+            return Err(write_failed(
+                "Interrupt identity requires a request fingerprint",
+            ));
+        }
+    } else if identity.request_fingerprint.is_some() {
+        return Err(write_failed(
+            "non-Interrupt reservation cannot carry a request fingerprint",
+        ));
+    }
+    Ok(())
+}
+
+fn message_identity_is_exact_replay(
+    existing: &MessageIdentityRecord,
+    candidate: &MessageIdentityRecord,
+) -> bool {
+    if existing.identity_kind == MessageIdentityKind::LegacyConflictOnly
+        || existing.identity_kind != candidate.identity_kind
+        || existing.message_id != candidate.message_id
+        || existing.conversation_id != candidate.conversation_id
+        || existing.username != candidate.username
+        || existing.role != candidate.role
+        || existing.message_type != candidate.message_type
+        || existing.task_id != candidate.task_id
+        || existing.request_fingerprint != candidate.request_fingerprint
+    {
+        return false;
+    }
+    candidate.identity_kind == MessageIdentityKind::Interrupt
+        || existing.message_created_at_ms == candidate.message_created_at_ms
 }
 
 fn validate_expected_status(

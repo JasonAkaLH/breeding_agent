@@ -1,6 +1,6 @@
 # P0 Checkpoint A：Sidecar Submission Admission 实施计划
 
-**状态：** ready；依据已批准方案 1 生成，并行计划审计与最终自审已收敛，尚未开始业务代码实施
+**状态：** implementation in progress；A1已完成并通过独立终审，下一步为A2 Sidecar SQLite canonical authority
 
 **设计 authority：** `docs/superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`
 

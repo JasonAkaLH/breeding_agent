@@ -70,6 +70,22 @@ from .models import (
     PendingSkillContext,
     SlotCollection,
     SlotEvent,
+    ConversationAdmissionCloseRequest,
+    ConversationAdmissionCloseResult,
+    MessageIdentityReservationRequest,
+    MessageIdentityReservationResult,
+    SubmissionAdmissionHandle,
+    SubmissionAdmissionPhase,
+    SubmissionAdmissionRequest,
+    SubmissionAdmissionResult,
+    SubmissionClaimRenewalRequest,
+    SubmissionClaimRequest,
+    SubmissionClaimResult,
+    SubmissionHandoffAcknowledgementRequest,
+    SubmissionPreparationLookup,
+    SubmissionPreparationRecord,
+    SubmissionPreparationRequest,
+    SubmissionProjectionAcknowledgementRequest,
     Task,
     TaskInputAttachment,
     TaskNode,
@@ -1272,6 +1288,45 @@ class AuthStoragePort(Protocol):
 
 
 @runtime_checkable
+class ConversationTaskAdmissionPort(Protocol):
+    async def admit_submission(
+        self, request: SubmissionAdmissionRequest
+    ) -> SubmissionAdmissionResult: ...
+
+    async def claim_pending_submission(
+        self, request: SubmissionClaimRequest
+    ) -> SubmissionClaimResult: ...
+
+    async def renew_submission_claim(
+        self, request: SubmissionClaimRenewalRequest
+    ) -> SubmissionAdmissionHandle: ...
+
+    async def acknowledge_submission_projection(
+        self, request: SubmissionProjectionAcknowledgementRequest
+    ) -> SubmissionAdmissionPhase: ...
+
+    async def prepare_submission_handoff(
+        self, request: SubmissionPreparationRequest
+    ) -> SubmissionPreparationRecord: ...
+
+    async def get_submission_preparation(
+        self, request: SubmissionPreparationLookup
+    ) -> SubmissionPreparationRecord | None: ...
+
+    async def acknowledge_submission_handoff(
+        self, request: SubmissionHandoffAcknowledgementRequest
+    ) -> SubmissionAdmissionPhase: ...
+
+    async def close_conversation_admission(
+        self, request: ConversationAdmissionCloseRequest
+    ) -> ConversationAdmissionCloseResult: ...
+
+    async def reserve_message_identity(
+        self, request: MessageIdentityReservationRequest
+    ) -> MessageIdentityReservationResult: ...
+
+
+@runtime_checkable
 class ConversationStoragePort(Protocol):
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
 
@@ -1644,6 +1699,7 @@ class StoragePort(
     MCPRemoteTaskStoragePort,
     MCPRolloutStoragePort,
     AuthStoragePort,
+    ConversationTaskAdmissionPort,
     ConversationStoragePort,
     PendingSkillContextStoragePort,
     MessageStoragePort,

@@ -100,6 +100,62 @@
       "idempotency_required": true
     },
     {
+      "name": "submission_admit",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "submission_pending_claim",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "submission_claim_renew",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "submission_projection_acknowledge",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "submission_handoff_prepare",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "submission_handoff_acknowledge",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "conversation_admission_close",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "message_identity_reserve",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
       "name": "task_get",
       "kind": "read",
       "enforce_failure": "read_only_degraded_error",
@@ -171,6 +227,13 @@
     },
     {
       "name": "agent_final_projection_get",
+      "kind": "read",
+      "enforce_failure": "read_only_degraded_error",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": false
+    },
+    {
+      "name": "submission_preparation_get",
       "kind": "read",
       "enforce_failure": "read_only_degraded_error",
       "python_legacy_write_fallback": false,
@@ -284,6 +347,7 @@
     "event_append_deadline_ms": 2000,
     "event_payload_bytes": 262144,
     "event_replay_deadline_ms": 10000,
+    "grpc_max_message_bytes": 146800640,
     "lease_deadline_ms": 1000,
     "max_in_flight_cap": 64,
     "max_in_flight_cpu_multiplier": 4,
@@ -294,6 +358,10 @@
     "replay_page_events": 1000,
     "shutdown_drain_ms": 30000,
     "state_transition_deadline_ms": 2000,
+    "submission_continuation_bytes": 67108864,
+    "submission_conversation_projection_bytes": 65536,
+    "submission_message_projection_bytes": 67108864,
+    "submission_prepared_execution_bytes": 131072,
     "task_submit_deadline_ms": 3000
   },
   "retry_policy": {
@@ -337,7 +405,7 @@
       "schema_hash",
       "provenance_attestation"
     ],
-    "expected_proto_hash": "maf_runtime_proto_v1_20260823_agent_only",
+    "expected_proto_hash": "maf_runtime_proto_v1_20260826_submission_admission_a1",
     "require_schema_hash_match": true,
     "require_checksum_allowlist": true,
     "require_cargo_lock_digest_allowlist": true,

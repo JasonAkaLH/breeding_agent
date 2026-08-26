@@ -22,7 +22,12 @@ from .enums import (
     RoutingMode,
     TaskStatus,
 )
-from .errors import BoundaryViolationError, ContractValidationError, CoreError
+from .errors import (
+    BoundaryViolationError,
+    ContractValidationError,
+    CoreError,
+    MessageIdentityConflictError,
+)
 from .models import (
     Artifact,
     Checkpoint,
@@ -69,6 +74,7 @@ __all__ = [
     "MailboxDeliveryStatus",
     "MailboxMessage",
     "Message",
+    "MessageIdentityConflictError",
     "MessageRole",
     "NodeStatus",
     "PendingSkillContext",

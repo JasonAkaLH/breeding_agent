@@ -12,6 +12,8 @@ from src.storage.interfaces import StoragePort as StorageInterfacesStoragePort
 
 
 EXPECTED_STORAGE_METHOD_SIGNATURES = {
+  "acknowledge_submission_handoff": "(self, request: 'SubmissionHandoffAcknowledgementRequest') -> 'SubmissionAdmissionPhase'",
+  "acknowledge_submission_projection": "(self, request: 'SubmissionProjectionAcknowledgementRequest') -> 'SubmissionAdmissionPhase'",
   "abandon_expired_mcp_remote_task_continuations": "(self, *, now: 'datetime', limit: 'int' = 100) -> 'list[MCPRemoteTaskOutbox]'",
   "abort_mcp_dispatch_resume_outbox": "(self, outbox_id: 'str', expected_revision: 'int', occurred_at: 'datetime') -> 'MCPDispatchResumeOutbox | None'",
   "accept_mcp_mrtr_answer": "(self, interrupt_id: 'str', answer: 'InterruptAnswer', occurred_at: 'datetime') -> 'MCPMRTRAnswerResult'",
@@ -22,6 +24,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "admit_mcp_remote_task_continuation": "(self, outbox_id: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', admitted_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
   "admit_mcp_tool_call": "(self, intent_id: 'str', outbox_id: 'str', expected_intent_revision: 'int', expected_outbox_revision: 'int', record: 'MCPCallRecord', occurred_at: 'datetime', *, cp7_candidate_id: 'str | None' = None, cp7_epoch_id: 'str | None' = None) -> 'bool'",
   "admit_mrtr_continuation": "(self, intent_id: 'str', outbox_id: 'str', original_call_id: 'str', sealed_state_ref: 'str', answer_id: 'str', expected_intent_revision: 'int', expected_outbox_revision: 'int', claim_owner: 'str', claim_token: 'str', payload_snapshot: 'MCPPendingActionPayloadSnapshot', record: 'MCPCallRecord', occurred_at: 'datetime', *, cp7_candidate_id: 'str | None' = None, cp7_epoch_id: 'str | None' = None) -> 'bool'",
+  "admit_submission": "(self, request: 'SubmissionAdmissionRequest') -> 'SubmissionAdmissionResult'",
   "append_event": "(self, event: 'EventRecord') -> 'EventRecord'",
   "append_mcp_audit_event": "(self, event: 'MCPAuditEvent') -> 'MCPAuditEvent'",
   "append_mcp_cp7_ready_epoch_event": "(self, event: 'MCPCP7ReadyEpochEvent') -> 'MCPCP7ReadyEpochEvent'",
@@ -50,9 +53,11 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "claim_mcp_remote_task_outbox": "(self, *, claim_owner: 'str', claim_token: 'str', now: 'datetime', lease_expires_at: 'datetime', limit: 'int' = 100) -> 'list[MCPRemoteTaskOutbox]'",
   "claim_mcp_terminal_candidate_archives": "(self, now: 'datetime', *, limit: 'int' = 1000) -> 'list[MCPTerminalCandidateLifecycle]'",
   "claim_mcp_terminal_candidate_deletions": "(self, now: 'datetime', *, limit: 'int' = 1000) -> 'list[MCPTerminalCandidateLifecycle]'",
+  "claim_pending_submission": "(self, request: 'SubmissionClaimRequest') -> 'SubmissionClaimResult'",
   "claim_user_mcp_health_attempt": "(self, attempt: 'UserMCPHealthAttempt') -> 'bool'",
   "clear_auth_user_token": "(self, username: 'str', *, api_token_hash: 'str', at: 'datetime', auth_generation_reason: 'str | None' = None) -> 'AuthUserToken | None'",
   "clear_user_mcp_tool_grants": "(self, owner_user_id: 'str', server_id: 'str') -> 'int'",
+  "close_conversation_admission": "(self, request: 'ConversationAdmissionCloseRequest') -> 'ConversationAdmissionCloseResult'",
   "commit_authoritative_mcp_terminal_result": "(self, call_id: 'str', candidate_id: 'str', occurred_at: 'datetime') -> 'MCPTerminalResultCommitResult'",
   "commit_mcp_call_terminal": "(self, call_id: 'str', candidate_id: 'str', outbox_id: 'str', expected_outbox_revision: 'int', claim_owner: 'str | None', claim_token: 'str | None', candidate_snapshot: 'MCPTerminalCandidateSnapshot', result_snapshot: 'MCPDurableResultSnapshot | None', occurred_at: 'datetime', *, remote_binding_ref: 'str | None' = None, remote_claim_owner: 'str | None' = None, remote_claim_token: 'str | None' = None, remote_expected_revision: 'int | None' = None) -> 'MCPTerminalResultCommitResult'",
   "compare_and_set_artifact_storage_ref": "(self, artifact_id: 'str', expected_storage_ref: 'str', replacement_storage_ref: 'str') -> 'bool'",
@@ -145,6 +150,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "get_pending_skill_context": "(self, context_id: 'str') -> 'PendingSkillContext | None'",
   "get_slot_collection": "(self, collection_id: 'str') -> 'SlotCollection | None'",
   "get_slot_event_by_idempotency_key": "(self, collection_id: 'str', key: 'str') -> 'SlotEvent | None'",
+  "get_submission_preparation": "(self, request: 'SubmissionPreparationLookup') -> 'SubmissionPreparationRecord | None'",
   "get_task": "(self, task_id: 'str') -> 'Task | None'",
   "get_task_node": "(self, node_id: 'str') -> 'TaskNode | None'",
   "get_user_mcp_credential": "(self, owner_user_id: 'str', server_id: 'str') -> 'UserMCPCredentialRecord | None'",
@@ -216,6 +222,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "pause_mcp_remote_task_for_input": "(self, owner_user_id: 'str', task_id: 'str', safe_remote_task_ref: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', input_requests: 'Mapping[str, Any]', conversation_id: 'str', source_message_id: 'str', updated_at: 'datetime') -> 'MCPRemoteTaskBinding | None'",
   "produce_mcp_cp7_safety_snapshot": "(self, candidate_id: 'str') -> 'MCPCP7SafetySnapshot'",
   "produce_mcp_shadow_evidence_snapshot": "(self, environment_id: 'str', deployment_id: 'str', *, window_started_at: 'datetime', window_ended_at: 'datetime', builder: 'Callable[[list[MCPShadowAuditSample], list[MCPRolloutMetricBucket]], MCPRolloutEvidenceSnapshot]') -> 'MCPRolloutEvidenceSnapshot'",
+  "prepare_submission_handoff": "(self, request: 'SubmissionPreparationRequest') -> 'SubmissionPreparationRecord'",
   "publish_mcp_remote_task": "(self, intent_id: 'str', outbox_id: 'str', call_id: 'str', safe_remote_task_ref: 'str', expected_intent_revision: 'int', expected_outbox_revision: 'int', claim_owner: 'str', claim_token: 'str', occurred_at: 'datetime') -> 'MCPRemoteTaskBinding | None'",
   "publish_mcp_remote_task_binding": "(self, owner_user_id: 'str', task_id: 'str', safe_remote_task_ref: 'str', *, published_at: 'datetime', continuation_plan: 'Mapping[str, Any] | None' = None) -> 'MCPRemoteTaskBinding | None'",
   "reclaim_mcp_dispatch_resume_outbox": "(self, outbox_id: 'str', expected_revision: 'int', now: 'datetime') -> 'MCPDispatchResumeOutbox | None'",
@@ -231,9 +238,11 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "renew_mcp_dispatch_claim": "(self, outbox_id: 'str', claim_owner: 'str', claim_token: 'str', expected_revision: 'int', now: 'datetime', lease_expires_at: 'datetime') -> 'MCPDispatchResumeOutbox | None'",
   "renew_mcp_remote_task_binding_claim": "(self, owner_user_id: 'str', task_id: 'str', safe_remote_task_ref: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', lease_expires_at: 'datetime', updated_at: 'datetime') -> 'MCPRemoteTaskBinding | None'",
   "renew_mcp_remote_task_continuation": "(self, outbox_id: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', lease_expires_at: 'datetime', node_ids: 'tuple[str, ...] | None' = None, updated_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
+  "renew_submission_claim": "(self, request: 'SubmissionClaimRenewalRequest') -> 'SubmissionAdmissionHandle'",
   "renew_user_mcp_health_attempt": "(self, attempt_id: 'str', owner_user_id: 'str', server_id: 'str', *, runner_instance_id: 'str', config_version: 'int', security_version: 'int', lease_expires_at: 'datetime', updated_at: 'datetime') -> 'bool'",
   "renew_user_mcp_scope_lease": "(self, scope_id: 'str', owner_user_id: 'str', server_id: 'str', *, gateway_instance_id: 'str', security_version: 'int', lease_expires_at: 'datetime', updated_at: 'datetime') -> 'bool'",
   "reserve_mcp_call": "(self, record: 'MCPCallRecord') -> 'bool'",
+  "reserve_message_identity": "(self, request: 'MessageIdentityReservationRequest') -> 'MessageIdentityReservationResult'",
   "resolve_user_mcp_target_intent": "(self, intent_id: 'str', occurred_at: 'datetime') -> 'MCPTargetIntentResolveResult'",
   "retry_failed_conversation_delete": "(self, conversation_id: 'str', *, runner_id: 'str', requested_at: 'datetime', started_at: 'datetime | None' = None, phase: 'str' = 'marking') -> 'Conversation | None'",
   "rotate_auth_user_token": "(self, username: 'str', *, old_api_token_hash: 'str', new_api_token_hash: 'str', at: 'datetime', auth_generation_reason: 'str | None' = None) -> 'AuthUserToken | None'",
@@ -309,7 +318,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 259)
+        self.assertEqual(len(actual), 268)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(

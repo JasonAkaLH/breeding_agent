@@ -16,6 +16,15 @@ class BoundaryViolationError(CoreError):
     """Raised when code crosses a forbidden module boundary."""
 
 
+class MessageIdentityConflictError(CoreError):
+    """Raised when a Message ID is already bound to another immutable identity."""
+
+    code = "message_id_conflict"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
 class RustCoreContractError(ContractValidationError):
     """Raised when the Rust Core contract or PyO3 facade fails closed."""
 

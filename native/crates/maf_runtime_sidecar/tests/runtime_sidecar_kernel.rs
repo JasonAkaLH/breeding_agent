@@ -1,11 +1,602 @@
 use maf_runtime_sidecar::{
-    AgentItemRecord, AgentRunRecord, AppendEventRequest, BundleRevisionResult, COMPONENT_ID,
-    CommitAgentStateRequest, CompatibilityCheck, CompatibilityCheckRequest, HealthState,
-    Idempotency, PROTOCOL_VERSION, ReadinessState, ReplayEventsRequest, RuntimeSidecarKernel,
-    RuntimeSidecarService, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
+    AcknowledgeSubmissionHandoffRequest, AcknowledgeSubmissionProjectionRequest,
+    AdmitSubmissionRequest, AgentItemRecord, AgentRunRecord, AppendEventRequest,
+    BundleRevisionResult, COMPONENT_ID, ClaimPendingSubmissionRequest,
+    CloseConversationAdmissionRequest, CommitAgentStateRequest, CompatibilityCheck,
+    CompatibilityCheckRequest, ConversationAdmissionCloseDisposition,
+    GetSubmissionPreparationRequest, HealthState, Idempotency, MessageIdentityDisposition,
+    MessageIdentityKind, MessageIdentityRecord, PROTOCOL_VERSION, PrepareSubmissionHandoffRequest,
+    ReadinessState, RenewSubmissionClaimRequest, ReplayEventsRequest,
+    ReserveMessageIdentityRequest, RuntimeSidecarKernel, RuntimeSidecarService,
+    SUBMISSION_CONTINUATION_MAX_BYTES, SUBMISSION_CONVERSATION_PROJECTION_MAX_BYTES,
+    SUBMISSION_MESSAGE_PROJECTION_MAX_BYTES, SUBMISSION_PREPARED_EXECUTION_MAX_BYTES,
+    SubmissionAdmissionDisposition, SubmissionHandoffState, SubmissionPreparationState,
+    SubmissionProjectionState, TaskNodeRecord, TaskRecord, TaskRouteAssignment,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+fn domain_digest(prefix: &[u8], parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prefix);
+    for part in parts {
+        hasher.update(part);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn mutate_continuation(
+    request: &mut AdmitSubmissionRequest,
+    mutate: impl FnOnce(&mut serde_json::Value),
+) {
+    let mut continuation: serde_json::Value =
+        serde_json::from_slice(&request.continuation_json).expect("continuation");
+    mutate(&mut continuation);
+    request.continuation_json = canonical(continuation);
+    request.continuation_sha256 = domain_digest(
+        b"maf.submission.continuation.v1\0",
+        &[&request.continuation_json],
+    );
+}
+
+#[test]
+fn submission_nested_contract_rejects_schema_type_sorting_forbidden_and_binding_drift() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    let mut schema = admission_request("schema-message", "schema-task", "schema-conv");
+    mutate_continuation(&mut schema, |value| {
+        value["schema"] = serde_json::Value::String("unknown".to_owned());
+    });
+    let mut typed = admission_request("typed-message", "typed-task", "typed-conv");
+    mutate_continuation(&mut typed, |value| {
+        value["model_options"]["thinking_enabled"] = serde_json::Value::String("false".to_owned());
+    });
+    let mut forbidden = admission_request("secret-message", "secret-task", "secret-conv");
+    mutate_continuation(&mut forbidden, |value| {
+        value["execution_metadata"]["api_key"] = serde_json::Value::String("secret".to_owned());
+    });
+    let mut unsorted = admission_request("sort-message", "sort-task", "sort-conv");
+    mutate_continuation(&mut unsorted, |value| {
+        value["upload_refs"] = serde_json::json!([
+            {"upload_id":"z","conversation_id":"sort-conv","sha256":"a".repeat(64),"size_bytes":1,"selected_sheet":null},
+            {"upload_id":"a","conversation_id":"sort-conv","sha256":"b".repeat(64),"size_bytes":1,"selected_sheet":null}
+        ]);
+    });
+    let mut binding = admission_request("bind-message", "bind-task", "bind-conv");
+    mutate_continuation(&mut binding, |value| {
+        value["message_content_sha256"] = serde_json::Value::String("0".repeat(64));
+    });
+    for request in [schema, typed, forbidden, unsorted, binding] {
+        assert_eq!(
+            kernel
+                .admit_submission(request)
+                .expect_err("nested contract drift rejected")
+                .code,
+            "runtime_store_write_failed"
+        );
+    }
+    let mut blank = admission_request("blank-message", "blank-task", "blank-conv");
+    let mut message: serde_json::Value =
+        serde_json::from_slice(&blank.message_projection_json).expect("message");
+    message["content"] = serde_json::Value::String(String::new());
+    blank.message_projection_json = canonical(message);
+    blank.projection_sha256 = domain_digest(
+        b"maf.submission.projection.v1\0",
+        &[
+            &blank.conversation_projection_json,
+            b"\0",
+            &blank.message_projection_json,
+        ],
+    );
+    mutate_continuation(&mut blank, |value| {
+        value["message_content_sha256"] =
+            serde_json::Value::String(format!("{:x}", Sha256::digest(b"")));
+    });
+    assert_eq!(
+        kernel
+            .admit_submission(blank)
+            .expect("existing blank content behavior remains accepted")
+            .disposition,
+        SubmissionAdmissionDisposition::Created
+    );
+}
+
+#[test]
+fn submission_admission_replays_before_busy_and_preserves_first_canonical_task() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    let first = kernel
+        .admit_submission(admission_request("message-1", "task-1", "conv-1"))
+        .expect("created admission");
+    assert_eq!(first.disposition, SubmissionAdmissionDisposition::Created);
+    let canonical_admission = first.admission.expect("canonical admission");
+    assert_eq!(canonical_admission.idempotency_key, "submission:message-1");
+
+    let mut replay = admission_request("message-1", "new-candidate-task", "conv-1");
+    replay.message_created_at_ms = 99;
+    let replayed = kernel.admit_submission(replay).expect("exact replay");
+    assert_eq!(
+        replayed.disposition,
+        SubmissionAdmissionDisposition::IdempotentReplay
+    );
+    assert_eq!(
+        replayed.admission.expect("replayed admission"),
+        canonical_admission
+    );
+    let mut changed_key = admission_request("message-1", "another-task", "conv-1");
+    changed_key.idempotency_key = "submission:different".to_owned();
+    assert_eq!(
+        kernel
+            .admit_submission(changed_key)
+            .expect("same Message key drift is a closed conflict")
+            .disposition,
+        SubmissionAdmissionDisposition::MessageIdConflict
+    );
+    let mut reused_key = admission_request("message-key-reuse", "task-key-reuse", "conv-key-reuse");
+    reused_key.idempotency_key = "submission:message-1".to_owned();
+    assert_eq!(
+        kernel
+            .admit_submission(reused_key)
+            .expect_err("different Message cannot reuse an admission key")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+
+    let busy = kernel
+        .admit_submission(admission_request("message-2", "task-2", "conv-1"))
+        .expect("closed busy result");
+    assert_eq!(
+        busy.disposition,
+        SubmissionAdmissionDisposition::ConversationBusy
+    );
+
+    let mut conflict = admission_request("message-1", "task-3", "conv-1");
+    conflict.request_fingerprint = "d".repeat(64);
+    let mut continuation: serde_json::Value =
+        serde_json::from_slice(&conflict.continuation_json).expect("continuation");
+    continuation["request_fingerprint"] = serde_json::Value::String("d".repeat(64));
+    conflict.continuation_json = canonical(continuation);
+    conflict.continuation_sha256 = domain_digest(
+        b"maf.submission.continuation.v1\0",
+        &[&conflict.continuation_json],
+    );
+    let conflict = kernel
+        .admit_submission(conflict)
+        .expect("closed conflict result");
+    assert_eq!(
+        conflict.disposition,
+        SubmissionAdmissionDisposition::MessageIdConflict
+    );
+
+    let closed = kernel
+        .close_conversation_admission(CloseConversationAdmissionRequest {
+            username: "owner".to_owned(),
+            conversation_id: "conv-1".to_owned(),
+            operation_id: "close-conv-1".to_owned(),
+            now_ms: 20,
+        })
+        .expect("close conversation");
+    assert_eq!(
+        closed.disposition,
+        ConversationAdmissionCloseDisposition::Closed
+    );
+    let cancelled = kernel.get_task("task-1").expect("cancelled pending Task");
+    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(cancelled.cancel_requested_at.as_deref(), Some("20"));
+    let mut message_type_conflict = admission_request("message-1", "task-4", "conv-1");
+    let mut message: serde_json::Value =
+        serde_json::from_slice(&message_type_conflict.message_projection_json).expect("message");
+    message["message_type"] = serde_json::Value::String("different".to_owned());
+    message_type_conflict.message_projection_json = canonical(message);
+    message_type_conflict.projection_sha256 = domain_digest(
+        b"maf.submission.projection.v1\0",
+        &[
+            &message_type_conflict.conversation_projection_json,
+            b"\0",
+            &message_type_conflict.message_projection_json,
+        ],
+    );
+    assert_eq!(
+        kernel
+            .admit_submission(message_type_conflict)
+            .expect("global Message conflict before unavailable guard")
+            .disposition,
+        SubmissionAdmissionDisposition::MessageIdConflict
+    );
+}
+
+#[test]
+fn submission_claim_projection_preparation_and_handoff_are_cas_closed() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    let created = kernel
+        .admit_submission(admission_request("message-flow", "task-flow", "conv-flow"))
+        .expect("created");
+    let first_claim = created.claim.expect("created claim");
+    assert_eq!(
+        kernel
+            .renew_submission_claim(RenewSubmissionClaimRequest {
+                message_id: "message-flow".to_owned(),
+                workflow_owner: "worker-b".to_owned(),
+                claim_token: first_claim.token,
+                now_ms: 20,
+                claim_ttl_ms: 100,
+            })
+            .expect_err("wrong owner rejected")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    let claimed = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "worker-b".to_owned(),
+            now_ms: 111,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .expect("take over expired claim");
+    assert!(claimed.found);
+    assert_eq!(claimed.finalization_receipt_sha256, Some("f".repeat(64)));
+    let claim = claimed.claim.expect("recovery claim");
+    let admission = claimed.admission.expect("claimed admission");
+    kernel
+        .acknowledge_submission_projection(AcknowledgeSubmissionProjectionRequest {
+            message_id: "message-flow".to_owned(),
+            workflow_owner: claim.owner.clone(),
+            claim_token: claim.token.clone(),
+            projection_sha256: admission.projection_sha256,
+            expected_state: SubmissionProjectionState::Pending,
+            now_ms: 112,
+        })
+        .expect("projection ack");
+    let prepared = prepared_execution("task-flow", "conv-flow", "message-flow");
+    let prepared_digest = domain_digest(b"maf.submission.prepared_execution.v1\0", &[&prepared]);
+    let prepared_result = kernel
+        .prepare_submission_handoff(PrepareSubmissionHandoffRequest {
+            message_id: "message-flow".to_owned(),
+            workflow_owner: claim.owner.clone(),
+            claim_token: claim.token.clone(),
+            prepared_execution_json: prepared.clone(),
+            prepared_execution_sha256: prepared_digest.clone(),
+            expected_state: SubmissionPreparationState::Pending,
+            now_ms: 113,
+        })
+        .expect("prepared");
+    assert!(!prepared_result.1);
+    assert!(
+        kernel
+            .get_submission_preparation(&GetSubmissionPreparationRequest {
+                username: "owner".to_owned(),
+                conversation_id: "conv-flow".to_owned(),
+                task_id: "task-flow".to_owned(),
+            })
+            .is_some()
+    );
+    let handoff_request = AcknowledgeSubmissionHandoffRequest {
+        message_id: "message-flow".to_owned(),
+        workflow_owner: claim.owner,
+        claim_token: claim.token,
+        prepared_execution_sha256: prepared_digest,
+        handoff_kind: "agent_run".to_owned(),
+        handoff_identity: "agent-run:task-flow".to_owned(),
+        expected_state: SubmissionHandoffState::Pending,
+        now_ms: 114,
+    };
+    let handed_off = kernel
+        .acknowledge_submission_handoff(handoff_request.clone())
+        .expect("handoff ack");
+    assert_eq!(
+        handed_off.0.handoff_state,
+        SubmissionHandoffState::HandedOff
+    );
+    assert!(
+        kernel
+            .acknowledge_submission_handoff(handoff_request.clone())
+            .expect("ack-loss exact retry with retained claim")
+            .1
+    );
+    let mut wrong_owner = handoff_request.clone();
+    wrong_owner.workflow_owner = "worker-c".to_owned();
+    assert_eq!(
+        kernel
+            .acknowledge_submission_handoff(wrong_owner)
+            .expect_err("handoff duplicate cannot bypass claim owner")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    let mut wrong_token = handoff_request.clone();
+    wrong_token.claim_token = "wrong-token".to_owned();
+    assert_eq!(
+        kernel
+            .acknowledge_submission_handoff(wrong_token)
+            .expect_err("handoff duplicate cannot bypass claim token")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    assert_eq!(
+        kernel
+            .renew_submission_claim(RenewSubmissionClaimRequest {
+                message_id: handoff_request.message_id.clone(),
+                workflow_owner: handoff_request.workflow_owner.clone(),
+                claim_token: handoff_request.claim_token.clone(),
+                now_ms: 115,
+                claim_ttl_ms: 100,
+            })
+            .expect_err("handed-off claim cannot be renewed")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    let mut expired_ack = handoff_request.clone();
+    expired_ack.now_ms = 212;
+    assert_eq!(
+        kernel
+            .acknowledge_submission_handoff(expired_ack)
+            .expect_err("expired handoff ack remains stale")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    let mut mismatched_handoff = handoff_request;
+    mismatched_handoff.handoff_identity = "agent-run:different".to_owned();
+    assert_eq!(
+        kernel
+            .acknowledge_submission_handoff(mismatched_handoff)
+            .expect_err("ack-loss retry identity drift rejected")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    let empty = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "worker-c".to_owned(),
+            now_ms: 300,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .expect("empty claim response");
+    assert!(!empty.found);
+    assert_eq!(empty.finalization_receipt_sha256, Some("f".repeat(64)));
+}
+
+#[test]
+fn message_identity_reservation_and_conversation_close_are_closed() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    let identity = MessageIdentityRecord {
+        message_id: "server-message".to_owned(),
+        conversation_id: "upload-conversation".to_owned(),
+        username: "owner".to_owned(),
+        identity_kind: MessageIdentityKind::FileVisible,
+        role: Some("assistant".to_owned()),
+        message_type: Some("file".to_owned()),
+        message_created_at_ms: Some(1),
+        task_id: None,
+        request_fingerprint: None,
+        reserved_at_ms: 2,
+    };
+    let created = kernel
+        .reserve_message_identity(ReserveMessageIdentityRequest {
+            identity: identity.clone(),
+        })
+        .expect("reserve identity");
+    assert_eq!(created.disposition, MessageIdentityDisposition::Created);
+    let exact = kernel
+        .reserve_message_identity(ReserveMessageIdentityRequest {
+            identity: identity.clone(),
+        })
+        .expect("exact reservation");
+    assert_eq!(exact.disposition, MessageIdentityDisposition::ExactReplay);
+    let closed = kernel
+        .close_conversation_admission(CloseConversationAdmissionRequest {
+            username: "owner".to_owned(),
+            conversation_id: "upload-conversation".to_owned(),
+            operation_id: "close-upload-conversation".to_owned(),
+            now_ms: 3,
+        })
+        .expect("close guard");
+    assert_eq!(
+        closed.disposition,
+        ConversationAdmissionCloseDisposition::Closed
+    );
+    let unavailable = kernel
+        .reserve_message_identity(ReserveMessageIdentityRequest {
+            identity: MessageIdentityRecord {
+                message_id: "late-message".to_owned(),
+                ..identity
+            },
+        })
+        .expect("closed result");
+    assert_eq!(
+        unavailable.disposition,
+        MessageIdentityDisposition::ConversationNotAvailable
+    );
+}
+
+#[test]
+fn submission_resource_boundaries_and_unfinalized_authority_fail_closed() {
+    assert_eq!(SUBMISSION_CONVERSATION_PROJECTION_MAX_BYTES, 64 * 1024);
+    assert_eq!(SUBMISSION_MESSAGE_PROJECTION_MAX_BYTES, 64 * 1024 * 1024);
+    assert_eq!(SUBMISSION_CONTINUATION_MAX_BYTES, 64 * 1024 * 1024);
+    assert_eq!(SUBMISSION_PREPARED_EXECUTION_MAX_BYTES, 128 * 1024);
+    let mut unfinalized = RuntimeSidecarKernel::new();
+    assert_eq!(
+        unfinalized
+            .admit_submission(admission_request("message", "task", "conversation"))
+            .expect_err("unfinalized authority blocked")
+            .code,
+        "runtime_store_migration_blocked"
+    );
+    let mut finalized =
+        RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    let mut invalid = admission_request("message", "task", "conversation");
+    invalid.continuation_sha256 = "0".repeat(64);
+    assert_eq!(
+        finalized
+            .admit_submission(invalid)
+            .expect_err("digest mismatch rejected")
+            .code,
+        "runtime_store_write_failed"
+    );
+    let mut nested_drift = admission_request("nested-message", "nested-task", "nested-conv");
+    let mut continuation: serde_json::Value =
+        serde_json::from_slice(&nested_drift.continuation_json).expect("continuation");
+    continuation["owner_scope"] = serde_json::Value::String("other-owner".to_owned());
+    nested_drift.continuation_json = canonical(continuation);
+    nested_drift.continuation_sha256 = domain_digest(
+        b"maf.submission.continuation.v1\0",
+        &[&nested_drift.continuation_json],
+    );
+    assert_eq!(
+        finalized
+            .admit_submission(nested_drift)
+            .expect_err("nested owner binding rejected")
+            .code,
+        "runtime_store_write_failed"
+    );
+}
+
+fn canonical(value: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&value).expect("canonical JSON")
+}
+
+fn admission_request(
+    message_id: &str,
+    task_id: &str,
+    conversation_id: &str,
+) -> AdmitSubmissionRequest {
+    let fingerprint = "a".repeat(64);
+    let content = "hello";
+    let conversation = canonical(serde_json::json!({
+        "conversation_id": conversation_id,
+        "create_if_missing": true,
+        "created_at": "2026-08-26T00:00:00Z",
+        "current_task_id": task_id,
+        "schema": "maf.submission.conversation_projection.v1",
+        "status": "active",
+        "updated_at": "2026-08-26T00:00:00Z",
+        "username": "owner",
+    }));
+    let message = canonical(serde_json::json!({
+        "content": content,
+        "conversation_id": conversation_id,
+        "message_created_at": "2026-08-26T00:00:00Z",
+        "message_id": message_id,
+        "message_type": "text",
+        "metadata": {},
+        "role": "user",
+        "schema": "maf.submission.message_projection.v1",
+        "stream_status": "complete",
+        "task_id": task_id,
+        "updated_at": "2026-08-26T00:00:00Z",
+    }));
+    let continuation = canonical(serde_json::json!({
+        "available_mcp_servers": [],
+        "bundle_revisions": {"mcp_bundle_revision": null, "skill_bundle_revision": null},
+        "conversation_id": conversation_id,
+        "execution_metadata": {
+            "requested_capability_alias": null,
+            "canonical_capability_id": null,
+            "mcp_dispatch_server_id": null,
+            "mcp_binding_mode": null,
+            "mcp_command": null,
+            "mcp_execution_mode": null,
+            "mcp_rollout_config_version": null,
+            "mcp_route_reason_code": null,
+            "mcp_rollout_mode": null,
+            "defer_task_completed_until_pending_skill_context_processed": null,
+            "forced_by_mcp_command": null,
+            "mcp_shadow_enabled": null
+        },
+        "initial_no_server_eligible": false,
+        "mcp_assignment": null,
+        "mcp_binding": null,
+        "message_content_sha256": format!("{:x}", Sha256::digest(content.as_bytes())),
+        "message_id": message_id,
+        "model_options": {"model_edition": null, "reasoning_effort": "medium", "thinking_enabled": false},
+        "owner_scope": "owner",
+        "pending_context": null,
+        "request_fingerprint": fingerprint,
+        "requested_capability_id": null,
+        "routing_mode": "auto",
+        "schema": "maf.submission.continuation.v1",
+        "sheet_selections": {},
+        "task_id": task_id,
+        "upload_refs": [],
+    }));
+    AdmitSubmissionRequest {
+        message_id: message_id.to_owned(),
+        task_id: task_id.to_owned(),
+        conversation_id: conversation_id.to_owned(),
+        username: "owner".to_owned(),
+        request_fingerprint: "a".repeat(64),
+        projection_sha256: domain_digest(
+            b"maf.submission.projection.v1\0",
+            &[&conversation, b"\0", &message],
+        ),
+        continuation_sha256: domain_digest(b"maf.submission.continuation.v1\0", &[&continuation]),
+        conversation_projection_json: conversation,
+        message_projection_json: message,
+        continuation_json: continuation,
+        message_created_at_ms: 10,
+        workflow_owner: "worker-a".to_owned(),
+        now_ms: 10,
+        claim_ttl_ms: 100,
+        task: TaskRecord {
+            task_id: task_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            root_message_id: message_id.to_owned(),
+            status: "accepted".to_owned(),
+            routing_mode: "auto".to_owned(),
+            requested_capability_id: None,
+            summary: None,
+            cancel_requested_at: None,
+            created_at: Some("2026-08-26T00:00:00Z".to_owned()),
+            updated_at: None,
+            assignment: None,
+        },
+        idempotency_key: format!("submission:{message_id}"),
+    }
+}
+
+fn prepared_execution(task_id: &str, conversation_id: &str, message_id: &str) -> Vec<u8> {
+    canonical(serde_json::json!({
+        "available_mcp_servers": [],
+        "bundle_revisions": {"mcp_bundle_revision": null, "skill_bundle_revision": null},
+        "conversation_id": conversation_id,
+        "execution_metadata": {
+            "requested_capability_alias": null,
+            "canonical_capability_id": null,
+            "mcp_dispatch_server_id": null,
+            "mcp_binding_mode": null,
+            "mcp_command": null,
+            "mcp_execution_mode": null,
+            "mcp_rollout_config_version": null,
+            "mcp_route_reason_code": null,
+            "mcp_rollout_mode": null,
+            "defer_task_completed_until_pending_skill_context_processed": null,
+            "forced_by_mcp_command": null,
+            "mcp_shadow_enabled": null
+        },
+        "execution_text_sha256": "c".repeat(64),
+        "execution_text_source": "root_message",
+        "initial_required_tool_name": null,
+        "mcp_assignment": null,
+        "mcp_binding": null,
+        "message_id": message_id,
+        "model_options": {"model_edition": null, "reasoning_effort": "medium", "thinking_enabled": false},
+        "owner_scope": "owner",
+        "pending_context": null,
+        "planned_handoff_kind": "agent_run",
+        "preparation_receipt": {
+            "task_id": task_id,
+            "receipt_sha256": "d".repeat(64),
+            "route_decision_sha256": "e".repeat(64),
+            "memory_context_sha256": "f".repeat(64),
+            "selector_decision_sha256": "0".repeat(64)
+        },
+        "prepared_kind": "agent_run",
+        "requested_capability_id": null,
+        "schema": "maf.submission.prepared_execution.v1",
+        "sheet_selections": {},
+        "task_id": task_id,
+        "upload_refs": [],
+    }))
+}
 
 #[derive(Deserialize)]
 struct CanonicalVector {
