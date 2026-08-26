@@ -22,7 +22,7 @@ P0～P8 渐进式架构清理已经结束。本轮不是继续清理架构，也
 采用已批准的方案 A：不建设统一“Consistency Layer”，不依赖 API 进程内锁，也不改变 lease token 轮换规则。四个问题按三个可独立回滚的手术式检查点修复：
 
 - Checkpoint A：一次原子会话准入，同时关闭 Message 主键越权覆盖和会话双活 Task。
-- Checkpoint B：lease handle 内的短临界区，在每次 ownership-bound 持久化前取得当前 token/revision。
+- Checkpoint B：lease handle 内的短临界区，在每次 ownership-bound 持久化前取得当前 token，并在锁内读取最新 AgentRun revision。
 - Checkpoint C：remote status 为终态主权，只有 completed 才能进入成功结果解析。
 
 ## 2. 目标与非目标
@@ -144,14 +144,14 @@ Runtime 在构造 Message/Task 后只调用一次原子准入：
 
 ```text
 heartbeat: lock -> renew(old token) -> handle.current = renewed -> unlock
-commit:    lock -> snapshot current token/revision -> DB assert/commit -> unlock
+commit:    lock -> snapshot current token -> load latest Run revision -> DB assert/commit -> unlock
 ```
 
 因此同一 worker 内不会发生“提交读到旧 token，同时 heartbeat 已把数据库 token 轮换为新值”的交叉。锁不替代数据库 CAS；另一个进程抢 lease 时，数据库仍按 owner/token/expiry 拒绝旧 worker。
 
 ### 5.3 Capability 调用接入点
 
-`AgentRunner._execute_records` 把当前 `AgentLeaseHandle` 沿既有 call invoker 链传给 `AgentCapabilityInvoker`。Agent 专用 invocation request 保留 task/call/model 等不可变字段，但每个 ownership-bound seam 都在 handle 锁内以 `handle.current` 重建 `expected_claim_token` 和 `expected_revision`：
+`AgentRunner._execute_records` 把当前 `AgentLeaseHandle` 沿既有 call invoker 链传给 `AgentCapabilityInvoker`。Agent 专用 invocation request 保留 task/call/model 等不可变字段，但每个 ownership-bound seam 都在 handle 锁内取得 `handle.current.token`，再从 Agent repository 读取与该 token 一致的最新 Run revision，重建 `expected_claim_token` 和 `expected_revision`。不得把 `AgentTaskLease.revision` 直接当作最新 Run revision，因为 sample/outcome commit 也会推进 Run revision：
 
 1. executor 前 ownership assert；
 2. TaskNode start/route rejection commit；

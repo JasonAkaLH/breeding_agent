@@ -221,6 +221,15 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             claim_token="claim-1",
             revision=3,
         )
+
+        class Runs:
+            async def get_run(self, _run_id: str) -> AgentRun:
+                return replace(
+                    run,
+                    claim_token=handle.current.token,
+                    revision=handle.current.revision,
+                )
+
         call_item = AgentItem(
             item_id="call-item-1",
             run_id=run.run_id,
@@ -233,7 +242,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         invoker = AgentCapabilityInvoker(
             invocation_service=kernel,
-            runs=object(),
+            runs=Runs(),
             task_loader=load_task,
             node_loader=load_node,
             request_metadata_loader=lambda _run: {},

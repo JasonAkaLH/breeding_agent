@@ -238,10 +238,13 @@ class AgentCapabilityInvoker:
             assert lease_handle is not None
 
             async def run_with_current(lease):
+                latest = await self._runs.get_run(lease.run_id)
+                if latest is None or latest.claim_token != lease.token:
+                    raise AgentStorageConflict("agent_task_lease_lost")
                 return await operation(
                     replace(
                         request,
-                        expected_revision=lease.revision,
+                        expected_revision=latest.revision,
                         expected_claim_token=lease.token,
                     )
                 )
