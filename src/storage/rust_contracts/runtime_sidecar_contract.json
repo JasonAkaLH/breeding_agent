@@ -1,7 +1,7 @@
 {
   "component": "maf_runtime_sidecar",
   "protocol_version": "maf.runtime.v1",
-  "schema_hash": "maf_runtime_v1_schema_20260823_agent_only",
+  "schema_hash": "maf_runtime_v1_schema_20260826_submission_admission_a2",
   "error_code_table_hash": "maf_runtime_error_table_v1_idempotency_conflict_20260812",
   "supported_features": [
     "runtime_store",
@@ -9,7 +9,8 @@
     "task_dispatcher",
     "artifact_metadata",
     "task_read",
-    "agent_state"
+    "agent_state",
+    "submission_admission"
   ],
   "modes": [
     "off",
@@ -360,6 +361,9 @@
     "state_transition_deadline_ms": 2000,
     "submission_continuation_bytes": 67108864,
     "submission_conversation_projection_bytes": 65536,
+    "submission_import_page_rows": 1000,
+    "submission_import_record_bytes": 65536,
+    "submission_import_stdin_bytes": 1073741824,
     "submission_message_projection_bytes": 67108864,
     "submission_prepared_execution_bytes": 131072,
     "task_submit_deadline_ms": 3000

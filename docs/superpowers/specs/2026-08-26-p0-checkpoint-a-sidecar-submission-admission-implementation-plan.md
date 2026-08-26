@@ -1,6 +1,6 @@
 # P0 Checkpoint A：Sidecar Submission Admission 实施计划
 
-**状态：** implementation in progress；A1已完成并通过独立终审，下一步为A2 Sidecar SQLite canonical authority
+**状态：** implementation in progress；A1、A2已完成并通过独立终审，下一步为A3 Python client与SQL off/shadow/enforce projection
 
 **设计 authority：** `docs/superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`
 
@@ -134,12 +134,12 @@ cd native && cargo fmt --all -- --check
 - `submission_message_identities`
 - `submission_admissions`
 
-不新增通用 receipt/job 表；singleton只记录`uninitialized/finalized`与finalization receipt digest，claim/phase/投影 bytes 都属于 admission row。
+不新增通用 receipt/job 表；singleton只记录`uninitialized/finalized`、finalization receipt digest/首次时间及strict canonical首次receipt blob，后者仅用于同digest crash exact replay；claim/phase/投影 bytes 都属于 admission row。
 
 ### 5.2 红测
 
 - fresh/reopen schema 具有 exact columns、indexes、CHECK；已有 Task 行升级不丢失。
-- uninitialized meta拒绝online admission；isolated finalize-empty后才允许created；finalized后旧SubmitTask不能创建无admission/import evidence的新ACCEPTED Task。
+- uninitialized meta拒绝online admission；isolated finalize-empty后才允许created；same digest finalize返回并复验首次stored receipt/time、different digest conflict；finalized后旧SubmitTask不能创建无admission/import evidence的新ACCEPTED Task。
 - 两独立 connection 同 Conversation 不同 ID：恰好一 created、一 busy。
 - 两独立 connection 同一请求：恰好一 created、一 replay。
 - fault injector 在 guard、identity、admission、Task、active pointer、claim 每个写点失败：四类 canonical state 全 rollback。
@@ -163,7 +163,7 @@ cd native && cargo fmt --all -- --check
 4. 实现identity reservation；所有online kind同transaction create/validate active Conversation guard，file_visible允许null task且不保存content，interrupt保存fingerprint与canonical Message timestamp。
 5. 实现claim/renew/prepare/get/ack与稳定`(admission.created_at_ms,message_id)`pending scan；prepared first-write-wins，closed admission永不返回；replay只向同workflow owner返回未过期token。
 6. close在同transaction关闭pending admission/fence claim；accepted Task用既有accepted→cancelling→cancelled两步validator但单commit；相同owner closed retry exact，不依赖随机SQL runner ID。
-7. 提供adapter offline import/finalize/finalize-empty primitive；确定性receipt exact replay，A6只包装stdin binary/operator/evidence。
+7. 提供adapter offline import/finalize/finalize-empty primitive；输入含strict 12-key canonical subject，按批准domain公式在write transaction前复验subject digest，并在同一IMMEDIATE transaction内重算三类PK/canonical inventory后才finalize；确定性receipt exact replay，A6只包装stdin binary/operator/evidence。
 8. 在Task update validator加入上述initial-no-server窄transition，并用prepared admission row校验资格；不增加通用assignment patch。
 9. 将 guard release 插入两条 Task canonical writer transaction。
 10. 替换A1 SQLite-backed migration-blocked handlers并复验kernel/SQLite parity；此时才更新SCHEMA_HASH、supported feature和checked contract，error table未变则hash不变。

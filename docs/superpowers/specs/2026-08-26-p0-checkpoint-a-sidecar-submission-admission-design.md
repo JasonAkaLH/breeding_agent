@@ -228,6 +228,7 @@ Message 的不可变 identity 是 `(message_id, conversation_id, role, task_id, 
 | `state` | `uninitialized` / `finalized` |
 | `finalization_receipt_sha256` | finalized 时必填的 64-lower-hex digest |
 | `finalized_at_ms` | finalized 时必填 |
+| `finalization_receipt_json` | finalized 时必填的strict canonical首次receipt；只用于同digest崩溃重放，不是通用receipt表 |
 
 `AdmitSubmission` 和 finalized 后的新 ACCEPTED `SubmitTask` 必须读取该 row。未 finalized 时在线 admission fail closed；finalized 后，旧 `SubmitTask` 不能创建没有 admission/import evidence 的新 ACCEPTED Task。fresh 空库也必须通过离线 finalize-empty，不能把“没有历史数据”当隐式授权。
 
@@ -488,13 +489,15 @@ Sidecar SQLite 在现有 schema bootstrap 中增加三张业务表和一个 sing
 
 历史导入不增加在线 bypass RPC。仓库提供专用离线 Rust adapter/import binary，由closed Python operator通过stdin传入canonical inventory，在Sidecar文件的单一`BEGIN IMMEDIATE`/独占writer fence内导入并finalize singleton。在线gRPC service不暴露import/finalize，旧`SubmitTask`也不能用magic idempotency key冒充迁移。
 
-finalization receipt由source identity/snapshot/fence、三类inventory count+PK+canonical digest及Sidecar schema/proto/feature hash的canonical subject确定性计算，不含时间。importer commit把该digest、首次`finalized_at_ms`与destination digests一起保存；若外部HMAC evidence/receipt写入前崩溃，同digest重跑只返回首次stored receipt/timestamp，operator在复验同一fenced source后补发evidence。不同digest一律conflict。跨进程commit后不虚称rollback。
+finalization receipt由source identity/snapshot/fence、三类inventory count+PK+canonical digest及Sidecar schema/proto/feature hash的canonical subject确定性计算，不含时间。importer commit把该digest、首次`finalized_at_ms`与含destination digests的strict canonical首次receipt一起保存在singleton；若外部HMAC evidence/receipt写入前崩溃，同digest重跑只返回并复验该首次stored receipt/timestamp，operator在复验同一fenced source后补发evidence。不同digest一律conflict。跨进程commit后不虚称rollback。
 
 离线stdin使用单个strict canonical JSON `maf.submission_authority.import_request.v1`，exact top-level keys为：`schema, source_backend, source_identity_sha256, snapshot_boundary_sha256, writer_fence_sha256, report_sha256, schema_hash, proto_hash, supported_features_sha256, inventories, conversations, message_identities, finalization_receipt_sha256`。`inventories` exact含`conversations, message_identities, active_tasks`三项，每项exact为`count, pk_sha256, canonical_sha256, finalize_empty`。Conversation record exact为`conversation_id, username, status, active_task_id, updated_at_ms`；legacy Message identity record exact为`message_id, conversation_id, username, identity_kind, role, message_type, message_created_at_ms, task_id, request_fingerprint, reserved_at_ms`。active Task不由stdin覆盖，importer从现有Sidecar Task表按report digest重读复验。
 
 stdout receipt使用`maf.submission_authority.import_receipt.v1`，exact keys为：`schema, result, finalization_receipt_sha256, finalized_at_ms, source_identity_sha256, snapshot_boundary_sha256, writer_fence_sha256, destination_schema_sha256, inventories`；`result`只允许`finalized|exact_replay`。
 
 finalization subject是独立的strict canonical JSON object，exact top-level keys为：`schema, source_backend, source_identity_sha256, snapshot_boundary_sha256, writer_fence_sha256, report_sha256, schema_hash, proto_hash, supported_features_sha256, conversation_inventory, message_identity_inventory, active_task_inventory`。三个`*_inventory`字段各自exact为`count, pk_sha256, canonical_sha256, finalize_empty`；subject不含源record arrays、时间或`finalization_receipt_sha256`。digest公式固定为`sha256("maf.submission_authority.finalization.v1\0" || canonical_subject_json)`。Rust importer与Python operator必须共享同一组request→subject canonical bytes→digest→receipt test vector，禁止各自重建一套隐式字段选择规则。
+
+三类inventory digest也使用唯一closed公式。`pk_sha256 = sha256("maf.submission_authority.inventory.pk.v1\0" || inventory_name || "\0" || canonical(sorted_pk_string_array))`；`canonical_sha256 = sha256("maf.submission_authority.inventory.rows.v1\0" || inventory_name || "\0" || canonical(records_sorted_by_pk))`。`inventory_name`只允许`conversations|message_identities|active_tasks`。Conversation与legacy Message identity row使用上文exact字段；active Task row exact keys为`task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, summary, cancel_requested_at, created_at, updated_at, assignment`，`assignment`为null或现有TaskRouteAssignment exact keys。Rust primitive接收strict canonical `finalization_subject_json`，在打开write transaction前校验schema/size/三类source records与subject digest；在同一IMMEDIATE transaction内重读actual active Task、计算destination三类digest并与subject/receipt逐字一致后才finalize。A6 operator只负责生成同一subject与外层evidence，不能替Rust补做写后校验。
 
 operator按每页1000行流式生成/校验，单record最多64KiB，stdin总量最多1GiB，总row count必须是非负u32且与inventories精确一致；这些值进入RuntimeSidecar contract resource limits。超限在打开write transaction前拒绝，stdout/stderr不含username、Message ID、DSN、路径或key。
 

@@ -6,7 +6,7 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260823_agent_only";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260826_submission_admission_a2";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
 pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260826_submission_admission_a1";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
@@ -15,6 +15,7 @@ pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
 pub const FEATURE_ARTIFACT_METADATA: &str = "artifact_metadata";
 pub const FEATURE_TASK_READ: &str = "task_read";
 pub const FEATURE_AGENT_STATE: &str = "agent_state";
+pub const FEATURE_SUBMISSION_ADMISSION: &str = "submission_admission";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
 pub const MAX_IN_FLIGHT_CPU_MULTIPLIER: u64 = 4;
@@ -700,6 +701,7 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             FEATURE_ARTIFACT_METADATA.to_owned(),
             FEATURE_TASK_READ.to_owned(),
             FEATURE_AGENT_STATE.to_owned(),
+            FEATURE_SUBMISSION_ADMISSION.to_owned(),
         ],
         modes: vec!["off".to_owned(), "shadow".to_owned(), "enforce".to_owned()],
         mode_env: BTreeMap::from([
@@ -744,6 +746,12 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             ),
             ("submission_continuation_bytes".to_owned(), 64 * 1024 * 1024),
             ("submission_prepared_execution_bytes".to_owned(), 128 * 1024),
+            ("submission_import_page_rows".to_owned(), 1_000),
+            ("submission_import_record_bytes".to_owned(), 64 * 1024),
+            (
+                "submission_import_stdin_bytes".to_owned(),
+                1024 * 1024 * 1024,
+            ),
             ("grpc_max_message_bytes".to_owned(), 140 * 1024 * 1024),
         ]),
         retry_policy: retry_policy(),

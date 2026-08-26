@@ -849,6 +849,54 @@ fn agent_state_commit_is_atomic_cas_idempotent_and_ordered() {
     );
 }
 
+#[test]
+fn finalized_kernel_commit_agent_state_rejects_unowned_new_accepted_task() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    kernel
+        .commit_agent_state(CommitAgentStateRequest {
+            operation: "create_run".to_owned(),
+            run: Some(agent_run(0)),
+            items: Vec::new(),
+            expected_revision: 0,
+            expected_claim_token: None,
+            idempotency: Some(Idempotency {
+                key: "finalized-agent-create".to_owned(),
+                owner: "test".to_owned(),
+                deadline_ms: 0,
+            }),
+            task_nodes: Vec::new(),
+            artifacts: Vec::new(),
+            final_projection_json: None,
+            task: None,
+        })
+        .expect("create AgentRun");
+    let mut task = task_record("accepted");
+    task.task_id = "task-agent".to_owned();
+    task.conversation_id = "conv-agent".to_owned();
+    task.root_message_id = "message-agent".to_owned();
+    let error = kernel
+        .commit_agent_state(CommitAgentStateRequest {
+            operation: "commit_outcome".to_owned(),
+            run: Some(agent_run(1)),
+            items: Vec::new(),
+            expected_revision: 0,
+            expected_claim_token: None,
+            idempotency: Some(Idempotency {
+                key: "finalized-agent-outcome".to_owned(),
+                owner: "test".to_owned(),
+                deadline_ms: 0,
+            }),
+            task_nodes: Vec::new(),
+            artifacts: Vec::new(),
+            final_projection_json: None,
+            task: Some(task),
+        })
+        .expect_err("finalized authority rejects Task without admission/import evidence");
+    assert_eq!(error.code, "runtime_store_migration_blocked");
+    assert_eq!(kernel.get_agent_run("run-agent").unwrap().revision, 0);
+    assert_eq!(kernel.get_task("task-agent"), None);
+}
+
 fn task_node(status: &str) -> TaskNodeRecord {
     TaskNodeRecord {
         node_id: "node-authority".to_owned(),

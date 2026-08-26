@@ -568,6 +568,7 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         contract = load_runtime_sidecar_contract()
         self.assertIn("task_read", contract["supported_features"])
         self.assertIn("agent_state", contract["supported_features"])
+        self.assertIn("submission_admission", contract["supported_features"])
         task_get = next(operation for operation in contract["operations"] if operation["name"] == "task_get")
         self.assertEqual(task_get["kind"], "read")
         self.assertFalse(task_get["idempotency_required"])
@@ -583,7 +584,7 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertFalse(conflict["retriable"])
         self.assertEqual(
             contract["schema_hash"],
-            "maf_runtime_v1_schema_20260823_agent_only",
+            "maf_runtime_v1_schema_20260826_submission_admission_a2",
         )
         self.assertEqual(
             contract["artifact_policy"]["expected_proto_hash"],

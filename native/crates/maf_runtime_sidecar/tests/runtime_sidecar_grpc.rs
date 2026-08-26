@@ -19,16 +19,82 @@ use tonic::Request;
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn sqlite_empty_finalization(finalized_at_ms: i64) -> (String, Vec<u8>, Vec<u8>) {
+    let inventory = |kind: &str| {
+        let pk = serde_json::to_vec(&Vec::<String>::new()).unwrap();
+        let records = serde_json::to_vec(&Vec::<serde_json::Value>::new()).unwrap();
+        let digest = |suffix: &str, bytes: &[u8]| {
+            let mut hasher = Sha256::new();
+            hasher.update(
+                format!("maf.submission_authority.inventory.{kind}.{suffix}.v1\0").as_bytes(),
+            );
+            hasher.update(bytes);
+            format!("{:x}", hasher.finalize())
+        };
+        serde_json::json!({
+            "canonical_sha256": digest("records", &records),
+            "count": 0,
+            "finalize_empty": true,
+            "pk_sha256": digest("pk", &pk),
+        })
+    };
+    let features = serde_json::to_vec(&maf_runtime_sidecar::supported_features()).unwrap();
+    let subject = serde_json::to_vec(&serde_json::json!({
+        "active_task_inventory": inventory("active_tasks"),
+        "conversation_inventory": inventory("conversations"),
+        "message_identity_inventory": inventory("message_identities"),
+        "proto_hash": maf_runtime_store::PROTO_HASH,
+        "report_sha256": "1".repeat(64),
+        "schema": "maf.submission_authority.finalization_subject.v1",
+        "schema_hash": maf_runtime_store::SCHEMA_HASH,
+        "snapshot_boundary_sha256": "2".repeat(64),
+        "source_backend": "sqlite",
+        "source_identity_sha256": "3".repeat(64),
+        "supported_features_sha256": format!("{:x}", Sha256::digest(features)),
+        "writer_fence_sha256": "4".repeat(64),
+    }))
+    .unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"maf.submission_authority.finalization.v1\0");
+    hasher.update(&subject);
+    let digest = format!("{:x}", hasher.finalize());
+    let subject_value: serde_json::Value = serde_json::from_slice(&subject).unwrap();
+    let receipt = serde_json::to_vec(&serde_json::json!({
+        "destination_schema_sha256": "c".repeat(64),
+        "finalization_receipt_sha256": digest,
+        "finalized_at_ms": finalized_at_ms,
+        "inventories": {
+            "active_tasks": subject_value["active_task_inventory"],
+            "conversations": subject_value["conversation_inventory"],
+            "message_identities": subject_value["message_identity_inventory"],
+        },
+        "result": "finalized",
+        "schema": "maf.submission_authority.import_receipt.v1",
+        "snapshot_boundary_sha256": "2".repeat(64),
+        "source_identity_sha256": "3".repeat(64),
+        "writer_fence_sha256": "4".repeat(64),
+    }))
+    .expect("canonical finalization receipt");
+    (digest, subject, receipt)
+}
+
 fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
     let target_content_bytes = 49 * 1024 * 1024;
     let mut content = "\"\\中".to_owned();
     content.push_str(&"a".repeat(target_content_bytes - content.len()));
+    pb_admit_request("large", &content)
+}
+
+fn pb_admit_request(prefix: &str, content: &str) -> runtime_pb::AdmitSubmissionRequest {
+    let conversation_id = format!("{prefix}-conversation");
+    let task_id = format!("{prefix}-task");
+    let message_id = format!("{prefix}-message");
     let canonical = |value: serde_json::Value| serde_json::to_vec(&value).expect("canonical JSON");
     let conversation = canonical(serde_json::json!({
-        "conversation_id": "large-conversation",
+        "conversation_id": conversation_id,
         "create_if_missing": true,
         "created_at": "2026-08-26T00:00:00Z",
-        "current_task_id": "large-task",
+        "current_task_id": task_id,
         "schema": "maf.submission.conversation_projection.v1",
         "status": "active",
         "updated_at": "2026-08-26T00:00:00Z",
@@ -36,21 +102,21 @@ fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
     }));
     let message = canonical(serde_json::json!({
         "content": &content,
-        "conversation_id": "large-conversation",
+        "conversation_id": conversation_id,
         "message_created_at": "2026-08-26T00:00:00Z",
-        "message_id": "large-message",
+        "message_id": message_id,
         "message_type": "text",
         "metadata": {},
         "role": "user",
         "schema": "maf.submission.message_projection.v1",
         "stream_status": "complete",
-        "task_id": "large-task",
+        "task_id": task_id,
         "updated_at": "2026-08-26T00:00:00Z"
     }));
     let continuation = canonical(serde_json::json!({
         "available_mcp_servers": [],
         "bundle_revisions": {"mcp_bundle_revision": null, "skill_bundle_revision": null},
-        "conversation_id": "large-conversation",
+        "conversation_id": conversation_id,
         "execution_metadata": {
             "requested_capability_alias": null,
             "canonical_capability_id": null,
@@ -69,7 +135,7 @@ fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
         "mcp_assignment": null,
         "mcp_binding": null,
         "message_content_sha256": format!("{:x}", Sha256::digest(content.as_bytes())),
-        "message_id": "large-message",
+        "message_id": message_id,
         "model_options": {"model_edition": null, "reasoning_effort": "medium", "thinking_enabled": false},
         "owner_scope": "owner",
         "pending_context": null,
@@ -78,7 +144,7 @@ fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
         "routing_mode": "auto",
         "schema": "maf.submission.continuation.v1",
         "sheet_selections": {},
-        "task_id": "large-task",
+        "task_id": task_id,
         "upload_refs": []
     }));
     let mut projection_hasher = Sha256::new();
@@ -90,9 +156,9 @@ fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
     continuation_hasher.update(b"maf.submission.continuation.v1\0");
     continuation_hasher.update(&continuation);
     runtime_pb::AdmitSubmissionRequest {
-        message_id: "large-message".to_owned(),
-        task_id: "large-task".to_owned(),
-        conversation_id: "large-conversation".to_owned(),
+        message_id: message_id.clone(),
+        task_id: task_id.clone(),
+        conversation_id: conversation_id.clone(),
         username: "owner".to_owned(),
         request_fingerprint: "a".repeat(64),
         conversation_projection_json: conversation,
@@ -101,13 +167,13 @@ fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
         continuation_json: continuation,
         continuation_sha256: format!("{:x}", continuation_hasher.finalize()),
         message_created_at_ms: 1,
-        workflow_owner: "large-worker".to_owned(),
+        workflow_owner: format!("{prefix}-worker"),
         now_ms: 1,
         claim_ttl_ms: 1_000,
         task: Some(runtime_pb::TaskRecord {
-            task_id: "large-task".to_owned(),
-            conversation_id: "large-conversation".to_owned(),
-            root_message_id: "large-message".to_owned(),
+            task_id,
+            conversation_id,
+            root_message_id: message_id.clone(),
             status: "accepted".to_owned(),
             routing_mode: "auto".to_owned(),
             requested_capability_id: None,
@@ -117,12 +183,58 @@ fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
             updated_at: None,
             assignment: None,
         }),
-        idempotency_key: "submission:large-message".to_owned(),
+        idempotency_key: format!("submission:{message_id}"),
     }
 }
 
+fn pb_prepared_execution(prefix: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "available_mcp_servers": [],
+        "bundle_revisions": {"mcp_bundle_revision": null, "skill_bundle_revision": null},
+        "conversation_id": format!("{prefix}-conversation"),
+        "execution_metadata": {
+            "canonical_capability_id": null,
+            "defer_task_completed_until_pending_skill_context_processed": null,
+            "forced_by_mcp_command": null,
+            "mcp_binding_mode": null,
+            "mcp_command": null,
+            "mcp_dispatch_server_id": null,
+            "mcp_execution_mode": null,
+            "mcp_rollout_config_version": null,
+            "mcp_rollout_mode": null,
+            "mcp_route_reason_code": null,
+            "mcp_shadow_enabled": null,
+            "requested_capability_alias": null
+        },
+        "execution_text_sha256": "c".repeat(64),
+        "execution_text_source": "root_message",
+        "initial_required_tool_name": null,
+        "mcp_assignment": null,
+        "mcp_binding": null,
+        "message_id": format!("{prefix}-message"),
+        "model_options": {"model_edition": null, "reasoning_effort": "medium", "thinking_enabled": false},
+        "owner_scope": "owner",
+        "pending_context": null,
+        "planned_handoff_kind": "agent_run",
+        "preparation_receipt": {
+            "memory_context_sha256": "f".repeat(64),
+            "receipt_sha256": "d".repeat(64),
+            "route_decision_sha256": "e".repeat(64),
+            "selector_decision_sha256": "0".repeat(64),
+            "task_id": format!("{prefix}-task")
+        },
+        "prepared_kind": "agent_run",
+        "requested_capability_id": null,
+        "schema": "maf.submission.prepared_execution.v1",
+        "sheet_selections": {},
+        "task_id": format!("{prefix}-task"),
+        "upload_refs": [],
+    }))
+    .expect("canonical prepared execution")
+}
+
 #[tokio::test]
-async fn submission_identity_rpc_round_trips_in_memory_and_is_migration_blocked_on_sqlite() {
+async fn submission_identity_rpc_round_trips_in_memory_and_sqlite_cutover_is_explicit() {
     assert!(std::hint::black_box(GRPC_MAX_MESSAGE_BYTES) >= 140 * 1024 * 1024);
     let request = runtime_pb::ReserveMessageIdentityRequest {
         identity: Some(runtime_pb::MessageIdentityRecord {
@@ -172,6 +284,167 @@ async fn submission_identity_rpc_round_trips_in_memory_and_is_migration_blocked_
         blocked.error.expect("migration error").code,
         "runtime_store_migration_blocked"
     );
+    let finalized_path = temp_db_path("grpc-submission-a2-finalized");
+    let finalized_adapter = RuntimeSidecarSqliteAdapter::open(&finalized_path).unwrap();
+    let (digest, subject, receipt) = sqlite_empty_finalization(1);
+    finalized_adapter
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 1)
+        .unwrap();
+    let finalized = RuntimeSidecarGrpcService::with_sqlite_adapter(finalized_adapter);
+    let created = finalized
+        .reserve_message_identity(Request::new(runtime_pb::ReserveMessageIdentityRequest {
+            identity: Some(runtime_pb::MessageIdentityRecord {
+                message_id: "sqlite-file-message".to_owned(),
+                conversation_id: "sqlite-file-conversation".to_owned(),
+                username: "owner".to_owned(),
+                identity_kind: runtime_pb::MessageIdentityKind::FileVisible as i32,
+                role: Some("assistant".to_owned()),
+                message_type: Some("file".to_owned()),
+                message_created_at_ms: Some(1),
+                task_id: None,
+                request_fingerprint: None,
+                reserved_at_ms: 2,
+            }),
+        }))
+        .await
+        .expect("SQLite reservation RPC")
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::MessageIdentityDisposition::Created as i32
+    );
+    assert!(created.error.is_none());
+    let _ = std::fs::remove_file(finalized_path);
+}
+
+#[tokio::test]
+async fn sqlite_submission_rpc_sequence_persists_all_admission_phases() {
+    let db_path = temp_db_path("grpc-submission-a2-sequence");
+    let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+    let (digest, subject, receipt) = sqlite_empty_finalization(2);
+    adapter
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 2)
+        .unwrap();
+    let service = RuntimeSidecarGrpcService::with_sqlite_adapter(adapter);
+    let created = service
+        .admit_submission(Request::new(pb_admit_request("sqlite-flow", "hello")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::Created as i32
+    );
+    let admission = created.admission.unwrap();
+    let initial_claim = created.claim.unwrap();
+    let renewed = service
+        .renew_submission_claim(Request::new(runtime_pb::RenewSubmissionClaimRequest {
+            message_id: admission.message_id.clone(),
+            workflow_owner: initial_claim.owner,
+            claim_token: initial_claim.token,
+            now_ms: 2,
+            claim_ttl_ms: 1_000,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .claim
+        .expect("renewed claim");
+    let projected = service
+        .acknowledge_submission_projection(Request::new(
+            runtime_pb::AcknowledgeSubmissionProjectionRequest {
+                message_id: admission.message_id.clone(),
+                workflow_owner: renewed.owner.clone(),
+                claim_token: renewed.token.clone(),
+                projection_sha256: admission.projection_sha256.clone(),
+                expected_state: runtime_pb::SubmissionProjectionState::Pending as i32,
+                now_ms: 3,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(projected.error.is_none());
+    let prepared = pb_prepared_execution("sqlite-flow");
+    let mut hasher = Sha256::new();
+    hasher.update(b"maf.submission.prepared_execution.v1\0");
+    hasher.update(&prepared);
+    let prepared_sha256 = format!("{:x}", hasher.finalize());
+    let prepared_response = service
+        .prepare_submission_handoff(Request::new(runtime_pb::PrepareSubmissionHandoffRequest {
+            message_id: admission.message_id.clone(),
+            workflow_owner: renewed.owner.clone(),
+            claim_token: renewed.token.clone(),
+            prepared_execution_json: prepared.clone(),
+            prepared_execution_sha256: prepared_sha256.clone(),
+            expected_state: runtime_pb::SubmissionPreparationState::Pending as i32,
+            now_ms: 4,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(prepared_response.error.is_none());
+    let stored = service
+        .get_submission_preparation(Request::new(runtime_pb::GetSubmissionPreparationRequest {
+            username: "owner".to_owned(),
+            conversation_id: "sqlite-flow-conversation".to_owned(),
+            task_id: "sqlite-flow-task".to_owned(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(stored.found);
+    assert_eq!(
+        stored.admission.unwrap().prepared_execution_json,
+        Some(prepared)
+    );
+    let handed_off = service
+        .acknowledge_submission_handoff(Request::new(
+            runtime_pb::AcknowledgeSubmissionHandoffRequest {
+                message_id: admission.message_id,
+                workflow_owner: renewed.owner,
+                claim_token: renewed.token,
+                prepared_execution_sha256: prepared_sha256,
+                handoff_kind: "agent_run".to_owned(),
+                handoff_identity: "run-sqlite-flow".to_owned(),
+                expected_state: runtime_pb::SubmissionHandoffState::Pending as i32,
+                now_ms: 5,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(handed_off.error.is_none());
+    let empty = service
+        .claim_pending_submission(Request::new(runtime_pb::ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 2_000,
+            claim_ttl_ms: 1_000,
+            after_created_at_ms: None,
+            after_message_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!empty.found);
+    assert_eq!(empty.finalization_receipt_sha256, Some(digest));
+    let closed = service
+        .close_conversation_admission(Request::new(
+            runtime_pb::CloseConversationAdmissionRequest {
+                username: "owner".to_owned(),
+                conversation_id: "sqlite-flow-conversation".to_owned(),
+                operation_id: "delete:sqlite-flow-conversation".to_owned(),
+                now_ms: 6,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        closed.disposition,
+        runtime_pb::ConversationAdmissionCloseDisposition::Closed as i32
+    );
+    let _ = std::fs::remove_file(db_path);
 }
 
 fn pb_task(status: &str) -> runtime_pb::TaskRecord {

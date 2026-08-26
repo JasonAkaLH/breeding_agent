@@ -7,10 +7,10 @@
 use maf_event_log::EventLog;
 use maf_runtime_store::{
     ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_AGENT_STATE,
-    FEATURE_ARTIFACT_METADATA, FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER,
-    FEATURE_TASK_READ, LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION,
-    RuntimeSidecarError, RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease,
-    runtime_sidecar_contract_artifact,
+    FEATURE_ARTIFACT_METADATA, FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE,
+    FEATURE_SUBMISSION_ADMISSION, FEATURE_TASK_DISPATCHER, FEATURE_TASK_READ, LeaseRegistry,
+    PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError, RuntimeSidecarErrorCode,
+    SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
 };
 use maf_task_dispatcher::{
     TaskDispatcher, TaskSubmitRequest as DispatcherTaskSubmitRequest, TaskSubmitResult,
@@ -34,7 +34,10 @@ use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 
 mod codec;
 mod sqlite_adapter;
-pub use sqlite_adapter::RuntimeSidecarSqliteAdapter;
+pub use sqlite_adapter::{
+    RuntimeSidecarSqliteAdapter, SubmissionAuthorityFinalizeResult,
+    SubmissionAuthorityImportRequest, SubmissionConversationImportRecord,
+};
 
 pub mod pb {
     pub mod common {
@@ -1862,9 +1865,28 @@ impl RuntimeSidecarKernel {
         }
         if let Some(existing) = self.tasks.get(&task.task_id) {
             validate_expected_status(expected_from_status, Some(&existing.status))?;
-            validate_task_update(existing, &task)?;
+            if !self.initial_no_server_task_transition_is_authorized(existing, &task) {
+                validate_task_update(existing, &task)?;
+            }
         } else {
             validate_expected_status(expected_from_status, None)?;
+            if task.status == "accepted"
+                && self
+                    .submission_authority_finalization_receipt_sha256
+                    .is_some()
+                && !self
+                    .submission_admissions
+                    .values()
+                    .any(|entry| entry.record.task_id == task.task_id)
+                && !self
+                    .submission_conversations
+                    .values()
+                    .any(|guard| guard.active_task_id.as_deref() == Some(task.task_id.as_str()))
+            {
+                return Err(migration_blocked(
+                    "new accepted Task requires submission admission or import evidence",
+                ));
+            }
         }
         if self.dispatched_task_ids.insert(task.task_id.clone()) {
             self.dispatcher.submit(DispatcherTaskSubmitRequest {
@@ -2022,8 +2044,20 @@ impl RuntimeSidecarKernel {
             if task.task_id != run.task_id || task.conversation_id != run.conversation_id {
                 return Err(write_failed("Agent Task projection identity mismatch"));
             }
-            if let Some(existing) = self.tasks.get(&task.task_id) {
+            if let Some(existing) = self.tasks.get(&task.task_id)
+                && !self.initial_no_server_task_transition_is_authorized(existing, task)
+            {
                 validate_task_update(existing, task)?;
+            } else if !self.tasks.contains_key(&task.task_id)
+                && task.status == "accepted"
+                && self
+                    .submission_authority_finalization_receipt_sha256
+                    .is_some()
+                && !self.task_has_submission_or_import_evidence(&task.task_id)
+            {
+                return Err(migration_blocked(
+                    "new accepted Task requires submission admission or import evidence",
+                ));
             }
         }
         self.agent_task_runs
@@ -2081,6 +2115,70 @@ impl RuntimeSidecarKernel {
             guard.active_task_id = None;
             guard.revision += 1;
         }
+    }
+
+    fn initial_no_server_task_transition_is_authorized(
+        &self,
+        existing: &TaskRecord,
+        replacement: &TaskRecord,
+    ) -> bool {
+        initial_no_server_task_transition_shape(existing, replacement)
+            && self.submission_admissions.values().any(|entry| {
+                entry.record.task_id == existing.task_id
+                    && !entry.record.closed
+                    && entry.record.preparation_state == SubmissionPreparationState::Prepared
+                    && entry.record.handoff_state == SubmissionHandoffState::Pending
+                    && entry
+                        .record
+                        .prepared_execution_json
+                        .as_deref()
+                        .is_some_and(|bytes| {
+                            serde_json::from_slice::<serde_json::Value>(bytes)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("prepared_kind")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_owned)
+                                })
+                                .as_deref()
+                                == Some("no_server_intent")
+                        })
+                    && serde_json::from_slice::<serde_json::Value>(&entry.record.continuation_json)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("initial_no_server_eligible")
+                                .and_then(serde_json::Value::as_bool)
+                        })
+                        == Some(true)
+                    && entry
+                        .record
+                        .prepared_execution_json
+                        .as_deref()
+                        .is_some_and(|bytes| {
+                            serde_json::from_slice::<serde_json::Value>(bytes)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("planned_handoff_kind")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_owned)
+                                })
+                                .as_deref()
+                                == Some("no_server_intent")
+                        })
+            })
+    }
+
+    fn task_has_submission_or_import_evidence(&self, task_id: &str) -> bool {
+        self.submission_admissions
+            .values()
+            .any(|entry| entry.record.task_id == task_id)
+            || self
+                .submission_conversations
+                .values()
+                .any(|guard| guard.active_task_id.as_deref() == Some(task_id))
     }
 
     #[must_use]
@@ -4071,23 +4169,29 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::AdmitSubmissionRequest>,
     ) -> Result<tonic::Response<runtime_pb::AdmitSubmissionResponse>, tonic::Status> {
-        let response = if self.sqlite_adapter.is_some() {
-            AdmitSubmissionResponse {
+        let response = match admit_submission_request_from_pb(request.into_inner()) {
+            Ok(request) => {
+                if let Some(adapter) = &self.sqlite_adapter {
+                    match self.run_sqlite_write(|| adapter.admit_submission(request))? {
+                        Ok(response) => response,
+                        Err(error) => {
+                            let mut response = admission_disposition(
+                                SubmissionAdmissionDisposition::ConversationNotAvailable,
+                            );
+                            response.error = Some(error.into());
+                            response
+                        }
+                    }
+                } else {
+                    self.lock()?.admit_submission(request)
+                }
+            }
+            Err(error) => AdmitSubmissionResponse {
                 disposition: SubmissionAdmissionDisposition::ConversationNotAvailable,
                 admission: None,
                 claim: None,
-                error: Some(sqlite_submission_migration_blocked().into()),
-            }
-        } else {
-            match admit_submission_request_from_pb(request.into_inner()) {
-                Ok(request) => self.lock()?.admit_submission(request),
-                Err(error) => AdmitSubmissionResponse {
-                    disposition: SubmissionAdmissionDisposition::ConversationNotAvailable,
-                    admission: None,
-                    claim: None,
-                    error: Some(error.into()),
-                },
-            }
+                error: Some(error.into()),
+            },
         };
         Ok(tonic::Response::new(admit_submission_response_to_pb(
             response,
@@ -4098,18 +4202,21 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::ClaimPendingSubmissionRequest>,
     ) -> Result<tonic::Response<runtime_pb::ClaimPendingSubmissionResponse>, tonic::Status> {
-        let response = if self.sqlite_adapter.is_some() {
-            ClaimPendingSubmissionResponse {
-                found: false,
-                admission: None,
-                claim: None,
-                authority_state: "uninitialized".to_owned(),
-                finalization_receipt_sha256: None,
-                error: Some(sqlite_submission_migration_blocked().into()),
+        let request = claim_pending_request_from_pb(request.into_inner());
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match self.run_sqlite_write(|| adapter.claim_pending_submission(request))? {
+                Ok(response) => response,
+                Err(error) => ClaimPendingSubmissionResponse {
+                    found: false,
+                    admission: None,
+                    claim: None,
+                    authority_state: "uninitialized".to_owned(),
+                    finalization_receipt_sha256: None,
+                    error: Some(error.into()),
+                },
             }
         } else {
-            self.lock()?
-                .claim_pending_submission(claim_pending_request_from_pb(request.into_inner()))
+            self.lock()?.claim_pending_submission(request)
         };
         Ok(tonic::Response::new(claim_pending_response_to_pb(response)))
     }
@@ -4118,13 +4225,12 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::RenewSubmissionClaimRequest>,
     ) -> Result<tonic::Response<runtime_pb::SubmissionClaimResponse>, tonic::Status> {
-        let result = if self.sqlite_adapter.is_some() {
-            Err(TypedErrorEnvelope::from(
-                sqlite_submission_migration_blocked(),
-            ))
+        let request = renew_claim_request_from_pb(request.into_inner());
+        let result = if let Some(adapter) = &self.sqlite_adapter {
+            self.run_sqlite_write(|| adapter.renew_submission_claim(request))?
+                .map_err(Into::into)
         } else {
-            self.lock()?
-                .renew_submission_claim(renew_claim_request_from_pb(request.into_inner()))
+            self.lock()?.renew_submission_claim(request)
         };
         Ok(tonic::Response::new(submission_claim_response_to_pb(
             result,
@@ -4135,18 +4241,23 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::AcknowledgeSubmissionProjectionRequest>,
     ) -> Result<tonic::Response<runtime_pb::SubmissionAdmissionResponse>, tonic::Status> {
-        let response = if self.sqlite_adapter.is_some() {
-            migration_blocked_submission_response()
-        } else {
+        let response =
             match projection_ack_request_from_pb(request.into_inner()) {
-                Ok(request) => self.lock()?.acknowledge_submission_projection(request),
+                Ok(request) => {
+                    if let Some(adapter) = &self.sqlite_adapter {
+                        submission_admission_result(self.run_sqlite_write(|| {
+                            adapter.acknowledge_submission_projection(request)
+                        })?)
+                    } else {
+                        self.lock()?.acknowledge_submission_projection(request)
+                    }
+                }
                 Err(error) => SubmissionAdmissionResponse {
                     admission: None,
                     duplicate: false,
                     error: Some(error.into()),
                 },
-            }
-        };
+            };
         Ok(tonic::Response::new(submission_admission_response_to_pb(
             response,
         )))
@@ -4156,17 +4267,21 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::PrepareSubmissionHandoffRequest>,
     ) -> Result<tonic::Response<runtime_pb::SubmissionAdmissionResponse>, tonic::Status> {
-        let response = if self.sqlite_adapter.is_some() {
-            migration_blocked_submission_response()
-        } else {
-            match prepare_handoff_request_from_pb(request.into_inner()) {
-                Ok(request) => self.lock()?.prepare_submission_handoff(request),
-                Err(error) => SubmissionAdmissionResponse {
-                    admission: None,
-                    duplicate: false,
-                    error: Some(error.into()),
-                },
+        let response = match prepare_handoff_request_from_pb(request.into_inner()) {
+            Ok(request) => {
+                if let Some(adapter) = &self.sqlite_adapter {
+                    submission_admission_result(
+                        self.run_sqlite_write(|| adapter.prepare_submission_handoff(request))?,
+                    )
+                } else {
+                    self.lock()?.prepare_submission_handoff(request)
+                }
             }
+            Err(error) => SubmissionAdmissionResponse {
+                admission: None,
+                duplicate: false,
+                error: Some(error.into()),
+            },
         };
         Ok(tonic::Response::new(submission_admission_response_to_pb(
             response,
@@ -4177,15 +4292,22 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::GetSubmissionPreparationRequest>,
     ) -> Result<tonic::Response<runtime_pb::GetSubmissionPreparationResponse>, tonic::Status> {
-        let response = if self.sqlite_adapter.is_some() {
-            GetSubmissionPreparationResponse {
-                found: false,
-                admission: None,
-                error: Some(sqlite_submission_migration_blocked().into()),
+        let request = get_preparation_request_from_pb(request.into_inner());
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.get_submission_preparation(&request) {
+                Ok(admission) => GetSubmissionPreparationResponse {
+                    found: admission.is_some(),
+                    admission,
+                    error: None,
+                },
+                Err(error) => GetSubmissionPreparationResponse {
+                    found: false,
+                    admission: None,
+                    error: Some(error.into()),
+                },
             }
         } else {
-            self.lock()?
-                .get_submission_preparation(&get_preparation_request_from_pb(request.into_inner()))
+            self.lock()?.get_submission_preparation(&request)
         };
         Ok(tonic::Response::new(get_preparation_response_to_pb(
             response,
@@ -4196,17 +4318,21 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::AcknowledgeSubmissionHandoffRequest>,
     ) -> Result<tonic::Response<runtime_pb::SubmissionAdmissionResponse>, tonic::Status> {
-        let response = if self.sqlite_adapter.is_some() {
-            migration_blocked_submission_response()
-        } else {
-            match handoff_ack_request_from_pb(request.into_inner()) {
-                Ok(request) => self.lock()?.acknowledge_submission_handoff(request),
-                Err(error) => SubmissionAdmissionResponse {
-                    admission: None,
-                    duplicate: false,
-                    error: Some(error.into()),
-                },
+        let response = match handoff_ack_request_from_pb(request.into_inner()) {
+            Ok(request) => {
+                if let Some(adapter) = &self.sqlite_adapter {
+                    submission_admission_result(
+                        self.run_sqlite_write(|| adapter.acknowledge_submission_handoff(request))?,
+                    )
+                } else {
+                    self.lock()?.acknowledge_submission_handoff(request)
+                }
             }
+            Err(error) => SubmissionAdmissionResponse {
+                admission: None,
+                duplicate: false,
+                error: Some(error.into()),
+            },
         };
         Ok(tonic::Response::new(submission_admission_response_to_pb(
             response,
@@ -4218,15 +4344,18 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         request: tonic::Request<runtime_pb::CloseConversationAdmissionRequest>,
     ) -> Result<tonic::Response<runtime_pb::CloseConversationAdmissionResponse>, tonic::Status>
     {
-        let response = if self.sqlite_adapter.is_some() {
-            CloseConversationAdmissionResponse {
-                disposition: ConversationAdmissionCloseDisposition::Conflict,
-                revision: 0,
-                error: Some(sqlite_submission_migration_blocked().into()),
+        let request = close_request_from_pb(request.into_inner());
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match self.run_sqlite_write(|| adapter.close_conversation_admission(request))? {
+                Ok(response) => response,
+                Err(error) => CloseConversationAdmissionResponse {
+                    disposition: ConversationAdmissionCloseDisposition::Conflict,
+                    revision: 0,
+                    error: Some(error.into()),
+                },
             }
         } else {
-            self.lock()?
-                .close_conversation_admission(close_request_from_pb(request.into_inner()))
+            self.lock()?.close_conversation_admission(request)
         };
         Ok(tonic::Response::new(close_response_to_pb(response)))
     }
@@ -4235,35 +4364,28 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         &self,
         request: tonic::Request<runtime_pb::ReserveMessageIdentityRequest>,
     ) -> Result<tonic::Response<runtime_pb::ReserveMessageIdentityResponse>, tonic::Status> {
-        let response = if self.sqlite_adapter.is_some() {
-            ReserveMessageIdentityResponse {
+        let response = match reserve_request_from_pb(request.into_inner()) {
+            Ok(request) => {
+                if let Some(adapter) = &self.sqlite_adapter {
+                    match self.run_sqlite_write(|| adapter.reserve_message_identity(request))? {
+                        Ok(response) => response,
+                        Err(error) => ReserveMessageIdentityResponse {
+                            disposition: MessageIdentityDisposition::Conflict,
+                            identity: None,
+                            error: Some(error.into()),
+                        },
+                    }
+                } else {
+                    self.lock()?.reserve_message_identity(request)
+                }
+            }
+            Err(error) => ReserveMessageIdentityResponse {
                 disposition: MessageIdentityDisposition::Conflict,
                 identity: None,
-                error: Some(sqlite_submission_migration_blocked().into()),
-            }
-        } else {
-            match reserve_request_from_pb(request.into_inner()) {
-                Ok(request) => self.lock()?.reserve_message_identity(request),
-                Err(error) => ReserveMessageIdentityResponse {
-                    disposition: MessageIdentityDisposition::Conflict,
-                    identity: None,
-                    error: Some(error.into()),
-                },
-            }
+                error: Some(error.into()),
+            },
         };
         Ok(tonic::Response::new(reserve_response_to_pb(response)))
-    }
-}
-
-fn sqlite_submission_migration_blocked() -> RuntimeSidecarError {
-    migration_blocked("submission admission SQLite authority is unavailable before A2 migration")
-}
-
-fn migration_blocked_submission_response() -> SubmissionAdmissionResponse {
-    SubmissionAdmissionResponse {
-        admission: None,
-        duplicate: false,
-        error: Some(sqlite_submission_migration_blocked().into()),
     }
 }
 
@@ -4427,6 +4549,7 @@ pub fn supported_features() -> Vec<String> {
         FEATURE_ARTIFACT_METADATA.to_owned(),
         FEATURE_TASK_READ.to_owned(),
         FEATURE_AGENT_STATE.to_owned(),
+        FEATURE_SUBMISSION_ADMISSION.to_owned(),
     ]
 }
 
@@ -4584,6 +4707,38 @@ pub(crate) fn validate_task_update(
     Ok(())
 }
 
+pub(crate) fn initial_no_server_task_transition_shape(
+    existing: &TaskRecord,
+    replacement: &TaskRecord,
+) -> bool {
+    let (Some(existing_assignment), Some(replacement_assignment)) =
+        (&existing.assignment, &replacement.assignment)
+    else {
+        return false;
+    };
+    existing.task_id == replacement.task_id
+        && existing.conversation_id == replacement.conversation_id
+        && existing.root_message_id == replacement.root_message_id
+        && existing.routing_mode == replacement.routing_mode
+        && existing.requested_capability_id == replacement.requested_capability_id
+        && existing.summary == replacement.summary
+        && existing.created_at == replacement.created_at
+        && existing.cancel_requested_at == replacement.cancel_requested_at
+        && existing.status == "accepted"
+        && replacement.status == "failed"
+        && existing_assignment.route_mode == "enforce"
+        && existing_assignment.real_path == "user_scoped"
+        && existing_assignment.shadow_path == "none"
+        && replacement_assignment.route_mode == existing_assignment.route_mode
+        && replacement_assignment.real_path == "unavailable"
+        && replacement_assignment.shadow_path == existing_assignment.shadow_path
+        && replacement_assignment.config_version == existing_assignment.config_version
+        && replacement_assignment.reason_code == "no_user_scoped_server"
+        && replacement_assignment.cohort_id == existing_assignment.cohort_id
+        && replacement_assignment.assignment_key_hash == existing_assignment.assignment_key_hash
+        && replacement_assignment.assigned_at == existing_assignment.assigned_at
+}
+
 pub(crate) fn validate_task_node_update(
     existing: &TaskNodeRecord,
     replacement: &TaskNodeRecord,
@@ -4649,7 +4804,7 @@ fn validate_claim_timing(
     Ok(())
 }
 
-fn new_submission_claim(
+pub(crate) fn new_submission_claim(
     message_id: &str,
     owner: &str,
     now_ms: i64,
@@ -4689,7 +4844,7 @@ fn validate_submission_claim(
     Ok(())
 }
 
-fn validate_admit_submission_request(
+pub(crate) fn validate_admit_submission_request(
     request: &AdmitSubmissionRequest,
 ) -> Result<(), RuntimeSidecarError> {
     if request.message_id.trim().is_empty()
@@ -4914,7 +5069,10 @@ fn validate_projection_identity(
     Ok(())
 }
 
-fn validate_prepared_execution(bytes: &[u8], digest: &str) -> Result<(), RuntimeSidecarError> {
+pub(crate) fn validate_prepared_execution(
+    bytes: &[u8],
+    digest: &str,
+) -> Result<(), RuntimeSidecarError> {
     validate_canonical_json_object(
         bytes,
         SUBMISSION_PREPARED_EXECUTION_MAX_BYTES,
@@ -5405,7 +5563,7 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn validate_message_identity(
+pub(crate) fn validate_message_identity(
     identity: &MessageIdentityRecord,
     allow_submission: bool,
 ) -> Result<(), RuntimeSidecarError> {
@@ -5453,7 +5611,7 @@ fn validate_message_identity(
     Ok(())
 }
 
-fn message_identity_is_exact_replay(
+pub(crate) fn message_identity_is_exact_replay(
     existing: &MessageIdentityRecord,
     candidate: &MessageIdentityRecord,
 ) -> bool {
