@@ -83,6 +83,8 @@ Checkpoint A 只有在以下证据同时成立时才能完成：
 
 一个请求只能有一个 canonical writer。不得出现“SQL 成功后再把 Sidecar 当 authority”或“Sidecar 失败时静默降级 SQL”的路径。
 
+off/shadow为了在不新增第二张SQL表的前提下区分model/upload/MCP等fingerprint漂移，可在首次USER Message raw `message_metadata`中保存一个server-private `maf_submission_admission_v1` receipt，exact keys为`schema, request_fingerprint, idempotency_key`。它与Conversation/Message/Task在同一transaction写入；不进入domain `Message.metadata`、API/历史投影、audit/event/SSE或Sidecar Message projection，generic Message更新必须保留且不得由caller创建、删除或改写。receipt不复制continuation、projection bytes/digest或用户正文，避免自引用和大payload重复；exact replay还必须复验现存Message immutable tuple与Task canonical identity，enforce继续以Sidecar admission为authority。
+
 ### 4.2 canonical 与 projection 的边界
 
 enforce 下 canonical admission 包含：
@@ -332,6 +334,8 @@ SQL unavailable、timeout 或 conflict 时：
 - 相同客户端重试进入 `idempotent_replay` 并协助同一 admission 恢复；
 - startup recovery 也会继续投影；
 - 不创建新 Message/Task，不删除 canonical admission，不降级到 SQL Task。
+
+off/shadow的canonical SQL admission同样使用本节的Conversation/Message exact规则，并额外在同一transaction创建Task与上述server-private receipt；不得新增receipt表或用audit event冒充不可见authority。
 
 ## 11. 后续工作流与 crash recovery
 

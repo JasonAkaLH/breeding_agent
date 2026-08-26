@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
 from src.auth.postgres_invalidation_bus import auth_generation_notify_sql
 from src.core.contracts import StoragePort
+from src.core.errors import MessageIdentityConflictError
 from src.core.enums import (
     ArtifactType,
     ConversationStatus,
@@ -107,10 +109,36 @@ from src.core.models import (
     MCPTargetIntentResolveResult,
     MCPSealedState,
     Message,
+    MessageIdentityDisposition,
+    MessageIdentityKind,
+    MessageIdentityReservationRequest,
+    MessageIdentityReservationResult,
     PendingSkillContext,
     SlotCollection,
     SlotEvent,
     Task,
+    SubmissionAdmissionDisposition,
+    SubmissionAdmissionHandle,
+    SubmissionAdmissionPhase,
+    SubmissionAdmissionRequest,
+    SubmissionAdmissionResult,
+    SubmissionAdmissionState,
+    SubmissionAuthorityState,
+    SubmissionClaimRequest,
+    SubmissionClaimResult,
+    SubmissionClaimRenewalRequest,
+    SubmissionHandoffAcknowledgementRequest,
+    SubmissionHandoffState,
+    SubmissionPreparationLookup,
+    SubmissionPreparationRecord,
+    SubmissionPreparationRequest,
+    SubmissionPreparationState,
+    SubmissionProjectionAcknowledgementRequest,
+    SubmissionProjectionState,
+    SubmissionRecoveryRecord,
+    ConversationAdmissionCloseRequest,
+    ConversationAdmissionCloseResult,
+    ConversationAdmissionCloseDisposition,
     TaskInputAttachment,
     TaskNode,
     UserMCPCredentialRecord,
@@ -152,7 +180,11 @@ from src.storage.rust_contract import error_policy as runtime_error_policy
 from src.storage.rust_contract import mode_for_component as runtime_mode_for_component
 from src.storage.rust_contract import operation_policy as runtime_operation_policy
 from src.storage.rust_contract import resource_limit as runtime_resource_limit
-from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
+from src.storage.runtime_sidecar_facade import (
+    ensure_sidecar_write_allowed,
+    validate_runtime_sidecar_response,
+    validate_runtime_sidecar_submission_envelopes,
+)
 from src.storage.runtime_sidecar_shadow import (
     RuntimeSidecarShadowSink,
     normalize_runtime_sidecar_response,
@@ -1055,6 +1087,151 @@ def _message_metadata_object(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+_SUBMISSION_ADMISSION_RECEIPT_KEY = "__maf_private_submission_admission_v1"
+_SUBMISSION_ADMISSION_RECEIPT_SCHEMA = "maf.sql_submission_admission_receipt.v1"
+
+
+def _public_message_metadata(value: object) -> dict[str, Any]:
+    metadata = _message_metadata_object(value)
+    metadata.pop(_SUBMISSION_ADMISSION_RECEIPT_KEY, None)
+    return metadata
+
+
+def _submission_private_receipt(request: SubmissionAdmissionRequest) -> dict[str, str]:
+    return {
+        "schema": _SUBMISSION_ADMISSION_RECEIPT_SCHEMA,
+        "request_fingerprint": request.request_fingerprint,
+        "idempotency_key": request.idempotency_key,
+    }
+
+
+def _canonical_json_object(payload: bytes, *, context: str) -> dict[str, Any]:
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{context}_invalid") from exc
+    if not isinstance(value, dict) or json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8") != payload:
+        raise ValueError(f"{context}_invalid")
+    return value
+
+
+def _submission_projection_values(
+    request: SubmissionAdmissionRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if request.task.conversation_id != request.conversation_id or (
+        request.task.root_message_id != request.message_id
+    ) or request.task.status != TaskStatus.ACCEPTED:
+        raise ValueError("submission_task_identity_invalid")
+    conversation, message, _ = validate_runtime_sidecar_submission_envelopes(
+        conversation_projection=request.conversation_projection,
+        message_projection=request.message_projection,
+        continuation=request.continuation,
+        projection_sha256=request.projection_sha256,
+        continuation_sha256=request.continuation_sha256,
+        username=request.username,
+        conversation_id=request.conversation_id,
+        message_id=request.message_id,
+        task_id=request.task.task_id,
+        request_fingerprint=request.request_fingerprint,
+        routing_mode=str(request.task.routing_mode),
+        requested_capability_id=request.task.requested_capability_id,
+    )
+    return conversation, message
+
+
+def _submission_datetime(value: Any, *, context: str) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{context}_invalid")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(
+            tzinfo=None
+        )
+    except ValueError as exc:
+        raise ValueError(f"{context}_invalid") from exc
+
+
+def _same_submission_task(existing: Task, candidate: Task) -> bool:
+    return (
+        existing.conversation_id == candidate.conversation_id
+        and existing.root_message_id == candidate.root_message_id
+        and existing.routing_mode == candidate.routing_mode
+        and existing.requested_capability_id == candidate.requested_capability_id
+    )
+
+
+def _message_projection_identity(row: MessageRow) -> tuple[Any, ...]:
+    return (
+        row.conversation_id,
+        str(row.role),
+        row.content,
+        row.task_id,
+        row.stream_status,
+        row.created_at,
+        _message_type_value(row.message_type),
+        _public_message_metadata(row.message_metadata),
+        row.updated_at,
+    )
+
+
+def _submission_disposition(
+    disposition: SubmissionAdmissionDisposition,
+    conversation_id: str,
+) -> SubmissionAdmissionResult:
+    return SubmissionAdmissionResult(
+        disposition=disposition,
+        conversation_id=conversation_id,
+    )
+
+
+def _sql_submission_result(
+    *,
+    disposition: SubmissionAdmissionDisposition,
+    request: SubmissionAdmissionRequest,
+    task: Task,
+    message_created_at: datetime | None,
+) -> SubmissionAdmissionResult:
+    phase = SubmissionAdmissionPhase(
+        admission_state=SubmissionAdmissionState.OPEN,
+        projection_state=SubmissionProjectionState.PROJECTED,
+        preparation_state=SubmissionPreparationState.PENDING,
+        handoff_state=SubmissionHandoffState.PENDING,
+    )
+    record = None
+    if disposition is SubmissionAdmissionDisposition.CREATED:
+        record = SubmissionRecoveryRecord(
+            username=request.username,
+            conversation_id=request.conversation_id,
+            message_id=request.message_id,
+            task_id=task.task_id,
+            conversation_projection=request.conversation_projection,
+            message_projection=request.message_projection,
+            projection_sha256=request.projection_sha256,
+            continuation=request.continuation,
+            continuation_sha256=request.continuation_sha256,
+            prepared_execution=None,
+            prepared_execution_sha256=None,
+            phase=phase,
+            created_at=task.created_at or request.message_created_at,
+        )
+    return SubmissionAdmissionResult(
+        disposition=disposition,
+        conversation_id=request.conversation_id,
+        message_id=request.message_id,
+        task_id=task.task_id,
+        message_created_at=message_created_at,
+        task_created_at=task.created_at,
+        phase=phase,
+        record=record,
+    )
+
+
 def _message_type_value(value: object) -> str:
     text = str(value or "").strip()
     return text or "chat"
@@ -1105,7 +1282,7 @@ def _row_to_message(row: MessageRow) -> Message:
         stream_status=row.stream_status,
         created_at=row.created_at,
         message_type=_message_type_value(getattr(row, "message_type", None)),
-        metadata=_message_metadata_object(getattr(row, "message_metadata", None)),
+        metadata=_public_message_metadata(getattr(row, "message_metadata", None)),
         updated_at=getattr(row, "updated_at", None),
     )
 
@@ -2799,21 +2976,309 @@ class SQLiteStateRepository:
         return _row_to_conversation_file_index_repair_marker(row)
 
     def save_message(self, message: Message) -> Message:
-        row = MessageRow(
-            message_id=message.message_id,
-            conversation_id=message.conversation_id,
-            role=str(message.role),
-            content=message.content,
-            task_id=message.task_id,
-            stream_status=message.stream_status,
-            created_at=message.created_at,
-            message_type=_message_type_value(message.message_type),
-            message_metadata=_message_metadata_object(message.metadata),
-            updated_at=message.updated_at,
+        incoming_metadata = _message_metadata_object(message.metadata)
+        if _SUBMISSION_ADMISSION_RECEIPT_KEY in incoming_metadata:
+            raise ValueError("message_private_metadata_reserved")
+        existing = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == message.message_id)
+            .with_for_update()
         )
-        merged = self._session.merge(row)
+        if existing is None:
+            existing = MessageRow(
+                message_id=message.message_id,
+                conversation_id=message.conversation_id,
+                role=str(message.role),
+                content=message.content,
+                task_id=message.task_id,
+                stream_status=message.stream_status,
+                created_at=message.created_at,
+                message_type=_message_type_value(message.message_type),
+                message_metadata=incoming_metadata,
+                updated_at=message.updated_at,
+            )
+            self._session.add(existing)
+        else:
+            immutable_identity = (
+                existing.conversation_id,
+                str(existing.role),
+                _message_type_value(existing.message_type),
+                existing.created_at,
+                existing.task_id,
+            )
+            candidate_identity = (
+                message.conversation_id,
+                str(message.role),
+                _message_type_value(message.message_type),
+                message.created_at,
+                message.task_id,
+            )
+            if immutable_identity != candidate_identity:
+                raise MessageIdentityConflictError()
+            private_receipt = _message_metadata_object(
+                existing.message_metadata
+            ).get(_SUBMISSION_ADMISSION_RECEIPT_KEY)
+            existing.content = message.content
+            existing.stream_status = message.stream_status
+            existing.message_metadata = incoming_metadata
+            if private_receipt is not None:
+                existing.message_metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY] = (
+                    private_receipt
+                )
+            existing.updated_at = message.updated_at
         self._session.flush()
-        return _row_to_message(merged)
+        return _row_to_message(existing)
+
+    def admit_submission_sql(
+        self, request: SubmissionAdmissionRequest
+    ) -> SubmissionAdmissionResult:
+        conversation_projection, message_projection = _submission_projection_values(
+            request
+        )
+        existing_message = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == request.message_id)
+            .with_for_update()
+        )
+        if existing_message is not None:
+            return self._replay_or_conflict_submission(
+                request,
+                existing_message,
+                message_projection=message_projection,
+            )
+
+        conversation = self._session.scalar(
+            select(ConversationRow)
+            .where(ConversationRow.conversation_id == request.conversation_id)
+            .with_for_update()
+        )
+        if conversation is None:
+            if conversation_projection.get("create_if_missing") is not True:
+                return _submission_disposition(
+                    SubmissionAdmissionDisposition.CONVERSATION_NOT_AVAILABLE,
+                    request.conversation_id,
+                )
+            conversation = ConversationRow(
+                conversation_id=request.conversation_id,
+                username=request.username,
+                status=str(ConversationStatus.ACTIVE),
+                current_task_id=None,
+                title=None,
+                created_at=_submission_datetime(
+                    conversation_projection.get("created_at"),
+                    context="submission_conversation_created_at",
+                ),
+                updated_at=_submission_datetime(
+                    conversation_projection.get("updated_at"),
+                    context="submission_conversation_updated_at",
+                ),
+            )
+            self._session.add(conversation)
+            self._session.flush()
+        elif (
+            conversation.username != request.username
+            or conversation.status != str(ConversationStatus.ACTIVE)
+        ):
+            return _submission_disposition(
+                SubmissionAdmissionDisposition.CONVERSATION_NOT_AVAILABLE,
+                request.conversation_id,
+            )
+
+        if conversation.current_task_id is not None:
+            return _submission_disposition(
+                SubmissionAdmissionDisposition.CONVERSATION_BUSY,
+                request.conversation_id,
+            )
+        if self._session.get(TaskRow, request.task.task_id) is not None:
+            return _submission_disposition(
+                SubmissionAdmissionDisposition.MESSAGE_ID_CONFLICT,
+                request.conversation_id,
+            )
+
+        metadata = _message_metadata_object(message_projection.get("metadata"))
+        if _SUBMISSION_ADMISSION_RECEIPT_KEY in metadata:
+            raise ValueError("submission_message_private_metadata_invalid")
+        metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY] = _submission_private_receipt(
+            request
+        )
+        message = MessageRow(
+            message_id=request.message_id,
+            conversation_id=request.conversation_id,
+            role=str(MessageRole.USER),
+            content=str(message_projection.get("content") or ""),
+            task_id=request.task.task_id,
+            stream_status=message_projection.get("stream_status"),
+            created_at=_submission_datetime(
+                message_projection.get("message_created_at"),
+                context="submission_message_created_at",
+            ),
+            message_type=_message_type_value(message_projection.get("message_type")),
+            message_metadata=metadata,
+            updated_at=_submission_datetime(
+                message_projection.get("updated_at"),
+                context="submission_message_updated_at",
+            ),
+        )
+        self._session.add(message)
+        self._session.flush()
+        conversation.current_task_id = request.task.task_id
+        conversation.updated_at = _submission_datetime(
+            conversation_projection.get("updated_at"),
+            context="submission_conversation_updated_at",
+        )
+        saved_task = self.save_task(request.task)
+        self._session.flush()
+        return _sql_submission_result(
+            disposition=SubmissionAdmissionDisposition.CREATED,
+            request=request,
+            task=saved_task,
+            message_created_at=message.created_at,
+        )
+
+    def project_submission_admission(
+        self,
+        record: SubmissionRecoveryRecord,
+    ) -> None:
+        conversation_projection = _canonical_json_object(
+            record.conversation_projection,
+            context="submission_conversation_projection",
+        )
+        message_projection = _canonical_json_object(
+            record.message_projection,
+            context="submission_message_projection",
+        )
+        conversation = self._session.scalar(
+            select(ConversationRow)
+            .where(ConversationRow.conversation_id == record.conversation_id)
+            .with_for_update()
+        )
+        create_if_missing = conversation_projection.get("create_if_missing") is True
+        if conversation is None:
+            if not create_if_missing:
+                raise RuntimeError("submission_projection_conflict")
+            conversation = ConversationRow(
+                conversation_id=record.conversation_id,
+                username=record.username,
+                status=str(ConversationStatus.ACTIVE),
+                current_task_id=record.task_id,
+                title=None,
+                created_at=_submission_datetime(
+                    conversation_projection.get("created_at"),
+                    context="submission_conversation_created_at",
+                ),
+                updated_at=_submission_datetime(
+                    conversation_projection.get("updated_at"),
+                    context="submission_conversation_updated_at",
+                ),
+            )
+            self._session.add(conversation)
+        elif (
+            conversation.username != record.username
+            or conversation.status != str(ConversationStatus.ACTIVE)
+            or conversation.created_at
+            != _submission_datetime(
+                conversation_projection.get("created_at"),
+                context="submission_conversation_created_at",
+            )
+            or conversation.current_task_id not in {None, record.task_id}
+        ):
+            raise RuntimeError("submission_projection_conflict")
+        else:
+            conversation.current_task_id = record.task_id
+            conversation.updated_at = _submission_datetime(
+                conversation_projection.get("updated_at"),
+                context="submission_conversation_updated_at",
+            )
+
+        existing = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == record.message_id)
+            .with_for_update()
+        )
+        expected_metadata = _message_metadata_object(message_projection.get("metadata"))
+        if existing is None:
+            self._session.add(
+                MessageRow(
+                    message_id=record.message_id,
+                    conversation_id=record.conversation_id,
+                    role=str(MessageRole.USER),
+                    content=str(message_projection.get("content") or ""),
+                    task_id=record.task_id,
+                    stream_status=message_projection.get("stream_status"),
+                    created_at=_submission_datetime(
+                        message_projection.get("message_created_at"),
+                        context="submission_message_created_at",
+                    ),
+                    message_type=_message_type_value(
+                        message_projection.get("message_type")
+                    ),
+                    message_metadata=expected_metadata,
+                    updated_at=_submission_datetime(
+                        message_projection.get("updated_at"),
+                        context="submission_message_updated_at",
+                    ),
+                )
+            )
+        elif _message_projection_identity(existing) != (
+            record.conversation_id,
+            str(MessageRole.USER),
+            str(message_projection.get("content") or ""),
+            record.task_id,
+            message_projection.get("stream_status"),
+            _submission_datetime(
+                message_projection.get("message_created_at"),
+                context="submission_message_created_at",
+            ),
+            _message_type_value(message_projection.get("message_type")),
+            expected_metadata,
+            _submission_datetime(
+                message_projection.get("updated_at"),
+                context="submission_message_updated_at",
+            ),
+        ):
+            raise RuntimeError("submission_projection_conflict")
+        self._session.flush()
+
+    def _replay_or_conflict_submission(
+        self,
+        request: SubmissionAdmissionRequest,
+        message: MessageRow,
+        *,
+        message_projection: Mapping[str, Any],
+    ) -> SubmissionAdmissionResult:
+        receipt = _message_metadata_object(message.message_metadata).get(
+            _SUBMISSION_ADMISSION_RECEIPT_KEY
+        )
+        conversation = self._session.scalar(
+            select(ConversationRow)
+            .where(ConversationRow.conversation_id == message.conversation_id)
+            .with_for_update()
+        )
+        task = self._session.get(TaskRow, message.task_id) if message.task_id else None
+        if (
+            receipt != _submission_private_receipt(request)
+            or message.conversation_id != request.conversation_id
+            or conversation is None
+            or conversation.username != request.username
+            or str(message.role) != str(MessageRole.USER)
+            or message.content != str(message_projection.get("content") or "")
+            or _message_type_value(message.message_type)
+            != _message_type_value(message_projection.get("message_type"))
+            or _public_message_metadata(message.message_metadata)
+            != _message_metadata_object(message_projection.get("metadata"))
+            or task is None
+            or not _same_submission_task(_row_to_task(task), request.task)
+        ):
+            return _submission_disposition(
+                SubmissionAdmissionDisposition.MESSAGE_ID_CONFLICT,
+                request.conversation_id,
+            )
+        return _sql_submission_result(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            request=request,
+            task=_row_to_task(task),
+            message_created_at=message.created_at,
+        )
 
     def get_message(self, message_id: str) -> Message | None:
         row = self._session.get(MessageRow, message_id)
@@ -12725,6 +13190,9 @@ class SQLiteStorage(StoragePort):
         self._mcp_mrtr_request_state_evidence_reader = (
             mcp_mrtr_request_state_evidence_reader
         )
+        self._submission_claims: weakref.WeakKeyDictionary[
+            SubmissionAdmissionHandle, dict[str, Any]
+        ] = weakref.WeakKeyDictionary()
 
     async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]:
         return await self._run(lambda state, collab: state.list_user_mcp_servers(owner_user_id))
@@ -15429,6 +15897,380 @@ class SQLiteStorage(StoragePort):
     async def mark_pending_skill_context_superseded(self, conversation_id: str) -> int:
         return await self._run(lambda state, collab: state.mark_pending_skill_context_superseded(conversation_id, updated_at=_utcnow_naive()))
 
+    async def admit_submission(
+        self, request: SubmissionAdmissionRequest
+    ) -> SubmissionAdmissionResult:
+        _submission_projection_values(request)
+        if self._task_authority_mode() != "enforce":
+            result = await self._run_submission_admission(request)
+            if result.record is not None:
+                handle = self._new_submission_handle(
+                    mode="sql",
+                    message_id=result.record.message_id,
+                    owner=request.claim_owner,
+                    token=None,
+                    record=result.record,
+                )
+                return replace(result, handle=handle)
+            return result
+        client = self._submission_sidecar_client("submission_admit")
+        now_ms = _datetime_epoch_ms(request.message_created_at)
+        response = await _resolve_runtime_sidecar_call(
+            client.admit_submission(
+                message_id=request.message_id,
+                task_id=request.task.task_id,
+                conversation_id=request.conversation_id,
+                username=request.username,
+                request_fingerprint=request.request_fingerprint,
+                conversation_projection_json=request.conversation_projection,
+                message_projection_json=request.message_projection,
+                projection_sha256=request.projection_sha256,
+                continuation_json=request.continuation,
+                continuation_sha256=request.continuation_sha256,
+                message_created_at_ms=_datetime_epoch_ms(request.message_created_at),
+                workflow_owner=request.claim_owner,
+                now_ms=now_ms,
+                claim_ttl_ms=_claim_ttl_ms(now_ms, request.claim_expires_at),
+                task=_task_to_sidecar_record(request.task),
+                idempotency_key=request.idempotency_key,
+            )
+        )
+        return self._submission_result_from_sidecar(
+            response,
+            expected_owner=request.claim_owner,
+            expected_conversation_id=request.conversation_id,
+        )
+
+    async def claim_pending_submission(
+        self, request: SubmissionClaimRequest
+    ) -> SubmissionClaimResult:
+        if self._task_authority_mode() != "enforce":
+            return SubmissionClaimResult(
+                found=False,
+                authority_state=SubmissionAuthorityState.FINALIZED,
+                finalization_receipt_sha256=None,
+            )
+        client = self._submission_sidecar_client("submission_pending_claim")
+        now_ms = _datetime_epoch_ms(request.now)
+        response = await _resolve_runtime_sidecar_call(
+            client.claim_pending_submission(
+                workflow_owner=request.claim_owner,
+                now_ms=now_ms,
+                claim_ttl_ms=_claim_ttl_ms(now_ms, request.claim_expires_at),
+                after_created_at_ms=(
+                    None
+                    if request.after_created_at is None
+                    else _datetime_epoch_ms(request.after_created_at)
+                ),
+                after_message_id=request.after_message_id,
+            )
+        )
+        record = _submission_recovery_record(response.get("admission"))
+        handle = None
+        claim = response.get("claim")
+        if record is not None and isinstance(claim, Mapping):
+            handle = self._new_submission_handle(
+                mode="sidecar",
+                message_id=record.message_id,
+                owner=request.claim_owner,
+                token=str(claim["token"]),
+                record=record,
+            )
+        return SubmissionClaimResult(
+            found=bool(response["found"]),
+            authority_state=SubmissionAuthorityState(str(response["authority_state"])),
+            finalization_receipt_sha256=response.get(
+                "finalization_receipt_sha256"
+            ),
+            record=record,
+            handle=handle,
+        )
+
+    async def renew_submission_claim(
+        self, request: SubmissionClaimRenewalRequest
+    ) -> SubmissionAdmissionHandle:
+        binding = self._submission_binding(request.handle)
+        if binding["mode"] == "sql":
+            return request.handle
+        now_ms = _datetime_epoch_ms(request.now)
+        client = self._submission_sidecar_client("submission_claim_renew")
+        response = await _resolve_runtime_sidecar_call(
+            client.renew_submission_claim(
+                message_id=binding["message_id"],
+                workflow_owner=binding["owner"],
+                claim_token=binding["token"],
+                now_ms=now_ms,
+                claim_ttl_ms=_claim_ttl_ms(now_ms, request.claim_expires_at),
+            )
+        )
+        claim = response["claim"]
+        del self._submission_claims[request.handle]
+        return self._new_submission_handle(
+            mode="sidecar",
+            message_id=binding["message_id"],
+            owner=binding["owner"],
+            token=str(claim["token"]),
+            record=binding["record"],
+        )
+
+    async def acknowledge_submission_projection(
+        self, request: SubmissionProjectionAcknowledgementRequest
+    ) -> SubmissionAdmissionPhase:
+        binding = self._submission_binding(request.handle)
+        record = binding["record"]
+        if record.projection_sha256 != request.projection_sha256:
+            raise RuntimeError("submission_projection_conflict")
+        await self._run_submission_projection(record)
+        if binding["mode"] == "sql":
+            phase = replace(
+                record.phase,
+                projection_state=SubmissionProjectionState.PROJECTED,
+            )
+            binding["record"] = replace(record, phase=phase)
+            return phase
+        client = self._submission_sidecar_client(
+            "submission_projection_acknowledge"
+        )
+        response = await _resolve_runtime_sidecar_call(
+            client.acknowledge_submission_projection(
+                message_id=binding["message_id"],
+                workflow_owner=binding["owner"],
+                claim_token=binding["token"],
+                projection_sha256=request.projection_sha256,
+                now_ms=_datetime_epoch_ms(request.acknowledged_at),
+            )
+        )
+        updated = _submission_recovery_record(response["admission"])
+        binding["record"] = updated
+        return updated.phase
+
+    async def prepare_submission_handoff(
+        self, request: SubmissionPreparationRequest
+    ) -> SubmissionPreparationRecord:
+        binding = self._submission_binding(request.handle)
+        if binding["mode"] == "sql":
+            current = binding["record"]
+            updated = replace(
+                current,
+                prepared_execution=request.prepared_execution,
+                prepared_execution_sha256=request.prepared_execution_sha256,
+                phase=replace(
+                    current.phase,
+                    preparation_state=SubmissionPreparationState.PREPARED,
+                ),
+            )
+        else:
+            client = self._submission_sidecar_client("submission_handoff_prepare")
+            response = await _resolve_runtime_sidecar_call(
+                client.prepare_submission_handoff(
+                    message_id=binding["message_id"],
+                    workflow_owner=binding["owner"],
+                    claim_token=binding["token"],
+                    prepared_execution_json=request.prepared_execution,
+                    prepared_execution_sha256=request.prepared_execution_sha256,
+                    now_ms=_datetime_epoch_ms(request.prepared_at),
+                )
+            )
+            updated = _submission_recovery_record(response["admission"])
+        binding["record"] = updated
+        return _submission_preparation_record(updated, response if binding["mode"] != "sql" else None)
+
+    async def get_submission_preparation(
+        self, request: SubmissionPreparationLookup
+    ) -> SubmissionPreparationRecord | None:
+        if self._task_authority_mode() != "enforce":
+            return None
+        client = self._submission_sidecar_client("submission_preparation_get")
+        response = await _resolve_runtime_sidecar_call(
+            client.get_submission_preparation(
+                username=request.username,
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+            )
+        )
+        if not response["found"]:
+            return None
+        record = _submission_recovery_record(response["admission"])
+        return _submission_preparation_record(record, response)
+
+    async def acknowledge_submission_handoff(
+        self, request: SubmissionHandoffAcknowledgementRequest
+    ) -> SubmissionAdmissionPhase:
+        binding = self._submission_binding(request.handle)
+        if binding["mode"] == "sql":
+            phase = replace(
+                binding["record"].phase,
+                handoff_state=SubmissionHandoffState.HANDED_OFF,
+            )
+        else:
+            client = self._submission_sidecar_client(
+                "submission_handoff_acknowledge"
+            )
+            response = await _resolve_runtime_sidecar_call(
+                client.acknowledge_submission_handoff(
+                    message_id=binding["message_id"],
+                    workflow_owner=binding["owner"],
+                    claim_token=binding["token"],
+                    prepared_execution_sha256=request.prepared_execution_sha256,
+                    handoff_kind=request.handoff_kind,
+                    handoff_identity=request.handoff_identity,
+                    now_ms=_datetime_epoch_ms(request.acknowledged_at),
+                )
+            )
+            phase = _submission_recovery_record(response["admission"]).phase
+        del self._submission_claims[request.handle]
+        return phase
+
+    async def close_conversation_admission(
+        self, request: ConversationAdmissionCloseRequest
+    ) -> ConversationAdmissionCloseResult:
+        if self._task_authority_mode() != "enforce":
+            return ConversationAdmissionCloseResult(
+                disposition=ConversationAdmissionCloseDisposition.CLOSED,
+                conversation_id=request.conversation_id,
+            )
+        response = await _resolve_runtime_sidecar_call(
+            self._submission_sidecar_client(
+                "conversation_admission_close"
+            ).close_conversation_admission(
+                username=request.username,
+                conversation_id=request.conversation_id,
+                operation_id=request.operation_id,
+                now_ms=_datetime_epoch_ms(request.closed_at),
+            )
+        )
+        return ConversationAdmissionCloseResult(
+            disposition=ConversationAdmissionCloseDisposition(
+                str(response["disposition"])
+            ),
+            conversation_id=request.conversation_id,
+        )
+
+    async def reserve_message_identity(
+        self, request: MessageIdentityReservationRequest
+    ) -> MessageIdentityReservationResult:
+        if self._task_authority_mode() != "enforce":
+            existing = await self.get_message(request.message_id)
+            disposition = (
+                MessageIdentityDisposition.CREATED
+                if existing is None
+                else MessageIdentityDisposition.EXACT_REPLAY
+                if _message_matches_reservation(existing, request)
+                else MessageIdentityDisposition.CONFLICT
+            )
+            return _message_identity_result(disposition, request)
+        response = await _resolve_runtime_sidecar_call(
+            self._submission_sidecar_client(
+                "message_identity_reserve"
+            ).reserve_message_identity(
+                identity=_message_identity_to_sidecar(request)
+            )
+        )
+        identity = response.get("identity")
+        if identity is None:
+            return _message_identity_result(
+                MessageIdentityDisposition(str(response["disposition"])),
+                request,
+            )
+        return _message_identity_result_from_sidecar(response)
+
+    def _new_submission_handle(
+        self,
+        *,
+        mode: str,
+        message_id: str,
+        owner: str,
+        token: str | None,
+        record: SubmissionRecoveryRecord,
+    ) -> SubmissionAdmissionHandle:
+        handle = SubmissionAdmissionHandle()
+        self._submission_claims[handle] = {
+            "mode": mode,
+            "message_id": message_id,
+            "owner": owner,
+            "token": token,
+            "record": record,
+        }
+        return handle
+
+    async def _run_submission_admission(
+        self, request: SubmissionAdmissionRequest
+    ) -> SubmissionAdmissionResult:
+        return await self._run(
+            lambda state, collab: state.admit_submission_sql(request)
+        )
+
+    async def _run_submission_projection(
+        self, record: SubmissionRecoveryRecord
+    ) -> None:
+        await self._run(
+            lambda state, collab: state.project_submission_admission(record)
+        )
+
+    def _submission_binding(
+        self, handle: SubmissionAdmissionHandle
+    ) -> dict[str, Any]:
+        try:
+            return self._submission_claims[handle]
+        except KeyError as exc:
+            raise RuntimeError("submission_claim_invalid") from exc
+
+    def _submission_sidecar_client(self, operation_name: str) -> Any:
+        client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name=operation_name,
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if client is None:
+            raise RuntimeError("runtime_store_unavailable")
+        return client
+
+    def _submission_result_from_sidecar(
+        self,
+        response: Mapping[str, Any],
+        *,
+        expected_owner: str,
+        expected_conversation_id: str,
+    ) -> SubmissionAdmissionResult:
+        disposition = SubmissionAdmissionDisposition(str(response["disposition"]))
+        record = _submission_recovery_record(response.get("admission"))
+        if record is None:
+            return _submission_disposition(
+                disposition,
+                expected_conversation_id,
+            )
+        handle = None
+        claim = response.get("claim")
+        if isinstance(claim, Mapping):
+            handle = self._new_submission_handle(
+                mode="sidecar",
+                message_id=record.message_id,
+                owner=expected_owner,
+                token=str(claim["token"]),
+                record=record,
+            )
+        message_projection = _canonical_json_object(
+            record.message_projection,
+            context="submission_message_projection",
+        )
+        return SubmissionAdmissionResult(
+            disposition=disposition,
+            conversation_id=record.conversation_id,
+            message_id=record.message_id,
+            task_id=record.task_id,
+            message_created_at=_submission_datetime(
+                message_projection.get("message_created_at"),
+                context="submission_message_created_at",
+            ),
+            task_created_at=_task_from_sidecar_record(
+                response["admission"]["task"]
+            ).created_at,
+            phase=record.phase,
+            record=record,
+            handle=handle,
+        )
+
     async def save_message(self, message: Message) -> Message:
         return await self._run(lambda state, collab: state.save_message(message))
 
@@ -16494,6 +17336,175 @@ def _validated_task_node_from_sidecar_record(record: Any) -> TaskNode:
 
 def _optional_datetime_text(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _datetime_epoch_ms(value: datetime) -> int:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return int(value.timestamp() * 1000)
+
+
+def _epoch_ms_datetime(value: int) -> datetime:
+    return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+
+
+def _claim_ttl_ms(now_ms: int, expires_at: datetime) -> int:
+    ttl = _datetime_epoch_ms(expires_at) - now_ms
+    if ttl <= 0:
+        raise ValueError("submission_claim_expiry_invalid")
+    return ttl
+
+
+def _submission_phase(record: Mapping[str, Any]) -> SubmissionAdmissionPhase:
+    return SubmissionAdmissionPhase(
+        admission_state=(
+            SubmissionAdmissionState.CLOSED
+            if record.get("closed") is True
+            else SubmissionAdmissionState.OPEN
+        ),
+        projection_state=SubmissionProjectionState(str(record["projection_state"])),
+        preparation_state=SubmissionPreparationState(
+            str(record["preparation_state"])
+        ),
+        handoff_state=SubmissionHandoffState(str(record["handoff_state"])),
+    )
+
+
+def _submission_recovery_record(
+    record: Any,
+) -> SubmissionRecoveryRecord | None:
+    if record is None:
+        return None
+    if not isinstance(record, Mapping):
+        raise RuntimeError("runtime_store_response_invalid")
+    return SubmissionRecoveryRecord(
+        username=str(record["username"]),
+        conversation_id=str(record["conversation_id"]),
+        message_id=str(record["message_id"]),
+        task_id=str(record["task_id"]),
+        conversation_projection=bytes(record["conversation_projection_json"]),
+        message_projection=bytes(record["message_projection_json"]),
+        projection_sha256=str(record["projection_sha256"]),
+        continuation=bytes(record["continuation_json"]),
+        continuation_sha256=str(record["continuation_sha256"]),
+        prepared_execution=(
+            None
+            if record.get("prepared_execution_json") is None
+            else bytes(record["prepared_execution_json"])
+        ),
+        prepared_execution_sha256=(
+            None
+            if record.get("prepared_execution_sha256") is None
+            else str(record["prepared_execution_sha256"])
+        ),
+        phase=_submission_phase(record),
+        created_at=_epoch_ms_datetime(int(record["created_at_ms"])),
+    )
+
+
+def _submission_preparation_record(
+    record: SubmissionRecoveryRecord | None,
+    response: Mapping[str, Any] | None,
+) -> SubmissionPreparationRecord:
+    if record is None or record.prepared_execution is None or (
+        record.prepared_execution_sha256 is None
+    ):
+        raise RuntimeError("runtime_store_response_invalid")
+    admission = response.get("admission") if response is not None else None
+    return SubmissionPreparationRecord(
+        conversation_id=record.conversation_id,
+        message_id=record.message_id,
+        task_id=record.task_id,
+        prepared_execution=record.prepared_execution,
+        prepared_execution_sha256=record.prepared_execution_sha256,
+        handoff_state=record.phase.handoff_state,
+        handoff_kind=(
+            str(admission["handoff_kind"])
+            if isinstance(admission, Mapping)
+            and admission.get("handoff_kind") is not None
+            else None
+        ),
+        handoff_identity=(
+            str(admission["handoff_identity"])
+            if isinstance(admission, Mapping)
+            and admission.get("handoff_identity") is not None
+            else None
+        ),
+    )
+
+
+def _message_identity_to_sidecar(
+    request: MessageIdentityReservationRequest,
+) -> dict[str, Any]:
+    return {
+        "message_id": request.message_id,
+        "conversation_id": request.conversation_id,
+        "username": request.username,
+        "identity_kind": str(request.identity_kind),
+        "role": None if request.role is None else str(request.role),
+        "message_type": request.message_type,
+        "message_created_at_ms": (
+            None
+            if request.message_created_at is None
+            else _datetime_epoch_ms(request.message_created_at)
+        ),
+        "task_id": request.task_id,
+        "request_fingerprint": request.request_fingerprint,
+        "reserved_at_ms": _datetime_epoch_ms(request.reserved_at),
+    }
+
+
+def _message_identity_result(
+    disposition: MessageIdentityDisposition,
+    request: MessageIdentityReservationRequest,
+) -> MessageIdentityReservationResult:
+    return MessageIdentityReservationResult(
+        disposition=disposition,
+        message_id=request.message_id,
+        conversation_id=request.conversation_id,
+        identity_kind=request.identity_kind,
+        role=request.role,
+        message_type=request.message_type,
+        message_created_at=request.message_created_at,
+        task_id=request.task_id,
+    )
+
+
+def _message_identity_result_from_sidecar(
+    response: Mapping[str, Any],
+) -> MessageIdentityReservationResult:
+    identity = response["identity"]
+    return MessageIdentityReservationResult(
+        disposition=MessageIdentityDisposition(str(response["disposition"])),
+        message_id=str(identity["message_id"]),
+        conversation_id=str(identity["conversation_id"]),
+        identity_kind=MessageIdentityKind(str(identity["identity_kind"])),
+        role=(
+            None
+            if identity.get("role") is None
+            else MessageRole(str(identity["role"]))
+        ),
+        message_type=identity.get("message_type"),
+        message_created_at=(
+            None
+            if identity.get("message_created_at_ms") is None
+            else _epoch_ms_datetime(int(identity["message_created_at_ms"]))
+        ),
+        task_id=identity.get("task_id"),
+    )
+
+
+def _message_matches_reservation(
+    message: Message,
+    request: MessageIdentityReservationRequest,
+) -> bool:
+    return (
+        message.conversation_id == request.conversation_id
+        and message.role == request.role
+        and message.message_type == request.message_type
+        and message.created_at == request.message_created_at
+        and message.task_id == request.task_id
+    )
 
 
 def _optional_task_string(record: Mapping[str, Any], name: str) -> str | None:

@@ -1,6 +1,6 @@
 # P0 Checkpoint A：Sidecar Submission Admission 实施计划
 
-**状态：** implementation in progress；A1、A2已完成并通过独立终审，下一步为A3 Python client与SQL off/shadow/enforce projection
+**状态：** implementation in progress；A1～A3已完成并通过独立终审，下一步为A4 durable Agent handoff与admission recovery primitive
 
 **设计 authority：** `docs/superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`
 
@@ -193,13 +193,15 @@ cd native && cargo check --workspace --all-targets --all-features
 - `src/storage/sqlite/repositories.py`：
   - off/shadow `admit_submission` 的单 `_run` / `BEGIN IMMEDIATE` transaction；
   - enforce `project_submission_admission` 的 Conversation+Message insert-or-exact transaction；
-  - Message immutable identity guard，替代危险 `session.merge` 改绑语义。
+  - Message immutable identity guard，替代危险 `session.merge` 改绑语义；
+  - off/shadow receipt只存于raw Message metadata的server-private reserved key，domain/API mapper剥离且generic update原样保留；不新增SQL表/列或audit event。
 - `src/storage/postgres/repositories.py`：PostgreSQL-specific admission/projection transaction，使用 conflict-safe Conversation insert、`FOR UPDATE`、Message unique conflict mapping。
 - `src/storage/interfaces.py` / exports：只同步既有模块索引需要的 type exposure。
 
 ### 6.2 红测
 
 - 扩展`tests/integrations/test_runtime_sidecar_grpc_client.py`：9 RPC request/response field、unknown/missing/oversize/digest/identity error、authority receipt、compatibility feature。
+- 同一client suite还必须以真实/协议fixture锁定HTTP/2 DATA按peer/default frame size分块、仅末帧END_STREAM、140 MiB response cap，以及gRPC 5-byte declared length与actual payload exact；不得用单个50 MiB DATA frame冒充A1 transport证据。
 - 升级 `tests/api/support.py` 的Sidecar fake为strict admission/identity fake；禁止测试fake继续用无条件Task overwrite把冲突/重放测成假绿。
 - 新建 `tests/storage/test_submission_admission_sqlite.py`：
   - cross-user/cross-Conversation same ID conflict且原行 byte-equivalent；
@@ -207,6 +209,7 @@ cd native && cargo check --workspace --all-targets --all-features
   - same Conversation并发 one created/one busy；same request one created/one replay；
   - Conversation/Message/Task逐点fault rollback；
   - enforce projection never inserts SQL Task；projection replay exact；immutable mismatch fail closed。
+  - off/shadow private receipt在domain/API/history/audit中不可见，generic streaming metadata update不删除/改写，caller注入reserved key拒绝。
 - 新建 `tests/storage/test_submission_admission_postgres_integration.py`：使用 `tests/postgres_test_support.py` 模块专用 DSN 和两真实 connection 复现同义并发/row lock/unique conflict/rollback。
 - 扩展 `tests/storage/test_sqlite_conversation_repository.py` 与 PostgreSQL contract：assistant streaming mutable update通过，immutable owner tuple变化拒绝。
 
@@ -231,6 +234,8 @@ python -m ruff check src/core src/storage tests/core/test_submission_admission_c
 **停止条件：** PostgreSQL first-Conversation race 需要进程锁；Sidecar RPC 必须进入 SQL transaction；projection 需要 SQL Task shadow；immutable guard破坏合法 streaming update。
 
 **提交：** `feat(admission): add SQL admission projection`
+
+**A3实施结果：** Python手写client与facade完成9个RPC、closed envelope/phase/request-response绑定、16KiB分帧/flow control/140MiB响应上限；off/shadow SQL admission与enforce Conversation/USER Message projection分别保持单一authority，private receipt不进入公开投影且未新增表/列/Event。focused 77、完整Storage 431（8项环境skip）、真实PostgreSQL双连接与rollback 4/4、近49MiB Python client↔SQLite Rust binary往返、compileall/Ruff/diff-check均通过；独立终审0 Blocking/0 Major。A4及生产API接线未进入本检查点。
 
 ## 7. A4：Durable Agent handoff 与 admission recovery primitive
 

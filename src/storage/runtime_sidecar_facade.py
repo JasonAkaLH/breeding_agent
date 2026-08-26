@@ -79,6 +79,97 @@ def validate_runtime_sidecar_task_record(task: Mapping[str, Any]) -> dict[str, A
     return dict(task)
 
 
+def validate_runtime_sidecar_submission_envelopes(
+    *,
+    conversation_projection: bytes,
+    message_projection: bytes,
+    continuation: bytes,
+    projection_sha256: str,
+    continuation_sha256: str,
+    username: str,
+    conversation_id: str,
+    message_id: str,
+    task_id: str,
+    request_fingerprint: str,
+    routing_mode: str,
+    requested_capability_id: str | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    conversation = _closed_json_mapping(
+        conversation_projection,
+        keys={
+            "schema", "conversation_id", "username", "status", "current_task_id",
+            "created_at", "updated_at", "create_if_missing",
+        },
+        limit_name="submission_conversation_projection_bytes",
+    )
+    message = _closed_json_mapping(
+        message_projection,
+        keys={
+            "schema", "message_id", "conversation_id", "role", "content", "task_id",
+            "stream_status", "message_created_at", "message_type", "metadata", "updated_at",
+        },
+        limit_name="submission_message_projection_bytes",
+    )
+    continuation_value = _closed_json_mapping(
+        continuation,
+        keys={
+            "schema", "request_fingerprint", "conversation_id", "message_id", "task_id",
+            "owner_scope", "message_content_sha256", "routing_mode", "requested_capability_id",
+            "model_options", "bundle_revisions", "execution_metadata", "upload_refs",
+            "sheet_selections", "mcp_binding", "mcp_assignment", "available_mcp_servers",
+            "pending_context", "initial_no_server_eligible",
+        },
+        limit_name="submission_continuation_bytes",
+    )
+    _validate_sha256(request_fingerprint)
+    if hashlib.sha256(
+        b"maf.submission.projection.v1\0" + conversation_projection + b"\0" + message_projection
+    ).hexdigest() != projection_sha256 or hashlib.sha256(
+        b"maf.submission.continuation.v1\0" + continuation
+    ).hexdigest() != continuation_sha256:
+        _raise_response_invalid()
+    content = message.get("content")
+    if not isinstance(content, str) or (
+        conversation.get("schema") != "maf.submission.conversation_projection.v1"
+        or conversation.get("status") != "active"
+        or not isinstance(conversation.get("create_if_missing"), bool)
+        or not isinstance(conversation.get("created_at"), str)
+        or not isinstance(conversation.get("updated_at"), str)
+        or conversation.get("conversation_id") != conversation_id
+        or conversation.get("username") != username
+        or conversation.get("current_task_id") != task_id
+        or message.get("schema") != "maf.submission.message_projection.v1"
+        or message.get("message_id") != message_id
+        or message.get("conversation_id") != conversation_id
+        or message.get("task_id") != task_id
+        or message.get("role") != "user"
+        or message.get("stream_status") != "complete"
+        or not isinstance(message.get("message_created_at"), str)
+        or not _non_empty_string(message.get("message_type"))
+        or not isinstance(message.get("metadata"), dict)
+        or not isinstance(message.get("updated_at"), str)
+        or continuation_value.get("schema") != "maf.submission.continuation.v1"
+        or continuation_value.get("request_fingerprint") != request_fingerprint
+        or continuation_value.get("conversation_id") != conversation_id
+        or continuation_value.get("message_id") != message_id
+        or continuation_value.get("task_id") != task_id
+        or continuation_value.get("owner_scope") != username
+        or continuation_value.get("message_content_sha256")
+        != hashlib.sha256(content.encode()).hexdigest()
+        or continuation_value.get("routing_mode") != routing_mode
+        or not _is_nullable_string(continuation_value.get("requested_capability_id"))
+        or continuation_value.get("requested_capability_id") != requested_capability_id
+        or not isinstance(continuation_value.get("initial_no_server_eligible"), bool)
+    ):
+        _raise_response_invalid()
+    _validate_model_options(continuation_value.get("model_options"))
+    _validate_bundle_revisions(continuation_value.get("bundle_revisions"))
+    _validate_execution_metadata(continuation_value.get("execution_metadata"))
+    _validate_safe_references(continuation_value, conversation_id)
+    _reject_submission_forbidden_keys(message["metadata"])
+    return conversation, message, continuation_value
+
+
 def _validate_typed_error(error: Any) -> None:
     if not isinstance(error, Mapping):
         _raise_response_invalid()
@@ -103,6 +194,89 @@ def _validate_typed_error(error: Any) -> None:
 
 
 def _validate_success_response(operation_name: str, response: Mapping[str, Any]) -> None:
+    if operation_name == "submission_admit":
+        disposition = response.get("disposition")
+        if disposition not in {
+            "created",
+            "idempotent_replay",
+            "conversation_busy",
+            "message_id_conflict",
+            "conversation_not_available",
+        }:
+            _raise_response_invalid()
+        admission = response.get("admission")
+        claim = response.get("claim")
+        if disposition in {"created", "idempotent_replay"}:
+            _validate_submission_admission_record(admission)
+            if claim is not None:
+                _validate_submission_claim(claim)
+        elif admission is not None or claim is not None:
+            _raise_response_invalid()
+        return
+    if operation_name == "submission_pending_claim":
+        found = response.get("found")
+        admission = response.get("admission")
+        claim = response.get("claim")
+        if not isinstance(found, bool) or response.get("authority_state") not in {
+            "uninitialized",
+            "finalized",
+        }:
+            _raise_response_invalid()
+        receipt = response.get("finalization_receipt_sha256")
+        if response["authority_state"] == "finalized":
+            _validate_sha256(receipt)
+        elif receipt is not None:
+            _raise_response_invalid()
+        if found:
+            _validate_submission_admission_record(admission)
+            _validate_submission_claim(claim)
+        elif admission is not None or claim is not None:
+            _raise_response_invalid()
+        return
+    if operation_name == "submission_claim_renew":
+        _validate_submission_claim(response.get("claim"))
+        return
+    if operation_name in {
+        "submission_projection_acknowledge",
+        "submission_handoff_prepare",
+        "submission_handoff_acknowledge",
+    }:
+        _validate_submission_admission_record(response.get("admission"))
+        if not isinstance(response.get("duplicate"), bool):
+            _raise_response_invalid()
+        return
+    if operation_name == "submission_preparation_get":
+        found = response.get("found")
+        admission = response.get("admission")
+        if not isinstance(found, bool) or found != (admission is not None):
+            _raise_response_invalid()
+        if admission is not None:
+            _validate_submission_admission_record(admission)
+        return
+    if operation_name == "conversation_admission_close":
+        if response.get("disposition") not in {
+            "closed",
+            "exact_replay",
+            "conversation_not_available",
+            "conflict",
+        } or not _is_plain_int(response.get("revision")):
+            _raise_response_invalid()
+        return
+    if operation_name == "message_identity_reserve":
+        disposition = response.get("disposition")
+        if disposition not in {
+            "created",
+            "exact_replay",
+            "conflict",
+            "conversation_not_available",
+        }:
+            _raise_response_invalid()
+        identity = response.get("identity")
+        if disposition in {"created", "exact_replay"}:
+            _validate_message_identity_record(identity)
+        elif identity is not None:
+            _raise_response_invalid()
+        return
     if operation_name == "event_append":
         _validate_event_cursor(response.get("cursor"))
         return
@@ -246,6 +420,398 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
     _raise_response_invalid()
 
 
+def _validate_submission_claim(claim: Any) -> None:
+    if not isinstance(claim, Mapping) or not (
+        _non_empty_string(claim.get("owner"))
+        and _non_empty_string(claim.get("token"))
+        and _is_plain_int(claim.get("expires_at_ms"))
+        and claim["expires_at_ms"] >= 0
+    ):
+        _raise_response_invalid()
+
+
+def _validate_message_identity_record(identity: Any) -> None:
+    if not isinstance(identity, Mapping) or not all(
+        _non_empty_string(identity.get(name))
+        for name in ("message_id", "conversation_id", "username")
+    ):
+        _raise_response_invalid()
+    kind = identity.get("identity_kind")
+    if kind not in {
+        "submission",
+        "interrupt",
+        "server_internal",
+        "file_visible",
+        "legacy_conflict_only",
+    } or not _is_plain_int(identity.get("reserved_at_ms")):
+        _raise_response_invalid()
+    for name in ("role", "message_type", "task_id", "request_fingerprint"):
+        if identity.get(name) is not None and not _non_empty_string(identity.get(name)):
+            _raise_response_invalid()
+    created_at = identity.get("message_created_at_ms")
+    if created_at is not None and not _is_plain_int(created_at):
+        _raise_response_invalid()
+    fingerprint = identity.get("request_fingerprint")
+    if fingerprint is not None:
+        _validate_sha256(fingerprint)
+
+
+def _validate_submission_admission_record(admission: Any) -> None:
+    if not isinstance(admission, Mapping) or not all(
+        _non_empty_string(admission.get(name))
+        for name in (
+            "message_id",
+            "task_id",
+            "conversation_id",
+            "username",
+            "idempotency_key",
+        )
+    ):
+        _raise_response_invalid()
+    for name in ("request_fingerprint", "projection_sha256", "continuation_sha256"):
+        _validate_sha256(admission.get(name))
+    if admission.get("projection_state") not in {"pending", "projected"}:
+        _raise_response_invalid()
+    if admission.get("preparation_state") not in {"pending", "prepared"}:
+        _raise_response_invalid()
+    if admission.get("handoff_state") not in {"pending", "handed_off"}:
+        _raise_response_invalid()
+    if not isinstance(admission.get("closed"), bool) or not all(
+        _is_plain_int(admission.get(name)) for name in ("created_at_ms", "updated_at_ms")
+    ):
+        _raise_response_invalid()
+    _validate_task_record(admission.get("task"))
+    validate_runtime_sidecar_submission_envelopes(
+        conversation_projection=admission["conversation_projection_json"],
+        message_projection=admission["message_projection_json"],
+        continuation=admission["continuation_json"],
+        projection_sha256=admission["projection_sha256"],
+        continuation_sha256=admission["continuation_sha256"],
+        username=admission["username"],
+        conversation_id=admission["conversation_id"],
+        message_id=admission["message_id"],
+        task_id=admission["task_id"],
+        request_fingerprint=admission["request_fingerprint"],
+        routing_mode=admission["task"]["routing_mode"],
+        requested_capability_id=admission["task"]["requested_capability_id"],
+    )
+    prepared = admission.get("prepared_execution_json")
+    prepared_sha = admission.get("prepared_execution_sha256")
+    if admission["projection_state"] == "pending" and (
+        admission["preparation_state"] != "pending"
+        or admission["handoff_state"] != "pending"
+    ):
+        _raise_response_invalid()
+    if admission["preparation_state"] == "prepared":
+        if (
+            not isinstance(prepared, bytes)
+            or not prepared
+            or len(prepared) > resource_limit("submission_prepared_execution_bytes")
+        ):
+            _raise_response_invalid()
+        _validate_canonical_json_object(prepared)
+        _validate_sha256(prepared_sha)
+        if hashlib.sha256(
+            b"maf.submission.prepared_execution.v1\0" + prepared
+        ).hexdigest() != prepared_sha:
+            _raise_response_invalid()
+        prepared_value = json.loads(prepared)
+        if set(prepared_value) != {
+            "schema",
+            "task_id",
+            "conversation_id",
+            "message_id",
+            "prepared_kind",
+            "owner_scope",
+            "execution_text_source",
+            "execution_text_sha256",
+            "requested_capability_id",
+            "initial_required_tool_name",
+            "model_options",
+            "bundle_revisions",
+            "execution_metadata",
+            "preparation_receipt",
+            "upload_refs",
+            "sheet_selections",
+            "mcp_binding",
+            "mcp_assignment",
+            "available_mcp_servers",
+            "pending_context",
+            "planned_handoff_kind",
+        } or (
+            prepared_value.get("schema")
+            != "maf.submission.prepared_execution.v1"
+            or prepared_value.get("task_id") != admission["task_id"]
+            or prepared_value.get("conversation_id")
+            != admission["conversation_id"]
+            or prepared_value.get("message_id") != admission["message_id"]
+            or prepared_value.get("prepared_kind")
+            not in {"agent_run", "interrupt", "no_server_intent"}
+            or prepared_value.get("planned_handoff_kind")
+            != prepared_value.get("prepared_kind")
+            or prepared_value.get("execution_text_source")
+            not in {"root_message", "pending_context", "memory_context"}
+            or not _non_empty_string(prepared_value.get("owner_scope"))
+            or not _is_nullable_string(
+                prepared_value.get("requested_capability_id")
+            )
+            or not _is_nullable_string(
+                prepared_value.get("initial_required_tool_name")
+            )
+        ):
+            _raise_response_invalid()
+        _validate_sha256(prepared_value.get("execution_text_sha256"))
+        _validate_model_options(prepared_value.get("model_options"))
+        _validate_bundle_revisions(prepared_value.get("bundle_revisions"))
+        _validate_execution_metadata(prepared_value.get("execution_metadata"))
+        _validate_safe_references(
+            prepared_value,
+            admission["conversation_id"],
+        )
+        receipt = prepared_value.get("preparation_receipt")
+        if not isinstance(receipt, Mapping) or set(receipt) != {
+            "task_id",
+            "receipt_sha256",
+            "route_decision_sha256",
+            "memory_context_sha256",
+            "selector_decision_sha256",
+        } or receipt.get("task_id") != admission["task_id"]:
+            _raise_response_invalid()
+        for name in (
+            "receipt_sha256",
+            "route_decision_sha256",
+            "memory_context_sha256",
+            "selector_decision_sha256",
+        ):
+            _validate_sha256(receipt.get(name))
+    elif prepared is not None or prepared_sha is not None:
+        _raise_response_invalid()
+    handoff_kind = admission.get("handoff_kind")
+    handoff_identity = admission.get("handoff_identity")
+    if admission["preparation_state"] == "pending" and (
+        admission["handoff_state"] != "pending"
+        or handoff_kind is not None
+        or handoff_identity is not None
+    ):
+        _raise_response_invalid()
+    if admission["handoff_state"] == "pending":
+        if handoff_kind is not None or handoff_identity is not None:
+            _raise_response_invalid()
+    elif (
+        admission["preparation_state"] != "prepared"
+        or not _non_empty_string(handoff_kind)
+        or not _non_empty_string(handoff_identity)
+    ):
+        _raise_response_invalid()
+    if (
+        admission["task"]["task_id"] != admission["task_id"]
+        or admission["task"]["conversation_id"] != admission["conversation_id"]
+        or admission["task"]["root_message_id"] != admission["message_id"]
+    ):
+        _raise_response_invalid()
+
+
+def _validate_sha256(value: Any) -> None:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        _raise_response_invalid()
+
+
+def _validate_canonical_json_object(value: bytes) -> None:
+    try:
+        decoded = json.loads(
+            value,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        _raise_response_invalid()
+    if not isinstance(decoded, dict):
+        _raise_response_invalid()
+    canonical = json.dumps(
+        decoded,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if canonical != value:
+        _raise_response_invalid()
+
+
+def _closed_json_mapping(
+    value: bytes,
+    *,
+    keys: set[str],
+    limit_name: str,
+) -> dict[str, Any]:
+    if not value or len(value) > resource_limit(limit_name):
+        _raise_response_invalid()
+    _validate_canonical_json_object(value)
+    decoded = json.loads(value)
+    if set(decoded) != keys:
+        _raise_response_invalid()
+    return decoded
+
+
+def _is_nullable_string(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_model_options(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "model_edition", "reasoning_effort", "thinking_enabled"
+    } or not _is_nullable_string(value.get("model_edition")) or not _non_empty_string(
+        value.get("reasoning_effort")
+    ) or not isinstance(value.get("thinking_enabled"), bool):
+        _raise_response_invalid()
+
+
+def _validate_bundle_revisions(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "skill_bundle_revision", "mcp_bundle_revision"
+    } or not all(_is_nullable_string(value.get(key)) for key in value):
+        _raise_response_invalid()
+
+
+def _validate_execution_metadata(value: Any) -> None:
+    string_keys = {
+        "requested_capability_alias", "canonical_capability_id", "mcp_dispatch_server_id",
+        "mcp_binding_mode", "mcp_command", "mcp_execution_mode",
+        "mcp_rollout_config_version", "mcp_route_reason_code", "mcp_rollout_mode",
+    }
+    boolean_keys = {
+        "defer_task_completed_until_pending_skill_context_processed",
+        "forced_by_mcp_command", "mcp_shadow_enabled",
+    }
+    if not isinstance(value, Mapping) or set(value) != string_keys | boolean_keys:
+        _raise_response_invalid()
+    if any(not _is_nullable_string(value.get(key)) for key in string_keys) or any(
+        value.get(key) is not None and not isinstance(value.get(key), bool)
+        for key in boolean_keys
+    ):
+        _raise_response_invalid()
+
+
+def _validate_safe_references(value: Mapping[str, Any], conversation_id: str) -> None:
+    uploads = value.get("upload_refs")
+    if not isinstance(uploads, list):
+        _raise_response_invalid()
+    selected: dict[str, str] = {}
+    previous = ""
+    for upload in uploads:
+        if not isinstance(upload, Mapping) or set(upload) != {
+            "upload_id", "conversation_id", "sha256", "size_bytes", "selected_sheet"
+        }:
+            _raise_response_invalid()
+        upload_id = upload.get("upload_id")
+        sheet = upload.get("selected_sheet")
+        if not _non_empty_string(upload_id) or upload_id <= previous or (
+            upload.get("conversation_id") != conversation_id
+            or not _is_plain_int(upload.get("size_bytes"))
+            or upload["size_bytes"] < 0
+            or not _is_nullable_string(sheet)
+            or sheet == ""
+        ):
+            _raise_response_invalid()
+        _validate_sha256(upload.get("sha256"))
+        previous = upload_id
+        if sheet is not None:
+            selected[upload_id] = sheet
+    if value.get("sheet_selections") != selected:
+        _raise_response_invalid()
+    _validate_mcp_binding(value.get("mcp_binding"))
+    _validate_mcp_assignment(value.get("mcp_assignment"))
+    _validate_available_mcp_servers(value.get("available_mcp_servers"))
+    _validate_pending_context(value.get("pending_context"))
+    _reject_submission_forbidden_keys(value)
+
+
+def _validate_mcp_binding(value: Any) -> None:
+    if value is None:
+        return
+    string_keys = {"server_id", "display_name", "command", "binding_mode"}
+    version_keys = {"server_config_version", "server_security_version"}
+    if not isinstance(value, Mapping) or set(value) != string_keys | version_keys or any(
+        not _non_empty_string(value.get(key)) for key in string_keys
+    ) or any(
+        not _is_plain_int(value.get(key)) or value[key] <= 0 for key in version_keys
+    ):
+        _raise_response_invalid()
+
+
+def _validate_mcp_assignment(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping) or set(value) != {
+        "execution_mode", "shadow_enabled", "rollout_config_version",
+        "route_reason_code", "rollout_mode",
+    } or value.get("execution_mode") not in {"legacy", "user_scoped", "unavailable"} or (
+        value.get("rollout_mode") not in {"off", "shadow", "enforce"}
+        or not isinstance(value.get("shadow_enabled"), bool)
+        or not _non_empty_string(value.get("rollout_config_version"))
+        or not _non_empty_string(value.get("route_reason_code"))
+    ):
+        _raise_response_invalid()
+
+
+def _validate_available_mcp_servers(value: Any) -> None:
+    if not isinstance(value, list):
+        _raise_response_invalid()
+    previous = ""
+    for server in value:
+        if not isinstance(server, Mapping) or set(server) != {
+            "server_id", "display_name", "routing_description", "transport"
+        }:
+            _raise_response_invalid()
+        server_id = server.get("server_id")
+        if not _non_empty_string(server_id) or server_id <= previous or not all(
+            _non_empty_string(server.get(key)) for key in ("display_name", "transport")
+        ) or not isinstance(server.get("routing_description"), str):
+            _raise_response_invalid()
+        previous = server_id
+
+
+def _validate_pending_context(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping) or set(value) != {
+        "context_id", "capability_id", "original_user_message", "assistant_message",
+        "missing_requirements",
+    } or not all(_non_empty_string(value.get(key)) for key in ("context_id", "capability_id")) or not all(
+        isinstance(value.get(key), str) for key in ("original_user_message", "assistant_message")
+    ):
+        _raise_response_invalid()
+    requirements = value.get("missing_requirements")
+    if not isinstance(requirements, list) or any(
+        not _non_empty_string(item) for item in requirements
+    ):
+        _raise_response_invalid()
+    if requirements != sorted(requirements) or len(requirements) != len(
+        set(requirements)
+    ):
+        _raise_response_invalid()
+
+
+def _reject_submission_forbidden_keys(value: Any) -> None:
+    forbidden = {
+        "credential", "credentials", "password", "api_key", "access_token",
+        "refresh_token", "file_content", "base64", "tool_arguments", "llm_prompt",
+        "provider_response",
+    }
+    if isinstance(value, Mapping):
+        if forbidden.intersection(value):
+            _raise_response_invalid()
+        for nested in value.values():
+            _reject_submission_forbidden_keys(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _reject_submission_forbidden_keys(nested)
+
+
 def _validate_event_cursor(cursor: Any) -> None:
     if not isinstance(cursor, Mapping):
         _raise_response_invalid()
@@ -343,6 +909,7 @@ def _validate_task_record(task: Any) -> None:
             "explicit_legacy_capability",
             "user_server_rollout_unavailable",
             "no_execution_path",
+            "no_user_scoped_server",
         }
     ):
         _raise_response_invalid()
@@ -1000,5 +1567,6 @@ __all__ = [
     "validate_runtime_sidecar_ops_readiness",
     "validate_runtime_sidecar_promotion_readiness",
     "validate_runtime_sidecar_response",
+    "validate_runtime_sidecar_submission_envelopes",
     "validate_runtime_sidecar_task_record",
 ]

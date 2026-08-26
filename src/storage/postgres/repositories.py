@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence, TypeVar
 
 from sqlalchemy import func, or_, select, text, update
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from src.core.enums import ConversationStatus
 from src.core.models import (
@@ -49,6 +49,9 @@ from src.core.models import (
     MCPTargetIntentArmResult,
     MCPTargetIntentResolveResult,
     Task,
+    SubmissionAdmissionRequest,
+    SubmissionAdmissionResult,
+    SubmissionRecoveryRecord,
     UserMCPCredentialRecord,
     UserMCPHealthAttempt,
     UserMCPScopeLease,
@@ -113,6 +116,12 @@ from src.storage.sqlite.repositories import (
 _T = TypeVar("_T")
 
 
+def _postgres_sqlstate(error: DBAPIError) -> str | None:
+    original = error.orig
+    value = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    return str(value) if value is not None else None
+
+
 class PostgreSQLStorage(SQLiteStorage):
     """StoragePort facade backed by PostgreSQL SQLAlchemy sessions.
 
@@ -153,6 +162,31 @@ class PostgreSQLStorage(SQLiteStorage):
             mcp_legacy_migration_session_factory
         )
         self._mcp_legacy_migration_role = mcp_legacy_migration_role
+
+    async def _run_submission_admission(
+        self, request: SubmissionAdmissionRequest
+    ) -> SubmissionAdmissionResult:
+        return await self._run_submission_write_with_unique_retry(
+            lambda state: state.admit_submission_sql(request)
+        )
+
+    async def _run_submission_projection(
+        self, record: SubmissionRecoveryRecord
+    ) -> None:
+        await self._run_submission_write_with_unique_retry(
+            lambda state: state.project_submission_admission(record)
+        )
+
+    async def _run_submission_write_with_unique_retry(
+        self,
+        operation: Callable[[SQLiteStateRepository], _T],
+    ) -> _T:
+        try:
+            return await self._run(lambda state, collab: operation(state))
+        except IntegrityError as exc:
+            if _postgres_sqlstate(exc) != "23505":
+                raise
+        return await self._run(lambda state, collab: operation(state))
 
     def _run_cp7_authority_sync(
         self,

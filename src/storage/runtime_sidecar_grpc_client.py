@@ -9,7 +9,7 @@ from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlparse
 
-from src.storage.rust_contract import load_runtime_sidecar_contract
+from src.storage.rust_contract import load_runtime_sidecar_contract, resource_limit
 from src.storage.runtime_sidecar_facade import (
     validate_runtime_sidecar_artifact_provenance,
     validate_runtime_sidecar_config_authority,
@@ -25,10 +25,48 @@ _FRAME_DATA = 0x0
 _FRAME_HEADERS = 0x1
 _FRAME_RST_STREAM = 0x3
 _FRAME_SETTINGS = 0x4
+_FRAME_WINDOW_UPDATE = 0x8
 _FRAME_GOAWAY = 0x7
 _FLAG_END_STREAM = 0x1
 _FLAG_END_HEADERS = 0x4
 _FLAG_ACK = 0x1
+_DEFAULT_HTTP2_MAX_FRAME_SIZE = 16_384
+_DEFAULT_HTTP2_FLOW_WINDOW = 65_535
+_SETTINGS_INITIAL_WINDOW_SIZE = 0x4
+_SETTINGS_MAX_FRAME_SIZE = 0x5
+
+_SUBMISSION_ADMISSION_DISPOSITIONS = {
+    1: "created",
+    2: "idempotent_replay",
+    3: "conversation_busy",
+    4: "message_id_conflict",
+    5: "conversation_not_available",
+}
+_SUBMISSION_PROJECTION_STATES = {1: "pending", 2: "projected"}
+_SUBMISSION_PREPARATION_STATES = {1: "pending", 2: "prepared"}
+_SUBMISSION_HANDOFF_STATES = {1: "pending", 2: "handed_off"}
+_MESSAGE_IDENTITY_KINDS = {
+    1: "submission",
+    2: "interrupt",
+    3: "server_internal",
+    4: "file_visible",
+    5: "legacy_conflict_only",
+}
+_MESSAGE_IDENTITY_KIND_VALUES = {
+    value: key for key, value in _MESSAGE_IDENTITY_KINDS.items()
+}
+_MESSAGE_IDENTITY_DISPOSITIONS = {
+    1: "created",
+    2: "exact_replay",
+    3: "conflict",
+    4: "conversation_not_available",
+}
+_CONVERSATION_ADMISSION_CLOSE_DISPOSITIONS = {
+    1: "closed",
+    2: "exact_replay",
+    3: "conversation_not_available",
+    4: "conflict",
+}
 
 
 class RuntimeSidecarGrpcClient:
@@ -301,6 +339,430 @@ class RuntimeSidecarGrpcClient:
             _raise_task_identity_invalid(
                 "task_get_active_for_conversation response contains a different conversation_id"
             )
+        return response
+
+    def admit_submission(
+        self,
+        *,
+        message_id: str,
+        task_id: str,
+        conversation_id: str,
+        username: str,
+        request_fingerprint: str,
+        conversation_projection_json: bytes,
+        message_projection_json: bytes,
+        projection_sha256: str,
+        continuation_json: bytes,
+        continuation_sha256: str,
+        message_created_at_ms: int,
+        workflow_owner: str,
+        now_ms: int,
+        claim_ttl_ms: int,
+        task: Mapping[str, Any],
+        idempotency_key: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        validate_runtime_sidecar_task_record(task)
+        request = b"".join(
+            [
+                _field_string(1, message_id),
+                _field_string(2, task_id),
+                _field_string(3, conversation_id),
+                _field_string(4, username),
+                _field_string(5, request_fingerprint),
+                _field_bytes(6, conversation_projection_json),
+                _field_bytes(7, message_projection_json),
+                _field_string(8, projection_sha256),
+                _field_bytes(9, continuation_json),
+                _field_string(10, continuation_sha256),
+                _field_varint(11, message_created_at_ms),
+                _field_string(12, workflow_owner),
+                _field_varint(13, now_ms),
+                _field_varint(14, claim_ttl_ms),
+                _field_bytes(15, _task_record(task)),
+                _field_string(16, idempotency_key),
+            ]
+        )
+        fields = _decode_closed_message(
+            self._unary("AdmitSubmission", request, timeout_seconds=timeout_seconds),
+            1,
+            2,
+            3,
+            4,
+        )
+        response = {
+            "operation": "submission_admit",
+            "disposition": _enum_name(
+                fields, 1, _SUBMISSION_ADMISSION_DISPOSITIONS
+            ),
+            "admission": _optional_submission_admission_record(fields, 2),
+            "claim": _optional_submission_claim(fields, 3),
+            "error": _optional_typed_error(fields, 4),
+        }
+        _consume_response("submission_admit", response)
+        admission = response["admission"]
+        if admission is not None and (
+            admission["message_id"] != message_id
+            or admission["conversation_id"] != conversation_id
+            or admission["username"] != username
+            or admission["request_fingerprint"] != request_fingerprint
+            or admission["idempotency_key"] != idempotency_key
+        ):
+            _raise_task_identity_invalid(
+                "submission_admit response identity differs from request"
+            )
+        if response["disposition"] == "created" and admission["task_id"] != task_id:
+            _raise_task_identity_invalid(
+                "created submission_admit response Task differs from request"
+            )
+        if response["claim"] is not None and response["claim"]["owner"] != workflow_owner:
+            _raise_task_identity_invalid(
+                "submission_admit response claim owner differs from request"
+            )
+        return response
+
+    def claim_pending_submission(
+        self,
+        *,
+        workflow_owner: str,
+        now_ms: int,
+        claim_ttl_ms: int,
+        after_created_at_ms: int | None = None,
+        after_message_id: str | None = None,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = (
+            _field_string(1, workflow_owner)
+            + _field_varint(2, now_ms)
+            + _field_varint(3, claim_ttl_ms)
+        )
+        if after_created_at_ms is not None:
+            request += _field_varint(4, after_created_at_ms)
+        if after_message_id is not None:
+            request += _field_string(5, after_message_id)
+        fields = _decode_closed_message(
+            self._unary(
+                "ClaimPendingSubmission", request, timeout_seconds=timeout_seconds
+            ),
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+        )
+        response = {
+            "operation": "submission_pending_claim",
+            "found": _first_bool(fields, 1),
+            "admission": _optional_submission_admission_record(fields, 2),
+            "claim": _optional_submission_claim(fields, 3),
+            "authority_state": _first_string(fields, 4),
+            "finalization_receipt_sha256": _optional_string(fields, 5),
+            "error": _optional_typed_error(fields, 6),
+        }
+        _consume_response("submission_pending_claim", response)
+        if response["claim"] is not None and response["claim"]["owner"] != workflow_owner:
+            _raise_task_identity_invalid(
+                "submission_pending_claim response owner differs from request"
+            )
+        return response
+
+    def renew_submission_claim(
+        self,
+        *,
+        message_id: str,
+        workflow_owner: str,
+        claim_token: str,
+        now_ms: int,
+        claim_ttl_ms: int,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = b"".join(
+            [
+                _field_string(1, message_id),
+                _field_string(2, workflow_owner),
+                _field_string(3, claim_token),
+                _field_varint(4, now_ms),
+                _field_varint(5, claim_ttl_ms),
+            ]
+        )
+        fields = _decode_closed_message(
+            self._unary(
+                "RenewSubmissionClaim", request, timeout_seconds=timeout_seconds
+            ),
+            1,
+            2,
+        )
+        response = {
+            "operation": "submission_claim_renew",
+            "claim": _optional_submission_claim(fields, 1),
+            "error": _optional_typed_error(fields, 2),
+        }
+        _consume_response("submission_claim_renew", response)
+        if response["claim"]["owner"] != workflow_owner:
+            _raise_task_identity_invalid(
+                "submission_claim_renew response owner differs from request"
+            )
+        return response
+
+    def acknowledge_submission_projection(
+        self,
+        *,
+        message_id: str,
+        workflow_owner: str,
+        claim_token: str,
+        projection_sha256: str,
+        now_ms: int,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        request = b"".join(
+            [
+                _field_string(1, message_id),
+                _field_string(2, workflow_owner),
+                _field_string(3, claim_token),
+                _field_string(4, projection_sha256),
+                _field_varint(5, 1),
+                _field_varint(6, now_ms),
+            ]
+        )
+        response = self._submission_admission_write(
+            "AcknowledgeSubmissionProjection",
+            "submission_projection_acknowledge",
+            request,
+            timeout_seconds=timeout_seconds,
+        )
+        admission = response["admission"]
+        if (
+            admission["message_id"] != message_id
+            or admission["projection_sha256"] != projection_sha256
+            or admission["projection_state"] != "projected"
+        ):
+            _raise_task_identity_invalid(
+                "submission projection acknowledgement differs from request"
+            )
+        return response
+
+    def prepare_submission_handoff(
+        self,
+        *,
+        message_id: str,
+        workflow_owner: str,
+        claim_token: str,
+        prepared_execution_json: bytes,
+        prepared_execution_sha256: str,
+        now_ms: int,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        request = b"".join(
+            [
+                _field_string(1, message_id),
+                _field_string(2, workflow_owner),
+                _field_string(3, claim_token),
+                _field_bytes(4, prepared_execution_json),
+                _field_string(5, prepared_execution_sha256),
+                _field_varint(6, 1),
+                _field_varint(7, now_ms),
+            ]
+        )
+        response = self._submission_admission_write(
+            "PrepareSubmissionHandoff",
+            "submission_handoff_prepare",
+            request,
+            timeout_seconds=timeout_seconds,
+        )
+        admission = response["admission"]
+        if (
+            admission["message_id"] != message_id
+            or admission["prepared_execution_sha256"]
+            != prepared_execution_sha256
+            or admission["prepared_execution_json"] != prepared_execution_json
+            or admission["preparation_state"] != "prepared"
+        ):
+            _raise_task_identity_invalid(
+                "submission preparation response differs from request"
+            )
+        return response
+
+    def get_submission_preparation(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = (
+            _field_string(1, username)
+            + _field_string(2, conversation_id)
+            + _field_string(3, task_id)
+        )
+        fields = _decode_closed_message(
+            self._unary(
+                "GetSubmissionPreparation", request, timeout_seconds=timeout_seconds
+            ),
+            1,
+            2,
+            3,
+        )
+        response = {
+            "operation": "submission_preparation_get",
+            "found": _first_bool(fields, 1),
+            "admission": _optional_submission_admission_record(fields, 2),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("submission_preparation_get", response)
+        admission = response["admission"]
+        if admission is not None and (
+            admission["username"] != username
+            or admission["conversation_id"] != conversation_id
+            or admission["task_id"] != task_id
+            or admission["preparation_state"] != "prepared"
+        ):
+            _raise_task_identity_invalid(
+                "submission preparation lookup differs from request"
+            )
+        return response
+
+    def acknowledge_submission_handoff(
+        self,
+        *,
+        message_id: str,
+        workflow_owner: str,
+        claim_token: str,
+        prepared_execution_sha256: str,
+        handoff_kind: str,
+        handoff_identity: str,
+        now_ms: int,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        request = b"".join(
+            [
+                _field_string(1, message_id),
+                _field_string(2, workflow_owner),
+                _field_string(3, claim_token),
+                _field_string(4, prepared_execution_sha256),
+                _field_string(5, handoff_kind),
+                _field_string(6, handoff_identity),
+                _field_varint(7, 1),
+                _field_varint(8, now_ms),
+            ]
+        )
+        response = self._submission_admission_write(
+            "AcknowledgeSubmissionHandoff",
+            "submission_handoff_acknowledge",
+            request,
+            timeout_seconds=timeout_seconds,
+        )
+        admission = response["admission"]
+        if (
+            admission["message_id"] != message_id
+            or admission["prepared_execution_sha256"]
+            != prepared_execution_sha256
+            or admission["handoff_state"] != "handed_off"
+            or admission["handoff_kind"] != handoff_kind
+            or admission["handoff_identity"] != handoff_identity
+        ):
+            _raise_task_identity_invalid(
+                "submission handoff acknowledgement differs from request"
+            )
+        return response
+
+    def close_conversation_admission(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        operation_id: str,
+        now_ms: int,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = b"".join(
+            [
+                _field_string(1, username),
+                _field_string(2, conversation_id),
+                _field_string(3, operation_id),
+                _field_varint(4, now_ms),
+            ]
+        )
+        fields = _decode_closed_message(
+            self._unary(
+                "CloseConversationAdmission", request, timeout_seconds=timeout_seconds
+            ),
+            1,
+            2,
+            3,
+        )
+        response = {
+            "operation": "conversation_admission_close",
+            "disposition": _enum_name(
+                fields, 1, _CONVERSATION_ADMISSION_CLOSE_DISPOSITIONS
+            ),
+            "revision": _first_int(fields, 2),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("conversation_admission_close", response)
+        return response
+
+    def reserve_message_identity(
+        self,
+        *,
+        identity: Mapping[str, Any],
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        fields = _decode_closed_message(
+            self._unary(
+                "ReserveMessageIdentity",
+                _field_bytes(1, _message_identity_record(identity)),
+                timeout_seconds=timeout_seconds,
+            ),
+            1,
+            2,
+            3,
+        )
+        response = {
+            "operation": "message_identity_reserve",
+            "disposition": _enum_name(
+                fields, 1, _MESSAGE_IDENTITY_DISPOSITIONS
+            ),
+            "identity": _optional_message_identity_record(fields, 2),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("message_identity_reserve", response)
+        returned = response["identity"]
+        if returned is not None and returned != dict(identity):
+            _raise_task_identity_invalid(
+                "message identity reservation response differs from request"
+            )
+        return response
+
+    def _submission_admission_write(
+        self,
+        rpc_method: str,
+        operation: str,
+        request: bytes,
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        fields = _decode_closed_message(
+            self._unary(rpc_method, request, timeout_seconds=timeout_seconds),
+            1,
+            2,
+            3,
+        )
+        response = {
+            "operation": operation,
+            "admission": _optional_submission_admission_record(fields, 1),
+            "duplicate": _first_bool(fields, 2),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response(operation, response)
         return response
 
     def transition_node(
@@ -771,7 +1233,9 @@ class RuntimeSidecarGrpcClient:
         with self._connect(timeout_seconds=timeout_seconds) as sock:
             sock.settimeout(timeout_seconds)
             sock.sendall(_HTTP2_PREFACE)
-            sock.sendall(_frame(_FRAME_SETTINGS, 0, 0, b""))
+            peer_max_frame_size, connection_window, stream_window = (
+                _initialize_http2_connection(sock)
+            )
             header_block = _encode_headers(
                 [
                     (":method", "POST"),
@@ -784,7 +1248,13 @@ class RuntimeSidecarGrpcClient:
                 ]
             )
             sock.sendall(_frame(_FRAME_HEADERS, _FLAG_END_HEADERS, 1, header_block))
-            sock.sendall(_frame(_FRAME_DATA, _FLAG_END_STREAM, 1, grpc_payload))
+            _send_grpc_payload(
+                sock,
+                grpc_payload,
+                max_frame_size=peer_max_frame_size,
+                connection_window=connection_window,
+                stream_window=stream_window,
+            )
             return _read_grpc_response(sock)
 
     def _connect(self, *, timeout_seconds: float) -> socket.socket:
@@ -822,6 +1292,7 @@ def _raise_typed_error(error: Mapping[str, Any]) -> None:
 
 def _read_grpc_response(sock: socket.socket) -> bytes:
     data = bytearray()
+    max_message_bytes = resource_limit("grpc_max_message_bytes")
     while True:
         frame_type, flags, stream_id, payload = _read_frame(sock)
         if frame_type == _FRAME_SETTINGS and flags & _FLAG_ACK == 0:
@@ -829,6 +1300,10 @@ def _read_grpc_response(sock: socket.socket) -> bytes:
             continue
         if frame_type == _FRAME_DATA and stream_id == 1:
             data.extend(payload)
+            if len(data) > max_message_bytes + 5:
+                raise RuntimeError(
+                    "runtime_store_response_invalid: Rust runtime sidecar gRPC response exceeds the configured limit"
+                )
             if flags & _FLAG_END_STREAM:
                 break
             continue
@@ -841,12 +1316,173 @@ def _read_grpc_response(sock: socket.socket) -> bytes:
         if frame_type == _FRAME_GOAWAY:
             raise RuntimeError("runtime sidecar gRPC connection received GOAWAY")
     if len(data) < 5:
-        return b""
+        raise RuntimeError(
+            "runtime_store_response_invalid: Rust runtime sidecar returned a truncated gRPC response"
+        )
     compressed = data[0]
     if compressed:
         raise RuntimeError("runtime sidecar returned compressed gRPC payload")
     size = struct.unpack(">I", data[1:5])[0]
-    return bytes(data[5 : 5 + size])
+    if size > max_message_bytes or len(data) != size + 5:
+        raise RuntimeError(
+            "runtime_store_response_invalid: Rust runtime sidecar gRPC message length is inconsistent"
+        )
+    return bytes(data[5:])
+
+
+def _grpc_data_frames(payload: bytes) -> tuple[bytes, ...]:
+    chunks = tuple(
+        payload[offset : offset + _DEFAULT_HTTP2_MAX_FRAME_SIZE]
+        for offset in range(0, len(payload), _DEFAULT_HTTP2_MAX_FRAME_SIZE)
+    ) or (b"",)
+    return tuple(
+        _frame(
+            _FRAME_DATA,
+            _FLAG_END_STREAM if index == len(chunks) - 1 else 0,
+            1,
+            chunk,
+        )
+        for index, chunk in enumerate(chunks)
+    )
+
+
+def _initialize_http2_connection(sock: socket.socket) -> tuple[int, int, int]:
+    receive_window = resource_limit("grpc_max_message_bytes") + 5
+    settings = (
+        _SETTINGS_INITIAL_WINDOW_SIZE.to_bytes(2, "big")
+        + receive_window.to_bytes(4, "big")
+    )
+    sock.sendall(_frame(_FRAME_SETTINGS, 0, 0, settings))
+    sock.sendall(
+        _frame(
+            _FRAME_WINDOW_UPDATE,
+            0,
+            0,
+            (receive_window - _DEFAULT_HTTP2_FLOW_WINDOW).to_bytes(4, "big"),
+        )
+    )
+    max_frame_size = _DEFAULT_HTTP2_MAX_FRAME_SIZE
+    stream_window = _DEFAULT_HTTP2_FLOW_WINDOW
+    connection_window = _DEFAULT_HTTP2_FLOW_WINDOW
+    while True:
+        frame_type, flags, stream_id, payload = _read_frame(sock)
+        if frame_type == _FRAME_SETTINGS:
+            if flags & _FLAG_ACK:
+                continue
+            max_frame_size, stream_window = _apply_peer_settings(
+                payload,
+                max_frame_size=max_frame_size,
+                stream_window=stream_window,
+            )
+            sock.sendall(_frame(_FRAME_SETTINGS, _FLAG_ACK, 0, b""))
+            return max_frame_size, connection_window, stream_window
+        if frame_type == _FRAME_WINDOW_UPDATE:
+            increment = _window_update_increment(payload)
+            if stream_id == 0:
+                connection_window += increment
+            elif stream_id == 1:
+                stream_window += increment
+            continue
+        if frame_type in {_FRAME_GOAWAY, _FRAME_RST_STREAM}:
+            raise RuntimeError(
+                "runtime sidecar gRPC connection closed during HTTP/2 negotiation"
+            )
+
+
+def _send_grpc_payload(
+    sock: socket.socket,
+    payload: bytes,
+    *,
+    max_frame_size: int,
+    connection_window: int,
+    stream_window: int,
+) -> None:
+    offset = 0
+    while offset < len(payload):
+        while connection_window <= 0 or stream_window <= 0:
+            frame_type, flags, stream_id, frame_payload = _read_frame(sock)
+            if frame_type == _FRAME_WINDOW_UPDATE:
+                increment = _window_update_increment(frame_payload)
+                if stream_id == 0:
+                    connection_window += increment
+                elif stream_id == 1:
+                    stream_window += increment
+                continue
+            if frame_type == _FRAME_SETTINGS:
+                if flags & _FLAG_ACK == 0:
+                    max_frame_size, stream_window = _apply_peer_settings(
+                        frame_payload,
+                        max_frame_size=max_frame_size,
+                        stream_window=stream_window,
+                    )
+                    sock.sendall(_frame(_FRAME_SETTINGS, _FLAG_ACK, 0, b""))
+                continue
+            if frame_type in {_FRAME_GOAWAY, _FRAME_RST_STREAM}:
+                raise RuntimeError(
+                    "runtime sidecar gRPC connection closed while sending request"
+                )
+            raise RuntimeError(
+                "runtime_store_response_invalid: Rust runtime sidecar responded before the unary request completed"
+            )
+        size = min(
+            max_frame_size,
+            connection_window,
+            stream_window,
+            len(payload) - offset,
+        )
+        end = offset + size
+        sock.sendall(
+            _frame(
+                _FRAME_DATA,
+                _FLAG_END_STREAM if end == len(payload) else 0,
+                1,
+                payload[offset:end],
+            )
+        )
+        offset = end
+        connection_window -= size
+        stream_window -= size
+
+
+def _apply_peer_settings(
+    payload: bytes,
+    *,
+    max_frame_size: int,
+    stream_window: int,
+) -> tuple[int, int]:
+    if len(payload) % 6:
+        raise RuntimeError(
+            "runtime_store_response_invalid: Rust runtime sidecar returned malformed HTTP/2 settings"
+        )
+    for offset in range(0, len(payload), 6):
+        setting = int.from_bytes(payload[offset : offset + 2], "big")
+        value = int.from_bytes(payload[offset + 2 : offset + 6], "big")
+        if setting == _SETTINGS_INITIAL_WINDOW_SIZE:
+            if value > 0x7FFF_FFFF:
+                raise RuntimeError(
+                    "runtime_store_response_invalid: Rust runtime sidecar flow-control window is invalid"
+                )
+            stream_window += value - _DEFAULT_HTTP2_FLOW_WINDOW
+        elif setting == _SETTINGS_MAX_FRAME_SIZE:
+            if not 16_384 <= value <= 16_777_215:
+                raise RuntimeError(
+                    "runtime_store_response_invalid: Rust runtime sidecar frame size is invalid"
+                )
+            max_frame_size = value
+    return max_frame_size, stream_window
+
+
+def _window_update_increment(payload: bytes) -> int:
+    if len(payload) != 4:
+        raise RuntimeError(
+            "runtime_store_response_invalid: Rust runtime sidecar WINDOW_UPDATE is malformed"
+        )
+    increment = int.from_bytes(payload, "big") & 0x7FFF_FFFF
+    if increment == 0:
+        raise RuntimeError(
+            "runtime_store_response_invalid: Rust runtime sidecar WINDOW_UPDATE is invalid"
+        )
+    return increment
 
 
 def _frame(frame_type: int, flags: int, stream_id: int, payload: bytes) -> bytes:
@@ -925,22 +1561,41 @@ def _varint(value: int) -> bytes:
     return bytes(encoded)
 
 
-def _decode_message(payload: bytes) -> dict[int, list[Any]]:
+def _decode_message(
+    payload: bytes,
+    *,
+    allowed_fields: frozenset[int] | None = None,
+    singular_fields: frozenset[int] = frozenset(),
+) -> dict[int, list[Any]]:
     fields: dict[int, list[Any]] = {}
     offset = 0
-    while offset < len(payload):
-        key, offset = _read_varint(payload, offset)
-        field_number = key >> 3
-        wire_type = key & 0x07
-        if wire_type == 0:
-            value, offset = _read_varint(payload, offset)
-        elif wire_type == 2:
-            length, offset = _read_varint(payload, offset)
-            value = payload[offset : offset + length]
-            offset += length
-        else:
-            raise RuntimeError(f"unsupported protobuf wire type: {wire_type}")
-        fields.setdefault(field_number, []).append(value)
+    try:
+        while offset < len(payload):
+            key, offset = _read_varint(payload, offset)
+            field_number = key >> 3
+            wire_type = key & 0x07
+            if field_number == 0 or (
+                allowed_fields is not None and field_number not in allowed_fields
+            ):
+                raise ValueError
+            if field_number in singular_fields and field_number in fields:
+                raise ValueError
+            if wire_type == 0:
+                value, offset = _read_varint(payload, offset)
+            elif wire_type == 2:
+                length, offset = _read_varint(payload, offset)
+                end = offset + length
+                if end > len(payload):
+                    raise ValueError
+                value = payload[offset:end]
+                offset = end
+            else:
+                raise ValueError
+            fields.setdefault(field_number, []).append(value)
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(
+            "runtime_store_response_invalid: Rust runtime sidecar returned malformed protobuf"
+        ) from exc
     return fields
 
 
@@ -948,6 +1603,8 @@ def _read_varint(payload: bytes, offset: int) -> tuple[int, int]:
     shift = 0
     value = 0
     while True:
+        if offset >= len(payload) or shift >= 70:
+            raise ValueError("truncated or oversized protobuf varint")
         byte = payload[offset]
         offset += 1
         value |= (byte & 0x7F) << shift
@@ -959,6 +1616,15 @@ def _read_varint(payload: bytes, offset: int) -> tuple[int, int]:
 def _first_message(fields: dict[int, list[Any]], field_number: int) -> bytes:
     values = fields.get(field_number, [])
     return values[0] if values else b""
+
+
+def _decode_closed_message(payload: bytes, *field_numbers: int) -> dict[int, list[Any]]:
+    closed = frozenset(field_numbers)
+    return _decode_message(
+        payload,
+        allowed_fields=closed,
+        singular_fields=closed,
+    )
 
 
 def _all_strings(fields: dict[int, list[Any]], field_number: int) -> list[str]:
@@ -999,6 +1665,123 @@ def _optional_event_cursor(fields: dict[int, list[Any]], field_number: int) -> d
     return _decode_event_cursor(values[0]) if values else None
 
 
+def _enum_name(
+    fields: dict[int, list[Any]],
+    field_number: int,
+    values: Mapping[int, str],
+) -> str:
+    encoded = _first_int(fields, field_number)
+    try:
+        return values[encoded]
+    except KeyError as exc:
+        raise RuntimeError(
+            "runtime_store_response_invalid: Rust runtime sidecar returned an unknown enum value"
+        ) from exc
+
+
+def _decode_submission_claim(payload: bytes) -> dict[str, Any]:
+    fields = _decode_closed_message(payload, 1, 2, 3)
+    return {
+        "owner": _first_string(fields, 1),
+        "token": _first_string(fields, 2),
+        "expires_at_ms": _first_int(fields, 3),
+    }
+
+
+def _optional_submission_claim(
+    fields: dict[int, list[Any]], field_number: int
+) -> dict[str, Any] | None:
+    payload = _first_message(fields, field_number)
+    return _decode_submission_claim(payload) if payload else None
+
+
+def _message_identity_record(identity: Mapping[str, Any]) -> bytes:
+    try:
+        kind = _MESSAGE_IDENTITY_KIND_VALUES[str(identity["identity_kind"])]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("unsupported runtime sidecar Message identity kind") from exc
+    payload = b"".join(
+        [
+            _field_string(1, str(identity["message_id"])),
+            _field_string(2, str(identity["conversation_id"])),
+            _field_string(3, str(identity["username"])),
+            _field_varint(4, kind),
+            _field_varint(10, int(identity["reserved_at_ms"])),
+        ]
+    )
+    for number, name in (
+        (5, "role"),
+        (6, "message_type"),
+        (8, "task_id"),
+        (9, "request_fingerprint"),
+    ):
+        if identity.get(name) is not None:
+            payload += _field_string(number, str(identity[name]))
+    if identity.get("message_created_at_ms") is not None:
+        payload += _field_varint(7, int(identity["message_created_at_ms"]))
+    return payload
+
+
+def _decode_message_identity_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_closed_message(payload, *range(1, 11))
+    return {
+        "message_id": _first_string(fields, 1),
+        "conversation_id": _first_string(fields, 2),
+        "username": _first_string(fields, 3),
+        "identity_kind": _enum_name(fields, 4, _MESSAGE_IDENTITY_KINDS),
+        "role": _optional_string(fields, 5),
+        "message_type": _optional_string(fields, 6),
+        "message_created_at_ms": _optional_int(fields, 7),
+        "task_id": _optional_string(fields, 8),
+        "request_fingerprint": _optional_string(fields, 9),
+        "reserved_at_ms": _first_int(fields, 10),
+    }
+
+
+def _optional_message_identity_record(
+    fields: dict[int, list[Any]], field_number: int
+) -> dict[str, Any] | None:
+    payload = _first_message(fields, field_number)
+    return _decode_message_identity_record(payload) if payload else None
+
+
+def _decode_submission_admission_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_closed_message(payload, *range(1, 23))
+    prepared = _first_message(fields, 13)
+    task = _first_message(fields, 21)
+    return {
+        "message_id": _first_string(fields, 1),
+        "task_id": _first_string(fields, 2),
+        "conversation_id": _first_string(fields, 3),
+        "username": _first_string(fields, 4),
+        "request_fingerprint": _first_string(fields, 5),
+        "conversation_projection_json": _first_message(fields, 6),
+        "message_projection_json": _first_message(fields, 7),
+        "projection_sha256": _first_string(fields, 8),
+        "continuation_json": _first_message(fields, 9),
+        "continuation_sha256": _first_string(fields, 10),
+        "projection_state": _enum_name(fields, 11, _SUBMISSION_PROJECTION_STATES),
+        "preparation_state": _enum_name(fields, 12, _SUBMISSION_PREPARATION_STATES),
+        "prepared_execution_json": prepared or None,
+        "prepared_execution_sha256": _optional_string(fields, 14),
+        "handoff_state": _enum_name(fields, 15, _SUBMISSION_HANDOFF_STATES),
+        "handoff_kind": _optional_string(fields, 16),
+        "handoff_identity": _optional_string(fields, 17),
+        "created_at_ms": _first_int(fields, 18),
+        "updated_at_ms": _first_int(fields, 19),
+        "closed": _first_bool(fields, 20),
+        "task": _decode_task_record(task) if task else None,
+        "idempotency_key": _first_string(fields, 22),
+    }
+
+
+def _optional_submission_admission_record(
+    fields: dict[int, list[Any]], field_number: int
+) -> dict[str, Any] | None:
+    payload = _first_message(fields, field_number)
+    return _decode_submission_admission_record(payload) if payload else None
+
+
 def _task_route_assignment(assignment: Mapping[str, Any]) -> bytes:
     payload = b"".join(
         _field_string(number, str(assignment[name]))
@@ -1037,7 +1820,7 @@ def _task_record(task: Mapping[str, Any]) -> bytes:
 
 
 def _decode_task_route_assignment(payload: bytes) -> dict[str, Any]:
-    fields = _decode_message(payload)
+    fields = _decode_closed_message(payload, *range(1, 9))
     return {
         "route_mode": _first_string(fields, 1),
         "real_path": _first_string(fields, 2),
@@ -1051,7 +1834,7 @@ def _decode_task_route_assignment(payload: bytes) -> dict[str, Any]:
 
 
 def _decode_task_record(payload: bytes) -> dict[str, Any]:
-    fields = _decode_message(payload)
+    fields = _decode_closed_message(payload, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12)
     assignment = _first_message(fields, 12)
     return {
         "task_id": _first_string(fields, 1),
@@ -1309,13 +2092,26 @@ def _optional_typed_error(fields: dict[int, list[Any]], field_number: int) -> di
     values = fields.get(field_number, [])
     if not values:
         return None
-    error_fields = _decode_message(values[0])
+    error_fields = _decode_message(
+        values[0],
+        allowed_fields=frozenset({1, 2, 3, 4, 5}),
+        singular_fields=frozenset({1, 2, 3, 4}),
+    )
+    safe_metadata: dict[str, str] = {}
+    for entry in error_fields.get(5, []):
+        entry_fields = _decode_closed_message(entry, 1, 2)
+        key = _first_string(entry_fields, 1)
+        if key in safe_metadata:
+            raise RuntimeError(
+                "runtime_store_response_invalid: Rust runtime sidecar returned duplicate safe metadata"
+            )
+        safe_metadata[key] = _first_string(entry_fields, 2)
     return {
         "code": _first_string(error_fields, 1),
         "message": _first_string(error_fields, 2),
         "retriable": _first_bool(error_fields, 3),
         "category": _category_name(_first_int(error_fields, 4)),
-        "safe_metadata": {},
+        "safe_metadata": safe_metadata,
     }
 
 
