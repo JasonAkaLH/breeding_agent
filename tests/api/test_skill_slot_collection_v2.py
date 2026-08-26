@@ -2,14 +2,404 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from unittest.mock import AsyncMock, patch
 
 from src.core.enums import InterruptStatus
+from src.core.errors import MessageIdentityConflictError
 from src.core.models import SlotCollection
 from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_FIELD, SLOT_COLLECTION_REF_FIELD
 from tests.api.support import APITestCase
 
 
 class SkillSlotCollectionV2APITest(APITestCase):
+    async def _open_diagonal_v2_interrupt(self, suffix: str):
+        root = self.workspace / f"skill-v2-{suffix}"
+        self._write_diagonal_skill(root)
+        await self.reconfigure_runtime(
+            skill_roots=(root,),
+            public_skill_roots=(root,),
+            enable_skill_input_llm=False,
+        )
+        conversation_id = f"conv-v2-{suffix}"
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            content="做对角线增广设计",
+            capability_id="skill.field_design",
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.wait_for_condition(lambda: self.runtime.list_interrupts(task_id))
+        interrupt = (await self.runtime.list_interrupts(task_id))[0]
+        return conversation_id, task_id, interrupt
+
+    async def test_v2_planned_receipt_replay_skips_planner_and_rejects_changed_payload(self) -> None:
+        _conversation_id, task_id, interrupt = await self._open_diagonal_v2_interrupt(
+            "planned-receipt-replay"
+        )
+        source_message_id = "client-v2-planned-receipt"
+        answer_payload = {
+            "client_request_id": source_message_id,
+            "answer": {"text": "12列"},
+        }
+        await self.runtime._record_event(
+            self.runtime._make_event(
+                task_id=task_id,
+                conversation_id=interrupt["conversation_id"],
+                node_id=interrupt["node_id"],
+                event_type="task.interrupt_turn_planned",
+                payload={
+                    "interrupt_id": interrupt["interrupt_id"],
+                    "client_request_id": source_message_id,
+                    "part_kinds": ["slot_answer"],
+                },
+            )
+        )
+
+        with patch.object(
+            self.runtime,
+            "_ensure_reserved_interrupt_user_message",
+            new=AsyncMock(side_effect=RuntimeError("message_write_failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "message_write_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    answer_payload,
+                    source_message_id=source_message_id,
+                )
+
+        planned = [
+            event
+            for event in await self.runtime.storage.list_events_for_task(task_id)
+            if event.event_type == "task.interrupt_turn_planned"
+        ]
+        self.assertEqual(len(planned), 2)
+        self.assertEqual(
+            sum(isinstance(event.payload.get("plan"), dict) for event in planned),
+            1,
+        )
+
+        planner = AsyncMock(side_effect=AssertionError("planner must not run on receipt replay"))
+        with patch.object(self.runtime, "_plan_v2_interrupt_open_turn", new=planner):
+            replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=source_message_id,
+            )
+        self.assertEqual(planner.await_count, 0)
+        self.assertEqual(replay["source_message_id"], source_message_id)
+
+        messages_before = await self.runtime.storage.list_messages_for_conversation(
+            interrupt["conversation_id"]
+        )
+        events_before = await self.runtime.storage.list_events_for_task(task_id)
+        with self.assertRaises(MessageIdentityConflictError):
+            await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                {
+                    "client_request_id": source_message_id,
+                    "answer": {"text": "13列"},
+                },
+                source_message_id=source_message_id,
+            )
+        self.assertEqual(
+            len(await self.runtime.storage.list_messages_for_conversation(interrupt["conversation_id"])),
+            len(messages_before),
+        )
+        self.assertEqual(
+            len(await self.runtime.storage.list_events_for_task(task_id)),
+            len(events_before),
+        )
+
+    async def test_v2_summary_write_retry_reuses_deterministic_assistant_message(self) -> None:
+        conversation_id, task_id, interrupt = await self._open_diagonal_v2_interrupt(
+            "summary-write-retry"
+        )
+        source_message_id = "client-v2-summary-retry"
+        answer_payload = {
+            "client_request_id": source_message_id,
+            "answer": {"text": "列数应该填什么格式？"},
+        }
+        original_append_slot_event = self.runtime.storage.append_slot_event
+        failed = False
+        failed_summary_payload = None
+
+        async def fail_summary_once(event):
+            nonlocal failed, failed_summary_payload
+            if event.event_type == "slot.interrupt_turn_processed" and not failed:
+                failed = True
+                failed_summary_payload = dict(event.payload)
+                raise RuntimeError("summary_write_failed")
+            return await original_append_slot_event(event)
+
+        llm_call = AsyncMock(return_value="列数请填写正整数，例如 12。")
+        with (
+            patch.object(
+                self.runtime.storage,
+                "append_slot_event",
+                side_effect=fail_summary_once,
+            ),
+            patch.object(
+                self.runtime,
+                "_call_skill_input_text_generator",
+                new=llm_call,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "summary_write_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    answer_payload,
+                    source_message_id=source_message_id,
+                )
+
+            replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=source_message_id,
+            )
+        self.assertEqual(llm_call.await_count, 1)
+        self.assertEqual(replay["source_message_id"], source_message_id)
+        self.assertIsNotNone(failed_summary_payload)
+        self.assertEqual(replay["action"], failed_summary_payload["action"])
+        self.assertEqual(
+            replay.get("assistant_message"),
+            failed_summary_payload["assistant_message"],
+        )
+        assistant_messages = [
+            message
+            for message in await self.runtime.storage.list_messages_for_conversation(conversation_id)
+            if message.message_id == f"{source_message_id}:interrupt-response"
+        ]
+        self.assertEqual(len(assistant_messages), 1)
+
+    async def test_v2_resume_retry_finishes_summary_without_rescheduling(self) -> None:
+        _conversation_id, task_id, interrupt = await self._open_diagonal_v2_interrupt(
+            "resume-summary-retry"
+        )
+        source_message_id = "client-v2-resume-summary-retry"
+        answer_payload = {
+            "client_request_id": source_message_id,
+            "answer": {"text": "12列"},
+        }
+        scheduler = AsyncMock(
+            side_effect=[RuntimeError("schedule_failed"), None]
+        )
+
+        with patch.object(
+            self.runtime,
+            "_schedule_v2_slot_resume",
+            new=scheduler,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "schedule_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    answer_payload,
+                    source_message_id=source_message_id,
+                )
+
+            replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=source_message_id,
+            )
+            final_replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=source_message_id,
+            )
+
+        self.assertEqual(scheduler.await_count, 2)
+        self.assertEqual(final_replay, replay)
+        self.assertEqual(replay["action"], "resumed")
+        self.assertTrue(replay["answer_payload"]["processed_parts"])
+        collection_id = replay["answer_payload"]["active_slot_collection_id"]
+        summaries = [
+            event
+            for event in await self.runtime.storage.list_slot_events(collection_id)
+            if event.event_type == "slot.interrupt_turn_processed"
+        ]
+        self.assertEqual(len(summaries), 1)
+
+    async def test_v2_summary_replay_repairs_missing_task_event(self) -> None:
+        _conversation_id, task_id, interrupt = await self._open_diagonal_v2_interrupt(
+            "summary-task-event-repair"
+        )
+        source_message_id = "client-v2-summary-task-event-repair"
+        answer_payload = {
+            "client_request_id": source_message_id,
+            "answer": {"text": "列数应该填什么格式？"},
+        }
+        original_append_event_exact = self.runtime.storage.append_event_exact
+        failed = False
+
+        async def fail_task_event_once(event):
+            nonlocal failed
+            if event.event_type == "task.interrupt_turn_processed" and not failed:
+                failed = True
+                raise RuntimeError("task_event_write_failed")
+            return await original_append_event_exact(event)
+
+        with patch.object(
+            self.runtime.storage,
+            "append_event_exact",
+            side_effect=fail_task_event_once,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "task_event_write_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    answer_payload,
+                    source_message_id=source_message_id,
+                )
+
+            replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=source_message_id,
+            )
+            final_replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=source_message_id,
+            )
+
+        self.assertEqual(final_replay, replay)
+        task_events = [
+            event
+            for event in await self.runtime.storage.list_events_for_task_filtered(
+                task_id,
+                event_types=("task.interrupt_turn_processed",),
+            )
+            if event.payload.get("client_request_id") == source_message_id
+        ]
+        self.assertEqual(len(task_events), 1)
+
+    async def test_v2_summary_replay_reuses_legacy_task_event_identity(self) -> None:
+        _conversation_id, task_id, interrupt_payload = await self._open_diagonal_v2_interrupt(
+            "legacy-task-event-replay"
+        )
+        task = await self.runtime.storage.get_task(task_id)
+        interrupt = await self.runtime.storage.get_interrupt(
+            interrupt_payload["interrupt_id"]
+        )
+        self.assertIsNotNone(task)
+        self.assertIsNotNone(interrupt)
+        assert task is not None and interrupt is not None
+        client_request_id = "client-v2-legacy-task-event"
+        collection_id = interrupt.required_fields[SLOT_COLLECTION_REF_FIELD]["collection_id"]
+        summary = {
+            "client_request_id": client_request_id,
+            "active_slot_collection_id": collection_id,
+            "action": "mixed_processed",
+            "will_resume": False,
+            "requires_confirmation": False,
+        }
+        await self.runtime._record_event(
+            self.runtime._make_event(
+                task_id=task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="task.interrupt_turn_processed",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "slot_collection_id": collection_id,
+                    "client_request_id": client_request_id,
+                    "action": "mixed_processed",
+                    "will_resume": False,
+                    "requires_confirmation": False,
+                },
+            )
+        )
+
+        await self.runtime._ensure_v2_interrupt_turn_processed_event(
+            task=task,
+            interrupt=interrupt,
+            summary=summary,
+            created_at=interrupt.created_at,
+        )
+
+        task_events = await self.runtime.storage.list_events_for_task_filtered(
+            task_id,
+            event_types=("task.interrupt_turn_processed",),
+        )
+        self.assertEqual(len(task_events), 1)
+
+    async def test_v2_schedule_failure_keeps_ready_then_retry_schedules_before_mark(self) -> None:
+        _conversation_id, task_id, interrupt = await self._open_diagonal_v2_interrupt(
+            "schedule-before-mark"
+        )
+        source_message_id = "client-v2-schedule-before-mark"
+        answer_payload = {
+            "client_request_id": source_message_id,
+            "answer": {"text": "12列"},
+        }
+        collection_id = interrupt["required_fields"][SLOT_COLLECTION_REF_FIELD]["collection_id"]
+
+        with patch.object(
+            self.runtime,
+            "_schedule_v2_slot_resume",
+            side_effect=RuntimeError("schedule_failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "schedule_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    answer_payload,
+                    source_message_id=source_message_id,
+                )
+        ready = await self.runtime.storage.get_slot_collection(collection_id)
+        self.assertIsNotNone(ready)
+        self.assertEqual(ready.status, "ready")
+
+        persisted_interrupt = await self.runtime.storage.get_interrupt(interrupt["interrupt_id"])
+        self.assertIsNotNone(persisted_interrupt)
+        open_interrupt = replace(
+            persisted_interrupt,
+            status=InterruptStatus.OPEN,
+            answered_at=None,
+        )
+        await self.runtime.storage.save_interrupt(open_interrupt)
+        call_order: list[str] = []
+
+        async def record_answer(_answer):
+            call_order.append("record_answer")
+            return replace(open_interrupt, status=InterruptStatus.ANSWERED)
+
+        async def schedule_resume(**_kwargs):
+            call_order.append("schedule")
+
+        with (
+            patch.object(
+                self.runtime.interrupt_service,
+                "record_answer",
+                side_effect=record_answer,
+            ),
+            patch.object(
+                self.runtime,
+                "_schedule_v2_slot_resume",
+                side_effect=schedule_resume,
+            ),
+        ):
+            await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=source_message_id,
+            )
+        self.assertEqual(call_order[:2], ["record_answer", "schedule"])
+        scheduled = await self.runtime.storage.get_slot_collection(collection_id)
+        self.assertIsNotNone(scheduled)
+        self.assertEqual(scheduled.status, "script_scheduled")
+
     def _write_diagonal_skill(self, root):
         skill = root / "field-design"
         (skill / "scripts").mkdir(parents=True)
@@ -1615,7 +2005,8 @@ input_schemas:
                 "metadata": {"interrupt_id": interrupt["interrupt_id"]},
             },
         )
-        self.assertEqual(stale_chat.status_code, 400, stale_chat.text)
+        self.assertEqual(stale_chat.status_code, 409, stale_chat.text)
+        self.assertEqual(stale_chat.json(), {"detail": {"code": "message_id_conflict"}})
 
         self.assertEqual(
             len(await self.runtime.storage.list_messages_for_conversation("conv-v2-stale-interrupt")),

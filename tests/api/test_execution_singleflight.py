@@ -16,10 +16,72 @@ class ExecutionSingleflightTest(unittest.IsolatedAsyncioTestCase):
         runtime._lock = asyncio.Lock()
         runtime._running_tasks = {}
         runtime._execution_generations = {}
+        runtime._execution_durable_starts = {}
         runtime._execution_wait_timeout_seconds = 0.01
         runtime._retain_task_skill_revision = lambda request: None
         runtime._retain_task_mcp_revision = lambda request: None
         return runtime
+
+    async def test_schedule_can_wait_only_until_durable_agent_run_initialization(self) -> None:
+        runtime = self._runtime()
+        initialized = asyncio.Event()
+        release = asyncio.Event()
+        run_is_durable = False
+
+        async def run(
+            request,
+            *,
+            active_task_count,
+            execution_generation=None,
+            durable_start=None,
+        ):
+            nonlocal run_is_durable
+            initialized.set()
+            await release.wait()
+            run_is_durable = True
+            durable_start.set_result(None)
+
+        class Runs:
+            async def get_run_for_task(self, _task_id):
+                return object() if run_is_durable else None
+
+        runtime._run_execution = run
+        runtime.agent_run_repository = Runs()
+        scheduled = asyncio.create_task(
+            runtime._schedule_execution(
+                self._request(),
+                await_durable_start=True,
+            )
+        )
+        await initialized.wait()
+        self.assertFalse(scheduled.done())
+        release.set()
+        handle = await scheduled
+        await handle
+
+    async def test_durable_start_failure_propagates_to_scheduler(self) -> None:
+        runtime = self._runtime()
+
+        async def run(
+            request,
+            *,
+            active_task_count,
+            execution_generation=None,
+            durable_start=None,
+        ):
+            durable_start.set_exception(RuntimeError("durable_init_failed"))
+
+        class Runs:
+            async def get_run_for_task(self, _task_id):
+                return None
+
+        runtime._run_execution = run
+        runtime.agent_run_repository = Runs()
+        with self.assertRaisesRegex(RuntimeError, "durable_init_failed"):
+            await runtime._schedule_execution(
+                self._request(),
+                await_durable_start=True,
+            )
 
     @staticmethod
     def _request() -> AgentExecutionRequest:

@@ -6,6 +6,7 @@ from dataclasses import replace
 from fastapi import APIRouter, HTTPException, Request, status
 
 from src.core.enums import ConversationStatus, MessageRole
+from src.core.errors import MessageIdentityConflictError
 from src.core.models import Artifact, Conversation, Message
 from src.lifecycle.errors import ConversationBusyError
 from src.api.mcp_binding import (
@@ -72,6 +73,11 @@ async def submit_message(body: SubmitMessageRequest, request: Request) -> Messag
     except MCPBindingFeatureUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": exc.code},
+        ) from exc
+    except MessageIdentityConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
             detail={"code": exc.code},
         ) from exc
     except ConversationBusyError as exc:

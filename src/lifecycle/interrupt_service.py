@@ -121,22 +121,15 @@ class InterruptService:
         return saved_interrupt
 
     async def record_answer(self, answer: InterruptAnswer, *, now: datetime | None = None) -> Interrupt:
-        interrupt = await self._storage.get_interrupt(answer.interrupt_id)
-        if interrupt is None:
-            raise ValueError(f"Unknown interrupt: {answer.interrupt_id}")
-        node = await self._storage.get_task_node(interrupt.node_id)
-        if node is None:
-            raise ValueError(f"Unknown node for interrupt: {interrupt.node_id}")
         current_time = now or self._utcnow_naive()
-        updated_interrupt, accepted_answer, updated_node = task_state_machine.answer_interrupt(
-            interrupt,
-            answer,
-            node,
-            now=current_time,
+        saved_interrupt, updated_node, changed = (
+            await self._storage.answer_interrupt_atomic(
+                answer,
+                now=current_time,
+            )
         )
-        await self._storage.save_interrupt_answer(accepted_answer)
-        await self._storage.save_task_node(updated_node)
-        saved_interrupt = await self._storage.save_interrupt(updated_interrupt)
+        if not changed:
+            return saved_interrupt
         await self._record_event(
             self._make_event(
                 task_id=saved_interrupt.task_id,

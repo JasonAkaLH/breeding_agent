@@ -10,18 +10,18 @@ from unittest.mock import patch
 
 from src.api.dto import SubmitMessageRequest
 from src.api.runtime import build_api_runtime as _build_api_runtime
-
-build_api_runtime = partial(
-    _build_api_runtime,
-    skill_roots=(),
-    public_skill_roots=(),
-)
 from src.core.enums import NodeStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Interrupt, TaskNode, UserMCPServer
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 from src.orchestration.agent_loop.tool_catalog import CapabilityVisibilityContext
 from src.storage.sqlite.repositories import SQLiteStorage
 from tests.api.support import InMemoryTaskRuntimeSidecar
+
+build_api_runtime = partial(
+    _build_api_runtime,
+    skill_roots=(),
+    public_skill_roots=(),
+)
 
 
 class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
@@ -90,9 +90,15 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
             self._enforce_env(percent=0, salt="replacement-salt")
         )
         resumed: list[AgentExecutionRequest] = []
+        durable_starts: list[bool] = []
 
-        async def capture_resume(request: AgentExecutionRequest) -> None:
+        async def capture_resume(
+            request: AgentExecutionRequest,
+            *,
+            await_durable_start: bool = False,
+        ) -> None:
             resumed.append(request)
+            durable_starts.append(await_durable_start)
 
         restarted._schedule_execution = capture_resume
         try:
@@ -107,6 +113,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(resumed), 1)
+            self.assertEqual(durable_starts, [True])
             request = resumed[0]
             self.assertEqual(request.metadata["mcp_execution_mode"], "user_scoped")
             self.assertEqual(
@@ -202,9 +209,15 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
 
         restarted = self._build_runtime(self._enforce_env(percent=100, salt="enforce-salt"))
         resumed: list[AgentExecutionRequest] = []
+        durable_starts: list[bool] = []
 
-        async def capture_resume(request: AgentExecutionRequest) -> None:
+        async def capture_resume(
+            request: AgentExecutionRequest,
+            *,
+            await_durable_start: bool = False,
+        ) -> None:
             resumed.append(request)
+            durable_starts.append(await_durable_start)
 
         restarted._schedule_execution = capture_resume
         try:
@@ -219,6 +232,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(resumed), 1)
+            self.assertEqual(durable_starts, [True])
             request = resumed[0]
             self.assertEqual(request.metadata["mcp_execution_mode"], "legacy")
             self.assertEqual(

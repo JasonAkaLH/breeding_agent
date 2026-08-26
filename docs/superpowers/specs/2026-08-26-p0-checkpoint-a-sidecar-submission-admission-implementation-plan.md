@@ -1,6 +1,6 @@
 # P0 Checkpoint A：Sidecar Submission Admission 实施计划
 
-**状态：** implementation in progress；A1～A4已完成并通过独立终审，下一步为A5全局Message identity与API/Interrupt行为
+**状态：** implementation in progress；A1～A5已完成并通过独立终审，下一步为A6 delete coordination、migration gate与production mode接线
 
 **设计 authority：** `docs/superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`
 
@@ -341,6 +341,17 @@ python -m ruff check src/api src/storage src/orchestration/visible_message_histo
 **停止条件：** 必须限制合法 `client_message_id` 才能正确；存在未登记的Message first-insert；exact replay会重新selector/LLM/capability；修改公开DTO。
 
 **提交：** `fix(message): enforce immutable message identity`
+
+### 8.5 完成证据
+
+**状态：** `complete`；Message identity capability保持factory默认关闭，A6前现有production-mode request不会自动切入新authority。
+
+- 所有已登记Message首次写入口统一复用mode-aware reservation；既有Message mutable update不重复RPC，immutable identity变化fail closed，epoch-ms与naive/aware时间比较按canonical语义闭合。
+- generic、file selection、v2 slot及remote control的Interrupt重试使用已存canonical answer；SQL authority在单事务内提交，split authority先以Interrupt行锁确定唯一final winner，再精确修复Sidecar TaskNode。remote control固定Interrupt→Outbox锁序，同identity回放canonical command，不同identity映射低敏409。
+- continuation、selector、question/verifier/clarification与v2 turn summary均有持久化receipt；schedule失败、summary/task-event分步失败及历史随机event ID升级重放均可补齐且不重复schedule或可观察event。
+- 未修改公开DTO、schema、proto、Frontend、部署或`prod`；没有新增依赖。
+
+验证：focused 151/151；API 523/523；Storage 492/492（环境型11 skip，其中新增PostgreSQL项已用真实PostgreSQL 17双连接单独1/1通过）；Integrations 728/728（2 skip）；Core 54/54；Lifecycle 46/46；Orchestration 123/123；compileall、Ruff、diff-check通过；三路独立终审最终均为0 Blocking/0 Major/0 scope drift。
 
 ## 9. A6：Delete coordination、migration gate 与 production mode接线
 

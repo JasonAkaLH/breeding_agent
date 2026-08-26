@@ -1,11 +1,66 @@
 from __future__ import annotations
 
-from src.core.enums import NodeStatus
+from unittest.mock import AsyncMock, patch
 
-from tests.api.support import APITestCase, blocking_mysql_adapter
+from src.core.enums import NodeStatus
+from src.core.errors import MessageIdentityConflictError
+
+from tests.api.support import (
+    APITestCase,
+    InMemoryTaskRuntimeSidecar,
+    blocking_mysql_adapter,
+)
+
+
+class _IdentityRejectingSidecar(InMemoryTaskRuntimeSidecar):
+    async def reserve_message_identity(self, **payload: object) -> dict[str, object]:
+        self.calls.append(("message_identity_reserve", dict(payload)))
+        raise AssertionError("disabled identity authority must not reserve")
 
 
 class MessageSubmissionAPITest(APITestCase):
+    async def test_enforce_submission_remains_accepted_while_a5_gate_is_disabled(
+        self,
+    ) -> None:
+        sidecar = _IdentityRejectingSidecar()
+        self.runtime.storage._mcp_task_authority_mode = "enforce"  # noqa: SLF001
+        self.runtime.storage._runtime_sidecar_client = sidecar  # noqa: SLF001
+
+        with patch.object(
+            self.runtime,
+            "_schedule_execution",
+            new=AsyncMock(),
+        ):
+            response = await self.submit_message()
+
+        self.assertEqual(response.status_code, 202, response.text)
+        payload = response.json()
+        self.assertIsNotNone(
+            await self.runtime.storage.get_message(payload["message_id"])
+        )
+        self.assertNotIn(
+            "message_identity_reserve",
+            [operation for operation, _payload in sidecar.calls],
+        )
+
+    async def test_message_identity_conflict_returns_low_sensitive_conflict(self) -> None:
+        conflict = MessageIdentityConflictError()
+        conflict.existing_conversation_id = "private-conversation"
+        conflict.existing_task_id = "private-task"
+
+        with patch.object(
+            self.runtime,
+            "submit_chat_message",
+            side_effect=conflict,
+        ):
+            response = await self.submit_message()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json(),
+            {"detail": {"code": "message_id_conflict"}},
+        )
+
     async def test_message_submission_returns_accepted_and_rejects_busy_conversation(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)

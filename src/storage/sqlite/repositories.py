@@ -25,6 +25,7 @@ from src.core.enums import (
     ArtifactType,
     ConversationStatus,
     EventVisibility,
+    InterruptStatus,
     MessageRole,
     NodeStatus,
     RoutingMode,
@@ -152,6 +153,8 @@ from src.core.models import (
     MAFMasterKeyValidation,
     validate_mcp_rollout_drill_observation,
 )
+from src.lifecycle import task_state_machine
+from src.lifecycle.errors import LifecycleTransitionError
 from src.storage.conversation_files import (
     FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
     FILE_UPLOAD_MESSAGE_TYPE,
@@ -2423,6 +2426,26 @@ class SQLiteStateRepository:
         row = self._session.get(ConversationRow, conversation_id)
         return None if row is None else _row_to_conversation(row)
 
+    def _require_active_conversation_identity(
+        self,
+        conversation_id: str,
+        *,
+        username: str,
+    ) -> None:
+        row = self._session.scalar(
+            select(ConversationRow)
+            .where(ConversationRow.conversation_id == conversation_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.username != username
+            or row.status != str(ConversationStatus.ACTIVE)
+        ):
+            raise PermissionError(
+                f"Conversation is not available: {conversation_id}"
+            )
+
     def list_conversations_for_username(self, username: str) -> list[Conversation]:
         rows = self._session.scalars(
             select(ConversationRow)
@@ -3110,8 +3133,34 @@ class SQLiteStateRepository:
         *,
         now: datetime,
     ) -> ConversationFileResource:
+        return self._save_conversation_file_resource_with_upload_message(
+            resource,
+            projection,
+            now=now,
+            allow_message_insert=True,
+        )
+
+    def _save_conversation_file_resource_with_upload_message(
+        self,
+        resource: ConversationFileResource,
+        projection: FileUploadMessageProjection,
+        *,
+        now: datetime,
+        allow_message_insert: bool,
+        expected_active_username: str | None = None,
+    ) -> ConversationFileResource:
+        if expected_active_username is not None:
+            self._require_active_conversation_identity(
+                projection.conversation_id,
+                username=expected_active_username,
+            )
         saved = self.save_conversation_file_resource(resource)
-        self.upsert_file_upload_message(projection, now=now)
+        self._upsert_file_upload_message(
+            projection,
+            now=now,
+            allow_insert=allow_message_insert,
+            expected_active_username=expected_active_username,
+        )
         return saved
 
     def mark_conversation_file_resource_and_upload_message_deleted(
@@ -3325,6 +3374,20 @@ class SQLiteStateRepository:
         return _row_to_conversation_file_index_repair_marker(row)
 
     def save_message(self, message: Message) -> Message:
+        return self._save_message(message, allow_insert=True)
+
+    def _save_message(
+        self,
+        message: Message,
+        *,
+        allow_insert: bool,
+        expected_active_username: str | None = None,
+    ) -> Message:
+        if expected_active_username is not None:
+            self._require_active_conversation_identity(
+                message.conversation_id,
+                username=expected_active_username,
+            )
         incoming_metadata = _message_metadata_object(message.metadata)
         if _SUBMISSION_ADMISSION_RECEIPT_KEY in incoming_metadata:
             raise ValueError("message_private_metadata_reserved")
@@ -3334,6 +3397,8 @@ class SQLiteStateRepository:
             .with_for_update()
         )
         if existing is None:
+            if not allow_insert:
+                raise RuntimeError("message_identity_missing")
             existing = MessageRow(
                 message_id=message.message_id,
                 conversation_id=message.conversation_id,
@@ -3352,17 +3417,21 @@ class SQLiteStateRepository:
                 existing.conversation_id,
                 str(existing.role),
                 _message_type_value(existing.message_type),
-                existing.created_at,
                 existing.task_id,
             )
             candidate_identity = (
                 message.conversation_id,
                 str(message.role),
                 _message_type_value(message.message_type),
-                message.created_at,
                 message.task_id,
             )
-            if immutable_identity != candidate_identity:
+            if (
+                immutable_identity != candidate_identity
+                or not _same_message_datetime(
+                    existing.created_at,
+                    message.created_at,
+                )
+            ):
                 raise MessageIdentityConflictError()
             private_receipt = _message_metadata_object(
                 existing.message_metadata
@@ -3640,6 +3709,25 @@ class SQLiteStateRepository:
         return [_row_to_message(row) for row in rows]
 
     def upsert_file_upload_message(self, projection: FileUploadMessageProjection, *, now: datetime) -> Message:
+        return self._upsert_file_upload_message(
+            projection,
+            now=now,
+            allow_insert=True,
+        )
+
+    def _upsert_file_upload_message(
+        self,
+        projection: FileUploadMessageProjection,
+        *,
+        now: datetime,
+        allow_insert: bool,
+        expected_active_username: str | None = None,
+    ) -> Message:
+        if expected_active_username is not None:
+            self._require_active_conversation_identity(
+                projection.conversation_id,
+                username=expected_active_username,
+            )
         message_id = file_upload_message_id(projection.upload_id)
         metadata = safe_file_upload_message_metadata(projection.metadata, upload_id=projection.upload_id)
         content = render_file_upload_message(metadata)
@@ -3647,6 +3735,8 @@ class SQLiteStateRepository:
             select(MessageRow).where(MessageRow.message_id == message_id).with_for_update()
         ).scalar_one_or_none()
         if row is None:
+            if not allow_insert:
+                raise RuntimeError("message_identity_missing")
             row = MessageRow(
                 message_id=message_id,
                 conversation_id=projection.conversation_id,
@@ -3680,6 +3770,21 @@ class SQLiteStateRepository:
             raise ValueError("file_upload message id belongs to another conversation")
         if _message_type_value(row.message_type) != FILE_UPLOAD_MESSAGE_TYPE:
             raise ValueError("file_upload message id conflicts with non-file_upload message")
+        if (
+            (expected_active_username is not None or not allow_insert)
+            and (
+                str(row.role) != str(MessageRole.SYSTEM)
+                or row.task_id is not None
+                or (
+                    projection.created_at is not None
+                    and not _same_message_datetime(
+                        row.created_at,
+                        projection.created_at,
+                    )
+                )
+            )
+        ):
+            raise MessageIdentityConflictError()
         existing_metadata = _message_metadata_object(row.message_metadata)
         if existing_metadata.get("file_status") == "deleted" and metadata.get("file_status") != "deleted":
             raise ValueError("deleted file_upload message cannot be resurrected")
@@ -11157,7 +11262,11 @@ class SQLiteStateRepository:
             return None
         self._session.flush()
         self._session.expire_all()
-        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        row = self._session.scalar(
+            select(MCPRemoteTaskOutboxRow)
+            .where(MCPRemoteTaskOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
         return None if row is None else _row_to_mcp_remote_task_outbox(row)
 
     def pause_mcp_remote_task_for_input(
@@ -11258,7 +11367,11 @@ class SQLiteStateRepository:
     ) -> MCPRemoteTaskOutbox | None:
         if action not in {"update", "cancel"}:
             raise ValueError("MCP remote task control action is invalid")
-        interrupt = self._session.get(InterruptRow, answer.interrupt_id)
+        interrupt = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.interrupt_id == answer.interrupt_id)
+            .with_for_update()
+        )
         if (
             interrupt is None
             or interrupt.reason_code != "mcp_remote_task_input_required"
@@ -13354,6 +13467,278 @@ class SQLiteCollaborationRepository:
         self._session.flush()
         return _row_to_interrupt_answer(merged)
 
+    @staticmethod
+    def _require_exact_accepted_interrupt_answer(
+        stored: InterruptAnswer,
+        candidate: InterruptAnswer,
+    ) -> InterruptAnswer:
+        if not stored.accepted or stored.accepted_at is None:
+            raise LifecycleTransitionError(
+                "Accepted interrupt answer is missing accepted_at."
+            )
+        if (
+            stored.interrupt_answer_id != candidate.interrupt_answer_id
+            or stored.interrupt_id != candidate.interrupt_id
+            or dict(stored.answer_payload) != dict(candidate.answer_payload)
+            or stored.source_message_id != candidate.source_message_id
+        ):
+            raise LifecycleTransitionError(
+                "Interrupt answer retry does not match the accepted answer."
+            )
+        return stored
+
+    def claim_split_interrupt_answer_final(
+        self,
+        answer: InterruptAnswer,
+        *,
+        now: datetime,
+        allow_create: bool,
+    ) -> tuple[Interrupt, InterruptAnswer, bool]:
+        interrupt_row = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.interrupt_id == answer.interrupt_id)
+            .with_for_update()
+        )
+        if interrupt_row is None:
+            raise ValueError(f"Unknown interrupt: {answer.interrupt_id}")
+        interrupt = _row_to_interrupt(interrupt_row)
+        answer_row = self._session.scalar(
+            select(InterruptAnswerRow)
+            .where(
+                InterruptAnswerRow.interrupt_answer_id
+                == answer.interrupt_answer_id
+            )
+            .with_for_update()
+        )
+
+        if interrupt.status == InterruptStatus.OPEN:
+            if answer_row is None:
+                if not allow_create:
+                    raise LifecycleTransitionError(
+                        "Ready interrupt node requires an exact accepted answer."
+                    )
+                accepted_answer = replace(
+                    answer,
+                    accepted=True,
+                    accepted_at=answer.accepted_at or now,
+                )
+                answer_row = InterruptAnswerRow(
+                    interrupt_answer_id=accepted_answer.interrupt_answer_id,
+                    interrupt_id=accepted_answer.interrupt_id,
+                    answer_payload=dict(accepted_answer.answer_payload),
+                    source_message_id=accepted_answer.source_message_id,
+                    accepted=accepted_answer.accepted,
+                    created_at=accepted_answer.created_at,
+                    accepted_at=accepted_answer.accepted_at,
+                )
+                self._session.add(answer_row)
+                self._session.flush()
+            else:
+                accepted_answer = self._require_exact_accepted_interrupt_answer(
+                    _row_to_interrupt_answer(answer_row),
+                    answer,
+                )
+            ambiguous_winner = self._session.scalar(
+                select(InterruptAnswerRow.interrupt_answer_id)
+                .where(
+                    InterruptAnswerRow.interrupt_id == answer.interrupt_id,
+                    InterruptAnswerRow.accepted.is_(True),
+                    InterruptAnswerRow.accepted_at
+                    == accepted_answer.accepted_at,
+                    InterruptAnswerRow.interrupt_answer_id
+                    != accepted_answer.interrupt_answer_id,
+                )
+                .with_for_update()
+            )
+            if ambiguous_winner is not None:
+                raise LifecycleTransitionError(
+                    "Interrupt final answer timestamp is ambiguous."
+                )
+            interrupt_row.status = str(InterruptStatus.ANSWERED)
+            interrupt_row.answered_at = accepted_answer.accepted_at
+            self._session.flush()
+            return _row_to_interrupt(interrupt_row), accepted_answer, True
+
+        if interrupt.status == InterruptStatus.ANSWERED:
+            if answer_row is None:
+                raise LifecycleTransitionError(
+                    "Answered interrupt cannot accept a different final answer."
+                )
+            accepted_answer = self._require_exact_accepted_interrupt_answer(
+                _row_to_interrupt_answer(answer_row),
+                answer,
+            )
+            if interrupt.answered_at != accepted_answer.accepted_at:
+                raise LifecycleTransitionError(
+                    "Interrupt answer is not the accepted final answer."
+                )
+            ambiguous_winner = self._session.scalar(
+                select(InterruptAnswerRow.interrupt_answer_id)
+                .where(
+                    InterruptAnswerRow.interrupt_id == answer.interrupt_id,
+                    InterruptAnswerRow.accepted.is_(True),
+                    InterruptAnswerRow.accepted_at
+                    == accepted_answer.accepted_at,
+                    InterruptAnswerRow.interrupt_answer_id
+                    != accepted_answer.interrupt_answer_id,
+                )
+                .with_for_update()
+            )
+            if ambiguous_winner is not None:
+                raise LifecycleTransitionError(
+                    "Interrupt final answer timestamp is ambiguous."
+                )
+            return interrupt, accepted_answer, False
+
+        raise LifecycleTransitionError(
+            "Interrupt cannot accept an answer from its current status."
+        )
+
+    def answer_interrupt_atomic(
+        self,
+        answer: InterruptAnswer,
+        *,
+        now: datetime,
+    ) -> tuple[Interrupt, TaskNode, bool]:
+        interrupt, node, changed, _node_transitioned = (
+            self._answer_interrupt_atomic(answer, now=now)
+        )
+        return interrupt, node, changed
+
+    def _answer_interrupt_atomic(
+        self,
+        answer: InterruptAnswer,
+        *,
+        now: datetime,
+    ) -> tuple[Interrupt, TaskNode, bool, bool]:
+        interrupt_row = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.interrupt_id == answer.interrupt_id)
+            .with_for_update()
+        )
+        if interrupt_row is None:
+            raise ValueError(f"Unknown interrupt: {answer.interrupt_id}")
+        node_row = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == interrupt_row.node_id)
+            .with_for_update()
+        )
+        if node_row is None:
+            raise ValueError(f"Unknown node for interrupt: {interrupt_row.node_id}")
+        if node_row.task_id != interrupt_row.task_id:
+            raise LifecycleTransitionError(
+                "Interrupt and TaskNode task identities do not match."
+            )
+
+        interrupt = _row_to_interrupt(interrupt_row)
+        node = _row_to_task_node(node_row)
+        existing_answer_row = self._session.scalar(
+            select(InterruptAnswerRow)
+            .where(
+                InterruptAnswerRow.interrupt_answer_id
+                == answer.interrupt_answer_id
+            )
+            .with_for_update()
+        )
+        if existing_answer_row is not None:
+            accepted_answer = self._require_exact_accepted_interrupt_answer(
+                _row_to_interrupt_answer(existing_answer_row),
+                answer,
+            )
+            if (
+                interrupt.status == InterruptStatus.ANSWERED
+                and node.status == NodeStatus.READY_TO_RESUME
+            ):
+                if interrupt.answered_at != accepted_answer.accepted_at:
+                    raise LifecycleTransitionError(
+                        "Answered interrupt does not match its accepted answer."
+                    )
+                return interrupt, node, False, False
+
+            if (
+                interrupt.status == InterruptStatus.OPEN
+                and node.status
+                in {NodeStatus.WAITING_FOR_INPUT, NodeStatus.READY_TO_RESUME}
+            ):
+                transition_node = (
+                    node
+                    if node.status == NodeStatus.WAITING_FOR_INPUT
+                    else replace(node, status=NodeStatus.WAITING_FOR_INPUT)
+                )
+                updated_interrupt, normalized_answer, updated_node = (
+                    task_state_machine.answer_interrupt(
+                        interrupt,
+                        accepted_answer,
+                        transition_node,
+                        now=accepted_answer.accepted_at,
+                    )
+                )
+                if (
+                    normalized_answer != accepted_answer
+                    or updated_node.status != NodeStatus.READY_TO_RESUME
+                ):
+                    raise LifecycleTransitionError(
+                        "Accepted interrupt answer cannot be repaired exactly."
+                    )
+                node_transitioned = node.status == NodeStatus.WAITING_FOR_INPUT
+                if node_transitioned:
+                    node_row.status = str(updated_node.status)
+                    self._session.flush()
+                    node = _row_to_task_node(node_row)
+                interrupt_row.status = str(updated_interrupt.status)
+                interrupt_row.answered_at = updated_interrupt.answered_at
+                self._session.flush()
+                return (
+                    _row_to_interrupt(interrupt_row),
+                    node,
+                    True,
+                    node_transitioned,
+                )
+
+            raise LifecycleTransitionError(
+                "Accepted interrupt answer has an inconsistent lifecycle state."
+            )
+
+        if (
+            interrupt.status == InterruptStatus.ANSWERED
+            and node.status == NodeStatus.READY_TO_RESUME
+        ):
+            raise LifecycleTransitionError(
+                "Answered interrupt cannot accept a different final answer."
+            )
+
+        updated_interrupt, accepted_answer, updated_node = (
+            task_state_machine.answer_interrupt(
+                interrupt,
+                answer,
+                node,
+                now=now,
+            )
+        )
+        self._session.add(
+            InterruptAnswerRow(
+                interrupt_answer_id=accepted_answer.interrupt_answer_id,
+                interrupt_id=accepted_answer.interrupt_id,
+                answer_payload=dict(accepted_answer.answer_payload),
+                source_message_id=accepted_answer.source_message_id,
+                accepted=accepted_answer.accepted,
+                created_at=accepted_answer.created_at,
+                accepted_at=accepted_answer.accepted_at,
+            )
+        )
+        self._session.flush()
+        node_row.status = str(updated_node.status)
+        self._session.flush()
+        interrupt_row.status = str(updated_interrupt.status)
+        interrupt_row.answered_at = updated_interrupt.answered_at
+        self._session.flush()
+        return (
+            _row_to_interrupt(interrupt_row),
+            _row_to_task_node(node_row),
+            True,
+            True,
+        )
+
     def get_interrupt_answer(self, interrupt_answer_id: str) -> InterruptAnswer | None:
         row = self._session.get(InterruptAnswerRow, interrupt_answer_id)
         return None if row is None else _row_to_interrupt_answer(row)
@@ -13522,6 +13907,7 @@ class SQLiteStorage(StoragePort):
         runtime_sidecar_client: Any | None = None,
         runtime_sidecar_shadow_sink: RuntimeSidecarShadowSink | None = None,
         mcp_task_authority_mode: str | None = None,
+        message_identity_authority_enabled: bool = False,
         mcp_terminal_candidate_reader: Callable[
             [str, str], MCPValidatedTerminalResultCandidate
         ]
@@ -13557,10 +13943,15 @@ class SQLiteStorage(StoragePort):
                 "runtime_store_unavailable: MCP Task shadow authority requires a "
                 "runtime sidecar comparison sink"
             )
+        if not isinstance(message_identity_authority_enabled, bool):
+            raise ValueError("message_identity_authority_enabled must be a bool")
         self._session_factory = session_factory
         self._runtime_sidecar_client = runtime_sidecar_client
         self._runtime_sidecar_shadow_sink = runtime_sidecar_shadow_sink
         self._mcp_task_authority_mode = mcp_task_authority_mode
+        self._message_identity_authority_enabled = (
+            message_identity_authority_enabled
+        )
         self._mcp_terminal_candidate_reader = mcp_terminal_candidate_reader
         self._mcp_terminal_candidate_resolver = mcp_terminal_candidate_resolver
         self._mcp_pending_action_payload_reader = mcp_pending_action_payload_reader
@@ -15160,10 +15551,18 @@ class SQLiteStorage(StoragePort):
         )
         if (
             expected_outbox is None
-            or expected_outbox.kind != "awaiting_input"
-            or expected_outbox.status != "awaiting_input"
         ):
             return None
+        if (
+            expected_outbox.kind != "awaiting_input"
+            or expected_outbox.status != "awaiting_input"
+        ):
+            return await self._recover_mcp_remote_task_control_exact(
+                binding,
+                answer,
+                action=action,
+                input_responses=input_responses,
+            )
         node = await self.get_task_node(binding.node_id)
         if node is None or node.status not in {
             NodeStatus.WAITING_FOR_INPUT,
@@ -15175,7 +15574,12 @@ class SQLiteStorage(StoragePort):
             expected_from_status=node.status,
         )
         if transitioned is None:
-            return None
+            transitioned = await self.get_task_node(binding.node_id)
+            if transitioned != replace(
+                node,
+                status=NodeStatus.WAITING_FOR_DEPENDENCY,
+            ):
+                return None
         command = await self._run(
             lambda state, collab: state.enqueue_mcp_remote_task_control(
                 answer,
@@ -15185,7 +15589,62 @@ class SQLiteStorage(StoragePort):
             )
         )
         if command is None:
-            raise RuntimeError("mcp_remote_task_control_aggregate_conflict")
+            command = await self._recover_mcp_remote_task_control_exact(
+                binding,
+                answer,
+                action=action,
+                input_responses=input_responses,
+            )
+        return command
+
+    async def _recover_mcp_remote_task_control_exact(
+        self,
+        binding: MCPRemoteTaskBinding,
+        answer: InterruptAnswer,
+        *,
+        action: str,
+        input_responses: Mapping[str, Any],
+    ) -> MCPRemoteTaskOutbox:
+        stored_interrupt = await self.get_interrupt(answer.interrupt_id)
+        stored_answer = await self.get_interrupt_answer(
+            answer.interrupt_answer_id
+        )
+        if (
+            stored_interrupt is None
+            or str(stored_interrupt.status) != "answered"
+            or stored_answer is None
+        ):
+            raise MessageIdentityConflictError()
+        try:
+            canonical_answer = (
+                SQLiteCollaborationRepository._require_exact_accepted_interrupt_answer(
+                    stored_answer,
+                    answer,
+                )
+            )
+        except LifecycleTransitionError as exc:
+            raise MessageIdentityConflictError() from exc
+        if stored_interrupt.answered_at != canonical_answer.accepted_at:
+            raise MessageIdentityConflictError()
+        command = await self._run(
+            lambda state, collab: state.get_mcp_remote_task_outbox(
+                f"mcp-remote-input:{binding.call_ref}"
+            )
+        )
+        expected_kind = (
+            "control_update" if action == "update" else "control_cancel"
+        )
+        expected_payload = (
+            {"input_responses": dict(input_responses)}
+            if action == "update"
+            else {"reason": "user_cancelled_remote_input"}
+        )
+        if (
+            command is None
+            or command.kind != expected_kind
+            or dict(command.payload) != expected_payload
+        ):
+            raise MessageIdentityConflictError()
         return command
 
     async def apply_mcp_remote_task_continuation(
@@ -16149,12 +16608,25 @@ class SQLiteStorage(StoragePort):
         now: datetime,
     ) -> ConversationFileResource:
         try:
-            return await self._run(
-                lambda state, collab: state.save_conversation_file_resource_with_upload_message(
-                    resource,
+            prepared_projection, allow_message_insert, expected_username = (
+                await self._prepare_file_upload_message_insert(
                     projection,
+                    username=resource.username,
                     now=now,
                 )
+            )
+            return await self._run_message_write(
+                lambda state: state._save_conversation_file_resource_with_upload_message(
+                    resource,
+                    prepared_projection,
+                    now=now,
+                    allow_message_insert=allow_message_insert,
+                    expected_active_username=expected_username,
+                ),
+                retry_unique=(
+                    self._message_identity_authority_active()
+                    and allow_message_insert
+                ),
             )
         except ValueError as exc:
             reason_code = _file_upload_message_error_reason(str(exc))
@@ -16603,7 +17075,7 @@ class SQLiteStorage(StoragePort):
     async def reserve_message_identity(
         self, request: MessageIdentityReservationRequest
     ) -> MessageIdentityReservationResult:
-        if self._task_authority_mode() != "enforce":
+        if not self._message_identity_authority_active():
             existing = await self.get_message(request.message_id)
             disposition = (
                 MessageIdentityDisposition.CREATED
@@ -16725,8 +17197,44 @@ class SQLiteStorage(StoragePort):
             handle=handle,
         )
 
-    async def save_message(self, message: Message) -> Message:
-        return await self._run(lambda state, collab: state.save_message(message))
+    async def save_message(
+        self,
+        message: Message,
+        *,
+        identity_reservation: MessageIdentityReservationRequest | None = None,
+    ) -> Message:
+        if not self._message_identity_authority_active():
+            return await self._run_message_write(
+                lambda state: state.save_message(message)
+            )
+
+        existing = await self.get_message(message.message_id)
+        if existing is not None:
+            return await self._run_message_write(
+                lambda state: state._save_message(message, allow_insert=False)
+            )
+
+        conversation = await self._active_identity_conversation(
+            message.conversation_id
+        )
+        reservation = self._message_insert_reservation(
+            message,
+            username=conversation.username,
+            identity_reservation=identity_reservation,
+        )
+        result = await self._reserve_message_insert(reservation)
+        canonical_message = replace(
+            message,
+            created_at=result.message_created_at,
+        )
+        return await self._run_message_write(
+            lambda state: state._save_message(
+                canonical_message,
+                allow_insert=True,
+                expected_active_username=conversation.username,
+            ),
+            retry_unique=True,
+        )
 
     async def get_message(self, message_id: str) -> Message | None:
         return await self._run(lambda state, collab: state.get_message(message_id))
@@ -16734,9 +17242,154 @@ class SQLiteStorage(StoragePort):
     async def list_messages_for_conversation(self, conversation_id: str) -> list[Message]:
         return await self._run(lambda state, collab: state.list_messages_for_conversation(conversation_id))
 
+    async def _active_identity_conversation(
+        self,
+        conversation_id: str,
+    ) -> Conversation:
+        conversation = await self.get_conversation(conversation_id)
+        if (
+            conversation is None
+            or conversation.status != ConversationStatus.ACTIVE
+        ):
+            raise PermissionError(
+                f"Conversation is not available: {conversation_id}"
+            )
+        return conversation
+
+    def _message_insert_reservation(
+        self,
+        message: Message,
+        *,
+        username: str,
+        identity_reservation: MessageIdentityReservationRequest | None,
+    ) -> MessageIdentityReservationRequest:
+        if message.created_at is None:
+            raise RuntimeError("message_created_at_required")
+        if str(message.role) == str(MessageRole.USER):
+            if identity_reservation is None:
+                raise RuntimeError("message_identity_reservation_required")
+            if (
+                identity_reservation.identity_kind
+                != MessageIdentityKind.INTERRUPT
+                or not _reservation_matches_message(
+                    identity_reservation,
+                    message,
+                    username=username,
+                )
+            ):
+                raise MessageIdentityConflictError()
+            return identity_reservation
+        if identity_reservation is not None:
+            raise RuntimeError("message_identity_reservation_invalid")
+        if message.task_id is None:
+            raise RuntimeError("message_task_id_required")
+        return MessageIdentityReservationRequest(
+            username=username,
+            conversation_id=message.conversation_id,
+            message_id=message.message_id,
+            identity_kind=MessageIdentityKind.SERVER_INTERNAL,
+            role=message.role,
+            message_type=_message_type_value(message.message_type),
+            message_created_at=message.created_at,
+            task_id=message.task_id,
+            request_fingerprint=None,
+            reserved_at=datetime.now(timezone.utc),
+        )
+
+    async def _reserve_message_insert(
+        self,
+        request: MessageIdentityReservationRequest,
+    ) -> MessageIdentityReservationResult:
+        result = await self.reserve_message_identity(request)
+        if result.disposition == MessageIdentityDisposition.CONFLICT:
+            raise MessageIdentityConflictError()
+        if (
+            result.disposition
+            == MessageIdentityDisposition.CONVERSATION_NOT_AVAILABLE
+        ):
+            raise PermissionError(
+                f"Conversation is not available: {request.conversation_id}"
+            )
+        if result.disposition not in {
+            MessageIdentityDisposition.CREATED,
+            MessageIdentityDisposition.EXACT_REPLAY,
+        }:
+            raise RuntimeError("runtime_store_response_invalid")
+        if not _reservation_result_matches_request(result, request):
+            raise RuntimeError("runtime_store_response_invalid")
+        return result
+
+    async def _prepare_file_upload_message_insert(
+        self,
+        projection: FileUploadMessageProjection,
+        *,
+        username: str | None,
+        now: datetime,
+    ) -> tuple[FileUploadMessageProjection, bool, str | None]:
+        if not self._message_identity_authority_active():
+            return projection, True, None
+        message_id = file_upload_message_id(projection.upload_id)
+        existing = await self.get_message(message_id)
+        if existing is not None:
+            if not _file_upload_message_identity_matches(existing, projection):
+                raise MessageIdentityConflictError()
+            return projection, False, None
+        conversation = await self._active_identity_conversation(
+            projection.conversation_id
+        )
+        if username is not None and conversation.username != username:
+            raise PermissionError(
+                f"Conversation is not available: {projection.conversation_id}"
+            )
+        message_created_at = projection.created_at or now
+        result = await self._reserve_message_insert(
+            MessageIdentityReservationRequest(
+                username=conversation.username if username is None else username,
+                conversation_id=projection.conversation_id,
+                message_id=message_id,
+                identity_kind=MessageIdentityKind.FILE_VISIBLE,
+                role=MessageRole.SYSTEM,
+                message_type=FILE_UPLOAD_MESSAGE_TYPE,
+                message_created_at=message_created_at,
+                task_id=None,
+                request_fingerprint=None,
+                reserved_at=now,
+            )
+        )
+        return (
+            replace(projection, created_at=result.message_created_at),
+            True,
+            conversation.username if username is None else username,
+        )
+
+    async def _run_message_write(
+        self,
+        operation: Callable[[SQLiteStateRepository], Any],
+        *,
+        retry_unique: bool = False,
+    ) -> Any:
+        return await self._run(lambda state, collab: operation(state))
+
     async def upsert_file_upload_message(self, projection: FileUploadMessageProjection, *, now: datetime) -> Message:
         try:
-            return await self._run(lambda state, collab: state.upsert_file_upload_message(projection, now=now))
+            prepared_projection, allow_insert, expected_username = (
+                await self._prepare_file_upload_message_insert(
+                    projection,
+                    username=None,
+                    now=now,
+                )
+            )
+            return await self._run_message_write(
+                lambda state: state._upsert_file_upload_message(
+                    prepared_projection,
+                    now=now,
+                    allow_insert=allow_insert,
+                    expected_active_username=expected_username,
+                ),
+                retry_unique=(
+                    self._message_identity_authority_active() and allow_insert
+                ),
+            )
         except ValueError as exc:
             reason_code = _file_upload_message_error_reason(str(exc))
             await self._run(
@@ -17137,6 +17790,21 @@ class SQLiteStorage(StoragePort):
                 raise RuntimeError(
                     "runtime_store_idempotency_conflict: expected TaskNode status is stale"
                 )
+        await self._record_task_node_transition_shadow(
+            node,
+            saved=saved,
+            expected_from_status=effective_expected_status,
+        )
+        return saved
+
+    async def _record_task_node_transition_shadow(
+        self,
+        node: TaskNode,
+        *,
+        saved: TaskNode,
+        expected_from_status: NodeStatus | None,
+    ) -> None:
+        node_record = _task_node_to_sidecar_record(node)
         await record_runtime_sidecar_shadow_write(
             component="runtime_store",
             operation_name="node_state_transition",
@@ -17158,8 +17826,8 @@ class SQLiteStorage(StoragePort):
                 to_status=str(node.status),
                 expected_from_status=(
                     ""
-                    if effective_expected_status is None
-                    else str(effective_expected_status)
+                    if expected_from_status is None
+                    else str(expected_from_status)
                 ),
                 idempotency_key=_task_node_snapshot_idempotency_key(node_record),
                 node=node_record,
@@ -17171,7 +17839,6 @@ class SQLiteStorage(StoragePort):
             },
             mode=self._task_authority_mode(),
         )
-        return saved
 
     async def compare_and_set_task_node(
         self, node: TaskNode, *, expected_from_status: NodeStatus
@@ -17594,6 +18261,142 @@ class SQLiteStorage(StoragePort):
     async def save_interrupt_answer(self, interrupt_answer: InterruptAnswer) -> InterruptAnswer:
         return await self._run(lambda state, collab: collab.save_interrupt_answer(interrupt_answer))
 
+    async def answer_interrupt_atomic(
+        self,
+        answer: InterruptAnswer,
+        *,
+        now: datetime,
+    ) -> tuple[Interrupt, TaskNode, bool]:
+        """Commit one answer atomically, or repair a split-authority commit.
+
+        SQL-authoritative nodes use one database transaction. Runtime Sidecar
+        authoritative nodes claim the final SQL answer first, then make the
+        Sidecar node transition an exact, idempotent repair point.
+        """
+        task_authority_mode = self._task_authority_mode()
+        if task_authority_mode == "enforce":
+            return await self._answer_interrupt_split_authority(
+                answer,
+                now=now,
+            )
+        interrupt, node, changed, node_transitioned = await self._run(
+            lambda state, collab: collab._answer_interrupt_atomic(
+                answer,
+                now=now,
+            )
+        )
+        if task_authority_mode == "shadow" and node_transitioned:
+            await self._record_task_node_transition_shadow(
+                node,
+                saved=node,
+                expected_from_status=NodeStatus.WAITING_FOR_INPUT,
+            )
+        return interrupt, node, changed
+
+    async def _answer_interrupt_split_authority(
+        self,
+        answer: InterruptAnswer,
+        *,
+        now: datetime,
+    ) -> tuple[Interrupt, TaskNode, bool]:
+        interrupt = await self.get_interrupt(answer.interrupt_id)
+        if interrupt is None:
+            raise ValueError(f"Unknown interrupt: {answer.interrupt_id}")
+        node = await self.get_task_node(interrupt.node_id)
+        if node is None:
+            raise ValueError(f"Unknown node for interrupt: {interrupt.node_id}")
+        if node.task_id != interrupt.task_id:
+            raise LifecycleTransitionError(
+                "Interrupt and TaskNode task identities do not match."
+            )
+        if interrupt.status not in {
+            InterruptStatus.OPEN,
+            InterruptStatus.ANSWERED,
+        } or node.status not in {
+            NodeStatus.WAITING_FOR_INPUT,
+            NodeStatus.READY_TO_RESUME,
+        }:
+            raise LifecycleTransitionError(
+                "Interrupt answer has an inconsistent split-authority state."
+            )
+        existing_answer = await self.get_interrupt_answer(
+            answer.interrupt_answer_id
+        )
+        if existing_answer is not None:
+            candidate = (
+                SQLiteCollaborationRepository._require_exact_accepted_interrupt_answer(
+                    existing_answer,
+                    answer,
+                )
+            )
+        elif (
+            interrupt.status == InterruptStatus.OPEN
+            and node.status == NodeStatus.WAITING_FOR_INPUT
+        ):
+            candidate = answer
+        else:
+            raise LifecycleTransitionError(
+                "Interrupt answer does not match the claimed final answer."
+            )
+        transition_interrupt = (
+            interrupt
+            if interrupt.status == InterruptStatus.OPEN
+            else replace(
+                interrupt,
+                status=InterruptStatus.OPEN,
+                answered_at=None,
+            )
+        )
+        transition_node = (
+            node
+            if node.status == NodeStatus.WAITING_FOR_INPUT
+            else replace(node, status=NodeStatus.WAITING_FOR_INPUT)
+        )
+        _validated_interrupt, normalized_answer, updated_node = (
+            task_state_machine.answer_interrupt(
+                transition_interrupt,
+                candidate,
+                transition_node,
+                now=(
+                    candidate.accepted_at
+                    if candidate.accepted_at is not None
+                    else now
+                ),
+            )
+        )
+        claimed_interrupt, accepted_answer, claimed = await self._run(
+            lambda state, collab: collab.claim_split_interrupt_answer_final(
+                normalized_answer,
+                now=now,
+                allow_create=node.status == NodeStatus.WAITING_FOR_INPUT,
+            )
+        )
+        SQLiteCollaborationRepository._require_exact_accepted_interrupt_answer(
+            accepted_answer,
+            normalized_answer,
+        )
+        node_transitioned = node.status == NodeStatus.WAITING_FOR_INPUT
+        if node_transitioned:
+            try:
+                node = await self.save_task_node(
+                    updated_node,
+                    expected_from_status=NodeStatus.WAITING_FOR_INPUT,
+                )
+            except RuntimeError as exc:
+                if not str(exc).startswith(
+                    "runtime_store_idempotency_conflict:"
+                ):
+                    raise
+                exact_node = await self.get_task_node(node.node_id)
+                if exact_node != updated_node:
+                    raise
+                node = exact_node
+        return (
+            claimed_interrupt,
+            node,
+            claimed or node_transitioned,
+        )
+
     async def get_interrupt_answer(self, interrupt_answer_id: str) -> InterruptAnswer | None:
         return await self._run(lambda state, collab: collab.get_interrupt_answer(interrupt_answer_id))
 
@@ -17696,6 +18499,12 @@ class SQLiteStorage(StoragePort):
         if self._mcp_task_authority_mode is not None:
             return self._mcp_task_authority_mode
         return runtime_mode_for_component("runtime_store")
+
+    def _message_identity_authority_active(self) -> bool:
+        return (
+            self._message_identity_authority_enabled
+            and self._task_authority_mode() == "enforce"
+        )
 
 
 def _runtime_sidecar_idempotency_key(*parts: str) -> str:
@@ -18004,8 +18813,81 @@ def _message_matches_reservation(
         message.conversation_id == request.conversation_id
         and message.role == request.role
         and message.message_type == request.message_type
-        and message.created_at == request.message_created_at
+        and _same_message_datetime(
+            message.created_at,
+            request.message_created_at,
+        )
         and message.task_id == request.task_id
+    )
+
+
+def _reservation_matches_message(
+    request: MessageIdentityReservationRequest,
+    message: Message,
+    *,
+    username: str,
+) -> bool:
+    return (
+        request.username == username
+        and request.conversation_id == message.conversation_id
+        and request.message_id == message.message_id
+        and request.role == message.role
+        and request.message_type == _message_type_value(message.message_type)
+        and _same_message_datetime(
+            request.message_created_at,
+            message.created_at,
+        )
+        and request.task_id == message.task_id
+    )
+
+
+def _reservation_result_matches_request(
+    result: MessageIdentityReservationResult,
+    request: MessageIdentityReservationRequest,
+) -> bool:
+    return (
+        result.message_id == request.message_id
+        and result.conversation_id == request.conversation_id
+        and result.identity_kind == request.identity_kind
+        and result.role == request.role
+        and result.message_type == request.message_type
+        and result.message_created_at is not None
+        and (
+            _same_message_datetime(
+                result.message_created_at,
+                request.message_created_at,
+            )
+            or (
+                result.disposition == MessageIdentityDisposition.EXACT_REPLAY
+                and request.identity_kind == MessageIdentityKind.INTERRUPT
+            )
+        )
+        and result.task_id == request.task_id
+    )
+
+
+def _same_message_datetime(
+    existing: datetime | None,
+    candidate: datetime | None,
+) -> bool:
+    if existing is None or candidate is None:
+        return existing is candidate
+    return _datetime_epoch_ms(existing) == _datetime_epoch_ms(candidate)
+
+
+def _file_upload_message_identity_matches(
+    message: Message,
+    projection: FileUploadMessageProjection,
+) -> bool:
+    return (
+        message.conversation_id == projection.conversation_id
+        and str(message.role) == str(MessageRole.SYSTEM)
+        and _message_type_value(message.message_type) == FILE_UPLOAD_MESSAGE_TYPE
+        and message.task_id is None
+        and (
+            projection.created_at is None
+            or _same_message_datetime(message.created_at, projection.created_at)
+        )
     )
 
 

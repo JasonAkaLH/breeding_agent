@@ -143,9 +143,14 @@ class PostgreSQLStorage(SQLiteStorage):
         mcp_rollout_role: str | None = None,
         mcp_legacy_migration_session_factory=None,
         mcp_legacy_migration_role: str | None = None,
+        message_identity_authority_enabled: bool = False,
         **kwargs: Any,
     ) -> None:
-        super().__init__(session_factory, **kwargs)
+        super().__init__(
+            session_factory,
+            message_identity_authority_enabled=message_identity_authority_enabled,
+            **kwargs,
+        )
         if mcp_rollout_role not in {
             None,
             "app",
@@ -222,6 +227,16 @@ class PostgreSQLStorage(SQLiteStorage):
         except IntegrityError as exc:
             if _postgres_sqlstate(exc) != "23505":
                 raise
+        return await self._run(lambda state, collab: operation(state))
+
+    async def _run_message_write(
+        self,
+        operation: Callable[[SQLiteStateRepository], _T],
+        *,
+        retry_unique: bool = False,
+    ) -> _T:
+        if retry_unique:
+            return await self._run_submission_write_with_unique_retry(operation)
         return await self._run(lambda state, collab: operation(state))
 
     def _run_cp7_authority_sync(

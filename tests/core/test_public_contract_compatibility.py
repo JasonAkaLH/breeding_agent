@@ -40,6 +40,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "apply_mcp_remote_task_continuation": "(self, outbox_id: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', updated_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
   "apply_slot_transition": "(self, collection_id: 'str', expected_revision: 'int', next_collection: 'SlotCollection', slot_event: 'SlotEvent', *, idempotency_key: 'str | None' = None) -> 'SlotCollection | None'",
   "arm_user_mcp_target_intent": "(self, task_id: 'str', node_id: 'str', requested_server_id: 'str', resume_envelope: 'Mapping[str, Any]', occurred_at: 'datetime') -> 'MCPTargetIntentArmResult'",
+  "answer_interrupt_atomic": "(self, answer: 'InterruptAnswer', *, now: 'datetime') -> 'tuple[Interrupt, TaskNode, bool]'",
   "begin_mcp_remote_task_continuation": "(self, outbox_id: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', started_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
   "begin_mcp_remote_task_control_delivery": "(self, outbox_id: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', lease_expires_at: 'datetime', updated_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
   "cancel_mcp_dispatch": "(self, intent_id: 'str', outbox_id: 'str', node_id: 'str', occurred_at: 'datetime') -> 'MCPDispatchFinalizeResult'",
@@ -265,7 +266,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "save_mcp_rollout_instance_config_lease": "(self, lease: 'MCPRolloutInstanceConfigLease') -> 'MCPRolloutInstanceConfigLease'",
   "save_mcp_sealed_state": "(self, state: 'MCPSealedState') -> 'MCPSealedState'",
   "save_mcp_shadow_audit_sample": "(self, sample: 'MCPShadowAuditSample') -> 'MCPShadowAuditSample'",
-  "save_message": "(self, message: 'Message') -> 'Message'",
+  "save_message": "(self, message: 'Message', *, identity_reservation: 'MessageIdentityReservationRequest | None' = None) -> 'Message'",
   "save_pending_skill_context": "(self, context: 'PendingSkillContext') -> 'PendingSkillContext'",
   "save_slot_collection": "(self, collection: 'SlotCollection') -> 'SlotCollection'",
   "save_task": "(self, task: 'Task', *, expected_from_status: 'TaskStatus | None' = None) -> 'Task'",
@@ -321,7 +322,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 271)
+        self.assertEqual(len(actual), 272)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(

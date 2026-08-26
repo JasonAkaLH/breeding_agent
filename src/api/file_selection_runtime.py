@@ -22,6 +22,7 @@ from src.api.file_selection import (
 )
 from src.orchestration.visible_message_history import persist_interrupt_question_message
 from src.core.enums import EventVisibility, InterruptStatus, MessageRole, NodeStatus, TaskStatus
+from src.core.errors import MessageIdentityConflictError
 from src.core.models import Interrupt, InterruptAnswer, Message, Task, TaskNode
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 
@@ -560,6 +561,65 @@ class ConversationFileSelectionRuntimeMixin:
     async def _has_open_interrupt(self, task_id: str) -> bool:
         return any(interrupt.status == InterruptStatus.OPEN for interrupt in await self.storage.list_interrupts_for_task(task_id))
 
+    async def _accept_file_selection_resume_answer(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        answer_payload: Mapping[str, object],
+        reserved_message,
+        request_fingerprint: str,
+    ) -> tuple[
+        InterruptAnswer,
+        Interrupt | None,
+        dict[str, object] | None,
+        bool,
+    ]:
+        answer = InterruptAnswer(
+            interrupt_answer_id=self._interrupt_answer_id(
+                interrupt.interrupt_id,
+                reserved_message.message.message_id,
+            ),
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload=dict(answer_payload),
+            source_message_id=reserved_message.message.message_id,
+            created_at=self._utcnow_naive(),
+        )
+        existing_answers = await self.storage.list_interrupt_answers(
+            interrupt.interrupt_id
+        )
+        exact_answer = next(
+            (
+                existing
+                for existing in existing_answers
+                if existing.source_message_id == answer.source_message_id
+                and dict(existing.answer_payload) == dict(answer.answer_payload)
+            ),
+            None,
+        )
+        if existing_answers and exact_answer is None:
+            raise MessageIdentityConflictError()
+        receipt = await self._interrupt_continuation_receipt(
+            task_id=task.task_id,
+            interrupt_id=interrupt.interrupt_id,
+            source_message_id=reserved_message.message.message_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if exact_answer is not None and receipt is not None:
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
+            return exact_answer, None, dict(receipt), True
+        accepted_answer = exact_answer or answer
+        saved_interrupt = await self.interrupt_service.record_answer(
+            accepted_answer
+        )
+        await self._ensure_reserved_interrupt_user_message(reserved_message)
+        return (
+            accepted_answer,
+            saved_interrupt,
+            None,
+            exact_answer is not None,
+        )
+
     async def _answer_file_selection_interrupt(
         self,
         *,
@@ -581,66 +641,208 @@ class ConversationFileSelectionRuntimeMixin:
         elif answer_payload.get("upload_ids"):
             upload_ids = self._normalize_upload_ids(answer_payload.get("upload_ids") or ())
 
-        file_selection = interrupt.required_fields.get("_file_selection")
-        file_selection_context = dict(file_selection) if isinstance(file_selection, Mapping) else {}
-        candidate_ids = [
-            str(item).strip()
-            for item in file_selection_context.get("candidate_upload_ids", [])
-            if str(item).strip()
+        reserved_message = await self._reserve_interrupt_user_message(
+            task=task,
+            interrupt=interrupt,
+            answer_payload=answer_payload,
+            source_message_id=source_message_id,
+        )
+        answer_claims = [
+            event
+            for event in await self.storage.list_events_for_task_filtered(
+                task.task_id,
+                event_types=("conversation_file.file_selector_answer_claimed",),
+            )
+            if event.event_type == "conversation_file.file_selector_answer_claimed"
+            and str(event.payload.get("interrupt_id") or "") == interrupt.interrupt_id
         ]
-        resources = await self.storage.list_conversation_file_resources(task.conversation_id, conversation.username, include_deleted=False)
-        candidate_resources = [resource for resource in resources if not candidate_ids or resource.file_id in candidate_ids]
-        recent_usage = build_recent_usage(await self.storage.list_task_input_attachments_for_conversation(task.conversation_id, limit=100))
-        candidates = tuple(
-            candidate_from_resource(resource, recent_usage=recent_usage.get(resource.file_id))
-            for resource in candidate_resources
-            if resource.status != "deleted"
+        request_fingerprint = reserved_message.request.request_fingerprint or ""
+        source_claims = [
+            event
+            for event in answer_claims
+            if str(event.payload.get("source_message_id") or "") == reserved_message.message.message_id
+        ]
+        matching_claim = next(
+            (
+                event
+                for event in source_claims
+                if str(event.payload.get("request_fingerprint") or "")
+                == request_fingerprint
+            ),
+            None,
         )
-        profile = FileRequirementProfile.from_mapping(
-            file_selection_context.get("profile") if isinstance(file_selection_context.get("profile"), Mapping) else {},
-            source="interrupt",
+        if source_claims and matching_claim is None:
+            raise MessageIdentityConflictError()
+        if source_claims:
+            assert matching_claim is not None
+            claim = matching_claim
+            raw_decision = claim.payload.get("decision")
+            claimed_payload = claim.payload.get("claimed_answer_payload")
+            if not isinstance(raw_decision, Mapping) or not isinstance(claimed_payload, Mapping):
+                raise RuntimeError("file_selection_answer_claim_invalid")
+            raw_upload_ids = raw_decision.get("upload_ids")
+            if not isinstance(raw_upload_ids, list):
+                raise RuntimeError("file_selection_answer_claim_invalid")
+            decision = FileSelectionDecision(
+                decision=str(raw_decision.get("decision") or ""),
+                upload_ids=tuple(str(item) for item in raw_upload_ids),
+                confidence=float(raw_decision.get("confidence") or 0.0),
+                reason_code=str(raw_decision.get("reason_code") or "") or None,
+            )
+            claimed_answer_payload = dict(claimed_payload)
+            claimed_assistant_text = str(claim.payload.get("assistant_message") or "")
+        else:
+            if interrupt.status != InterruptStatus.OPEN:
+                raise MessageIdentityConflictError()
+            file_selection = interrupt.required_fields.get("_file_selection")
+            file_selection_context = dict(file_selection) if isinstance(file_selection, Mapping) else {}
+            candidate_ids = [
+                str(item).strip()
+                for item in file_selection_context.get("candidate_upload_ids", [])
+                if str(item).strip()
+            ]
+            resources = await self.storage.list_conversation_file_resources(
+                task.conversation_id,
+                conversation.username,
+                include_deleted=False,
+            )
+            candidate_resources = [
+                resource
+                for resource in resources
+                if not candidate_ids or resource.file_id in candidate_ids
+            ]
+            recent_usage = build_recent_usage(
+                await self.storage.list_task_input_attachments_for_conversation(
+                    task.conversation_id,
+                    limit=100,
+                )
+            )
+            candidates = tuple(
+                candidate_from_resource(
+                    resource,
+                    recent_usage=recent_usage.get(resource.file_id),
+                )
+                for resource in candidate_resources
+                if resource.status != "deleted"
+            )
+            profile = FileRequirementProfile.from_mapping(
+                file_selection_context.get("profile")
+                if isinstance(file_selection_context.get("profile"), Mapping)
+                else {},
+                source="interrupt",
+            )
+            decision = FileSelectionAnswerResolver().resolve(
+                answer_text,
+                candidates,
+                replacement_upload_ids=upload_ids,
+                allow_multiple=self._allows_guarded_multi_file_selection(
+                    answer_text,
+                    profile,
+                ),
+            )
+            if decision.decision == "no_file_needed" and profile.required:
+                decision = FileSelectionDecision(
+                    "ambiguous",
+                    reason_code="required_file_cannot_be_skipped",
+                )
+            claimed_answer_payload = dict(answer_payload)
+            if decision.decision in {"select_one", "select_many"}:
+                claimed_answer_payload["upload_ids"] = list(decision.upload_ids)
+                if isinstance(claimed_answer_payload.get("answer"), Mapping):
+                    nested_answer = dict(claimed_answer_payload["answer"])
+                    nested_answer["upload_ids"] = list(decision.upload_ids)
+                    claimed_answer_payload["answer"] = nested_answer
+            claimed_assistant_text = (
+                render_file_selection_question(
+                    candidates,
+                    reason_code=decision.reason_code,
+                )
+                if decision.decision not in {"no_file_needed", "select_one", "select_many"}
+                else ""
+            )
+            await self._record_file_selection_audit_event(
+                task=task,
+                event_type="conversation_file.file_selector_answer_claimed",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "source_message_id": reserved_message.message.message_id,
+                    "request_fingerprint": request_fingerprint,
+                    "decision": {
+                        "decision": decision.decision,
+                        "upload_ids": list(decision.upload_ids),
+                        "confidence": decision.confidence,
+                        "reason_code": decision.reason_code,
+                    },
+                    "claimed_answer_payload": claimed_answer_payload,
+                    "assistant_message": claimed_assistant_text,
+                    "planned_action": (
+                        "clarification_answer"
+                        if decision.decision not in {"no_file_needed", "select_one", "select_many"}
+                        else "resumed"
+                    ),
+                },
+            )
+        replay_event = next(
+            (
+                event
+                for event in await self.storage.list_events_for_task_filtered(
+                    task.task_id,
+                    event_types=("conversation_file.file_selector_invalid_output",),
+                )
+                if event.event_type == "conversation_file.file_selector_invalid_output"
+                and str(event.payload.get("source_message_id") or "")
+                == reserved_message.message.message_id
+            ),
+            None,
         )
-        allow_multiple = self._allows_guarded_multi_file_selection(answer_text, profile)
-        decision = FileSelectionAnswerResolver().resolve(
-            answer_text,
-            candidates,
-            replacement_upload_ids=upload_ids,
-            allow_multiple=allow_multiple,
+        if replay_event is not None:
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
+            return {
+                "interrupt_id": interrupt.interrupt_id,
+                "status": str(interrupt.status),
+                "node_id": interrupt.node_id,
+                "answer_payload": dict(answer_payload),
+                "action": "clarification_answer",
+                "assistant_message": str(replay_event.payload.get("assistant_message") or ""),
+                "source_message_id": reserved_message.message.message_id,
+            }
+        completed_receipt = await self._interrupt_continuation_receipt(
+            task_id=task.task_id,
+            interrupt_id=interrupt.interrupt_id,
+            source_message_id=reserved_message.message.message_id,
+            request_fingerprint=request_fingerprint,
         )
-        if decision.decision == "no_file_needed" and profile.required:
-            decision = FileSelectionDecision("ambiguous", reason_code="required_file_cannot_be_skipped")
+        if completed_receipt is not None:
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
+            return dict(completed_receipt)
         if decision.decision == "no_file_needed":
             resume_metadata = {
                 **self._task_file_selection_resume_metadata.get(task.task_id, {}),
                 **self._resume_skill_revision_metadata(task.task_id),
                 **await self._resume_llm_metadata(task, request_metadata),
             }
-            answer = InterruptAnswer(
-                interrupt_answer_id=self._make_id("interrupt-answer"),
-                interrupt_id=interrupt.interrupt_id,
-                answer_payload=dict(answer_payload),
-                source_message_id=source_message_id or str(answer_payload.get("client_request_id") or self._make_id("msg")),
-                created_at=self._utcnow_naive(),
-            )
-            saved_interrupt = await self.interrupt_service.record_answer(answer)
-            await self.storage.save_message(
-                Message(
-                    message_id=answer.source_message_id,
-                    conversation_id=task.conversation_id,
-                    role=MessageRole.USER,
-                    content=answer_text or self._format_answer_message(answer_payload),
-                    task_id=task.task_id,
-                    created_at=self._utcnow_naive(),
+            answer, saved_interrupt, receipt, exact_answer_replay = (
+                await self._accept_file_selection_resume_answer(
+                    task=task,
+                    interrupt=interrupt,
+                    answer_payload=answer_payload,
+                    reserved_message=reserved_message,
+                    request_fingerprint=request_fingerprint,
                 )
             )
+            if receipt is not None:
+                return receipt
+            if saved_interrupt is None:
+                raise RuntimeError("file_selection_interrupt_missing_after_answer")
             await self._schedule_file_selection_agent_resume(task, resume_metadata)
             self._task_file_selection_resume_metadata.pop(task.task_id, None)
-            await self._record_file_selection_audit_event(
-                task=task,
-                event_type="conversation_file.file_selector_resumed_from_interrupt",
-                payload={"decision": decision.decision, "reason_code": decision.reason_code},
-            )
-            return {
+            if not exact_answer_replay:
+                await self._record_file_selection_audit_event(
+                    task=task,
+                    event_type="conversation_file.file_selector_resumed_from_interrupt",
+                    payload={"decision": decision.decision, "reason_code": decision.reason_code},
+                )
+            response = {
                 "interrupt_id": saved_interrupt.interrupt_id,
                 "status": str(saved_interrupt.status),
                 "node_id": saved_interrupt.node_id,
@@ -648,22 +850,37 @@ class ConversationFileSelectionRuntimeMixin:
                 "action": "resumed",
                 "source_message_id": answer.source_message_id,
             }
+            await self._record_interrupt_continuation_completed(
+                task=task,
+                interrupt=interrupt,
+                reserved_message=reserved_message,
+                response=response,
+            )
+            return response
         if decision.decision not in {"select_one", "select_many"}:
-            assistant_text = render_file_selection_question(candidates, reason_code=decision.reason_code)
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
+            assistant_text = claimed_assistant_text
             assistant_message = Message(
-                message_id=self._make_id("msg"),
+                message_id=f"{reserved_message.message.message_id}:file-selection-clarification",
                 conversation_id=task.conversation_id,
                 role=MessageRole.ASSISTANT,
                 content=assistant_text,
                 task_id=task.task_id,
                 stream_status="interrupt_visible",
-                created_at=self._utcnow_naive(),
+                created_at=reserved_message.message.created_at,
             )
-            await self.storage.save_message(assistant_message)
+            saved_assistant_message = await self.storage.save_message(
+                assistant_message
+            )
+            assistant_text = saved_assistant_message.content
             await self._record_file_selection_audit_event(
                 task=task,
                 event_type="conversation_file.file_selector_invalid_output",
-                payload={"reason_code": decision.reason_code},
+                payload={
+                    "reason_code": decision.reason_code,
+                    "source_message_id": reserved_message.message.message_id,
+                    "assistant_message": assistant_text,
+                },
             )
             return {
                 "interrupt_id": interrupt.interrupt_id,
@@ -672,7 +889,7 @@ class ConversationFileSelectionRuntimeMixin:
                 "answer_payload": dict(answer_payload),
                 "action": "clarification_answer",
                 "assistant_message": assistant_text,
-                "source_message_id": source_message_id or str(answer_payload.get("client_request_id") or ""),
+                "source_message_id": reserved_message.message.message_id,
             }
 
         resume_metadata = {
@@ -680,40 +897,47 @@ class ConversationFileSelectionRuntimeMixin:
             **self._resume_skill_revision_metadata(task.task_id),
             **await self._resume_llm_metadata(task, request_metadata),
         }
-        selected_answer_payload = dict(answer_payload)
-        selected_answer_payload["upload_ids"] = list(decision.upload_ids)
-        if isinstance(selected_answer_payload.get("answer"), Mapping):
-            nested_answer = dict(selected_answer_payload["answer"])
-            nested_answer["upload_ids"] = list(decision.upload_ids)
-            selected_answer_payload["answer"] = nested_answer
-        answer = InterruptAnswer(
-            interrupt_answer_id=self._make_id("interrupt-answer"),
-            interrupt_id=interrupt.interrupt_id,
-            answer_payload=selected_answer_payload,
-            source_message_id=source_message_id or str(answer_payload.get("client_request_id") or self._make_id("msg")),
-            created_at=self._utcnow_naive(),
+        selected_answer_payload = claimed_answer_payload
+        existing_answers = await self.storage.list_interrupt_answers(
+            interrupt.interrupt_id
         )
-        await self._bind_file_selection_uploads_or_open_sheet_selection(
-            task=task,
-            username=conversation.username,
-            upload_ids=decision.upload_ids,
-            metadata=resume_metadata,
-            source_kind="interrupt_answer_upload" if decision.reason_code == "replacement_upload" else "file_selector",
-            source_message_id=answer.source_message_id,
-            interrupt_answer_id=answer.interrupt_answer_id,
+        exact_answer = next(
+            (
+                existing
+                for existing in existing_answers
+                if existing.source_message_id
+                == reserved_message.message.message_id
+                and dict(existing.answer_payload) == dict(selected_answer_payload)
+            ),
+            None,
         )
+        if exact_answer is None:
+            await self._bind_file_selection_uploads_or_open_sheet_selection(
+                task=task,
+                username=conversation.username,
+                upload_ids=decision.upload_ids,
+                metadata=resume_metadata,
+                source_kind="interrupt_answer_upload" if decision.reason_code == "replacement_upload" else "file_selector",
+                source_message_id=reserved_message.message.message_id,
+                interrupt_answer_id=self._interrupt_answer_id(
+                    interrupt.interrupt_id,
+                    reserved_message.message.message_id,
+                ),
+            )
         resume_metadata.update(await self._conversation_file_context_metadata_for_task(task))
-        saved_interrupt = await self.interrupt_service.record_answer(answer)
-        await self.storage.save_message(
-            Message(
-                message_id=answer.source_message_id,
-                conversation_id=task.conversation_id,
-                role=MessageRole.USER,
-                content=answer_text or self._format_answer_message(selected_answer_payload),
-                task_id=task.task_id,
-                created_at=self._utcnow_naive(),
+        answer, saved_interrupt, receipt, _ = (
+            await self._accept_file_selection_resume_answer(
+                task=task,
+                interrupt=interrupt,
+                answer_payload=selected_answer_payload,
+                reserved_message=reserved_message,
+                request_fingerprint=request_fingerprint,
             )
         )
+        if receipt is not None:
+            return receipt
+        if saved_interrupt is None:
+            raise RuntimeError("file_selection_interrupt_missing_after_answer")
         resumed_payload: dict[str, Any] = {
             "decision": decision.decision,
             "reason_code": decision.reason_code,
@@ -721,14 +945,15 @@ class ConversationFileSelectionRuntimeMixin:
         }
         if len(decision.upload_ids) > 1:
             resumed_payload["multi_select_resolution"] = "multi_select_confirmed_by_user"
-        await self._record_file_selection_audit_event(
-            task=task,
-            event_type="conversation_file.file_selector_resumed_from_interrupt",
-            payload=resumed_payload,
-        )
+        if exact_answer is None:
+            await self._record_file_selection_audit_event(
+                task=task,
+                event_type="conversation_file.file_selector_resumed_from_interrupt",
+                payload=resumed_payload,
+            )
         if await self._has_open_interrupt(task.task_id):
             self._task_file_selection_resume_metadata.pop(task.task_id, None)
-            return {
+            response = {
                 "interrupt_id": saved_interrupt.interrupt_id,
                 "status": str(saved_interrupt.status),
                 "node_id": saved_interrupt.node_id,
@@ -736,9 +961,16 @@ class ConversationFileSelectionRuntimeMixin:
                 "action": "sheet_selection_required",
                 "source_message_id": answer.source_message_id,
             }
+            await self._record_interrupt_continuation_completed(
+                task=task,
+                interrupt=interrupt,
+                reserved_message=reserved_message,
+                response=response,
+            )
+            return response
         await self._schedule_file_selection_agent_resume(task, resume_metadata)
         self._task_file_selection_resume_metadata.pop(task.task_id, None)
-        return {
+        response = {
             "interrupt_id": saved_interrupt.interrupt_id,
             "status": str(saved_interrupt.status),
             "node_id": saved_interrupt.node_id,
@@ -746,6 +978,13 @@ class ConversationFileSelectionRuntimeMixin:
             "action": "resumed",
             "source_message_id": answer.source_message_id,
         }
+        await self._record_interrupt_continuation_completed(
+            task=task,
+            interrupt=interrupt,
+            reserved_message=reserved_message,
+            response=response,
+        )
+        return response
 
     async def _schedule_file_selection_agent_resume(
         self,
@@ -773,5 +1012,6 @@ class ConversationFileSelectionRuntimeMixin:
                     conversation.username,
                     execution_mode=task.mcp_execution_mode,
                 ),
-            )
+            ),
+            await_durable_start=True,
         )

@@ -384,6 +384,130 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                 now_ms=1_000,
             )
 
+    def test_message_identity_reservation_validates_canonical_replay_identity(self) -> None:
+        client = object.__new__(RuntimeSidecarGrpcClient)
+        client._ensure_compatible = Mock()  # type: ignore[method-assign]
+        request = {
+            "message_id": "server-message",
+            "conversation_id": "conversation",
+            "username": "owner",
+            "identity_kind": "interrupt",
+            "role": "user",
+            "message_type": "text",
+            "message_created_at_ms": 2_000,
+            "task_id": "task",
+            "request_fingerprint": "a" * 64,
+            "reserved_at_ms": 3_000,
+        }
+
+        client._unary = Mock(  # type: ignore[method-assign]
+            return_value=_field_varint(1, 2)
+            + _field_bytes(
+                2,
+                _message_identity_wire(
+                    identity_kind=2,
+                    role="user",
+                    message_created_at_ms=1_000,
+                    request_fingerprint="a" * 64,
+                    reserved_at_ms=1_500,
+                ),
+            )
+        )
+        replay = client.reserve_message_identity(identity=request)
+        self.assertEqual(replay["disposition"], "exact_replay")
+        self.assertEqual(replay["identity"]["message_created_at_ms"], 1_000)
+        self.assertEqual(replay["identity"]["reserved_at_ms"], 1_500)
+
+        invalid_exact_replays = (
+            _message_identity_wire(
+                identity_kind=2,
+                role="assistant",
+                message_created_at_ms=1_000,
+                request_fingerprint="a" * 64,
+                reserved_at_ms=1_500,
+            ),
+            _message_identity_wire(
+                identity_kind=2,
+                role="user",
+                message_created_at_ms=1_000,
+                request_fingerprint="b" * 64,
+                reserved_at_ms=1_500,
+            ),
+        )
+        for identity in invalid_exact_replays:
+            client._unary = Mock(  # type: ignore[method-assign]
+                return_value=_field_varint(1, 2) + _field_bytes(2, identity)
+            )
+            with self.subTest(identity=identity), self.assertRaisesRegex(
+                RuntimeError, "differs from request"
+            ):
+                client.reserve_message_identity(identity=request)
+
+        server_request = {
+            **request,
+            "identity_kind": "server_internal",
+            "role": "assistant",
+            "request_fingerprint": None,
+        }
+        client._unary = Mock(  # type: ignore[method-assign]
+            return_value=_field_varint(1, 2)
+            + _field_bytes(
+                2,
+                _message_identity_wire(
+                    message_created_at_ms=2_000,
+                    reserved_at_ms=1_500,
+                ),
+            )
+        )
+        replay = client.reserve_message_identity(identity=server_request)
+        self.assertEqual(replay["identity"]["reserved_at_ms"], 1_500)
+
+        client._unary = Mock(  # type: ignore[method-assign]
+            return_value=_field_varint(1, 2)
+            + _field_bytes(
+                2,
+                _message_identity_wire(
+                    message_created_at_ms=1_000,
+                    reserved_at_ms=1_500,
+                ),
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "differs from request"):
+            client.reserve_message_identity(identity=server_request)
+
+    def test_message_identity_reservation_validates_disposition_identity_shape(self) -> None:
+        client = object.__new__(RuntimeSidecarGrpcClient)
+        client._ensure_compatible = Mock()  # type: ignore[method-assign]
+        request = {
+            "message_id": "server-message",
+            "conversation_id": "conversation",
+            "username": "owner",
+            "identity_kind": "server_internal",
+            "role": "assistant",
+            "message_type": "text",
+            "message_created_at_ms": 1_000,
+            "task_id": "task",
+            "request_fingerprint": None,
+            "reserved_at_ms": 1_000,
+        }
+
+        client._unary = Mock(  # type: ignore[method-assign]
+            return_value=_field_varint(1, 1)
+            + _field_bytes(2, _message_identity_wire(reserved_at_ms=999))
+        )
+        with self.assertRaisesRegex(RuntimeError, "differs from request"):
+            client.reserve_message_identity(identity=request)
+
+        for disposition in (3, 4):
+            client._unary = Mock(  # type: ignore[method-assign]
+                return_value=_field_varint(1, disposition)
+                + _field_bytes(2, _message_identity_wire())
+            )
+            with self.subTest(disposition=disposition), self.assertRaisesRegex(
+                RuntimeError, "runtime_store_response_invalid"
+            ):
+                client.reserve_message_identity(identity=request)
+
     def test_large_grpc_request_is_split_into_legal_http2_data_frames(self) -> None:
         frames = _grpc_data_frames(b"x" * 50_000)
 
@@ -1414,20 +1538,30 @@ def _prepared_execution_bytes() -> bytes:
     ).encode()
 
 
-def _message_identity_wire() -> bytes:
-    return b"".join(
+def _message_identity_wire(
+    *,
+    identity_kind: int = 3,
+    role: str = "assistant",
+    message_created_at_ms: int = 1_000,
+    request_fingerprint: str | None = None,
+    reserved_at_ms: int = 1_000,
+) -> bytes:
+    payload = b"".join(
         [
             _field_string(1, "server-message"),
             _field_string(2, "conversation"),
             _field_string(3, "owner"),
-            _field_varint(4, 3),
-            _field_string(5, "assistant"),
+            _field_varint(4, identity_kind),
+            _field_string(5, role),
             _field_string(6, "text"),
-            _field_varint(7, 1_000),
+            _field_varint(7, message_created_at_ms),
             _field_string(8, "task"),
-            _field_varint(10, 1_000),
+            _field_varint(10, reserved_at_ms),
         ]
     )
+    if request_fingerprint is not None:
+        payload += _field_string(9, request_fingerprint)
+    return payload
 
 
 class _BytesSocket:

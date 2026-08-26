@@ -4,7 +4,7 @@ import json
 import textwrap
 from datetime import datetime, timedelta
 from io import BytesIO
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from openpyxl import Workbook
 
@@ -20,7 +20,7 @@ from src.api.file_selection import (
 )
 from src.api.file_selection_runtime import ConversationFileSelectionRuntimeMixin
 from src.api.runtime import ApiRuntime
-from src.core.enums import EventVisibility
+from src.core.enums import EventVisibility, MessageRole
 from src.core.models import TaskInputAttachment
 
 from tests.api.support import APITestCase
@@ -1143,6 +1143,7 @@ class ConversationFileSelectionAPITest(APITestCase):
             conversation_id=conversation_id,
             interrupt_id=interrupt["interrupt_id"],
             content=f"使用 {first}",
+            client_message_id="client-file-selection-resume-replay",
         )
 
         self.assertEqual(answer.status_code, 202, answer.text)
@@ -1153,6 +1154,92 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertEqual(attachments[0].source_upload_id, first)
         self.assertEqual(attachments[0].source_kind, "file_selector")
         self.assertIsNotNone(attachments[0].interrupt_answer_id)
+
+        await self.runtime.storage.mark_conversation_file_resource_deleted(
+            conversation_id,
+            "acc-1",
+            first,
+            updated_at=datetime(2026, 8, 26, 12, 0, 0),
+        )
+        with patch.object(
+            FileSelectionAnswerResolver,
+            "resolve",
+            side_effect=AssertionError("exact replay must not rerun file selector"),
+        ):
+            replay = await self.answer_interrupt_with_chat(
+                conversation_id=conversation_id,
+                interrupt_id=interrupt["interrupt_id"],
+                content=f"使用 {first}",
+                client_message_id="client-file-selection-resume-replay",
+            )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(replay.json()["action"], "interrupt_resumed")
+        self.assertEqual(replay.json()["answer_payload"]["upload_ids"], [first])
+        replayed_attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(replayed_attachments), 1)
+
+    async def test_file_selection_answered_before_schedule_retries_continuation_from_claim(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-schedule-retry"
+        first = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+        message_id = "client-file-schedule-retry"
+        content = f"使用 {first}"
+        answer_payload = {
+            "client_request_id": message_id,
+            "answer": {"text": content},
+            "upload_ids": [],
+            "file_selection_answer": content,
+        }
+
+        with patch.object(
+            self.runtime,
+            "_schedule_file_selection_agent_resume",
+            side_effect=RuntimeError("schedule_failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "schedule_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    answer_payload,
+                    source_message_id=message_id,
+                )
+
+        await self.runtime.storage.mark_conversation_file_resource_deleted(
+            conversation_id,
+            "acc-1",
+            first,
+            updated_at=datetime(2026, 8, 26, 12, 30, 0),
+        )
+
+        scheduler = AsyncMock(return_value=None)
+        with patch.object(
+            self.runtime,
+            "_schedule_file_selection_agent_resume",
+            new=scheduler,
+        ):
+            replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt["interrupt_id"],
+                answer_payload,
+                source_message_id=message_id,
+            )
+        self.assertEqual(replay["action"], "resumed")
+        self.assertEqual(scheduler.await_count, 1)
+        receipts = [
+            event
+            for event in await self.runtime.storage.list_events_for_task(task_id)
+            if event.event_type == "task.interrupt_continuation_completed"
+        ]
+        self.assertEqual(len(receipts), 1)
 
     async def test_file_selection_interrupt_answer_mixed_valid_unknown_upload_id_stays_clarifying(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce_narrow"
@@ -1177,6 +1264,73 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertEqual(answer.status_code, 202, answer.text)
         self.assertEqual(answer.json()["action"], "interrupt_clarification_answer")
         self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_file_selection_clarification_exact_replay_keeps_one_user_message_and_one_audit(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-interrupt-clarification-replay"
+        first = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+        message_id = "client-file-clarification-replay"
+        content = f"使用 {first} 和 upl-abcdef123456"
+
+        first_answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content=content,
+            client_message_id=message_id,
+        )
+        self.assertEqual(first_answer.status_code, 202, first_answer.text)
+        messages_before = await self.runtime.storage.list_messages_for_conversation(conversation_id)
+        events_before = await self.runtime.storage.list_events_for_task(task_id)
+
+        replay = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content=content,
+            client_message_id=message_id,
+        )
+
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(replay.json()["action"], "interrupt_clarification_answer")
+        messages_after = await self.runtime.storage.list_messages_for_conversation(conversation_id)
+        events_after = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertEqual(len(messages_after), len(messages_before))
+        replay_sensitive_types = {
+            "conversation_file.file_selector_answer_claimed",
+            "conversation_file.file_selector_invalid_output",
+        }
+        self.assertEqual(
+            [event.event_type for event in events_after if event.event_type in replay_sensitive_types],
+            [event.event_type for event in events_before if event.event_type in replay_sensitive_types],
+        )
+        self.assertEqual(
+            [message.message_id for message in messages_after if message.role == MessageRole.USER].count(message_id),
+            1,
+        )
+        user_message = await self.runtime.storage.get_message(message_id)
+        assistant_message = await self.runtime.storage.get_message(
+            f"{message_id}:file-selection-clarification"
+        )
+        self.assertIsNotNone(user_message)
+        self.assertIsNotNone(assistant_message)
+        self.assertEqual(assistant_message.created_at, user_message.created_at)
+        self.assertEqual(await self.runtime.storage.list_interrupt_answers(interrupt["interrupt_id"]), [])
+
+        changed_payload = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content="改用另一个回答",
+            client_message_id=message_id,
+        )
+        self.assertEqual(changed_payload.status_code, 409, changed_payload.text)
 
     async def test_guarded_multi_interrupt_answer_binds_multiple_exact_upload_ids_with_multi_intent(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"

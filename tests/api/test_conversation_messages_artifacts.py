@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from functools import wraps
+from unittest.mock import patch
 
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import Artifact, Conversation, EventRecord, Interrupt, Message, Task
@@ -16,6 +17,55 @@ from tests.api.support import APITestCase
 
 
 class ConversationMessagesArtifactRestoreAPITest(APITestCase):
+    async def test_assistant_history_retry_reuses_durable_artifact_timestamp(self) -> None:
+        conversation_id = "conv-history-retry-created-at"
+        task_id = "task-history-retry-created-at"
+        artifact_created_at = datetime(2026, 6, 3, 2, 0, 3)
+        await self.runtime.storage.save_conversation(Conversation(conversation_id, "acc-1"))
+        await self.runtime.storage.save_task(
+            Task(
+                task_id,
+                conversation_id,
+                root_message_id="msg-history-retry-root",
+                status=TaskStatus.COMPLETED,
+                created_at=datetime(2026, 6, 3, 2, 0, 1),
+                updated_at=datetime(2026, 6, 3, 2, 0, 2),
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "agent-artifact:history-retry:final",
+                task_id,
+                "node-history-retry-final",
+                ArtifactType.TEXT,
+                "stable assistant answer",
+                is_complete=True,
+                created_at=artifact_created_at,
+            )
+        )
+        original_save_message = self.runtime.storage.save_message
+        attempted_created_at: list[datetime | None] = []
+
+        async def fail_after_reservation(message, **_kwargs):
+            attempted_created_at.append(message.created_at)
+            raise RuntimeError("sql_write_failed_after_reservation")
+
+        with patch.object(self.runtime.storage, "save_message", side_effect=fail_after_reservation):
+            with self.assertRaisesRegex(RuntimeError, "sql_write_failed_after_reservation"):
+                await self.runtime._persist_assistant_history_message(task_id, conversation_id)
+
+        async def save_on_retry(message, **kwargs):
+            attempted_created_at.append(message.created_at)
+            return await original_save_message(message, **kwargs)
+
+        with patch.object(self.runtime.storage, "save_message", side_effect=save_on_retry):
+            await self.runtime._persist_assistant_history_message(task_id, conversation_id)
+
+        self.assertEqual(attempted_created_at, [artifact_created_at, artifact_created_at])
+        saved = await self.runtime.storage.get_message(f"{task_id}:assistant")
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved.created_at, artifact_created_at)
+
     async def _save_conversation_with_messages(self, conversation_id: str = "conv-history-artifacts") -> None:
         await self.runtime.storage.save_conversation(Conversation(conversation_id, "acc-1"))
         await self.runtime.storage.save_message(

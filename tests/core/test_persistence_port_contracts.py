@@ -307,6 +307,7 @@ EXPECTED_METHODS_BY_PORT = {
         "get_interrupt_for_node",
         "list_interrupts_for_task",
         "save_interrupt_answer",
+        "answer_interrupt_atomic",
         "get_interrupt_answer",
         "list_interrupt_answers",
     ),
@@ -348,8 +349,8 @@ class PersistencePortContractsTest(unittest.TestCase):
             self.assertTrue(getattr(port, "_is_runtime_protocol", False), port_name)
             actual_names.extend(direct)
 
-        self.assertEqual(len(actual_names), 271)
-        self.assertEqual(len(set(actual_names)), 271)
+        self.assertEqual(len(actual_names), 272)
+        self.assertEqual(len(set(actual_names)), 272)
         self.assertEqual(set(actual_names), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
 
     def test_aggregate_is_thin_and_preserves_exact_inherited_surface(self) -> None:

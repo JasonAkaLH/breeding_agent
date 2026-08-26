@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import textwrap
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from src.api.dto import SubmitMessageRequest
-from src.core.enums import RoutingMode
-from src.core.models import PendingSkillContext
+from src.core.enums import InterruptStatus, MessageRole, NodeStatus, RoutingMode
+from src.core.errors import MessageIdentityConflictError
+from src.core.models import Conversation, Interrupt, Message, PendingSkillContext, Task, TaskNode
 from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_REF_FIELD
 from tests.api.support import APITestCase
 
@@ -275,6 +279,355 @@ entrypoints: {run: {path: scripts/fail.py}}
         self.assertIn("task.interrupt_answered", [event.event_type for event in events])
         self.assertIn("skill.execution_completed", [event.event_type for event in events])
         self.assertNotIn("pending_skill_context.consumed", [event.event_type for event in events])
+
+    async def test_generic_interrupt_attachment_bind_failure_keeps_answer_open_and_retryable(self) -> None:
+        conversation_id = "conv-generic-bind-failure"
+        task_id = "task-generic-bind-failure"
+        root_message_id = "root-generic-bind-failure"
+        node_id = "node-generic-bind-failure"
+        interrupt_id = "interrupt-generic-bind-failure"
+        source_message_id = "answer-generic-bind-failure"
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id=conversation_id, username="acc-1")
+        )
+        await self.runtime.storage.save_message(
+            Message(
+                message_id=root_message_id,
+                conversation_id=conversation_id,
+                role=MessageRole.USER,
+                content="start",
+            )
+        )
+        await self.runtime.storage.save_task(Task(task_id, conversation_id, root_message_id))
+        await self.runtime.storage.save_task_node(
+            TaskNode(
+                node_id=node_id,
+                task_id=task_id,
+                capability_id="skill.legacy",
+                status=NodeStatus.WAITING_FOR_INPUT,
+            )
+        )
+        await self.runtime.storage.save_interrupt(
+            Interrupt(
+                interrupt_id=interrupt_id,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                node_id=node_id,
+                source_agent="skill.legacy",
+                source_message_id=root_message_id,
+                question="upload?",
+                reason_code="legacy_missing_input",
+                required_fields={"material": {"type": "artifact"}},
+            )
+        )
+        payload = {"answer": "use upload", "upload_ids": ["upl-fault"]}
+
+        with patch.object(
+            self.runtime,
+            "_bind_or_update_resume_input_attachments",
+            new=AsyncMock(side_effect=RuntimeError("bind_failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bind_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt_id,
+                    payload,
+                    source_message_id=source_message_id,
+                )
+
+        interrupt_after_failure = await self.runtime.storage.get_interrupt(interrupt_id)
+        self.assertIsNotNone(interrupt_after_failure)
+        self.assertEqual(str(interrupt_after_failure.status), "open")
+        self.assertEqual(await self.runtime.storage.list_interrupt_answers(interrupt_id), [])
+        self.assertIsNone(await self.runtime.storage.get_message(source_message_id))
+
+        with (
+            patch.object(
+                self.runtime,
+                "_bind_or_update_resume_input_attachments",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                self.runtime,
+                "_resume_agent_interrupt",
+                new=AsyncMock(return_value=True),
+            ),
+        ):
+            result = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt_id,
+                payload,
+                source_message_id=source_message_id,
+            )
+
+        self.assertEqual(result["source_message_id"], source_message_id)
+        self.assertIsNotNone(await self.runtime.storage.get_message(source_message_id))
+        with (
+            patch.object(
+                self.runtime,
+                "_bind_or_update_resume_input_attachments",
+                new=AsyncMock(side_effect=AssertionError("replay must not rebind attachments")),
+            ),
+            patch.object(
+                self.runtime,
+                "_resume_agent_interrupt",
+                new=AsyncMock(side_effect=AssertionError("replay must not resume twice")),
+            ),
+        ):
+            replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt_id,
+                payload,
+                source_message_id=source_message_id,
+            )
+        self.assertEqual(replay["source_message_id"], source_message_id)
+        self.assertEqual(len(await self.runtime.storage.list_interrupt_answers(interrupt_id)), 1)
+
+    async def test_remote_interrupt_open_partial_retry_repairs_control_before_replay(self) -> None:
+        conversation_id = "conv-remote-replay-conflict"
+        task_id = "task-remote-replay-conflict"
+        root_message_id = "root-remote-replay-conflict"
+        node_id = "node-remote-replay-conflict"
+        interrupt_id = "interrupt-remote-replay-conflict"
+        source_message_id = "answer-remote-replay-conflict"
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id=conversation_id, username="acc-1")
+        )
+        await self.runtime.storage.save_message(
+            Message(
+                message_id=root_message_id,
+                conversation_id=conversation_id,
+                role=MessageRole.USER,
+                content="start remote",
+            )
+        )
+        await self.runtime.storage.save_task(Task(task_id, conversation_id, root_message_id))
+        await self.runtime.storage.save_task_node(
+            TaskNode(
+                node_id=node_id,
+                task_id=task_id,
+                capability_id="mcp.dispatch",
+                status=NodeStatus.WAITING_FOR_INPUT,
+            )
+        )
+        await self.runtime.storage.save_interrupt(
+            Interrupt(
+                interrupt_id=interrupt_id,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                node_id=node_id,
+                source_agent="mcp.dispatch",
+                source_message_id=root_message_id,
+                question="remote input?",
+                reason_code="mcp_remote_task_input_required",
+            )
+        )
+        payload = {"mcp_input_responses": {"region": "north"}}
+
+        async def record_control(answer, **_kwargs):
+            await self.runtime.storage.save_interrupt_answer(answer)
+            if control.await_count == 1:
+                raise RuntimeError("control_write_failed")
+            current_interrupt = await self.runtime.storage.get_interrupt(interrupt_id)
+            assert current_interrupt is not None
+            await self.runtime.storage.save_interrupt(
+                replace(
+                    current_interrupt,
+                    status=InterruptStatus.ANSWERED,
+                    answered_at=answer.accepted_at,
+                )
+            )
+            current_node = await self.runtime.storage.get_task_node(node_id)
+            assert current_node is not None
+            await self.runtime.storage.save_task_node(
+                replace(current_node, status=NodeStatus.WAITING_FOR_DEPENDENCY)
+            )
+            return SimpleNamespace(kind="update")
+
+        control = AsyncMock(side_effect=record_control)
+        with patch.object(
+            self.runtime.interrupt_service,
+            "record_mcp_remote_task_control",
+            new=control,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "control_write_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt_id,
+                    payload,
+                    source_message_id=source_message_id,
+                )
+            replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt_id,
+                payload,
+                source_message_id=source_message_id,
+            )
+            exact_replay = await self.runtime.answer_interrupt(
+                task_id,
+                interrupt_id,
+                payload,
+                source_message_id=source_message_id,
+            )
+            with self.assertRaises(MessageIdentityConflictError):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt_id,
+                    {"mcp_input_responses": {"region": "south"}},
+                    source_message_id=source_message_id,
+                )
+            with self.assertRaises(MessageIdentityConflictError):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt_id,
+                    payload,
+                    source_message_id="answer-remote-replay-other-source",
+                )
+
+        self.assertEqual(replay["action"], "mcp_remote_task_input_submitted")
+        self.assertEqual(exact_replay, replay)
+        self.assertEqual(control.await_count, 2)
+
+    async def test_generic_interrupt_partial_attachment_retry_uses_final_deterministic_answer_id(self) -> None:
+        conversation_id = "conv-generic-partial-bind"
+        task_id = "task-generic-partial-bind"
+        root_message_id = "root-generic-partial-bind"
+        node_id = "node-generic-partial-bind"
+        interrupt_id = "interrupt-generic-partial-bind"
+        source_message_id = "answer-generic-partial-bind"
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id=conversation_id, username="acc-1")
+        )
+        upload_ids: list[str] = []
+        for index in (1, 2):
+            upload = await self.client.post(
+                "/api/v1/conversations/uploads",
+                data={"conversation_id": conversation_id},
+                files={
+                    "file": (
+                        f"materials-{index}.csv",
+                        f"ped_id,value\nA00{index},{index}\n",
+                        "text/csv",
+                    )
+                },
+            )
+            self.assertEqual(upload.status_code, 201, upload.text)
+            upload_ids.append(upload.json()["upload_id"])
+        await self.runtime.storage.save_message(
+            Message(
+                message_id=root_message_id,
+                conversation_id=conversation_id,
+                role=MessageRole.USER,
+                content="start partial bind",
+            )
+        )
+        await self.runtime.storage.save_task(Task(task_id, conversation_id, root_message_id))
+        await self.runtime.storage.save_task_node(
+            TaskNode(
+                node_id=node_id,
+                task_id=task_id,
+                capability_id="skill.legacy",
+                status=NodeStatus.WAITING_FOR_INPUT,
+            )
+        )
+        await self.runtime.storage.save_interrupt(
+            Interrupt(
+                interrupt_id=interrupt_id,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                node_id=node_id,
+                source_agent="skill.legacy",
+                source_message_id=root_message_id,
+                question="uploads?",
+                reason_code="legacy_missing_input",
+                required_fields={"materials": {"type": "artifact"}},
+            )
+        )
+        payload = {"answer": "use both", "upload_ids": upload_ids}
+        expected_answer_id = self.runtime._interrupt_answer_id(
+            interrupt_id,
+            source_message_id,
+        )
+        original_save_attachment = self.runtime.storage.save_task_input_attachment
+        save_count = 0
+
+        async def fail_second_attachment(attachment):
+            nonlocal save_count
+            save_count += 1
+            if save_count == 2:
+                raise RuntimeError("second_attachment_failed")
+            return await original_save_attachment(attachment)
+
+        with patch.object(
+            self.runtime.storage,
+            "save_task_input_attachment",
+            side_effect=fail_second_attachment,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "second_attachment_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt_id,
+                    payload,
+                    source_message_id=source_message_id,
+                )
+        partial = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(partial), 1)
+        self.assertEqual(partial[0].interrupt_answer_id, expected_answer_id)
+
+        with (
+            patch.object(
+                self.runtime,
+                "_resume_agent_interrupt",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(
+                self.runtime,
+                "_schedule_execution",
+                new=AsyncMock(side_effect=RuntimeError("durable_init_failed")),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "durable_init_failed"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt_id,
+                    payload,
+                    source_message_id=source_message_id,
+                )
+        self.assertEqual(
+            [
+                event
+                for event in await self.runtime.storage.list_events_for_task(task_id)
+                if event.event_type == "task.interrupt_continuation_completed"
+            ],
+            [],
+        )
+
+        scheduler = AsyncMock(return_value=None)
+        with (
+            patch.object(
+                self.runtime,
+                "_resume_agent_interrupt",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(self.runtime, "_schedule_execution", new=scheduler),
+        ):
+            await self.runtime.answer_interrupt(
+                task_id,
+                interrupt_id,
+                payload,
+                source_message_id=source_message_id,
+            )
+        scheduled_request = scheduler.await_args.args[0]
+        self.assertEqual(scheduled_request.user_message.count("use both"), 1)
+
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 2)
+        self.assertEqual(
+            {attachment.interrupt_answer_id for attachment in attachments},
+            {expected_answer_id},
+        )
+        answers = await self.runtime.storage.list_interrupt_answers(interrupt_id)
+        self.assertEqual([answer.interrupt_answer_id for answer in answers], [expected_answer_id])
 
     async def test_interrupt_resume_reuses_previous_upload_answer_across_multiple_missing_inputs(self) -> None:
         response = await self.submit_message(

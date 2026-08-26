@@ -10,13 +10,14 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from src.core.enums import ArtifactType, NodeStatus, TaskStatus
+from src.core.enums import ArtifactType, InterruptStatus, NodeStatus, TaskStatus
 from src.core.models import (
     Artifact,
     EventRecord,
     Interrupt,
+    InterruptAnswer,
     MCPBranchRecord,
     MCPCallRecord,
     MCPRemoteTaskBinding,
@@ -24,6 +25,7 @@ from src.core.models import (
     TaskNode,
 )
 from src.lifecycle.cancellation_service import CancellationService
+from src.lifecycle.errors import LifecycleTransitionError
 from src.lifecycle.interrupt_service import InterruptService
 from src.orchestration.agent_loop.models import (
     AgentModelBinding,
@@ -474,6 +476,17 @@ class _MismatchedTaskNodeSidecar(_RecordingRuntimeSidecarClient):
         response["nodes"] = [
             {**node, "task_id": "different-task"} for node in response["nodes"]  # type: ignore[union-attr]
         ]
+        return response
+
+
+class _FailAfterNodeTransitionSidecar(_RecordingRuntimeSidecarClient):
+    fail_after_next_transition = False
+
+    async def transition_node(self, **payload: object) -> dict[str, object]:
+        response = await super().transition_node(**payload)  # type: ignore[arg-type]
+        if self.fail_after_next_transition:
+            self.fail_after_next_transition = False
+            raise RuntimeError("injected_after_node")
         return response
 
 
@@ -1257,6 +1270,357 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertIn("task_node_get", [call[0] for call in sidecar.calls])
         self.assertIn("task_node_list", [call[0] for call in sidecar.calls])
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
+
+    def test_interrupt_answer_repairs_each_split_authority_partial_state(self) -> None:
+        for fault_point in (None, "after_answer", "after_node"):
+            with self.subTest(fault_point=fault_point):
+                suffix = fault_point or "success"
+                sidecar = _FailAfterNodeTransitionSidecar()
+                storage = SQLiteStorage(
+                    self.session_factory,
+                    runtime_sidecar_client=sidecar,
+                )
+                service = InterruptService(storage)
+                node = TaskNode(
+                    node_id=f"node-interrupt-split-{suffix}",
+                    task_id=f"task-interrupt-split-{suffix}",
+                    capability_id="skill.data_query",
+                    status=NodeStatus.RUNNING,
+                )
+                interrupt = Interrupt(
+                    interrupt_id=f"interrupt-split-{suffix}",
+                    conversation_id=f"conv-interrupt-split-{suffix}",
+                    task_id=node.task_id,
+                    node_id=node.node_id,
+                    source_agent="skill.data-query",
+                    source_message_id="mail-1",
+                    question="region?",
+                    reason_code="missing_region",
+                )
+                answer = InterruptAnswer(
+                    interrupt_answer_id=f"answer-split-{suffix}",
+                    interrupt_id=interrupt.interrupt_id,
+                    answer_payload={"region": "east"},
+                    source_message_id=f"message-split-{suffix}",
+                    created_at=datetime(2026, 8, 26, 12, 1, 0),
+                )
+                answer_time = datetime(2026, 8, 26, 12, 1, 1)
+
+                with patch.dict(
+                    os.environ,
+                    {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"},
+                ):
+                    asyncio.run(storage.save_task_node(node))
+                    asyncio.run(
+                        service.open_interrupt(
+                            interrupt,
+                            now=datetime(2026, 8, 26, 12, 0, 0),
+                        )
+                    )
+                    if fault_point == "after_answer":
+                        with patch.object(
+                            storage,
+                            "save_task_node",
+                            new=AsyncMock(
+                                side_effect=RuntimeError("injected_after_answer")
+                            ),
+                        ):
+                            with self.assertRaisesRegex(
+                                RuntimeError,
+                                "injected_after_answer",
+                            ):
+                                asyncio.run(
+                                    service.record_answer(
+                                        answer,
+                                        now=answer_time,
+                                    )
+                                )
+                        partial_node = asyncio.run(
+                            storage.get_task_node(node.node_id)
+                        )
+                        self.assertEqual(
+                            partial_node.status,
+                            NodeStatus.WAITING_FOR_INPUT,
+                        )
+                        partial_interrupt = asyncio.run(
+                            storage.get_interrupt(interrupt.interrupt_id)
+                        )
+                        self.assertEqual(
+                            partial_interrupt.status,
+                            InterruptStatus.ANSWERED,
+                        )
+                    elif fault_point == "after_node":
+                        sidecar.fail_after_next_transition = True
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "injected_after_node",
+                        ):
+                            asyncio.run(
+                                service.record_answer(
+                                    answer,
+                                    now=answer_time,
+                                )
+                            )
+                        partial_node = asyncio.run(
+                            storage.get_task_node(node.node_id)
+                        )
+                        self.assertEqual(
+                            partial_node.status,
+                            NodeStatus.READY_TO_RESUME,
+                        )
+
+                    answered = asyncio.run(
+                        service.record_answer(answer, now=answer_time)
+                    )
+                    replayed = asyncio.run(
+                        service.record_answer(answer, now=answer_time)
+                    )
+                    authoritative_node = asyncio.run(
+                        storage.get_task_node(node.node_id)
+                    )
+
+                self.assertEqual(answered.status, InterruptStatus.ANSWERED)
+                self.assertEqual(replayed, answered)
+                self.assertEqual(
+                    authoritative_node.status,
+                    NodeStatus.READY_TO_RESUME,
+                )
+                self.assertEqual(
+                    len(
+                        asyncio.run(
+                            storage.list_interrupt_answers(
+                                interrupt.interrupt_id
+                            )
+                        )
+                    ),
+                    1,
+                )
+                ready_events = [
+                    event
+                    for event in asyncio.run(
+                        storage.list_events_for_task(node.task_id)
+                    )
+                    if event.event_type == "node.ready_to_resume"
+                ]
+                if fault_point != "after_node":
+                    self.assertEqual(len(ready_events), 1)
+                self.assertIsNone(
+                    asyncio.run(
+                        SQLiteStorage(self.session_factory).get_task_node(
+                            node.node_id
+                        )
+                    )
+                )
+
+    def test_split_authority_concurrent_answers_have_one_final_winner(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+        )
+        service = InterruptService(storage)
+        node = TaskNode(
+            node_id="node-interrupt-concurrent-final",
+            task_id="task-interrupt-concurrent-final",
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-concurrent-final",
+            conversation_id="conv-interrupt-concurrent-final",
+            task_id=node.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        answers = (
+            InterruptAnswer(
+                interrupt_answer_id="answer-concurrent-final-east",
+                interrupt_id=interrupt.interrupt_id,
+                answer_payload={"region": "east"},
+                source_message_id="message-concurrent-final-east",
+            ),
+            InterruptAnswer(
+                interrupt_answer_id="answer-concurrent-final-west",
+                interrupt_id=interrupt.interrupt_id,
+                answer_payload={"region": "west"},
+                source_message_id="message-concurrent-final-west",
+            ),
+        )
+
+        async def race_answers() -> tuple[object, object]:
+            return tuple(
+                await asyncio.gather(
+                    *(
+                        storage.answer_interrupt_atomic(
+                            answer,
+                            now=datetime(2026, 8, 26, 13, 0, index),
+                        )
+                        for index, answer in enumerate(answers)
+                    ),
+                    return_exceptions=True,
+                )
+            )  # type: ignore[return-value]
+
+        with patch.dict(
+            os.environ,
+            {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"},
+        ):
+            asyncio.run(storage.save_task_node(node))
+            asyncio.run(
+                service.open_interrupt(
+                    interrupt,
+                    now=datetime(2026, 8, 26, 12, 59, 0),
+                )
+            )
+            results = asyncio.run(race_answers())
+
+        self.assertEqual(
+            sum(isinstance(result, LifecycleTransitionError) for result in results),
+            1,
+        )
+        self.assertEqual(
+            sum(isinstance(result, tuple) for result in results),
+            1,
+        )
+        stored_answers = asyncio.run(
+            storage.list_interrupt_answers(interrupt.interrupt_id)
+        )
+        self.assertEqual(len(stored_answers), 1)
+        stored_interrupt = asyncio.run(
+            storage.get_interrupt(interrupt.interrupt_id)
+        )
+        self.assertEqual(stored_interrupt.status, InterruptStatus.ANSWERED)
+        self.assertEqual(stored_interrupt.answered_at, stored_answers[0].accepted_at)
+
+    def test_split_authority_concurrent_exact_answer_converges(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+        )
+        service = InterruptService(storage)
+        node = TaskNode(
+            node_id="node-interrupt-concurrent-exact",
+            task_id="task-interrupt-concurrent-exact",
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-concurrent-exact",
+            conversation_id="conv-interrupt-concurrent-exact",
+            task_id=node.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        answer = InterruptAnswer(
+            interrupt_answer_id="answer-concurrent-exact",
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload={"region": "east"},
+            source_message_id="message-concurrent-exact",
+        )
+
+        async def race_exact_answer() -> list[tuple[Interrupt, TaskNode, bool]]:
+            return await asyncio.gather(
+                storage.answer_interrupt_atomic(
+                    answer,
+                    now=datetime(2026, 8, 26, 14, 0, 0),
+                ),
+                storage.answer_interrupt_atomic(
+                    answer,
+                    now=datetime(2026, 8, 26, 14, 0, 1),
+                ),
+            )
+
+        with patch.dict(
+            os.environ,
+            {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"},
+        ):
+            asyncio.run(storage.save_task_node(node))
+            asyncio.run(
+                service.open_interrupt(
+                    interrupt,
+                    now=datetime(2026, 8, 26, 13, 59, 0),
+                )
+            )
+            results = asyncio.run(race_exact_answer())
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(
+            all(result[0].status == InterruptStatus.ANSWERED for result in results)
+        )
+        self.assertEqual(
+            len(asyncio.run(storage.list_interrupt_answers(interrupt.interrupt_id))),
+            1,
+        )
+
+    def test_interrupt_answer_preserves_one_shadow_node_transition_without_replay(self) -> None:
+        audit_events: list[dict[str, str]] = []
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=audit_events.append,
+        )
+        service = InterruptService(storage)
+        node = TaskNode(
+            node_id="node-interrupt-shadow-answer",
+            task_id="task-interrupt-shadow-answer",
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-shadow-answer",
+            conversation_id="conv-interrupt-shadow-answer",
+            task_id=node.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        answer = InterruptAnswer(
+            interrupt_answer_id="answer-shadow-answer",
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload={"region": "east"},
+            source_message_id="message-shadow-answer",
+        )
+        answer_time = datetime(2026, 8, 26, 12, 1, 1)
+
+        with patch.dict(
+            os.environ,
+            {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"},
+        ):
+            asyncio.run(storage.save_task_node(node))
+            asyncio.run(
+                service.open_interrupt(
+                    interrupt,
+                    now=datetime(2026, 8, 26, 12, 0, 0),
+                )
+            )
+            sidecar.calls.clear()
+            audit_events.clear()
+
+            answered = asyncio.run(
+                service.record_answer(answer, now=answer_time)
+            )
+            replayed = asyncio.run(
+                service.record_answer(answer, now=answer_time)
+            )
+
+        self.assertEqual(answered.status, InterruptStatus.ANSWERED)
+        self.assertEqual(replayed, answered)
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            ["node_state_transition"],
+        )
+        self.assertEqual(len(audit_events), 1)
+        self.assertEqual(audit_events[0]["rust_status"], "ok")
 
     def test_runtime_store_shadow_routes_to_sidecar_and_keeps_python_visible_write(self) -> None:
         audit_events: list[dict[str, str]] = []

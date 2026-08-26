@@ -781,10 +781,12 @@ class RuntimeSidecarGrpcClient:
         timeout_seconds: float = 5,
     ) -> dict[str, Any]:
         self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request_identity_payload = _message_identity_record(identity)
+        requested = _decode_message_identity_record(request_identity_payload)
         fields = _decode_closed_message(
             self._unary(
                 "ReserveMessageIdentity",
-                _field_bytes(1, _message_identity_record(identity)),
+                _field_bytes(1, request_identity_payload),
                 timeout_seconds=timeout_seconds,
             ),
             1,
@@ -801,7 +803,18 @@ class RuntimeSidecarGrpcClient:
         }
         _consume_response("message_identity_reserve", response)
         returned = response["identity"]
-        if returned is not None and returned != dict(identity):
+        disposition = response["disposition"]
+        differs = disposition == "created" and returned != requested
+        if disposition == "exact_replay" and returned is not None:
+            replay_variable_fields = {"reserved_at_ms"}
+            if requested["identity_kind"] == "interrupt":
+                replay_variable_fields.add("message_created_at_ms")
+            differs = any(
+                returned[name] != value
+                for name, value in requested.items()
+                if name not in replay_variable_fields
+            )
+        if differs:
             _raise_task_identity_invalid(
                 "message identity reservation response differs from request"
             )

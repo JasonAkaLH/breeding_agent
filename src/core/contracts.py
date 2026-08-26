@@ -1547,7 +1547,12 @@ class PendingSkillContextStoragePort(Protocol):
 
 @runtime_checkable
 class MessageStoragePort(Protocol):
-    async def save_message(self, message: Message) -> Message: ...
+    async def save_message(
+        self,
+        message: Message,
+        *,
+        identity_reservation: MessageIdentityReservationRequest | None = None,
+    ) -> Message: ...
 
     async def get_message(self, message_id: str) -> Message | None: ...
 
@@ -1678,6 +1683,13 @@ class InterruptStoragePort(Protocol):
     async def list_interrupts_for_task(self, task_id: str) -> list[Interrupt]: ...
 
     async def save_interrupt_answer(self, interrupt_answer: InterruptAnswer) -> InterruptAnswer: ...
+
+    async def answer_interrupt_atomic(
+        self,
+        answer: InterruptAnswer,
+        *,
+        now: datetime,
+    ) -> tuple[Interrupt, TaskNode, bool]: ...
 
     async def get_interrupt_answer(self, interrupt_answer_id: str) -> InterruptAnswer | None: ...
 

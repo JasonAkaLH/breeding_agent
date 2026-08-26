@@ -10,8 +10,10 @@ from typing import Any
 from sqlalchemy import delete
 
 from src.core.enums import NodeStatus
+from src.core.errors import MessageIdentityConflictError
 from src.core.models import (
     Conversation,
+    Interrupt,
     InterruptAnswer,
     MCPBranchRecord,
     MCPCallRecord,
@@ -242,6 +244,31 @@ class UserMCPRemoteTaskRecoveryWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(reserved)
 
+    async def _prepare_remote_input(
+        self,
+        suffix: str,
+    ) -> tuple[MCPRemoteTaskBinding, Interrupt]:
+        binding = self._binding(suffix)
+        await self._reserve_call(binding)
+        await self.storage.save_mcp_remote_task_binding(binding)
+        poller = MCPRemoteTaskRecoveryWorker(
+            storage=self.storage,
+            client_factory=lambda _binding: _RecordingClient(
+                state=MCPTaskState(
+                    safe_remote_task_ref=binding.safe_remote_task_ref,
+                    status="input_required",
+                    terminal=False,
+                    input_requests={"approval": {"type": "boolean"}},
+                )
+            ),
+            instance_id=f"worker-{suffix}",
+            now_fn=lambda: self.now,
+        )
+        self.assertEqual(await poller.run_once(), 1)
+        interrupts = await self.storage.list_interrupts_for_task(binding.task_id)
+        self.assertEqual(len(interrupts), 1)
+        return binding, interrupts[0]
+
     async def test_claim_is_exclusive_renews_and_recovery_is_query_only(self) -> None:
         binding = self._binding("exclusive")
         await self.storage.save_mcp_remote_task_binding(binding)
@@ -433,6 +460,102 @@ class UserMCPRemoteTaskRecoveryWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.next_poll_at, self.now)
         self.assertEqual(control_client.calls[0][0], "tasks/update")
         self.assertNotIn("tools/call", repr(control_client.calls))
+
+    async def test_concurrent_exact_remote_control_converges(self) -> None:
+        _binding, interrupt = await self._prepare_remote_input(
+            "input-concurrent-exact"
+        )
+        answer = InterruptAnswer(
+            interrupt_answer_id="answer-input-concurrent-exact",
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload={"mcp_input_responses": {"approval": True}},
+            accepted=True,
+            created_at=self.now,
+            accepted_at=self.now,
+        )
+
+        commands = await asyncio.gather(
+            self.storage.enqueue_mcp_remote_task_control(
+                answer,
+                action="update",
+                input_responses={"approval": True},
+                updated_at=self.now,
+            ),
+            self.storage.enqueue_mcp_remote_task_control(
+                answer,
+                action="update",
+                input_responses={"approval": True},
+                updated_at=self.now,
+            ),
+        )
+
+        self.assertIsNotNone(commands[0])
+        self.assertEqual(commands[0], commands[1])
+        self.assertEqual(
+            len(
+                await self.storage.list_interrupt_answers(
+                    interrupt.interrupt_id
+                )
+            ),
+            1,
+        )
+
+    async def test_concurrent_different_remote_controls_have_one_winner(self) -> None:
+        _binding, interrupt = await self._prepare_remote_input(
+            "input-concurrent-conflict"
+        )
+        answers = (
+            InterruptAnswer(
+                interrupt_answer_id="answer-input-concurrent-allow",
+                interrupt_id=interrupt.interrupt_id,
+                answer_payload={"mcp_input_responses": {"approval": True}},
+                accepted=True,
+                created_at=self.now,
+                accepted_at=self.now,
+            ),
+            InterruptAnswer(
+                interrupt_answer_id="answer-input-concurrent-deny",
+                interrupt_id=interrupt.interrupt_id,
+                answer_payload={"mcp_input_responses": {"approval": False}},
+                accepted=True,
+                created_at=self.now,
+                accepted_at=self.now,
+            ),
+        )
+
+        results = await asyncio.gather(
+            self.storage.enqueue_mcp_remote_task_control(
+                answers[0],
+                action="update",
+                input_responses={"approval": True},
+                updated_at=self.now,
+            ),
+            self.storage.enqueue_mcp_remote_task_control(
+                answers[1],
+                action="update",
+                input_responses={"approval": False},
+                updated_at=self.now,
+            ),
+            return_exceptions=True,
+        )
+
+        self.assertEqual(
+            sum(isinstance(result, MessageIdentityConflictError) for result in results),
+            1,
+            results,
+        )
+        self.assertEqual(
+            sum(not isinstance(result, Exception) for result in results),
+            1,
+        )
+        self.assertEqual(
+            len(
+                await self.storage.list_interrupt_answers(
+                    interrupt.interrupt_id
+                )
+            ),
+            1,
+        )
 
     async def test_terminal_continuation_recovers_after_crash_without_repoll(self) -> None:
         binding = self._binding("continuation-restart")

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from sqlalchemy import Engine
 
@@ -45,6 +46,7 @@ from src.capabilities.mcp_tool import build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.contracts import MCPRemoteTaskStoragePort
+from src.core.errors import MessageIdentityConflictError
 from src.core.models import (
     Conversation,
     ConversationFileResource,
@@ -58,6 +60,9 @@ from src.core.models import (
     MCPNoServerConvergenceResult,
     MCPValidatedTerminalResultCandidate,
     MCPTerminalState,
+    MessageIdentityDisposition,
+    MessageIdentityKind,
+    MessageIdentityReservationRequest,
     PendingSkillContext,
     SlotCollection,
     SlotEvent,
@@ -568,6 +573,12 @@ class InterruptOpenTurnPlan:
     fallback_reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _ReservedInterruptMessage:
+    message: Message
+    request: MessageIdentityReservationRequest
+
+
 def _is_v2_slot_collection_payload(value: Mapping[str, Any] | None) -> bool:
     if not isinstance(value, Mapping):
         return False
@@ -821,6 +832,7 @@ class ApiRuntime(
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._execution_generations: dict[str, int] = {}
+        self._execution_durable_starts: dict[str, asyncio.Future[None]] = {}
         self._execution_wait_timeout_seconds = 30.0
         self._conversation_delete_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
         self._locally_cancelled_task_ids = local_cancelled_task_ids if local_cancelled_task_ids is not None else set()
@@ -837,6 +849,7 @@ class ApiRuntime(
         self._task_file_selection_resume_metadata: dict[str, dict[str, Any]] = {}
         self._assistant_history_sync_failure_task_ids: set[str] = set()
         self._assistant_history_sync_failure_lock = asyncio.Lock()
+        self._interrupt_answer_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._mcp_auth_invalidation_queue = None
         self._mcp_auth_invalidation_task: asyncio.Task[None] | None = None
         self._mcp_audit_retention_task: asyncio.Task[None] | None = None
@@ -1043,7 +1056,6 @@ class ApiRuntime(
                 if (
                     replay_interrupt is None
                     or replay_interrupt.conversation_id != conversation_id
-                    or slot_collection_ref_from_required_fields(replay_interrupt.required_fields) is None
                 ):
                     raise ValueError(f"No active task is waiting for interrupt: {requested_interrupt_id}")
                 message_id = request.client_message_id or self._make_id("msg")
@@ -1074,7 +1086,6 @@ class ApiRuntime(
                     replay_interrupt is not None
                     and replay_interrupt.task_id == active_task.task_id
                     and replay_interrupt.conversation_id == conversation_id
-                    and slot_collection_ref_from_required_fields(replay_interrupt.required_fields) is not None
                 ):
                     open_interrupt = replay_interrupt
                 else:
@@ -2541,30 +2552,59 @@ class ApiRuntime(
             )
 
     async def _schedule_execution(
-        self, request: AgentExecutionRequest
+        self,
+        request: AgentExecutionRequest,
+        *,
+        await_durable_start: bool = False,
     ) -> asyncio.Task[None]:
         self._retain_task_skill_revision(request)
         self._retain_task_mcp_revision(request)
         async with self._lock:
             existing = self._running_tasks.get(request.task_id)
             if existing is not None and not existing.done():
-                return existing
-            if existing is not None:
-                self._running_tasks.pop(request.task_id, None)
-            active_task_count = sum(
-                1 for item in self._running_tasks.values() if not item.done()
-            )
-            generation = self._execution_generations.get(request.task_id, 0) + 1
-            self._execution_generations[request.task_id] = generation
-            handle = asyncio.create_task(
-                self._run_execution(
-                    request,
-                    active_task_count=active_task_count,
-                    execution_generation=generation,
+                handle = existing
+                durable_start = self._execution_durable_starts.get(request.task_id)
+            else:
+                if existing is not None:
+                    self._running_tasks.pop(request.task_id, None)
+                active_task_count = sum(
+                    1 for item in self._running_tasks.values() if not item.done()
                 )
-            )
-            self._running_tasks[request.task_id] = handle
-            return handle
+                generation = self._execution_generations.get(request.task_id, 0) + 1
+                self._execution_generations[request.task_id] = generation
+                durable_start = (
+                    asyncio.get_running_loop().create_future()
+                    if await_durable_start
+                    else None
+                )
+                if durable_start is not None:
+                    self._execution_durable_starts[request.task_id] = durable_start
+                execution = (
+                    self._run_execution(
+                        request,
+                        active_task_count=active_task_count,
+                        execution_generation=generation,
+                    )
+                    if durable_start is None
+                    else self._run_execution(
+                        request,
+                        active_task_count=active_task_count,
+                        execution_generation=generation,
+                        durable_start=durable_start,
+                    )
+                )
+                handle = asyncio.create_task(execution)
+                self._running_tasks[request.task_id] = handle
+        if await_durable_start:
+            if durable_start is not None:
+                await asyncio.shield(durable_start)
+            run = await self.agent_run_repository.get_run_for_task(request.task_id)
+            while run is None and not handle.done():
+                await asyncio.sleep(0.01)
+                run = await self.agent_run_repository.get_run_for_task(request.task_id)
+            if run is None:
+                raise RuntimeError("agent_run_durable_start_missing")
+        return handle
 
     async def _run_execution(
         self,
@@ -2572,6 +2612,7 @@ class ApiRuntime(
         *,
         active_task_count: int,
         execution_generation: int | None = None,
+        durable_start: asyncio.Future[None] | None = None,
     ) -> None:
         try:
             request = await self._scrub_deleted_file_context_for_execution(request)
@@ -2579,10 +2620,19 @@ class ApiRuntime(
             BackpressureGuard(
                 max_active_tasks=DEFAULT_MAX_ACTIVE_TASKS
             ).ensure_can_accept(active_task_count=active_task_count)
-            await self.agent_loop_orchestrator.start_or_resume(
-                request,
-                cancellation=self._agent_cancellation_token(request.task_id),
-            )
+            if durable_start is None:
+                await self.agent_loop_orchestrator.start_or_resume(
+                    request,
+                    cancellation=self._agent_cancellation_token(request.task_id),
+                )
+            else:
+                initialized = await self.agent_loop_orchestrator.initialize_run(request)
+                if not durable_start.done():
+                    durable_start.set_result(None)
+                await self.agent_loop_orchestrator.run_initialized(
+                    initialized,
+                    cancellation=self._agent_cancellation_token(request.task_id),
+                )
             restored_cancelled_task = await self._restore_cancelled_task_if_requested(
                 request.task_id,
                 request.conversation_id,
@@ -2590,6 +2640,8 @@ class ApiRuntime(
             if restored_cancelled_task is not None:
                 return
         except Exception as exc:
+            if durable_start is not None and not durable_start.done():
+                durable_start.set_exception(exc)
             if (
                 isinstance(exc, AgentStorageConflict)
                 and str(exc) == "agent_task_lease_held"
@@ -2634,6 +2686,7 @@ class ApiRuntime(
                         )
                     ):
                         self._running_tasks.pop(request.task_id, None)
+                        self._execution_durable_starts.pop(request.task_id, None)
     async def _scrub_deleted_file_context_for_execution(self, request: AgentExecutionRequest) -> AgentExecutionRequest:
         await self._fail_if_effective_uploads_inactive_for_execution(request)
         metadata = dict(request.metadata)
@@ -2883,6 +2936,12 @@ class ApiRuntime(
         text_artifact = select_final_text_artifact(artifacts, events=events)
         if text_artifact is None:
             return
+        task = await self.storage.get_task(task_id)
+        message_created_at = text_artifact.created_at
+        if message_created_at is None and task is not None:
+            message_created_at = task.updated_at or task.created_at
+        if message_created_at is None:
+            raise RuntimeError("assistant_history_message_created_at_missing")
         message = Message(
             message_id=message_id,
             conversation_id=conversation_id,
@@ -2890,7 +2949,7 @@ class ApiRuntime(
             content=text_artifact.storage_ref,
             task_id=task_id,
             stream_status="complete",
-            created_at=self._utcnow_naive(),
+            created_at=message_created_at,
             metadata={CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata} if fallback_metadata is not None else {},
         )
         try:
@@ -3119,46 +3178,41 @@ class ApiRuntime(
             if collection.status == "ready":
                 script_key = self._v2_slot_script_scheduled_key(collection)
                 if await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, script_key) is None:
-                    scheduled_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(collection)
-                    if scheduled_new and scheduled_collection.status == "script_scheduled":
-                        latest_interrupt = await self.storage.get_interrupt_for_node(task_id, collection.node_id)
-                        if latest_interrupt is not None and latest_interrupt.status == InterruptStatus.OPEN:
-                            await self.storage.save_interrupt(
-                                replace(
-                                    latest_interrupt,
-                                    status=InterruptStatus.ANSWERED,
-                                    answered_at=self._utcnow_naive(),
-                                )
+                    latest_interrupt = await self.storage.get_interrupt_for_node(task_id, collection.node_id)
+                    if latest_interrupt is not None and latest_interrupt.status == InterruptStatus.OPEN:
+                        await self.storage.save_interrupt(
+                            replace(
+                                latest_interrupt,
+                                status=InterruptStatus.ANSWERED,
+                                answered_at=self._utcnow_naive(),
                             )
-                        recovery_fields = slot_collection_required_fields_ref(
-                            scheduled_collection
                         )
-                        if latest_interrupt is not None:
-                            raw_locator = latest_interrupt.required_fields.get(
-                                "_agent_continuation"
-                            )
-                            if isinstance(raw_locator, Mapping):
-                                recovery_fields["_agent_continuation"] = dict(raw_locator)
-                        recovery_interrupt = Interrupt(
-                            interrupt_id=f"{collection.collection_id}:interrupt:ready_recovery",
-                            conversation_id=collection.conversation_id,
-                            task_id=collection.task_id,
-                            node_id=collection.node_id,
-                            source_agent=collection.capability_id,
-                            source_message_id="",
-                            question=collection.last_question or "",
-                            reason_code="ready_v2_slot_recovered",
-                            required_fields=recovery_fields,
-                            status=InterruptStatus.ANSWERED,
-                            created_at=self._utcnow_naive(),
-                            answered_at=self._utcnow_naive(),
-                        )
-                        await self._schedule_v2_slot_resume(
-                            task=task,
-                            interrupt=recovery_interrupt,
-                            collection=scheduled_collection,
-                            raw_answer={},
-                        )
+                    recovery_fields = slot_collection_required_fields_ref(collection)
+                    if latest_interrupt is not None:
+                        raw_locator = latest_interrupt.required_fields.get("_agent_continuation")
+                        if isinstance(raw_locator, Mapping):
+                            recovery_fields["_agent_continuation"] = dict(raw_locator)
+                    recovery_interrupt = Interrupt(
+                        interrupt_id=f"{collection.collection_id}:interrupt:ready_recovery",
+                        conversation_id=collection.conversation_id,
+                        task_id=collection.task_id,
+                        node_id=collection.node_id,
+                        source_agent=collection.capability_id,
+                        source_message_id="",
+                        question=collection.last_question or "",
+                        reason_code="ready_v2_slot_recovered",
+                        required_fields=recovery_fields,
+                        status=InterruptStatus.ANSWERED,
+                        created_at=self._utcnow_naive(),
+                        answered_at=self._utcnow_naive(),
+                    )
+                    await self._schedule_v2_slot_resume(
+                        task=task,
+                        interrupt=recovery_interrupt,
+                        collection=collection,
+                        raw_answer={},
+                    )
+                    await self._mark_v2_slot_script_scheduled(collection)
                 continue
             if collection.status not in _SLOT_WAITING_STATUSES:
                 continue
@@ -3461,7 +3515,262 @@ class ApiRuntime(
             for interrupt in interrupts
         ]
 
+    @staticmethod
+    def _interrupt_answer_fingerprint(
+        interrupt_id: str,
+        answer_payload: Mapping[str, object],
+    ) -> str:
+        canonical = json.dumps(
+            {
+                "schema": "maf.interrupt.answer.identity.v1",
+                "interrupt_id": interrupt_id,
+                "answer_payload": dict(answer_payload),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _interrupt_answer_id(interrupt_id: str, source_message_id: str) -> str:
+        digest = hashlib.sha256(
+            f"maf.interrupt.answer.v1:{interrupt_id}:{source_message_id}".encode("utf-8")
+        ).hexdigest()
+        return f"interrupt-answer:{digest}"
+
+    @staticmethod
+    def _interrupt_user_message_content(
+        interrupt: Interrupt,
+        answer_payload: Mapping[str, object],
+    ) -> str:
+        raw_answer = answer_payload.get("answer")
+        if slot_collection_ref_from_required_fields(interrupt.required_fields) is not None and isinstance(raw_answer, Mapping):
+            return ApiRuntime._format_v2_answer_message(raw_answer) or ApiRuntime._v2_answer_text(raw_answer)
+        if interrupt.reason_code == "file_selection_ambiguous":
+            answer_text = str(answer_payload.get("file_selection_answer") or answer_payload.get("answer") or "").strip()
+            if isinstance(raw_answer, Mapping):
+                answer_text = str(raw_answer.get("text") or answer_text).strip()
+            return answer_text or ApiRuntime._format_answer_message(answer_payload)
+        return ApiRuntime._format_answer_message(answer_payload)
+
+    async def _reserve_interrupt_user_message(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        answer_payload: Mapping[str, object],
+        source_message_id: str | None,
+    ) -> _ReservedInterruptMessage:
+        message_id = str(
+            source_message_id
+            or answer_payload.get("client_request_id")
+            or self._make_id("msg")
+        ).strip()
+        if not message_id:
+            raise MessageIdentityConflictError()
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        if conversation is None:
+            raise ValueError(f"Unknown conversation: {task.conversation_id}")
+        existing_message = await self.storage.get_message(message_id)
+        reserved_at = self._utcnow_naive()
+        requested_created_at = (
+            existing_message.created_at
+            if existing_message is not None and existing_message.created_at is not None
+            else reserved_at
+        )
+        reservation_request = MessageIdentityReservationRequest(
+            username=conversation.username,
+            conversation_id=task.conversation_id,
+            message_id=message_id,
+            identity_kind=MessageIdentityKind.INTERRUPT,
+            role=MessageRole.USER,
+            message_type="chat",
+            message_created_at=requested_created_at,
+            task_id=task.task_id,
+            request_fingerprint=self._interrupt_answer_fingerprint(
+                interrupt.interrupt_id,
+                answer_payload,
+            ),
+            reserved_at=reserved_at,
+        )
+        reservation = await self.storage.reserve_message_identity(reservation_request)
+        if reservation.disposition == MessageIdentityDisposition.CONFLICT:
+            raise MessageIdentityConflictError()
+        if reservation.disposition == MessageIdentityDisposition.CONVERSATION_NOT_AVAILABLE:
+            raise PermissionError(f"Conversation is not available: {task.conversation_id}")
+        if reservation.message_created_at is None:
+            raise RuntimeError("interrupt_message_identity_missing_created_at")
+        return _ReservedInterruptMessage(
+            message=Message(
+                message_id=message_id,
+                conversation_id=task.conversation_id,
+                role=MessageRole.USER,
+                content=self._interrupt_user_message_content(interrupt, answer_payload),
+                task_id=task.task_id,
+                created_at=reservation.message_created_at,
+            ),
+            request=replace(
+                reservation_request,
+                message_created_at=reservation.message_created_at,
+            ),
+        )
+
+    async def _ensure_reserved_interrupt_user_message(
+        self,
+        reserved: _ReservedInterruptMessage,
+    ) -> Message:
+        return await self.storage.save_message(
+            reserved.message,
+            identity_reservation=reserved.request,
+        )
+
+    async def _completed_interrupt_replay_response(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        answer_payload: Mapping[str, object],
+        reserved_message: _ReservedInterruptMessage,
+        allow_open: bool = False,
+    ) -> dict[str, object] | None:
+        if interrupt.status == InterruptStatus.OPEN and not allow_open:
+            return None
+        expected_fingerprint = self._interrupt_answer_fingerprint(
+            interrupt.interrupt_id,
+            answer_payload,
+        )
+        existing_answers = await self.storage.list_interrupt_answers(interrupt.interrupt_id)
+        matching_answer = next(
+            (
+                answer
+                for answer in existing_answers
+                if answer.source_message_id == reserved_message.message.message_id
+                and self._interrupt_answer_fingerprint(
+                    interrupt.interrupt_id,
+                    answer.answer_payload,
+                )
+                == expected_fingerprint
+            ),
+            None,
+        )
+        if matching_answer is None:
+            if existing_answers:
+                raise MessageIdentityConflictError()
+            if interrupt.status == InterruptStatus.OPEN:
+                return None
+            raise MessageIdentityConflictError()
+        if interrupt.status == InterruptStatus.OPEN:
+            return None
+        await self._ensure_reserved_interrupt_user_message(reserved_message)
+        if interrupt.reason_code == "mcp_remote_task_input_required":
+            action = (
+                "mcp_remote_task_cancel_submitted"
+                if answer_payload.get("mcp_remote_task_cancel") is True
+                else "mcp_remote_task_input_submitted"
+            )
+            return {
+                "task_id": task.task_id,
+                "action": action,
+                "interrupt_id": interrupt.interrupt_id,
+                "source_message_id": reserved_message.message.message_id,
+            }
+        action: str | None = None
+        if interrupt.reason_code == "file_selection_ambiguous":
+            action = (
+                "sheet_selection_required"
+                if await self._has_open_interrupt(task.task_id)
+                else "resumed"
+            )
+        return {
+            "interrupt_id": interrupt.interrupt_id,
+            "status": str(interrupt.status),
+            "node_id": interrupt.node_id,
+            "answer_payload": dict(answer_payload),
+            "source_message_id": reserved_message.message.message_id,
+            **({"action": action} if action is not None else {}),
+        }
+
+    async def _interrupt_continuation_receipt(
+        self,
+        *,
+        task_id: str,
+        interrupt_id: str,
+        source_message_id: str,
+        request_fingerprint: str,
+    ) -> Mapping[str, object] | None:
+        for event in await self.storage.list_events_for_task_filtered(
+            task_id,
+            event_types=("task.interrupt_continuation_completed",),
+        ):
+            if (
+                event.event_type == "task.interrupt_continuation_completed"
+                and str(event.payload.get("interrupt_id") or "") == interrupt_id
+                and str(event.payload.get("source_message_id") or "") == source_message_id
+            ):
+                if str(event.payload.get("request_fingerprint") or "") != request_fingerprint:
+                    raise MessageIdentityConflictError()
+                response = event.payload.get("response")
+                if not isinstance(response, Mapping):
+                    raise RuntimeError("interrupt_continuation_receipt_invalid")
+                return response
+        return None
+
+    async def _record_interrupt_continuation_completed(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        reserved_message: _ReservedInterruptMessage,
+        response: Mapping[str, object],
+    ) -> None:
+        if await self._interrupt_continuation_receipt(
+            task_id=task.task_id,
+            interrupt_id=interrupt.interrupt_id,
+            source_message_id=reserved_message.message.message_id,
+            request_fingerprint=reserved_message.request.request_fingerprint or "",
+        ) is not None:
+            return
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="task.interrupt_continuation_completed",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "source_message_id": reserved_message.message.message_id,
+                    "request_fingerprint": reserved_message.request.request_fingerprint or "",
+                    "response": dict(response),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+
     async def answer_interrupt(
+        self,
+        task_id: str,
+        interrupt_id: str,
+        answer_payload: dict[str, object],
+        *,
+        source_message_id: str | None = None,
+        request_metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, object]:
+        lock = self._interrupt_answer_locks.get(interrupt_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._interrupt_answer_locks[interrupt_id] = lock
+        async with lock:
+            return await self._answer_interrupt_unlocked(
+                task_id,
+                interrupt_id,
+                answer_payload,
+                source_message_id=source_message_id,
+                request_metadata=request_metadata,
+            )
+
+    async def _answer_interrupt_unlocked(
         self,
         task_id: str,
         interrupt_id: str,
@@ -3518,11 +3827,29 @@ class ApiRuntime(
                 raise ValueError(
                     "mcp_input_responses must be an object for remote task input"
                 )
+            reserved_message = await self._reserve_interrupt_user_message(
+                task=task,
+                interrupt=interrupt,
+                answer_payload=answer_payload,
+                source_message_id=source_message_id,
+            )
+            replay_response = await self._completed_interrupt_replay_response(
+                task=task,
+                interrupt=interrupt,
+                answer_payload=answer_payload,
+                reserved_message=reserved_message,
+                allow_open=True,
+            )
+            if replay_response is not None:
+                return replay_response
             answer = InterruptAnswer(
-                interrupt_answer_id=self._make_id("interrupt-answer"),
+                interrupt_answer_id=self._interrupt_answer_id(
+                    interrupt_id,
+                    reserved_message.message.message_id,
+                ),
                 interrupt_id=interrupt_id,
                 answer_payload=dict(answer_payload),
-                source_message_id=source_message_id or self._make_id("msg"),
+                source_message_id=reserved_message.message.message_id,
                 accepted=True,
                 created_at=self._utcnow_naive(),
                 accepted_at=self._utcnow_naive(),
@@ -3535,6 +3862,7 @@ class ApiRuntime(
                 ),
                 now=self._utcnow_naive(),
             )
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
             await self._record_event(
                 self._make_event(
                     task_id=task.task_id,
@@ -3557,6 +3885,7 @@ class ApiRuntime(
                     else "mcp_remote_task_input_submitted"
                 ),
                 "interrupt_id": interrupt_id,
+                "source_message_id": answer.source_message_id,
             }
         if interrupt.reason_code == "sheet_selection_required":
             self._validate_sheet_selection_answer(interrupt, answer_payload)
@@ -3583,8 +3912,6 @@ class ApiRuntime(
             if collection is None:
                 raise UploadValidationError("slot collection state is missing; restart the Skill")
             recovered_interrupt = replace(interrupt, required_fields=slot_collection_required_fields_ref(collection))
-            await self.storage.save_interrupt(recovered_interrupt)
-            await persist_interrupt_question_message(self.storage, recovered_interrupt)
             return await self._answer_v2_slot_interrupt(
                 task=task,
                 interrupt=recovered_interrupt,
@@ -3593,8 +3920,39 @@ class ApiRuntime(
                 request_metadata=request_metadata,
             )
 
+        reserved_message = await self._reserve_interrupt_user_message(
+            task=task,
+            interrupt=interrupt,
+            answer_payload=answer_payload,
+            source_message_id=source_message_id,
+        )
+        existing_interrupt_answers = await self.storage.list_interrupt_answers(interrupt_id)
+        exact_answer = next(
+            (
+                existing
+                for existing in existing_interrupt_answers
+                if existing.source_message_id == reserved_message.message.message_id
+                and dict(existing.answer_payload) == dict(answer_payload)
+            ),
+            None,
+        )
+        if existing_interrupt_answers and exact_answer is None:
+            raise MessageIdentityConflictError()
+        continuation_receipt = await self._interrupt_continuation_receipt(
+            task_id=task.task_id,
+            interrupt_id=interrupt_id,
+            source_message_id=reserved_message.message.message_id,
+            request_fingerprint=reserved_message.request.request_fingerprint or "",
+        )
+        if exact_answer is not None and continuation_receipt is not None:
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
+            return dict(continuation_receipt)
         existing_answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
-        answer_payloads = (*existing_answer_payloads, dict(answer_payload))
+        answer_payloads = (
+            existing_answer_payloads
+            if exact_answer is not None
+            else (*existing_answer_payloads, dict(answer_payload))
+        )
         root_message = await self.storage.get_message(task.root_message_id)
         merged_answer_payload = self._merge_answer_payloads(answer_payloads)
         combined_message = self._combine_resume_message(
@@ -3611,10 +3969,13 @@ class ApiRuntime(
         for payload in answer_payloads:
             resume_metadata.update(self._answer_payload_metadata(payload))
         answer = InterruptAnswer(
-            interrupt_answer_id=self._make_id("interrupt-answer"),
+            interrupt_answer_id=self._interrupt_answer_id(
+                interrupt_id,
+                reserved_message.message.message_id,
+            ),
             interrupt_id=interrupt_id,
             answer_payload=dict(answer_payload),
-            source_message_id=source_message_id or self._make_id("msg"),
+            source_message_id=reserved_message.message.message_id,
             accepted=mcp_approval_action is not None or mcp_mrtr_answer,
             created_at=self._utcnow_naive(),
             accepted_at=(
@@ -3667,8 +4028,12 @@ class ApiRuntime(
                     upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
                 )
             )
+        if exact_answer is not None:
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
         mcp_approval_result: str | None = None
-        if mcp_approval_action is not None:
+        if exact_answer is not None:
+            saved_interrupt = await self.interrupt_service.record_answer(exact_answer)
+        elif mcp_approval_action is not None:
             assert mcp_approval_decision is not None
             mcp_approval_result = str(
                 await self.storage.accept_mcp_tool_approval(
@@ -3678,22 +4043,12 @@ class ApiRuntime(
                     self._utcnow_naive(),
                 )
             )
-            if mcp_approval_result == "already_accepted":
-                saved_interrupt = await self.storage.get_interrupt(interrupt_id)
-                if saved_interrupt is None:
-                    raise RuntimeError("mcp_approval_interrupt_missing_after_accept")
-                return {
-                    "interrupt_id": saved_interrupt.interrupt_id,
-                    "status": str(saved_interrupt.status),
-                    "node_id": saved_interrupt.node_id,
-                    "answer_payload": dict(answer_payload),
-                    "source_message_id": answer.source_message_id,
-                }
             if mcp_approval_result in {"conflict", "invalidated"}:
                 raise ValueError("MCP tool approval is no longer pending")
             saved_interrupt = await self.storage.get_interrupt(interrupt_id)
             if saved_interrupt is None:
                 raise RuntimeError("mcp_approval_interrupt_missing_after_accept")
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
             if mcp_approval_result == "accepted":
                 resumed_node = await self.storage.get_task_node(interrupt.node_id)
                 if resumed_node is None:
@@ -3724,14 +4079,7 @@ class ApiRuntime(
             saved_interrupt = await self.storage.get_interrupt(interrupt_id)
             if saved_interrupt is None:
                 raise RuntimeError("mcp_mrtr_interrupt_missing_after_accept")
-            if mcp_mrtr_result == "already_accepted":
-                return {
-                    "interrupt_id": saved_interrupt.interrupt_id,
-                    "status": str(saved_interrupt.status),
-                    "node_id": saved_interrupt.node_id,
-                    "answer_payload": dict(answer_payload),
-                    "source_message_id": answer.source_message_id,
-                }
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
             resumed_node = await self.storage.get_task_node(interrupt.node_id)
             if resumed_node is None:
                 raise RuntimeError("mcp_mrtr_node_missing_after_accept")
@@ -3750,34 +4098,36 @@ class ApiRuntime(
             )
         else:
             saved_interrupt = await self.interrupt_service.record_answer(answer)
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
 
-        answer_message = Message(
-            message_id=answer.source_message_id or self._make_id("msg"),
-            conversation_id=task.conversation_id,
-            role=MessageRole.USER,
-            content=self._format_answer_message(answer_payload),
-            task_id=task.task_id,
-            created_at=self._utcnow_naive(),
-        )
-        await self.storage.save_message(answer_message)
-        await self._record_event(
-            self._make_event(
-                task_id=task.task_id,
-                conversation_id=task.conversation_id,
-                node_id=interrupt.node_id,
-                event_type="task.interrupt_answered",
-                payload={"interrupt_id": interrupt_id, "answer_payload": dict(answer_payload)},
+        if exact_answer is None:
+            await self._record_event(
+                self._make_event(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    node_id=interrupt.node_id,
+                    event_type="task.interrupt_answered",
+                    payload={"interrupt_id": interrupt_id, "answer_payload": dict(answer_payload)},
+                )
             )
-        )
 
-        if mcp_approval_result == "denied_finalized":
-            return {
+        if mcp_approval_result == "denied_finalized" or (
+            exact_answer is not None and mcp_approval_decision == "deny"
+        ):
+            response = {
                 "interrupt_id": saved_interrupt.interrupt_id,
                 "status": str(saved_interrupt.status),
                 "node_id": saved_interrupt.node_id,
                 "answer_payload": dict(answer_payload),
                 "source_message_id": answer.source_message_id,
             }
+            await self._record_interrupt_continuation_completed(
+                task=task,
+                interrupt=interrupt,
+                reserved_message=reserved_message,
+                response=response,
+            )
+            return response
 
         if await self._resume_agent_interrupt(
             task=task,
@@ -3785,13 +4135,20 @@ class ApiRuntime(
             answer_payload=answer_payload,
             resume_metadata=resume_metadata,
         ):
-            return {
+            response = {
                 "interrupt_id": saved_interrupt.interrupt_id,
                 "status": str(saved_interrupt.status),
                 "node_id": saved_interrupt.node_id,
                 "answer_payload": dict(answer_payload),
                 "source_message_id": answer.source_message_id,
             }
+            await self._record_interrupt_continuation_completed(
+                task=task,
+                interrupt=interrupt,
+                reserved_message=reserved_message,
+                response=response,
+            )
+            return response
 
         await self._await_existing_execution(task.task_id)
         interrupted_node = await self.storage.get_task_node(interrupt.node_id)
@@ -3831,17 +4188,25 @@ class ApiRuntime(
                     owner_conversation.username,
                     execution_mode=task.mcp_execution_mode,
                 ),
-            )
+            ),
+            await_durable_start=True,
         )
         if sheet_selection_resume_metadata:
             self._task_sheet_selection_resume_metadata.pop(task.task_id, None)
-        return {
+        response = {
             "interrupt_id": saved_interrupt.interrupt_id,
             "status": str(saved_interrupt.status),
             "node_id": saved_interrupt.node_id,
             "answer_payload": dict(answer_payload),
             "source_message_id": answer.source_message_id,
         }
+        await self._record_interrupt_continuation_completed(
+            task=task,
+            interrupt=interrupt,
+            reserved_message=reserved_message,
+            response=response,
+        )
+        return response
 
     async def _resume_agent_interrupt(
         self,
@@ -4014,13 +4379,27 @@ class ApiRuntime(
         if collection is None:
             raise UploadValidationError("slot collection state is missing; restart the Skill")
 
+        reserved_message = await self._reserve_interrupt_user_message(
+            task=task,
+            interrupt=interrupt,
+            answer_payload=answer_payload,
+            source_message_id=source_message_id,
+        )
+        stored_interrupt = await self.storage.get_interrupt(interrupt.interrupt_id)
+        if (
+            stored_interrupt is not None
+            and slot_collection_ref_from_required_fields(stored_interrupt.required_fields) is None
+        ):
+            await self.storage.save_interrupt(interrupt)
+            await persist_interrupt_question_message(self.storage, interrupt)
+
         return await self._process_v2_interrupt_open_turn(
             task=task,
             interrupt=interrupt,
             collection=collection,
             raw_answer=dict(raw_answer),
             client_request_id=client_request_id,
-            source_message_id=source_message_id,
+            reserved_message=reserved_message,
             request_metadata=request_metadata,
         )
 
@@ -4044,24 +4423,94 @@ class ApiRuntime(
         collection: SlotCollection,
         raw_answer: dict[str, object],
         client_request_id: str,
-        source_message_id: str | None = None,
+        reserved_message: _ReservedInterruptMessage,
         request_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, object]:
         turn_key = f"interrupt_turn:{interrupt.interrupt_id}:{client_request_id}"
+        request_fingerprint = reserved_message.request.request_fingerprint or ""
+        planned_receipt = await self._load_v2_interrupt_turn_plan_receipt(
+            task_id=task.task_id,
+            interrupt_id=interrupt.interrupt_id,
+            client_request_id=client_request_id,
+            source_message_id=reserved_message.message.message_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if planned_receipt is None:
+            legacy_answers = [
+                answer
+                for answer in await self.storage.list_interrupt_answers(interrupt.interrupt_id)
+                if isinstance(answer.answer_payload, Mapping)
+                and str(answer.answer_payload.get("client_request_id") or "").strip()
+                == client_request_id
+            ]
+            if legacy_answers and not any(
+                answer.source_message_id == reserved_message.message.message_id
+                and dict(answer.answer_payload)
+                == {"client_request_id": client_request_id, "answer": dict(raw_answer)}
+                for answer in legacy_answers
+            ):
+                raise MessageIdentityConflictError()
+        exact_accepted_answer = next(
+            (
+                answer
+                for answer in await self.storage.list_interrupt_answers(interrupt.interrupt_id)
+                if answer.accepted
+                and answer.source_message_id == reserved_message.message.message_id
+                and dict(answer.answer_payload)
+                == {"client_request_id": client_request_id, "answer": dict(raw_answer)}
+            ),
+            None,
+        )
+        current_collection = await self.storage.get_slot_collection(collection.collection_id) or collection
         existing_summary = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, turn_key)
         if existing_summary is not None and existing_summary.event_type == "slot.interrupt_turn_processed":
             payload = dict(existing_summary.payload)
+            summary_source_message_id = str(payload.get("source_message_id") or "")
+            if summary_source_message_id != reserved_message.message.message_id:
+                raise MessageIdentityConflictError()
+            user_message = await self._ensure_reserved_interrupt_user_message(reserved_message)
+            await self._ensure_v2_interrupt_turn_processed_event(
+                task=task,
+                interrupt=interrupt,
+                summary=payload,
+                created_at=user_message.created_at,
+            )
             return self._interrupt_open_turn_response_from_summary(
                 interrupt=interrupt,
                 summary=payload,
-                fallback_source_message_id=source_message_id,
+                fallback_source_message_id=reserved_message.message.message_id,
             )
+
+        if (
+            exact_accepted_answer is not None
+            and current_collection.status in {"ready", "script_scheduled"}
+        ):
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
+            interrupt = await self.interrupt_service.record_answer(
+                exact_accepted_answer
+            )
+            if current_collection.status == "ready":
+                await self._schedule_v2_slot_resume(
+                    task=task,
+                    interrupt=interrupt,
+                    collection=current_collection,
+                    raw_answer=raw_answer,
+                    request_metadata=request_metadata,
+                )
+                current_collection, _ = await self._mark_v2_slot_script_scheduled(
+                    current_collection
+                )
+            collection = current_collection
 
         # Compatibility with pre-query-split idempotency keys. New turns are always
         # persisted with the turn-level key above; legacy keys are read only.
         legacy_answer_key = f"answer:{interrupt.interrupt_id}:{client_request_id}"
         existing_legacy_event = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, legacy_answer_key)
-        if existing_legacy_event is not None:
+        if existing_legacy_event is not None and planned_receipt is None:
+            legacy_source_message_id = str(existing_legacy_event.payload.get("source_message_id") or "")
+            if legacy_source_message_id and legacy_source_message_id != reserved_message.message.message_id:
+                raise MessageIdentityConflictError()
+            await self._ensure_reserved_interrupt_user_message(reserved_message)
             if existing_legacy_event.event_type == "slot.clarification_answered":
                 return {
                     "interrupt_id": interrupt.interrupt_id,
@@ -4070,7 +4519,7 @@ class ApiRuntime(
                     "answer_payload": {"client_request_id": client_request_id},
                     "action": "clarification_answer",
                     "assistant_message": str(existing_legacy_event.payload.get("assistant_message") or ""),
-                    "source_message_id": str(existing_legacy_event.payload.get("source_message_id") or source_message_id or ""),
+                    "source_message_id": str(existing_legacy_event.payload.get("source_message_id") or reserved_message.message.message_id),
                 }
             current_collection = await self.storage.get_slot_collection(collection.collection_id) or collection
             return {
@@ -4079,36 +4528,45 @@ class ApiRuntime(
                 "node_id": interrupt.node_id,
                 "answer_payload": {"client_request_id": client_request_id},
                 "action": "resumed" if current_collection.status in {"script_scheduled", "completed"} else None,
-                "source_message_id": str(existing_legacy_event.payload.get("source_message_id") or source_message_id or ""),
+                "source_message_id": str(existing_legacy_event.payload.get("source_message_id") or reserved_message.message.message_id),
             }
 
-        if interrupt.status != InterruptStatus.OPEN:
+        if interrupt.status != InterruptStatus.OPEN and planned_receipt is None:
+            replay_response = await self._completed_interrupt_replay_response(
+                task=task,
+                interrupt=interrupt,
+                answer_payload={"client_request_id": client_request_id, "answer": dict(raw_answer)},
+                reserved_message=reserved_message,
+            )
+            if replay_response is not None:
+                return replay_response
             raise UploadValidationError(
                 "v2 slot interrupt is not open; retry with the original client_request_id to replay an accepted turn"
             )
 
         turn_llm_metadata = await self._resume_llm_metadata(task, request_metadata)
-        plan = await self._plan_v2_interrupt_open_turn(
-            task=task,
-            interrupt=interrupt,
-            collection=collection,
-            raw_answer=raw_answer,
-            client_request_id=client_request_id,
-            llm_metadata=turn_llm_metadata,
-        )
-        await self._record_v2_interrupt_turn_planned(
-            task=task,
-            interrupt=interrupt,
-            collection=collection,
-            client_request_id=client_request_id,
-            plan=plan,
-        )
+        if planned_receipt is None:
+            plan = await self._plan_v2_interrupt_open_turn(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                raw_answer=raw_answer,
+                client_request_id=client_request_id,
+                llm_metadata=turn_llm_metadata,
+            )
+            plan = await self._record_v2_interrupt_turn_planned(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                client_request_id=client_request_id,
+                plan=plan,
+                source_message_id=reserved_message.message.message_id,
+                request_fingerprint=request_fingerprint,
+            )
+        else:
+            plan = planned_receipt
+        user_message = await self._ensure_reserved_interrupt_user_message(reserved_message)
 
-        user_message = await self._save_v2_interrupt_user_message(
-            task=task,
-            raw_answer=raw_answer,
-            source_message_id=source_message_id,
-        )
         processed_parts: list[dict[str, object]] = []
         assistant_sections: list[str] = []
         schema_switch_metadata: dict[str, object] | None = None
@@ -4122,14 +4580,37 @@ class ApiRuntime(
                 confidence=max((part.confidence for part in plan.parts if part.kind == "slot_answer"), default=0.0),
                 reason=plan.reason,
             )
-            verifier_block_candidate = await self._verify_v2_interrupt_resume(
-                task=task,
-                interrupt=interrupt,
-                collection=collection,
-                raw_answer=raw_answer,
-                decision=verifier_decision,
-                llm_metadata=turn_llm_metadata,
+            verifier_key = f"{turn_key}:substep:verifier"
+            verifier_receipt = await self._v2_substep_receipt(
+                collection.collection_id,
+                verifier_key,
             )
+            if verifier_receipt is None:
+                verifier_block_candidate = await self._verify_v2_interrupt_resume(
+                    task=task,
+                    interrupt=interrupt,
+                    collection=collection,
+                    raw_answer=raw_answer,
+                    decision=verifier_decision,
+                    llm_metadata=turn_llm_metadata,
+                )
+                await self._record_v2_substep_receipt(
+                    collection=collection,
+                    key=verifier_key,
+                    payload={
+                        "allow_resume": verifier_block_candidate.allow_resume,
+                        "confidence": verifier_block_candidate.confidence,
+                        "reason": verifier_block_candidate.reason,
+                        "clarification_answer": verifier_block_candidate.clarification_answer,
+                    },
+                )
+            else:
+                verifier_block_candidate = InterruptResumeVerification(
+                    allow_resume=bool(verifier_receipt.get("allow_resume")),
+                    confidence=float(verifier_receipt.get("confidence") or 0.0),
+                    reason=str(verifier_receipt.get("reason") or ""),
+                    clarification_answer=str(verifier_receipt.get("clarification_answer") or ""),
+                )
             if not verifier_block_candidate.allow_resume:
                 verifier_block = verifier_block_candidate
                 blocking_parts.append(
@@ -4190,22 +4671,35 @@ class ApiRuntime(
 
         latest_collection = await self.storage.get_slot_collection(current_collection.collection_id) or current_collection
         for part in [part for part in plan.parts if part.kind == "skill_question"]:
-            answer = part.assistant_message.strip()
-            if answer:
-                await self._record_v2_interrupt_question_answered(
-                    task=task,
-                    interrupt=interrupt,
-                    collection=latest_collection,
-                    part=part,
-                    answer=answer,
-                )
+            question_key = f"{turn_key}:substep:question:{part.part_id}"
+            question_receipt = await self._v2_substep_receipt(
+                latest_collection.collection_id,
+                question_key,
+            )
+            if question_receipt is not None:
+                answer = str(question_receipt.get("answer") or "")
             else:
-                answer = await self._process_v2_skill_question_part(
-                    task=task,
-                    interrupt=interrupt,
+                answer = part.assistant_message.strip()
+                if answer:
+                    await self._record_v2_interrupt_question_answered(
+                        task=task,
+                        interrupt=interrupt,
+                        collection=latest_collection,
+                        part=part,
+                        answer=answer,
+                    )
+                else:
+                    answer = await self._process_v2_skill_question_part(
+                        task=task,
+                        interrupt=interrupt,
+                        collection=latest_collection,
+                        part=part,
+                        llm_metadata=turn_llm_metadata,
+                    )
+                await self._record_v2_substep_receipt(
                     collection=latest_collection,
-                    part=part,
-                    llm_metadata=turn_llm_metadata,
+                    key=question_key,
+                    payload={"answer": answer},
                 )
             if answer:
                 assistant_sections.append(answer)
@@ -4239,18 +4733,31 @@ class ApiRuntime(
                 )
             )
         for part in ambiguous_parts:
-            message = part.assistant_message.strip() or part.block_reason.strip()
-            if not message:
-                message = await self._generate_v2_interrupt_clarification_answer(
-                    task=task,
-                    interrupt=interrupt,
+            clarification_key = f"{turn_key}:substep:clarification:{part.part_id}"
+            clarification_receipt = await self._v2_substep_receipt(
+                latest_collection.collection_id,
+                clarification_key,
+            )
+            if clarification_receipt is not None:
+                message = str(clarification_receipt.get("answer") or "")
+            else:
+                message = part.assistant_message.strip() or part.block_reason.strip()
+                if not message:
+                    message = await self._generate_v2_interrupt_clarification_answer(
+                        task=task,
+                        interrupt=interrupt,
+                        collection=latest_collection,
+                        user_text=part.text or self._v2_answer_text(raw_answer),
+                        decision=InterruptTurnDecision(intent="ambiguous", confidence=part.confidence, reason=part.reason),
+                        llm_metadata=turn_llm_metadata,
+                    )
+                if not message:
+                    message = self._interrupt_ambiguity_message(latest_collection)
+                await self._record_v2_substep_receipt(
                     collection=latest_collection,
-                    user_text=part.text or self._v2_answer_text(raw_answer),
-                    decision=InterruptTurnDecision(intent="ambiguous", confidence=part.confidence, reason=part.reason),
-                    llm_metadata=turn_llm_metadata,
+                    key=clarification_key,
+                    payload={"answer": message},
                 )
-            if not message:
-                message = self._interrupt_ambiguity_message(latest_collection)
             if message:
                 assistant_sections.append(message)
             processed_parts.append(self._interrupt_part_summary(part, result={"blocked": part.blocks_resume}))
@@ -4269,7 +4776,7 @@ class ApiRuntime(
                 source_message_id=user_message.message_id,
             )
         blocked = bool(blocking_parts)
-        will_resume = False
+        will_resume = latest_collection.status in {"script_scheduled", "completed"}
         saved_interrupt = interrupt
         if latest_collection.status == "ready":
             if has_schema_switch and not self._schema_switch_execution_gates_pass(plan, schema_switch_metadata=schema_switch_metadata):
@@ -4294,7 +4801,6 @@ class ApiRuntime(
                     raw_answer=raw_answer,
                     client_request_id=client_request_id,
                     source_message_id=user_message.message_id,
-                    save_user_message=False,
                 )
                 saved_interrupt = await self.interrupt_service.record_answer(answer)
                 await self._record_event(
@@ -4310,15 +4816,14 @@ class ApiRuntime(
                         },
                     )
                 )
-                latest_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(latest_collection)
-                if scheduled_new and latest_collection.status == "script_scheduled":
-                    await self._schedule_v2_slot_resume(
-                        task=task,
-                        interrupt=saved_interrupt,
-                        collection=latest_collection,
-                        raw_answer=raw_answer,
-                        request_metadata=request_metadata,
-                    )
+                await self._schedule_v2_slot_resume(
+                    task=task,
+                    interrupt=saved_interrupt,
+                    collection=latest_collection,
+                    raw_answer=raw_answer,
+                    request_metadata=request_metadata,
+                )
+                latest_collection, _ = await self._mark_v2_slot_script_scheduled(latest_collection)
                 will_resume = latest_collection.status in {"script_scheduled", "completed"}
 
         if not assistant_sections and not will_resume:
@@ -4330,15 +4835,21 @@ class ApiRuntime(
         assistant_message = "\n\n".join(dict.fromkeys(section.strip() for section in assistant_sections if section.strip()))
         if assistant_message:
             assistant_message_record = Message(
-                message_id=self._make_id("msg"),
+                message_id=f"{user_message.message_id}:interrupt-response",
                 conversation_id=task.conversation_id,
                 role=MessageRole.ASSISTANT,
                 content=assistant_message,
                 task_id=task.task_id,
                 stream_status=INTERRUPT_VISIBLE_STREAM_STATUS,
-                created_at=self._utcnow_naive(),
+                created_at=user_message.created_at,
             )
-            await self.storage.save_message(assistant_message_record)
+            existing_assistant_message = await self.storage.get_message(
+                assistant_message_record.message_id
+            )
+            if existing_assistant_message is None:
+                await self.storage.save_message(assistant_message_record)
+            else:
+                assistant_message = existing_assistant_message.content
 
         action = self._interrupt_open_turn_action(
             will_resume=will_resume,
@@ -4376,27 +4887,76 @@ class ApiRuntime(
                 created_at=self._utcnow_naive(),
             )
         )
-        await self._record_event(
-            self._make_event(
-                task_id=task.task_id,
-                conversation_id=task.conversation_id,
-                node_id=interrupt.node_id,
-                event_type="task.interrupt_turn_processed",
-                payload={
-                    "interrupt_id": interrupt.interrupt_id,
-                    "slot_collection_id": latest_collection.collection_id,
-                    "client_request_id": client_request_id,
-                    "action": action,
-                    "will_resume": will_resume,
-                    "requires_confirmation": requires_confirmation,
-                },
-            )
+        await self._ensure_v2_interrupt_turn_processed_event(
+            task=task,
+            interrupt=interrupt,
+            summary=summary_payload,
+            created_at=user_message.created_at,
         )
         return self._interrupt_open_turn_response_from_summary(
             interrupt=saved_interrupt,
             summary=summary_payload,
             fallback_source_message_id=user_message.message_id,
         )
+
+    async def _ensure_v2_interrupt_turn_processed_event(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        summary: Mapping[str, object],
+        created_at: datetime,
+    ) -> None:
+        client_request_id = str(summary.get("client_request_id") or "")
+        slot_collection_id = str(summary.get("active_slot_collection_id") or "")
+        event_payload = {
+            "interrupt_id": interrupt.interrupt_id,
+            "slot_collection_id": slot_collection_id,
+            "client_request_id": client_request_id,
+            "action": summary.get("action"),
+            "will_resume": bool(summary.get("will_resume")),
+            "requires_confirmation": bool(summary.get("requires_confirmation")),
+        }
+        for existing in await self.storage.list_events_for_task_filtered(
+            task.task_id,
+            event_types=("task.interrupt_turn_processed",),
+        ):
+            existing_payload = dict(existing.payload)
+            if all(
+                existing_payload.get(key) == event_payload[key]
+                for key in (
+                    "interrupt_id",
+                    "slot_collection_id",
+                    "client_request_id",
+                )
+            ):
+                if existing_payload != event_payload:
+                    raise RuntimeError(
+                        "runtime_store_idempotency_conflict: interrupt turn event differs"
+                    )
+                return
+        identity_digest = hashlib.sha256(
+            json.dumps(
+                [interrupt.interrupt_id, slot_collection_id, client_request_id],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        event = self._make_event(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            node_id=interrupt.node_id,
+            event_type="task.interrupt_turn_processed",
+            payload=event_payload,
+            created_at=created_at,
+        )
+        event = replace(
+            event,
+            event_id=f"slot-interrupt-turn-processed:v1:{identity_digest}",
+        )
+        saved, duplicate = await self.storage.append_event_exact(event)
+        if not duplicate:
+            await self.event_broker.publish(saved)
 
     @staticmethod
     def _interrupt_open_turn_response_from_summary(
@@ -4756,7 +5316,31 @@ class ApiRuntime(
         collection: SlotCollection,
         client_request_id: str,
         plan: InterruptOpenTurnPlan,
-    ) -> None:
+        source_message_id: str,
+        request_fingerprint: str,
+    ) -> InterruptOpenTurnPlan:
+        for event in await self.storage.list_events_for_task_filtered(
+            task.task_id,
+            event_types=("task.interrupt_turn_planned",),
+        ):
+            if (
+                event.event_type == "task.interrupt_turn_planned"
+                and str(event.payload.get("interrupt_id") or "") == interrupt.interrupt_id
+                and str(event.payload.get("client_request_id") or "") == client_request_id
+            ):
+                if "source_message_id" not in event.payload or "request_fingerprint" not in event.payload:
+                    continue
+                if (
+                    str(event.payload.get("source_message_id") or "") != source_message_id
+                    or str(event.payload.get("request_fingerprint") or "") != request_fingerprint
+                ):
+                    raise MessageIdentityConflictError()
+                stored_plan = event.payload.get("plan")
+                return (
+                    self._interrupt_open_turn_plan_from_payload(stored_plan)
+                    if isinstance(stored_plan, Mapping)
+                    else plan
+                )
         await self._record_event(
             self._make_event(
                 task_id=task.task_id,
@@ -4767,6 +5351,9 @@ class ApiRuntime(
                     "interrupt_id": interrupt.interrupt_id,
                     "slot_collection_id": collection.collection_id,
                     "client_request_id": client_request_id,
+                    "source_message_id": source_message_id,
+                    "request_fingerprint": request_fingerprint,
+                    "plan": self._interrupt_open_turn_plan_payload(plan),
                     "part_kinds": [part.kind for part in plan.parts],
                     "confidence": plan.confidence,
                     "fallback": plan.fallback,
@@ -4774,24 +5361,117 @@ class ApiRuntime(
                 },
             )
         )
+        return plan
 
-    async def _save_v2_interrupt_user_message(
+    async def _load_v2_interrupt_turn_plan_receipt(
         self,
         *,
-        task: Task,
-        raw_answer: Mapping[str, object],
-        source_message_id: str | None,
-    ) -> Message:
-        message = Message(
-            message_id=source_message_id or self._make_id("msg"),
-            conversation_id=task.conversation_id,
-            role=MessageRole.USER,
-            content=self._format_v2_answer_message(raw_answer) or self._v2_answer_text(raw_answer),
-            task_id=task.task_id,
-            created_at=self._utcnow_naive(),
+        task_id: str,
+        interrupt_id: str,
+        client_request_id: str,
+        source_message_id: str,
+        request_fingerprint: str,
+    ) -> InterruptOpenTurnPlan | None:
+        events = await self.storage.list_events_for_task_filtered(
+            task_id,
+            event_types=("task.interrupt_turn_planned",),
         )
-        await self.storage.save_message(message)
-        return message
+        for event in reversed(events):
+            if (
+                event.event_type != "task.interrupt_turn_planned"
+                or str(event.payload.get("interrupt_id") or "") != interrupt_id
+                or str(event.payload.get("client_request_id") or "") != client_request_id
+            ):
+                continue
+            if "source_message_id" not in event.payload or "request_fingerprint" not in event.payload:
+                continue
+            if (
+                str(event.payload.get("source_message_id") or "") != source_message_id
+                or str(event.payload.get("request_fingerprint") or "") != request_fingerprint
+            ):
+                raise MessageIdentityConflictError()
+            stored_plan = event.payload.get("plan")
+            if not isinstance(stored_plan, Mapping):
+                return None
+            return self._interrupt_open_turn_plan_from_payload(stored_plan)
+        return None
+
+    @staticmethod
+    def _interrupt_open_turn_plan_payload(
+        plan: InterruptOpenTurnPlan,
+    ) -> dict[str, object]:
+        return {
+            "parts": [
+                {
+                    "part_id": part.part_id,
+                    "kind": part.kind,
+                    "text": part.text,
+                    "target_slots": list(part.target_slots),
+                    "target_schema_id": part.target_schema_id,
+                    "reuse_decision": part.reuse_decision,
+                    "execution_confirmation": part.execution_confirmation,
+                    "execution_confirmation_confidence": part.execution_confirmation_confidence,
+                    "uses_uploads": part.uses_uploads,
+                    "confidence": part.confidence,
+                    "reason": part.reason,
+                    "blocks_resume": part.blocks_resume,
+                    "block_reason": part.block_reason,
+                    "assistant_message": part.assistant_message,
+                }
+                for part in plan.parts
+            ],
+            "confidence": plan.confidence,
+            "reason": plan.reason,
+            "fallback": plan.fallback,
+            "fallback_reason": plan.fallback_reason,
+        }
+
+    @staticmethod
+    def _interrupt_open_turn_plan_from_payload(
+        payload: Mapping[str, object],
+    ) -> InterruptOpenTurnPlan:
+        raw_parts = payload.get("parts")
+        if not isinstance(raw_parts, list):
+            raise RuntimeError("interrupt_turn_plan_receipt_invalid")
+        parts: list[InterruptOpenTurnPart] = []
+        try:
+            for raw_part in raw_parts:
+                if not isinstance(raw_part, Mapping):
+                    raise TypeError
+                raw_target_slots = raw_part.get("target_slots")
+                if not isinstance(raw_target_slots, list):
+                    raise TypeError
+                parts.append(
+                    InterruptOpenTurnPart(
+                        part_id=str(raw_part["part_id"]),
+                        kind=str(raw_part["kind"]),
+                        text=str(raw_part.get("text") or ""),
+                        target_slots=tuple(str(item) for item in raw_target_slots),
+                        target_schema_id=(
+                            None
+                            if raw_part.get("target_schema_id") is None
+                            else str(raw_part["target_schema_id"])
+                        ),
+                        reuse_decision=str(raw_part.get("reuse_decision") or "unspecified"),
+                        execution_confirmation=bool(raw_part.get("execution_confirmation")),
+                        execution_confirmation_confidence=float(raw_part.get("execution_confirmation_confidence") or 0.0),
+                        uses_uploads=bool(raw_part.get("uses_uploads")),
+                        confidence=float(raw_part.get("confidence") or 0.0),
+                        reason=str(raw_part.get("reason") or ""),
+                        blocks_resume=bool(raw_part.get("blocks_resume")),
+                        block_reason=str(raw_part.get("block_reason") or ""),
+                        assistant_message=str(raw_part.get("assistant_message") or ""),
+                    )
+                )
+            return InterruptOpenTurnPlan(
+                parts=tuple(parts),
+                confidence=float(payload.get("confidence") or 0.0),
+                reason=str(payload.get("reason") or ""),
+                fallback=bool(payload.get("fallback")),
+                fallback_reason=str(payload.get("fallback_reason") or ""),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("interrupt_turn_plan_receipt_invalid") from exc
 
     @staticmethod
     def _raw_answer_for_interrupt_part(raw_answer: Mapping[str, object], part: InterruptOpenTurnPart) -> dict[str, object]:
@@ -4841,10 +5521,12 @@ class ApiRuntime(
         raw_answer: Mapping[str, object],
         client_request_id: str,
         source_message_id: str,
-        save_user_message: bool,
     ) -> InterruptAnswer:
         answer = InterruptAnswer(
-            interrupt_answer_id=self._make_id("interrupt-answer"),
+            interrupt_answer_id=self._interrupt_answer_id(
+                interrupt.interrupt_id,
+                source_message_id,
+            ),
             interrupt_id=interrupt.interrupt_id,
             answer_payload={"client_request_id": client_request_id, "answer": dict(raw_answer)},
             source_message_id=source_message_id,
@@ -4864,8 +5546,6 @@ class ApiRuntime(
                 interrupt_answer_id=answer.interrupt_answer_id,
                 upload_sheet_selections=self._v2_answer_sheet_selections(raw_answer),
             )
-        if save_user_message:
-            await self._save_v2_interrupt_user_message(task=task, raw_answer=raw_answer, source_message_id=source_message_id)
         return answer
 
     @staticmethod
@@ -4890,18 +5570,30 @@ class ApiRuntime(
         client_request_id: str,
         source_message_id: str,
     ) -> None:
+        answer_payload = {"client_request_id": client_request_id, "answer": dict(raw_answer)}
         existing = await self.storage.list_interrupt_answers(interrupt.interrupt_id)
-        if any(
-            isinstance(answer.answer_payload, Mapping)
-            and str(answer.answer_payload.get("client_request_id") or "").strip() == client_request_id
+        matching_client_answers = [
+            answer
             for answer in existing
-        ):
-            return
+            if isinstance(answer.answer_payload, Mapping)
+            and str(answer.answer_payload.get("client_request_id") or "").strip() == client_request_id
+        ]
+        if matching_client_answers:
+            if any(
+                answer.source_message_id == source_message_id
+                and dict(answer.answer_payload) == answer_payload
+                for answer in matching_client_answers
+            ):
+                return
+            raise MessageIdentityConflictError()
+        answer_key = hashlib.sha256(
+            f"v2-interrupt-answer:{interrupt.interrupt_id}:{client_request_id}".encode("utf-8")
+        ).hexdigest()
         await self.storage.save_interrupt_answer(
             InterruptAnswer(
-                interrupt_answer_id=self._make_id("interrupt-answer"),
+                interrupt_answer_id=f"interrupt-answer:{answer_key}",
                 interrupt_id=interrupt.interrupt_id,
-                answer_payload={"client_request_id": client_request_id, "answer": dict(raw_answer)},
+                answer_payload=answer_payload,
                 source_message_id=source_message_id,
                 accepted=True,
                 created_at=self._utcnow_naive(),
@@ -5054,6 +5746,45 @@ class ApiRuntime(
                 created_at=self._utcnow_naive(),
             )
         )
+
+    async def _v2_substep_receipt(
+        self,
+        collection_id: str,
+        key: str,
+    ) -> Mapping[str, object] | None:
+        event = await self.storage.get_slot_event_by_idempotency_key(collection_id, key)
+        if event is None:
+            return None
+        if event.event_type != "slot.interrupt_substep_completed":
+            raise RuntimeError("interrupt_substep_receipt_invalid")
+        return event.payload
+
+    async def _record_v2_substep_receipt(
+        self,
+        *,
+        collection: SlotCollection,
+        key: str,
+        payload: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        existing = await self._v2_substep_receipt(collection.collection_id, key)
+        if existing is not None:
+            return existing
+        await self.storage.append_slot_event(
+            SlotEvent(
+                slot_event_id=f"{collection.collection_id}:event:substep:{hashlib.sha256(key.encode('utf-8')).hexdigest()}",
+                collection_id=collection.collection_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                conversation_id=collection.conversation_id,
+                event_type="slot.interrupt_substep_completed",
+                round=collection.round,
+                revision=collection.revision,
+                idempotency_key=key,
+                payload=dict(payload),
+                created_at=self._utcnow_naive(),
+            )
+        )
+        return payload
 
     async def _record_v2_interrupt_skill_question_audit(
         self,
@@ -5697,12 +6428,6 @@ class ApiRuntime(
         resume_metadata.update(await self._conversation_file_context_metadata_for_task(task))
         resume_metadata.update(await self._resume_llm_metadata(task, request_metadata))
         resume_metadata.update(self._mcp_task_assignment_metadata(task))
-        resume_capability_id = task.requested_capability_id
-        interrupted_node = await self.storage.get_task_node(interrupt.node_id)
-        if interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
-            resume_capability_id = interrupted_node.capability_id
-        elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
-            resume_capability_id = interrupt.source_agent
         owner_conversation = await self.storage.get_conversation(task.conversation_id)
         if owner_conversation is None:
             raise ValueError(f"Unknown conversation: {task.conversation_id}")
@@ -5722,7 +6447,8 @@ class ApiRuntime(
                     owner_conversation.username,
                     execution_mode=task.mcp_execution_mode,
                 ),
-            )
+            ),
+            await_durable_start=True,
         )
 
     async def _understand_v2_interrupt_turn(
@@ -5945,90 +6671,6 @@ class ApiRuntime(
             reason=str(parsed.get("reason") or ""),
             clarification_answer=str(parsed.get("clarification_answer") or ""),
         )
-
-    async def _record_v2_interrupt_clarification(
-        self,
-        *,
-        task: Task,
-        interrupt: Interrupt,
-        collection: SlotCollection,
-        raw_answer: dict[str, object],
-        client_request_id: str,
-        decision: InterruptTurnDecision,
-        idempotency_key: str,
-        source_message_id: str | None = None,
-    ) -> dict[str, object]:
-        user_message = Message(
-            message_id=source_message_id or self._make_id("msg"),
-            conversation_id=task.conversation_id,
-            role=MessageRole.USER,
-            content=self._format_v2_answer_message(raw_answer) or self._v2_answer_text(raw_answer),
-            task_id=task.task_id,
-            created_at=self._utcnow_naive(),
-        )
-        await self.storage.save_message(user_message)
-        assistant_text = decision.clarification_answer.strip() or await self._generate_v2_interrupt_clarification_answer(
-            task=task,
-            interrupt=interrupt,
-            collection=collection,
-            user_text=self._v2_answer_text(raw_answer),
-            decision=decision,
-        )
-        assistant_message = Message(
-            message_id=self._make_id("msg"),
-            conversation_id=task.conversation_id,
-            role=MessageRole.ASSISTANT,
-            content=assistant_text,
-            task_id=task.task_id,
-            stream_status=INTERRUPT_VISIBLE_STREAM_STATUS,
-            created_at=self._utcnow_naive(),
-        )
-        await self.storage.save_message(assistant_message)
-        await self.storage.append_slot_event(
-            SlotEvent(
-                slot_event_id=f"{collection.collection_id}:event:clarification:{client_request_id}",
-                collection_id=collection.collection_id,
-                task_id=collection.task_id,
-                node_id=collection.node_id,
-                conversation_id=collection.conversation_id,
-                event_type="slot.clarification_answered",
-                round=collection.round,
-                revision=collection.revision,
-                idempotency_key=idempotency_key,
-                payload={
-                    "interrupt_id": interrupt.interrupt_id,
-                    "client_request_id": client_request_id,
-                    "intent": decision.intent,
-                    "confidence": decision.confidence,
-                    "reason": decision.reason,
-                    "assistant_message": assistant_text,
-                    "source_message_id": user_message.message_id,
-                },
-                created_at=self._utcnow_naive(),
-            )
-        )
-        await self._record_event(
-            self._make_event(
-                task_id=task.task_id,
-                conversation_id=task.conversation_id,
-                node_id=interrupt.node_id,
-                event_type="task.interrupt_clarification_answered",
-                payload={
-                    "interrupt_id": interrupt.interrupt_id,
-                    "slot_collection_id": collection.collection_id,
-                    "client_request_id": client_request_id,
-                },
-            )
-        )
-        return {
-            "interrupt_id": interrupt.interrupt_id,
-            "status": str(interrupt.status),
-            "node_id": interrupt.node_id,
-            "answer_payload": {"client_request_id": client_request_id},
-            "action": "clarification_answer",
-            "assistant_message": assistant_text,
-            "source_message_id": user_message.message_id,
-        }
 
     async def _generate_v2_interrupt_clarification_answer(
         self,
