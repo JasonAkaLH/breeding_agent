@@ -1,6 +1,6 @@
 # P0 数据流硬伤手术式修复设计
 
-**状态：** 方案 A 已获用户批准；Checkpoint B 已实施，A 因 SQL/Sidecar 双 authority 假设不成立暂停，C 待实施
+**状态：** 方案 A 已获用户批准；Checkpoint B、C 已实施，A 因 SQL/Sidecar 双 authority 假设不成立暂停
 
 **设计基线：** `main` / `2ad43a818bb5148d8965c65d12bf7`
 

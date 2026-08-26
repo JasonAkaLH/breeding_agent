@@ -26,6 +26,7 @@ from src.integrations.mcp.protocol import MCP_PROTOCOL_VERSION_2026_07_28
 from src.integrations.mcp.recovery_worker import (
     MCPContinuationAdmissionResult,
     MCPRemoteTaskProcessedResult,
+    MCPRemoteTaskPollResult,
     MCPRemoteTaskRecoveryError,
     MCPRemoteTaskRecoveryWorker,
     MCPRemoteTaskTerminalMetricSample,
@@ -799,6 +800,59 @@ class UserMCPRemoteTaskRecoveryWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(call.status, "failed")
         self.assertEqual(call.safe_error_code, "mcp_tool_error")
+
+    async def test_non_completed_terminal_payload_cannot_reach_result_processor(
+        self,
+    ) -> None:
+        binding = self._binding("invalid-terminal-result")
+        await self._reserve_call(binding)
+        await self.storage.save_mcp_remote_task_binding(binding)
+        processed: list[str] = []
+        sealed: list[str] = []
+
+        class InvalidHandler:
+            protocol_version = MCP_PROTOCOL_VERSION_2026_07_28
+
+            async def poll(self, _client, _binding):
+                return MCPRemoteTaskPollResult(
+                    status="failed",
+                    terminal=True,
+                    final_result={"isError": False, "content": []},
+                    result_source="tasks_get",
+                )
+
+        async def process(_binding, _result, _source):
+            processed.append("processed")
+            return MCPRemoteTaskProcessedResult(
+                "completed", None, "result:must-not-exist"
+            )
+
+        async def seal(_binding, _status, _result_ref, _safe_error_code):
+            sealed.append("sealed")
+
+        worker = MCPRemoteTaskRecoveryWorker(
+            storage=self.storage,
+            client_factory=lambda _binding: object(),
+            instance_id="worker-invalid-terminal-result",
+            handlers={MCP_PROTOCOL_VERSION_2026_07_28: InvalidHandler()},
+            result_processor=process,
+            terminal_sealer=seal,
+            now_fn=lambda: self.now,
+            error_backoff_seconds=17,
+        )
+
+        self.assertEqual(await worker.run_once(), 1)
+        self.assertEqual(processed, [])
+        self.assertEqual(sealed, [])
+        stored = await self._get(binding)
+        self.assertEqual(stored.last_status, "working")
+        self.assertEqual(stored.next_poll_at, self.now + timedelta(seconds=17))
+        call = await self.storage.get_mcp_call_record(
+            binding.owner_user_id, binding.task_id, binding.call_ref
+        )
+        self.assertEqual(call.status, "active")
+        self.assertIsNone(call.result_ref)
+
     async def test_terminal_metrics_follow_successful_atomic_convergence(self) -> None:
         expected = {
             "completed": (

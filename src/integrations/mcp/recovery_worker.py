@@ -144,7 +144,7 @@ class MCP2025RemoteTaskProtocolHandler:
         if not isinstance(state, MCP2025TaskState):
             raise MCPRemoteTaskRecoveryError("mcp_remote_task_response_invalid")
         final_result = None
-        if state.status in {"completed", "failed"}:
+        if state.status == "completed":
             task_result = await client.tasks_result(
                 binding.safe_remote_task_ref,
                 recovery_context=context,
@@ -596,6 +596,10 @@ class MCPRemoteTaskRecoveryWorker:
                 )
                 result_ref = None
                 result_receipt_id = None
+                if call_status != "completed" and result.final_result is not None:
+                    raise MCPRemoteTaskRecoveryError(
+                        "mcp_remote_task_terminal_result_invalid"
+                    )
                 if result.final_result is not None and self._result_processor is not None:
                     if result.result_source is None:
                         raise MCPRemoteTaskRecoveryError(

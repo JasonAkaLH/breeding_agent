@@ -480,7 +480,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "content": [{"type": "text", "text": "final-2025"}],
                         "structuredContent": {"status": "complete"},
-                        "isError": status == "failed",
+                        "isError": False,
                         "_meta": {
                             "io.modelcontextprotocol/related-task": {
                                 "taskId": raw_task_id
@@ -517,7 +517,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 methods,
                 ["tasks/get", "tasks/result"]
-                if status in {"completed", "failed"}
+                if status == "completed"
                 else ["tasks/get"],
             )
             self.assertNotIn("tools/call", methods)
