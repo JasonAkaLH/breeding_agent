@@ -1,6 +1,8 @@
 # P0 数据流硬伤手术式修复设计
 
-**状态：** 方案 A 已获用户批准；Checkpoint B、C 已实施，A 因 SQL/Sidecar 双 authority 假设不成立暂停
+**状态：** 方案 A 已获用户批准；Checkpoint B、C 已实施；A 的原 SQL-only 方案因双 authority 失效，现已由获批方案 1 的 Sidecar Submission Admission 书面规格接管并等待确认
+
+**Checkpoint A 当前 authority：** `2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`；该文档仅替代本文件的 A 设计，B/C 继续以本文件和既有实现为准
 
 **设计基线：** `main` / `2ad43a818bb5148d8965c65d12bf7`
 
@@ -44,7 +46,7 @@ P0～P8 渐进式架构清理已经结束。本轮不是继续清理架构，也
 - Rust Sidecar Agent enforce adapter 未完整实现的问题。
 - MCP presence failure 丢失取消责任的问题。
 - parallel wave 扩展、调度策略重写、通用幂等平台、全局 consistency/recovery 抽象。
-- 新数据库表、唯一索引、数据迁移、协议版本、前端功能、部署或 `prod` 变更。
+- 除后续获批的 Checkpoint A Sidecar admission 最小 schema/proto/migration evidence 外，新数据库平台、前端功能、部署或 `prod` 变更。
 - P0～P8 清理范围内已经冻结的其他 deferred behavior。
 
 上述三项 P1 只保留为独立后续候选，不进入本设计、实施计划或验收数字。
@@ -114,7 +116,7 @@ P0～P8 渐进式架构清理已经结束。本轮不是继续清理架构，也
 
 - SQLite：复用 `SQLiteStorage._run` 的 `BEGIN IMMEDIATE`，所有检查和写入必须位于同一个 callback/session 内；不得在 `_run` 外预查后再保存。
 - PostgreSQL：现有 Conversation 使用 `SELECT ... FOR UPDATE`；Conversation 不存在时先用 conflict-safe insert 建立候选行，再 `FOR UPDATE` 读取和校验。并发插入由 Conversation/Message 主键约束串行化，唯一约束错误必须转换为上述 closed result，不能暴露数据库错误。
-- Runtime Sidecar：当前 composition 已确认 Conversation/Message/Task 准入由 `SQLiteStorage` 或 `PostgreSQLStorage` 承担，Sidecar client 不接管该写路径；本轮不新增 Sidecar RPC 或 proto。
+- Runtime Sidecar：本条是原 SQL-only 方案的实施前假设，已由 4.5 的双 authority 证据否定；当前 A 以获批的 Sidecar Submission Admission 规格为准，不再执行本段算法。
 
 不同会话并发使用相同 Message ID 时，不要求全局粗锁：数据库 Message 主键决定唯一赢家，失败事务完整回滚并返回 `message_id_conflict`。
 
@@ -152,12 +154,12 @@ Runtime 在构造 Message/Task 后只调用一次原子准入：
 
 给现有 `SubmitTask` 增加“每 Conversation 只允许一个 active Task”的内部检查可以关闭 TOCTOU，但仍不能关闭跨存储半提交，所以不能作为 Checkpoint A 完成证据。进程锁、PostgreSQL advisory lock、延长超时或 startup 猜测清理同样不构成原子提交。
 
-Checkpoint A 因此按本设计第 9 节的停止条件暂停。要恢复实施，必须先获得一个新的 authority 设计授权，至少允许以下二者之一：
+Checkpoint A 因此曾按本设计第 9 节的停止条件暂停。用户随后明确授权必要 schema/proto 并选择方案 1；恢复后的唯一书面 authority 是 `2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`。该规格采用以下第一种路径：
 
 1. 把 Conversation/Message/admission 与 Task 移到一个共同事务 authority；或
 2. 增加 durable prepared admission/outbox 及其明确的 commit/abort/recovery 状态。
 
-在获得该授权前，不允许只为 `off/shadow` 实现、在 `enforce` 降级、暗写 SQL Task shadow、引入进程锁或提交带半提交窗口的 saga；这些做法都会缩小原目标或制造新的硬伤。
+授权不改变原停止条件：仍不允许只为 `off/shadow` 实现、在 `enforce` 降级、暗写 SQL Task shadow、引入进程锁或提交带半提交窗口的 saga；这些做法都会缩小原目标或制造新的硬伤。
 
 ## 5. Checkpoint B：heartbeat token 与 capability 提交线性化
 
@@ -282,7 +284,7 @@ SQLite 测试必须使用两个独立 session/并发任务；PostgreSQL 同义�
 - MCP remote task recovery handler/worker：terminal 单向约束；
 - 对应分层测试、文档索引与变更日志。
 
-无 schema/proto/frontend/dependency 变更。每个检查点单独提交，可按 C → B → A 的逆序回滚；回滚某一检查点不要求回滚其他检查点。任何实现中发现必须改 schema、Sidecar proto、公开客户端 DTO 或外部 MCP 服务，均视为设计假设失效，停止该检查点并回到设计审查，不能顺手扩范围。
+Checkpoint B/C 无 schema/proto/frontend/dependency 变更。Checkpoint A 的最小 Sidecar schema/proto/migration evidence 例外以其后续获批书面规格为唯一边界；公开客户端 DTO、Frontend、外部 MCP 服务、部署与 `prod` 仍禁止扩入。每个检查点单独提交并独立回滚。
 
 ## 10. 自审结论
 
