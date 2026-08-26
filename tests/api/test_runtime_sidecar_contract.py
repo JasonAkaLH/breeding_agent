@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from src.core.enums import TaskStatus
 from src.core.models import EventRecord, Task
@@ -101,6 +101,10 @@ class _FailingDispatcherSidecarClient(_RecordingDispatcherSidecarClient):
 
 
 class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.durable_events: dict[str, tuple[str, str, str, bytes]] = {}
+
     def append_event(
         self,
         *,
@@ -110,6 +114,13 @@ class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
         payload_json: bytes,
         idempotency_key: str,
     ) -> dict[str, object]:
+        identity = (conversation_id, task_id, event_type, payload_json)
+        existing = self.durable_events.get(idempotency_key)
+        if existing is not None and existing != identity:
+            raise RuntimeError(
+                "runtime_store_idempotency_conflict: event append payload differs"
+            )
+        self.durable_events.setdefault(idempotency_key, identity)
         self.calls.append(
             (
                 "event_append",
@@ -127,11 +138,15 @@ class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
             "cursor": {
                 "conversation_id": conversation_id,
                 "created_at_ms": 1,
-                "sequence": 1,
+                "sequence": list(self.durable_events).index(idempotency_key) + 1,
                 "task_id": task_id,
             },
+            "duplicate": existing is not None,
             "error": None,
         }
+
+    def append_event_exact(self, **kwargs) -> dict[str, object]:
+        return self.append_event(**kwargs)
 
 
 class RuntimeSidecarContractAPITest(APITestCase):
@@ -385,6 +400,89 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(shadow_records[-1]["payload"]["legacy_status"], "ok")
         self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "ok")
         self.assertNotIn("do-not-log", json.dumps(shadow_records[-1], ensure_ascii=False))
+
+    async def test_event_enforce_retries_exact_append_without_sql_event_loader(self) -> None:
+        sidecar = _RecordingRuntimeStoreSidecarClient()
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "enforce"}):
+            await self.reconfigure_runtime(
+                runtime_sidecar_client=sidecar,
+                enable_conversation_memory=False,
+            )
+            self.assertIsNone(self.runtime.agent_loop_orchestrator._load_event)  # noqa: SLF001
+            task = Task(
+                task_id="task-event-enforce",
+                conversation_id="conv-event-enforce",
+                root_message_id="msg-event-enforce",
+                status=TaskStatus.ACCEPTED,
+            )
+            await self.runtime.storage.save_task(task)
+            request = AgentExecutionRequest(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                root_message_id=task.root_message_id,
+                user_message="run",
+                owner_scope="owner:test",
+            )
+            publish = AsyncMock(wraps=self.runtime.event_broker.publish)
+            with patch.object(self.runtime.event_broker, "publish", publish):
+                first = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+                second = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+
+                started_id = f"evt-agent-run-started:{first.run.run_id}"
+                started = sidecar.durable_events[started_id]
+                sidecar.durable_events[started_id] = (
+                    started[0],
+                    started[1],
+                    started[2],
+                    b'{"routing_mode":"changed"}',
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_idempotency_conflict",
+                ):
+                    await self.runtime.agent_loop_orchestrator.initialize_run(request)
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(publish.await_count, 2)
+            self.assertEqual(len(sidecar.durable_events), 2)
+            self.assertEqual(
+                {call[1]["idempotency_key"] for call in sidecar.calls if call[0] == "event_append"},
+                set(sidecar.durable_events),
+            )
+
+            self.assertEqual(len(sidecar.durable_events), 2)
+
+    async def test_initialization_event_restart_does_not_republish_sql_exact_replay(self) -> None:
+        task = Task(
+            task_id="task-event-restart",
+            conversation_id="conv-event-restart",
+            root_message_id="msg-event-restart",
+            status=TaskStatus.ACCEPTED,
+        )
+        request = AgentExecutionRequest(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            root_message_id=task.root_message_id,
+            user_message="run",
+            owner_scope="owner:test",
+        )
+        await self.runtime.storage.save_task(task)
+        first_publish = AsyncMock(wraps=self.runtime.event_broker.publish)
+        with patch.object(self.runtime.event_broker, "publish", first_publish):
+            first = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+        self.assertEqual(first_publish.await_count, 2)
+
+        await self.reconfigure_runtime(enable_conversation_memory=False)
+        restart_publish = AsyncMock(wraps=self.runtime.event_broker.publish)
+        with patch.object(self.runtime.event_broker, "publish", restart_publish):
+            replay = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+
+        self.assertEqual(replay.run, first.run)
+        self.assertEqual(restart_publish.await_count, 0)
+        self.assertEqual(
+            len(await self.runtime.storage.list_events_for_task(task.task_id)),
+            2,
+        )
 
     async def test_dispatcher_shadow_records_bundle_pin_release_audit_after_legacy_revision(self) -> None:
         sidecar = _RecordingDispatcherSidecarClient()

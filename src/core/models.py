@@ -1304,6 +1304,12 @@ class SubmissionHandoffState(StrEnum):
     HANDED_OFF = "handed_off"
 
 
+class SubmissionPreparationReceiptComponent(StrEnum):
+    ROUTE_DECISION = "route_decision"
+    MEMORY_CONTEXT = "memory_context"
+    SELECTOR_DECISION = "selector_decision"
+
+
 class SubmissionAuthorityState(StrEnum):
     UNINITIALIZED = "uninitialized"
     FINALIZED = "finalized"
@@ -1410,6 +1416,8 @@ class SubmissionClaimResult:
     found: bool
     authority_state: SubmissionAuthorityState
     finalization_receipt_sha256: str | None
+    pending_count: int = 0
+    earliest_claim_expires_at: datetime | None = None
     record: SubmissionRecoveryRecord | None = None
     handle: SubmissionAdmissionHandle | None = field(default=None, repr=False)
 
@@ -1453,6 +1461,21 @@ class SubmissionPreparationRecord:
     handoff_state: SubmissionHandoffState
     handoff_kind: str | None = None
     handoff_identity: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationReceipt:
+    task_id: str
+    conversation_id: str
+    route_decision: bytes | None
+    route_decision_sha256: str | None
+    memory_context: bytes | None
+    memory_context_sha256: str | None
+    selector_decision: bytes | None
+    selector_decision_sha256: str | None
+    receipt_sha256: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(slots=True, frozen=True)

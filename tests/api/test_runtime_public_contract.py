@@ -93,6 +93,8 @@ EXPECTED_SIGNATURES = {
             ("mcp_cp7_verifier_authorized", "KEYWORD_ONLY", "bool", "False"),
             ("mcp_cp7_maintenance_authorization", "KEYWORD_ONLY", "object | None", "None"),
             ("mcp_cp7_maintenance_authorizer", "KEYWORD_ONLY", "Callable[[object], bool] | None", "None"),
+            ("submission_admission_coordinator", "KEYWORD_ONLY", "SubmissionAdmissionCoordinator | None", "None"),
+            ("prepared_agent_recovery_loader", "KEYWORD_ONLY", "PreparedAgentRecoveryLoader | None", "None"),
         ],
         "return": "None",
     },

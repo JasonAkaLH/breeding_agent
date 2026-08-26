@@ -871,6 +871,26 @@ impl RuntimeSidecarSqliteAdapter {
         created_at_ms: i64,
         idempotency_key: &str,
     ) -> Result<EventCursor, RuntimeSidecarError> {
+        self.append_event_exact(
+            conversation_id,
+            task_id,
+            event_type,
+            payload_json,
+            created_at_ms,
+            idempotency_key,
+        )
+        .map(|(cursor, _duplicate)| cursor)
+    }
+
+    pub fn append_event_exact(
+        &self,
+        conversation_id: &str,
+        task_id: &str,
+        event_type: &str,
+        payload_json: Vec<u8>,
+        created_at_ms: i64,
+        idempotency_key: &str,
+    ) -> Result<(EventCursor, bool), RuntimeSidecarError> {
         if payload_json.len() > maf_event_log::MAX_EVENT_PAYLOAD_BYTES {
             return Err(RuntimeSidecarError::new(
                 RuntimeSidecarErrorCode::EventLogPayloadTooLarge,
@@ -882,11 +902,21 @@ impl RuntimeSidecarSqliteAdapter {
         let transaction = connection.transaction().map_err(|error| {
             sqlite_error("begin runtime event append transaction failed", error)
         })?;
-        if let Some(cursor) = event_cursor_for_idempotency(&transaction, &idempotency_key)? {
+        if let Some(existing) = event_for_idempotency(&transaction, &idempotency_key)? {
+            if existing.cursor.conversation_id != conversation_id
+                || existing.cursor.task_id != task_id
+                || existing.event_type != event_type
+                || existing.payload_json != payload_json
+                || existing.cursor.created_at_ms != created_at_ms
+            {
+                return Err(idempotency_conflict(
+                    "event append idempotency payload differs",
+                ));
+            }
             transaction
                 .commit()
                 .map_err(|error| sqlite_error("commit idempotent event append failed", error))?;
-            return Ok(cursor);
+            return Ok((existing.cursor, true));
         }
 
         let next_sequence: i64 = transaction
@@ -929,12 +959,15 @@ impl RuntimeSidecarSqliteAdapter {
             .commit()
             .map_err(|error| sqlite_error("commit runtime event append failed", error))?;
 
-        Ok(EventCursor {
-            conversation_id: conversation_id.to_owned(),
-            task_id: task_id.to_owned(),
-            sequence: next_sequence as u64,
-            created_at_ms,
-        })
+        Ok((
+            EventCursor {
+                conversation_id: conversation_id.to_owned(),
+                task_id: task_id.to_owned(),
+                sequence: next_sequence as u64,
+                created_at_ms,
+            },
+            false,
+        ))
     }
 
     pub fn replay_events(
@@ -1710,19 +1743,34 @@ impl RuntimeSidecarSqliteAdapter {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| sqlite_error("begin pending submission claim failed", error))?;
         let receipt = require_finalized_submission_authority(&transaction)?;
+        let pending_count = transaction
+            .query_row(
+                r"SELECT COUNT(*) FROM submission_admissions
+                  WHERE admission_state='open' AND handoff_state='pending'
+                    AND (?1 IS NULL OR (created_at_ms > ?1 OR (created_at_ms = ?1 AND message_id > ?2)))",
+                rusqlite::params![
+                    request.after_created_at_ms,
+                    request.after_message_id.as_deref()
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| sqlite_error("count pending submissions failed", error))?
+            as u64;
         let candidate = transaction
             .query_row(
-                r"SELECT message_id FROM submission_admissions
+                r"SELECT message_id, claim_expires_at_ms FROM submission_admissions
                   WHERE admission_state='open' AND handoff_state='pending'
-                    AND (claim_token IS NULL OR claim_expires_at_ms <= ?1)
-                    AND (?2 IS NULL OR (created_at_ms > ?2 OR (created_at_ms = ?2 AND message_id > ?3)))
+                    AND (?1 IS NULL OR (created_at_ms > ?1 OR (created_at_ms = ?1 AND message_id > ?2)))
                   ORDER BY created_at_ms, message_id LIMIT 1",
-                rusqlite::params![request.now_ms, request.after_created_at_ms, request.after_message_id],
-                |row| row.get::<_, String>(0),
+                rusqlite::params![
+                    request.after_created_at_ms,
+                    request.after_message_id.as_deref()
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .optional()
             .map_err(|error| sqlite_error("scan pending submission failed", error))?;
-        let Some(message_id) = candidate else {
+        let Some((message_id, claim_expires_at_ms)) = candidate else {
             transaction
                 .commit()
                 .map_err(|error| sqlite_error("commit empty submission claim failed", error))?;
@@ -1732,9 +1780,26 @@ impl RuntimeSidecarSqliteAdapter {
                 claim: None,
                 authority_state: "finalized".to_owned(),
                 finalization_receipt_sha256: Some(receipt),
+                pending_count: 0,
+                earliest_claim_expires_at_ms: None,
                 error: None,
             });
         };
+        if claim_expires_at_ms.is_some_and(|expires_at_ms| expires_at_ms > request.now_ms) {
+            transaction
+                .commit()
+                .map_err(|error| sqlite_error("commit blocked submission claim failed", error))?;
+            return Ok(ClaimPendingSubmissionResponse {
+                found: false,
+                admission: None,
+                claim: None,
+                authority_state: "finalized".to_owned(),
+                finalization_receipt_sha256: Some(receipt),
+                pending_count,
+                earliest_claim_expires_at_ms: claim_expires_at_ms,
+                error: None,
+            });
+        }
         let claim = new_submission_claim(
             &message_id,
             &request.workflow_owner,
@@ -1772,6 +1837,8 @@ impl RuntimeSidecarSqliteAdapter {
             claim: Some(claim),
             authority_state: "finalized".to_owned(),
             finalization_receipt_sha256: Some(receipt),
+            pending_count,
+            earliest_claim_expires_at_ms: None,
             error: None,
         })
     }
@@ -4299,24 +4366,34 @@ fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRecord
     })
 }
 
-fn event_cursor_for_idempotency(
+struct EventAppendReceipt {
+    cursor: EventCursor,
+    event_type: String,
+    payload_json: Vec<u8>,
+}
+
+fn event_for_idempotency(
     connection: &Connection,
     idempotency_key: &str,
-) -> Result<Option<EventCursor>, RuntimeSidecarError> {
+) -> Result<Option<EventAppendReceipt>, RuntimeSidecarError> {
     connection
         .query_row(
             r"
-            SELECT conversation_id, task_id, sequence, created_at_ms
+            SELECT conversation_id, task_id, sequence, event_type, payload_json, created_at_ms
             FROM runtime_events
             WHERE idempotency_key = ?1
             ",
             rusqlite::params![idempotency_key],
             |row| {
-                Ok(EventCursor {
-                    conversation_id: row.get(0)?,
-                    task_id: row.get(1)?,
-                    sequence: row.get::<_, i64>(2)? as u64,
-                    created_at_ms: row.get(3)?,
+                Ok(EventAppendReceipt {
+                    cursor: EventCursor {
+                        conversation_id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        sequence: row.get::<_, i64>(2)? as u64,
+                        created_at_ms: row.get(5)?,
+                    },
+                    event_type: row.get(3)?,
+                    payload_json: row.get(4)?,
                 })
             },
         )

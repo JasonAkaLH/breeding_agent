@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 from unittest.mock import patch
@@ -39,6 +39,7 @@ class FakeStorage:
         self.events_by_task = dict(events_by_task or {})
         self.latest_summary = latest_summary
         self.saved_summaries = []
+        self.materialized_summaries = {}
 
     async def get_conversation(self, conversation_id: str):
         return self.conversation if self.conversation.conversation_id == conversation_id else None
@@ -93,6 +94,15 @@ class FakeStorage:
     async def save_conversation_memory_summary(self, summary):
         self.saved_summaries.append(summary)
         return summary
+
+    async def materialize_conversation_memory_summary_exact(self, summary):
+        existing = self.materialized_summaries.get(summary.summary_id)
+        if existing is None:
+            self.materialized_summaries[summary.summary_id] = summary
+            return summary
+        if existing != summary:
+            raise RuntimeError("conversation_memory_summary_materialization_conflict")
+        return existing
 
 
 class ConversationMemorySafeAllowlistTest(unittest.TestCase):
@@ -584,6 +594,148 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.saved_summaries[0].model_metadata_safe["prompt_profile"]["template_id"], "conversation_memory_summary")
         self.assertEqual(context.to_audit_payload()["summary_prompt_profile"]["template_id"], "conversation_memory_summary")
         self.assertIn("不得引入新事实", calls[0]["prompt"])
+
+    async def test_prepare_is_pure_and_exact_materialization_is_single_assignment(self) -> None:
+        async def summarizer(_prompt: str, **_kwargs) -> str:
+            return "忠实摘要：用户查询龙粳33。"
+
+        source_time = datetime(2026, 5, 8, 9, 0, 0)
+        messages: list[Message] = []
+        tasks: list[Task] = []
+        for index in range(4):
+            task_id = f"task-prepare-{index}"
+            messages.extend(
+                (
+                    Message(
+                        f"msg-prepare-{index}",
+                        "conv-prepare",
+                        MessageRole.USER,
+                        "查询龙粳33。" + ("长上下文" * 600),
+                        task_id=task_id,
+                        created_at=source_time,
+                    ),
+                    Message(
+                        f"{task_id}:assistant",
+                        "conv-prepare",
+                        MessageRole.ASSISTANT,
+                        "答复。",
+                        task_id=task_id,
+                        created_at=source_time,
+                    ),
+                )
+            )
+            tasks.append(
+                Task(
+                    task_id,
+                    "conv-prepare",
+                    root_message_id=f"msg-prepare-{index}",
+                    status=TaskStatus.COMPLETED,
+                    created_at=source_time,
+                )
+            )
+        messages.append(
+            Message(
+                "msg-current",
+                "conv-prepare",
+                MessageRole.USER,
+                "继续",
+                task_id="task-current",
+                created_at=source_time,
+            )
+        )
+        tasks.append(
+            Task(
+                "task-current",
+                "conv-prepare",
+                root_message_id="msg-current",
+                status=TaskStatus.ACCEPTED,
+                created_at=source_time,
+            )
+        )
+        storage = FakeStorage(
+            conversation=Conversation("conv-prepare", "alice"),
+            messages=messages,
+            tasks=tasks,
+        )
+        request = MemoryRequest("task-current", "conv-prepare", "msg-current", "继续")
+        builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000, recent_turns=1),
+            summary_generator=summarizer,
+            now_fn=lambda: datetime(2026, 5, 8, 10, 0, 0),
+        )
+
+        preparation = await builder.prepare(request, username="alice")
+
+        self.assertEqual(preparation.context.history_summary, "忠实摘要：用户查询龙粳33。")
+        self.assertIsNotNone(preparation.summary_write)
+        self.assertEqual(storage.saved_summaries, [])
+        self.assertEqual(storage.materialized_summaries, {})
+
+        first_context = await builder.materialize(preparation)
+        replay_context = await builder.materialize(preparation)
+
+        self.assertEqual(first_context, preparation.context)
+        self.assertEqual(replay_context, preparation.context)
+        self.assertEqual(list(storage.materialized_summaries), [preparation.summary_write.summary_id])
+
+        takeover_builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000, recent_turns=1),
+            summary_generator=summarizer,
+            now_fn=lambda: datetime(2026, 5, 8, 10, 0, 1),
+        )
+        takeover = await takeover_builder.prepare(request, username="alice")
+        self.assertEqual(takeover.summary_write.summary_id, preparation.summary_write.summary_id)
+        self.assertNotEqual(takeover.summary_write, preparation.summary_write)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "conversation_memory_summary_materialization_conflict",
+        ):
+            await takeover_builder.materialize(takeover)
+
+        drifted = replace(
+            preparation,
+            summary_write=replace(preparation.summary_write, summary_text="发生漂移的摘要"),
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "conversation_memory_summary_materialization_conflict",
+        ):
+            await builder.materialize(drifted)
+
+        await builder.build(request, username="alice")
+        await builder.build(request, username="alice")
+        self.assertEqual(len(storage.saved_summaries), 2)
+        self.assertNotEqual(
+            storage.saved_summaries[0].summary_id,
+            storage.saved_summaries[1].summary_id,
+        )
+
+    async def test_prepare_preserves_large_prompt_payload_without_agent_item_limit(self) -> None:
+        current_user_message = "逐字保留🙂" * 30_000
+        storage = FakeStorage(conversation=Conversation("conv-large-memory", "alice"))
+        builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000),
+        )
+
+        preparation = await builder.prepare(
+            MemoryRequest(
+                "task-large-memory",
+                "conv-large-memory",
+                "msg-large-memory",
+                current_user_message,
+            ),
+            username="alice",
+        )
+
+        prompt_payload = preparation.context.to_prompt_payload()
+        self.assertGreater(len(current_user_message.encode("utf-8")), 131_072)
+        self.assertEqual(prompt_payload["current_user_message"], current_user_message)
+        self.assertEqual(storage.saved_summaries, [])
+        self.assertEqual(storage.materialized_summaries, {})
 
     async def test_builder_summary_failure_keeps_prompt_profile_in_audit_payload(self) -> None:
         async def summarizer(_prompt: str, **_kwargs) -> str:

@@ -100,6 +100,7 @@ class _RecordingRuntimeSidecarClient:
         self.tasks: dict[str, dict[str, object]] = {}
         self.artifacts: dict[str, dict[str, object]] = {}
         self.nodes: dict[str, dict[str, object]] = {}
+        self.events: dict[str, tuple[str, str, str, bytes]] = {}
 
     async def submit_task(
         self,
@@ -324,6 +325,13 @@ class _RecordingRuntimeSidecarClient:
         payload_json: bytes,
         idempotency_key: str,
     ) -> dict[str, object]:
+        identity = (conversation_id, task_id, event_type, payload_json)
+        existing = self.events.get(idempotency_key)
+        if existing is not None and existing != identity:
+            raise RuntimeError(
+                "runtime_store_idempotency_conflict: event append payload differs"
+            )
+        self.events.setdefault(idempotency_key, identity)
         self.calls.append(
             (
                 "event_append",
@@ -343,8 +351,12 @@ class _RecordingRuntimeSidecarClient:
                 "sequence": 1,
                 "created_at_ms": 1,
             },
+            "duplicate": existing is not None,
             "error": None,
         }
+
+    async def append_event_exact(self, **kwargs) -> dict[str, object]:
+        return await self.append_event(**kwargs)
 
     async def write_cancellation_token(
         self,
@@ -584,11 +596,11 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertFalse(conflict["retriable"])
         self.assertEqual(
             contract["schema_hash"],
-            "maf_runtime_v1_schema_20260826_submission_admission_a2",
+            "maf_runtime_v1_schema_20260826_event_append_exact_a4",
         )
         self.assertEqual(
             contract["artifact_policy"]["expected_proto_hash"],
-            "maf_runtime_proto_v1_20260826_submission_admission_a1",
+            "maf_runtime_proto_v1_20260826_event_append_exact_a4",
         )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:
@@ -661,6 +673,96 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             ],
         )
         self.assertEqual(asyncio.run(SQLiteStorage(self.session_factory).list_event_page_for_task("task-sidecar")), [])
+
+    def test_initialization_event_exact_reports_sql_and_sidecar_replay(self) -> None:
+        event = EventRecord(
+            event_id="evt-initialization-exact",
+            conversation_id="conv-initialization-exact",
+            task_id="task-initialization-exact",
+            event_type="agent.run.started",
+            payload={
+                "services": ("mysql_readonly",),
+                "binding": {"mode": "readonly", "version": 1},
+            },
+        )
+        reordered_event = replace(
+            event,
+            payload={
+                "binding": {"version": 1, "mode": "readonly"},
+                "services": ["mysql_readonly"],
+            },
+        )
+        sql_storage = SQLiteStorage(self.session_factory)
+
+        _, created_duplicate = asyncio.run(sql_storage.append_event_exact(event))
+        _, replay_duplicate = asyncio.run(
+            sql_storage.append_event_exact(reordered_event)
+        )
+        self.assertFalse(created_duplicate)
+        self.assertTrue(replay_duplicate)
+
+        sidecar = _RecordingRuntimeSidecarClient()
+        enforce_storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+        )
+        sidecar_event = replace(
+            event,
+            event_id="evt-initialization-sidecar-exact",
+            task_id="task-initialization-sidecar-exact",
+        )
+        reordered_sidecar_event = replace(
+            reordered_event,
+            event_id=sidecar_event.event_id,
+            task_id=sidecar_event.task_id,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "enforce"}):
+            _, created_duplicate = asyncio.run(
+                enforce_storage.append_event_exact(sidecar_event)
+            )
+            _, replay_duplicate = asyncio.run(
+                enforce_storage.append_event_exact(reordered_sidecar_event)
+            )
+        self.assertFalse(created_duplicate)
+        self.assertTrue(replay_duplicate)
+
+        self.assertEqual(len(sidecar.events), 1)
+        expected_payload = (
+            b'{"binding":{"mode":"readonly","version":1},'
+            b'"services":["mysql_readonly"]}'
+        )
+        self.assertEqual(next(iter(sidecar.events.values()))[3], expected_payload)
+
+        shadow_sidecar = _RecordingRuntimeSidecarClient()
+        shadow_storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=shadow_sidecar,
+            runtime_sidecar_shadow_sink=lambda _payload: None,
+        )
+        shadow_event = replace(
+            event,
+            event_id="evt-initialization-shadow-exact",
+            task_id="task-initialization-shadow-exact",
+        )
+        reordered_shadow_event = replace(
+            reordered_event,
+            event_id=shadow_event.event_id,
+            task_id=shadow_event.task_id,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "shadow"}):
+            _, created_duplicate = asyncio.run(
+                shadow_storage.append_event_exact(shadow_event)
+            )
+            _, replay_duplicate = asyncio.run(
+                shadow_storage.append_event_exact(reordered_shadow_event)
+            )
+        self.assertFalse(created_duplicate)
+        self.assertTrue(replay_duplicate)
+        self.assertEqual(len(shadow_sidecar.events), 1)
+        self.assertEqual(
+            next(iter(shadow_sidecar.events.values()))[3],
+            expected_payload,
+        )
 
     def test_event_log_enforce_rejects_python_sqlite_replay_even_when_append_sidecar_is_configured(self) -> None:
         sidecar = _RecordingRuntimeSidecarClient()
@@ -1660,6 +1762,7 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                     "sequence": 1,
                     "created_at_ms": 123,
                 },
+                "duplicate": False,
                 "error": None,
             },
         )
@@ -1701,6 +1804,16 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
 
         for invalid_response in [
             {"operation": "lease_acquire", "cursor": {"task_id": "task-response", "sequence": 1}},
+            {
+                "operation": "event_append",
+                "cursor": {
+                    "conversation_id": "conv-response",
+                    "task_id": "task-response",
+                    "sequence": 1,
+                    "created_at_ms": 123,
+                },
+                "error": None,
+            },
             {"operation": "event_append", "cursor": {"task_id": "task-response", "sequence": 1}},
             {"operation": "artifact_save", "artifact": {"artifact_id": "artifact-response"}},
             {

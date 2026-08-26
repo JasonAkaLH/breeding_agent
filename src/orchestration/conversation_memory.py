@@ -5,9 +5,9 @@ import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from src.core.coercion import coerce_positive_int
@@ -34,11 +34,21 @@ SummaryGenerator = Callable[..., str | Awaitable[str]]
 ResolutionGenerator = Callable[..., str | Awaitable[str]]
 
 
+@runtime_checkable
+class ConversationMemorySummaryMaterializationPort(Protocol):
+    async def materialize_conversation_memory_summary_exact(
+        self,
+        summary: ConversationMemorySummary,
+    ) -> ConversationMemorySummary:
+        """Insert a prepared summary or reject an identity-matched drift."""
+
+
 class ConversationMemoryStoragePort(
     ConversationStoragePort,
     MessageStoragePort,
     TaskStoragePort,
     ArtifactStoragePort,
+    ConversationMemorySummaryMaterializationPort,
     Protocol,
 ):
     """Persistence surface used while building conversation memory."""
@@ -422,6 +432,12 @@ class ConversationMemoryContext:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationMemoryPreparation:
+    context: ConversationMemoryContext
+    summary_write: ConversationMemorySummary | None = None
+
+
 class ConversationMemorySafeAllowlist:
     _ALLOWED_OUTPUT_KEYS = {
         "summary",
@@ -613,10 +629,30 @@ class ConversationMemoryBuilder:
         return self._config_resolver(request)
 
     async def build(self, request: MemoryRequest, *, username: str | None = None) -> ConversationMemoryContext:
+        preparation = await self.prepare(request, username=username)
+        if preparation.summary_write is not None and hasattr(
+            self._storage,
+            "save_conversation_memory_summary",
+        ):
+            legacy_summary = replace(
+                preparation.summary_write,
+                summary_id=f"memory-summary-{uuid4().hex}",
+            )
+            await self._storage.save_conversation_memory_summary(legacy_summary)
+        return preparation.context
+
+    async def prepare(
+        self,
+        request: MemoryRequest,
+        *,
+        username: str | None = None,
+    ) -> ConversationMemoryPreparation:
         config = self._config_for_request(request)
         conversation = await self._storage.get_conversation(request.conversation_id)
         if conversation is None:
-            return self._empty_context(request, fallback_reason="conversation_missing", config=config)
+            return ConversationMemoryPreparation(
+                context=self._empty_context(request, fallback_reason="conversation_missing", config=config)
+            )
         if username is not None and conversation.username != username:
             raise PermissionError(f"Conversation does not belong to username: {request.conversation_id}")
 
@@ -650,7 +686,7 @@ class ConversationMemoryBuilder:
             request=request,
         )
 
-        context = await self._compress(
+        return await self._compress(
             request=request,
             username=conversation.username,
             current_user_message=current_user_message,
@@ -662,7 +698,20 @@ class ConversationMemoryBuilder:
             capability_summaries=capability_summaries,
             config=config,
         )
-        return context
+
+    async def materialize(self, preparation: ConversationMemoryPreparation) -> ConversationMemoryContext:
+        summary = preparation.summary_write
+        if summary is None:
+            return preparation.context
+        materialize = getattr(
+            self._storage,
+            "materialize_conversation_memory_summary_exact",
+            None,
+        )
+        if not callable(materialize):
+            raise RuntimeError("conversation_memory_exact_materialization_unavailable")
+        await materialize(summary)
+        return preparation.context
 
     async def _latest_valid_summary(
         self,
@@ -783,7 +832,7 @@ class ConversationMemoryBuilder:
         source_message_count: int,
         capability_summaries: tuple[dict[str, Any], ...],
         config: ConversationMemoryConfig,
-    ) -> ConversationMemoryContext:
+    ) -> ConversationMemoryPreparation:
         token_budget = config.actual_memory_budget
         all_recent_messages = tuple(message for turn in turns for message in turn.memory_messages())
         existing_summary_text = existing_summary.summary_text if existing_summary is not None else None
@@ -801,6 +850,7 @@ class ConversationMemoryBuilder:
         truncated = False
         recent_messages = all_recent_messages
         summary_prompt_profile: Mapping[str, Any] | None = None
+        summary_write: ConversationMemorySummary | None = None
 
         if estimated_before > token_budget:
             compression_level = "level_1"
@@ -827,7 +877,7 @@ class ConversationMemoryBuilder:
                         history_summary = str(generated or "").strip()[: config.effective_summary_max_tokens * 4]
                         if history_summary:
                             compression_level = "level_2"
-                            await self._save_summary(
+                            summary_write = await self._prepare_summary_write(
                                 request=request,
                                 username=username,
                                 summary_text=history_summary,
@@ -858,24 +908,29 @@ class ConversationMemoryBuilder:
             resolved_user_message,
             config=config.tokenization_config,
         )
-        return ConversationMemoryContext(
-            conversation_id=request.conversation_id,
-            root_message_id=request.root_message_id,
-            source_message_count=source_message_count,
-            current_user_message=current_user_message,
-            resolved_user_message=resolved_user_message,
-            recent_messages=recent_messages,
-            clarification_messages=tuple(message for message in recent_messages if message.kind == "clarification"),
-            history_summary=history_summary,
-            capability_summaries=capability_summaries,
-            compression_level=compression_level,
-            token_budget=token_budget,
-            estimated_tokens_before=estimated_before,
-            estimated_tokens_after=estimated_after,
-            truncated=truncated or estimated_after > token_budget,
-            fallback_reason=fallback_reason,
-            resolution_metadata=resolution_metadata,
-            summary_prompt_profile=summary_prompt_profile,
+        return ConversationMemoryPreparation(
+            context=ConversationMemoryContext(
+                conversation_id=request.conversation_id,
+                root_message_id=request.root_message_id,
+                source_message_count=source_message_count,
+                current_user_message=current_user_message,
+                resolved_user_message=resolved_user_message,
+                recent_messages=recent_messages,
+                clarification_messages=tuple(
+                    message for message in recent_messages if message.kind == "clarification"
+                ),
+                history_summary=history_summary,
+                capability_summaries=capability_summaries,
+                compression_level=compression_level,
+                token_budget=token_budget,
+                estimated_tokens_before=estimated_before,
+                estimated_tokens_after=estimated_after,
+                truncated=truncated or estimated_after > token_budget,
+                fallback_reason=fallback_reason,
+                resolution_metadata=resolution_metadata,
+                summary_prompt_profile=summary_prompt_profile,
+            ),
+            summary_write=summary_write,
         )
 
     def _build_summary_prompt(self, older_turns: list[_BusinessTurn], *, existing_summary_text: str | None) -> str:
@@ -965,7 +1020,7 @@ class ConversationMemoryBuilder:
             audit_context={"stage": "conversation_memory_summary", "source_turn_count": len(older_turns)},
         )
 
-    async def _save_summary(
+    async def _prepare_summary_write(
         self,
         *,
         request: MemoryRequest,
@@ -975,44 +1030,47 @@ class ConversationMemoryBuilder:
         existing_summary: ConversationMemorySummary | None,
         config: ConversationMemoryConfig,
         prompt_profile: Mapping[str, Any] | None = None,
-    ) -> None:
-        if not hasattr(self._storage, "save_conversation_memory_summary"):
-            return
+    ) -> ConversationMemorySummary | None:
         messages = [message for turn in older_turns for message in turn.memory_messages()]
         if not messages:
-            return
+            return None
         last = messages[-1]
         now = self._now_fn()
-        await self._storage.save_conversation_memory_summary(
-            ConversationMemorySummary(
-                summary_id=f"memory-summary-{uuid4().hex}",
-                conversation_id=request.conversation_id,
-                username=username,
-                covered_until_turn_id=older_turns[-1].turn_id,
-                covered_until_message_id=last.message_id,
-                covered_until_created_at=last.created_at,
-                summary_text=summary_text,
-                source_message_count=len(messages)
-                + (existing_summary.source_message_count if existing_summary is not None else 0),
-                source_message_ids_hash=_message_ids_hash(
-                    [
-                        *((existing_summary.source_message_ids_hash,) if existing_summary is not None else ()),
-                        *(message.message_id for message in messages),
-                    ]
-                ),
-                estimated_tokens=await get_num_of_tokens_from_messages_async(
-                    [summary_text],
-                    config=config.tokenization_config,
-                ),
-                summary_version=SUMMARY_VERSION,
-                compression_policy_version=COMPRESSION_POLICY_VERSION,
-                model_metadata_safe={
-                    "provider": "conversation_memory_summary_generator",
-                    **({"prompt_profile": dict(prompt_profile)} if prompt_profile is not None else {}),
-                },
-                created_at=now,
-                updated_at=now,
-            )
+        covered_until_turn_id = older_turns[-1].turn_id
+        summary_id = _stable_memory_summary_id(
+            conversation_id=request.conversation_id,
+            username=username,
+            covered_until_turn_id=covered_until_turn_id,
+            covered_until_message_id=last.message_id,
+        )
+        return ConversationMemorySummary(
+            summary_id=summary_id,
+            conversation_id=request.conversation_id,
+            username=username,
+            covered_until_turn_id=covered_until_turn_id,
+            covered_until_message_id=last.message_id,
+            covered_until_created_at=last.created_at,
+            summary_text=summary_text,
+            source_message_count=len(messages)
+            + (existing_summary.source_message_count if existing_summary is not None else 0),
+            source_message_ids_hash=_message_ids_hash(
+                [
+                    *((existing_summary.source_message_ids_hash,) if existing_summary is not None else ()),
+                    *(message.message_id for message in messages),
+                ]
+            ),
+            estimated_tokens=await get_num_of_tokens_from_messages_async(
+                [summary_text],
+                config=config.tokenization_config,
+            ),
+            summary_version=SUMMARY_VERSION,
+            compression_policy_version=COMPRESSION_POLICY_VERSION,
+            model_metadata_safe={
+                "provider": "conversation_memory_summary_generator",
+                **({"prompt_profile": dict(prompt_profile)} if prompt_profile is not None else {}),
+            },
+            created_at=now,
+            updated_at=now,
         )
 
     async def _resolve_user_message(
@@ -1798,6 +1856,32 @@ async def _estimate_context_tokens(
 def _message_ids_hash(message_ids: Iterable[str]) -> str:
     joined = "\n".join(message_ids)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _stable_memory_summary_id(
+    *,
+    conversation_id: str,
+    username: str,
+    covered_until_turn_id: str,
+    covered_until_message_id: str,
+) -> str:
+    identity = json.dumps(
+        {
+            "compression_policy_version": COMPRESSION_POLICY_VERSION,
+            "conversation_id": conversation_id,
+            "covered_until_message_id": covered_until_message_id,
+            "covered_until_turn_id": covered_until_turn_id,
+            "summary_version": SUMMARY_VERSION,
+            "username": username,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(
+        b"maf.conversation_memory_summary.identity.v1\0" + identity.encode("utf-8")
+    ).hexdigest()
+    return f"memory-summary-{digest}"
 
 
 def _json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:

@@ -4,7 +4,7 @@
 //! A tonic/gRPC wrapper can delegate to this kernel without reintroducing
 //! Python-owned dispatcher, lease, event, cancellation, or bundle state.
 
-use maf_event_log::EventLog;
+use maf_event_log::{EventLog, EventRecord as EventLogRecord};
 use maf_runtime_store::{
     ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_AGENT_STATE,
     FEATURE_ARTIFACT_METADATA, FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE,
@@ -356,6 +356,8 @@ pub struct ClaimPendingSubmissionResponse {
     pub claim: Option<SubmissionClaim>,
     pub authority_state: String,
     pub finalization_receipt_sha256: Option<String>,
+    pub pending_count: u64,
+    pub earliest_claim_expires_at_ms: Option<i64>,
     pub error: Option<TypedErrorEnvelope>,
 }
 
@@ -653,6 +655,7 @@ pub struct AppendEventRequest {
 pub struct AppendEventResponse {
     pub cursor: Option<EventCursor>,
     pub error: Option<TypedErrorEnvelope>,
+    pub duplicate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1019,7 +1022,7 @@ pub struct RuntimeSidecarKernel {
     artifacts: BTreeMap<String, ArtifactRecord>,
     cancellation_tokens: BTreeMap<String, CancellationToken>,
     bundle_pins: BTreeMap<(String, String), BundlePin>,
-    event_append_idempotency: BTreeMap<String, EventCursor>,
+    event_append_idempotency: BTreeMap<String, EventLogRecord>,
     lease_acquire_idempotency: BTreeMap<String, TaskLease>,
     task_submit_idempotency: BTreeMap<String, TaskSubmitResult>,
     task_record_idempotency: BTreeMap<String, TaskRecord>,
@@ -1411,10 +1414,6 @@ impl RuntimeSidecarKernel {
             .filter(|(_, entry)| {
                 !entry.record.closed
                     && entry.record.handoff_state != SubmissionHandoffState::HandedOff
-                    && entry
-                        .claim
-                        .as_ref()
-                        .is_none_or(|claim| claim.expires_at_ms <= request.now_ms)
             })
             .map(|(message_id, entry)| (entry.record.created_at_ms, message_id.clone()))
             .filter(|(created_at_ms, message_id)| {
@@ -1431,6 +1430,7 @@ impl RuntimeSidecarKernel {
             })
             .collect::<Vec<_>>();
         candidates.sort();
+        let pending_count = candidates.len() as u64;
         let Some((_, message_id)) = candidates.into_iter().next() else {
             return Ok(ClaimPendingSubmissionResponse {
                 found: false,
@@ -1438,9 +1438,29 @@ impl RuntimeSidecarKernel {
                 claim: None,
                 authority_state: "finalized".to_owned(),
                 finalization_receipt_sha256: receipt,
+                pending_count: 0,
+                earliest_claim_expires_at_ms: None,
                 error: None,
             });
         };
+        if let Some(expires_at_ms) = self
+            .submission_admissions
+            .get(&message_id)
+            .and_then(|entry| entry.claim.as_ref())
+            .map(|claim| claim.expires_at_ms)
+            .filter(|expires_at_ms| *expires_at_ms > request.now_ms)
+        {
+            return Ok(ClaimPendingSubmissionResponse {
+                found: false,
+                admission: None,
+                claim: None,
+                authority_state: "finalized".to_owned(),
+                finalization_receipt_sha256: receipt,
+                pending_count,
+                earliest_claim_expires_at_ms: Some(expires_at_ms),
+                error: None,
+            });
+        }
         let entry = self
             .submission_admissions
             .get_mut(&message_id)
@@ -1460,6 +1480,8 @@ impl RuntimeSidecarKernel {
             claim: Some(claim),
             authority_state: "finalized".to_owned(),
             finalization_receipt_sha256: receipt,
+            pending_count,
+            earliest_claim_expires_at_ms: None,
             error: None,
         })
     }
@@ -2400,10 +2422,51 @@ impl RuntimeSidecarKernel {
         created_at_ms: i64,
         idempotency_key: impl Into<String>,
     ) -> Result<EventCursor, RuntimeSidecarError> {
+        self.append_event_exact(
+            conversation_id,
+            task_id,
+            event_type,
+            payload_json,
+            created_at_ms,
+            idempotency_key,
+        )
+        .map(|(cursor, _duplicate)| cursor)
+    }
+
+    pub fn append_event_exact(
+        &mut self,
+        conversation_id: impl Into<String>,
+        task_id: impl Into<String>,
+        event_type: impl Into<String>,
+        payload_json: Vec<u8>,
+        created_at_ms: i64,
+        idempotency_key: impl Into<String>,
+    ) -> Result<(EventCursor, bool), RuntimeSidecarError> {
         self.ensure_accepting_writes()?;
         let idempotency_key = require_idempotency_key(idempotency_key)?;
-        if let Some(cursor) = self.event_append_idempotency.get(&idempotency_key) {
-            return Ok(cursor.clone());
+        let conversation_id = conversation_id.into();
+        let task_id = task_id.into();
+        let event_type = event_type.into();
+        if let Some(event) = self.event_append_idempotency.get(&idempotency_key) {
+            if event.conversation_id != conversation_id
+                || event.task_id != task_id
+                || event.event_type != event_type
+                || event.payload_json != payload_json
+                || event.created_at_ms != created_at_ms
+            {
+                return Err(idempotency_conflict(
+                    "event append idempotency payload differs",
+                ));
+            }
+            return Ok((
+                EventCursor {
+                    conversation_id: event.conversation_id.clone(),
+                    task_id: event.task_id.clone(),
+                    sequence: event.sequence,
+                    created_at_ms: event.created_at_ms,
+                },
+                true,
+            ));
         }
         let event = self.event_log.append(
             conversation_id,
@@ -2413,14 +2476,13 @@ impl RuntimeSidecarKernel {
             created_at_ms,
         )?;
         let cursor = EventCursor {
-            conversation_id: event.conversation_id,
-            task_id: event.task_id,
+            conversation_id: event.conversation_id.clone(),
+            task_id: event.task_id.clone(),
             sequence: event.sequence,
             created_at_ms: event.created_at_ms,
         };
-        self.event_append_idempotency
-            .insert(idempotency_key, cursor.clone());
-        Ok(cursor)
+        self.event_append_idempotency.insert(idempotency_key, event);
+        Ok((cursor, false))
     }
 
     pub fn replay_events(
@@ -2862,7 +2924,7 @@ impl RuntimeSidecarService {
     }
 
     pub fn append_event(&mut self, request: AppendEventRequest) -> AppendEventResponse {
-        match self.kernel.append_event(
+        match self.kernel.append_event_exact(
             request.conversation_id,
             request.task_id,
             request.event_type,
@@ -2870,13 +2932,15 @@ impl RuntimeSidecarService {
             request.created_at_ms,
             idempotency_key(request.idempotency),
         ) {
-            Ok(cursor) => AppendEventResponse {
+            Ok((cursor, duplicate)) => AppendEventResponse {
                 cursor: Some(cursor),
                 error: None,
+                duplicate,
             },
             Err(error) => AppendEventResponse {
                 cursor: None,
                 error: Some(TypedErrorEnvelope::from(error)),
+                duplicate: false,
             },
         }
     }
@@ -3044,6 +3108,8 @@ impl RuntimeSidecarService {
                 claim: None,
                 authority_state: "uninitialized".to_owned(),
                 finalization_receipt_sha256: None,
+                pending_count: 0,
+                earliest_claim_expires_at_ms: None,
                 error: Some(error.into()),
             })
     }
@@ -3852,7 +3918,7 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
             let response = match self.run_sqlite_write(|| {
-                adapter.append_event(
+                adapter.append_event_exact(
                     &request.conversation_id,
                     &request.task_id,
                     &request.event_type,
@@ -3861,18 +3927,21 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                     &pb_idempotency_key(request.idempotency.clone()),
                 )
             })? {
-                Ok(cursor) => AppendEventResponse {
+                Ok((cursor, duplicate)) => AppendEventResponse {
                     cursor: Some(cursor),
                     error: None,
+                    duplicate,
                 },
                 Err(error) => AppendEventResponse {
                     cursor: None,
                     error: Some(TypedErrorEnvelope::from(error)),
+                    duplicate: false,
                 },
             };
             return Ok(tonic::Response::new(runtime_pb::AppendEventResponse {
                 cursor: response.cursor.map(cursor_to_pb),
                 error: response.error.map(typed_error_to_pb),
+                duplicate: response.duplicate,
             }));
         }
         let response = self.lock()?.append_event(AppendEventRequest {
@@ -3886,6 +3955,7 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         Ok(tonic::Response::new(runtime_pb::AppendEventResponse {
             cursor: response.cursor.map(cursor_to_pb),
             error: response.error.map(typed_error_to_pb),
+            duplicate: response.duplicate,
         }))
     }
 
@@ -4212,6 +4282,8 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                     claim: None,
                     authority_state: "uninitialized".to_owned(),
                     finalization_receipt_sha256: None,
+                    pending_count: 0,
+                    earliest_claim_expires_at_ms: None,
                     error: Some(error.into()),
                 },
             }

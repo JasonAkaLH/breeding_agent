@@ -519,8 +519,8 @@ fn sqlite_adapter_persists_event_replay_across_reopen() {
 
     {
         let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter");
-        let first = adapter
-            .append_event(
+        let (first, first_duplicate) = adapter
+            .append_event_exact(
                 "conv",
                 "task",
                 "task.accepted",
@@ -529,21 +529,60 @@ fn sqlite_adapter_persists_event_replay_across_reopen() {
                 "event-1",
             )
             .expect("append event");
-        let duplicate = adapter
-            .append_event(
+        let (duplicate, replay_duplicate) = adapter
+            .append_event_exact(
                 "conv",
                 "task",
-                "changed",
-                b"{\"changed\":true}".to_vec(),
-                11,
+                "task.accepted",
+                b"{}".to_vec(),
+                10,
                 "event-1",
             )
             .expect("idempotent append");
         assert_eq!(first, duplicate);
+        assert!(!first_duplicate);
+        assert!(replay_duplicate);
         assert_eq!(first.sequence, 1);
+        for (conversation_id, task_id, event_type, payload_json, created_at_ms) in [
+            ("other-conv", "task", "task.accepted", b"{}".to_vec(), 10),
+            ("conv", "other-task", "task.accepted", b"{}".to_vec(), 10),
+            ("conv", "task", "changed", b"{}".to_vec(), 10),
+            (
+                "conv",
+                "task",
+                "task.accepted",
+                b"{\"changed\":true}".to_vec(),
+                10,
+            ),
+            ("conv", "task", "task.accepted", b"{}".to_vec(), 11),
+        ] {
+            let error = adapter
+                .append_event(
+                    conversation_id,
+                    task_id,
+                    event_type,
+                    payload_json,
+                    created_at_ms,
+                    "event-1",
+                )
+                .expect_err("event identity drift must conflict");
+            assert_eq!(error.code, "runtime_store_idempotency_conflict");
+        }
     }
 
     let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen sqlite adapter");
+    let (restarted, duplicate) = reopened
+        .append_event_exact(
+            "conv",
+            "task",
+            "task.accepted",
+            b"{}".to_vec(),
+            10,
+            "event-1",
+        )
+        .expect("exact append after reopen");
+    assert_eq!(restarted.sequence, 1);
+    assert!(duplicate);
     let replayed = reopened
         .replay_events("conv", "task", 0, 1_000, 1024)
         .expect("replay after reopen");
@@ -1068,9 +1107,9 @@ fn submission_finalization_shared_vector_locks_subject_digest_and_receipt() {
             format!("{:x}", Sha256::digest(&receipt)),
         ),
         (
-            "06ed83cca977c6a1173de06dd40c543a8f421d9f8887584ba3052ab24967ee52".to_owned(),
-            "7243cfa4d910f870ecb7a615fceeb8c8e1b786405288116d3b5f1b4f244b89ba".to_owned(),
-            "24f52a1c39a55d8564ae6307f1f2427fcba349fc13588bdbc932bf5a70344071".to_owned(),
+            "48fd5ffba62e2e24fac246d40725f2cf836ce66beb33491488918db04c0c8c90".to_owned(),
+            "aa53b907b800f2c0e8ea86f5a62c3000e224b13b51b34a2aa0f31ceb5d5156e5".to_owned(),
+            "1d6d7be12c40d42887f5eb9095a770afc96e0da719105b40e67c90bfa43fa770".to_owned(),
         )
     );
 }
@@ -1424,6 +1463,102 @@ fn sqlite_submission_claim_prepare_get_and_handoff_are_durable_and_cas_closed() 
             .found
     );
     let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn sqlite_submission_claim_observability_is_cursor_scoped_and_head_ordered() {
+    let adapter = RuntimeSidecarSqliteAdapter::open_in_memory().expect("open adapter");
+    let (digest, subject, receipt) = empty_finalization_bundle(1);
+    adapter
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 1)
+        .unwrap();
+    let head = adapter
+        .admit_submission(sqlite_admission_request(
+            "head-message",
+            "head-task",
+            "head-conversation",
+        ))
+        .unwrap();
+    let head_claim = head.claim.unwrap();
+    let mut tail = sqlite_admission_request("tail-message", "tail-task", "tail-conversation");
+    tail.now_ms = 20;
+    tail.message_created_at_ms = 20;
+    tail.claim_ttl_ms = 20;
+    adapter.admit_submission(tail).unwrap();
+
+    let blocked = adapter
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 50,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .unwrap();
+    assert!(!blocked.found);
+    assert_eq!(blocked.pending_count, 2);
+    assert_eq!(blocked.earliest_claim_expires_at_ms, Some(110));
+
+    let tail = adapter
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 50,
+            claim_ttl_ms: 100,
+            after_created_at_ms: Some(10),
+            after_message_id: Some("head-message".to_owned()),
+        })
+        .unwrap();
+    assert!(tail.found);
+    assert_eq!(tail.pending_count, 1);
+    assert_eq!(tail.admission.unwrap().message_id, "tail-message");
+
+    let renewed = adapter
+        .renew_submission_claim(RenewSubmissionClaimRequest {
+            message_id: "head-message".to_owned(),
+            workflow_owner: head_claim.owner,
+            claim_token: head_claim.token,
+            now_ms: 60,
+            claim_ttl_ms: 200,
+        })
+        .unwrap();
+    assert_eq!(renewed.expires_at_ms, 260);
+    let heartbeat_blocked = adapter
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "other".to_owned(),
+            now_ms: 259,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .unwrap();
+    assert_eq!(heartbeat_blocked.pending_count, 2);
+    assert_eq!(heartbeat_blocked.earliest_claim_expires_at_ms, Some(260));
+
+    let takeover = adapter
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "other".to_owned(),
+            now_ms: 260,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .unwrap();
+    assert!(takeover.found);
+    assert_eq!(takeover.pending_count, 2);
+    assert_eq!(takeover.admission.unwrap().message_id, "head-message");
+
+    let empty = adapter
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "other".to_owned(),
+            now_ms: 260,
+            claim_ttl_ms: 100,
+            after_created_at_ms: Some(20),
+            after_message_id: Some("tail-message".to_owned()),
+        })
+        .unwrap();
+    assert!(!empty.found);
+    assert_eq!(empty.pending_count, 0);
+    assert_eq!(empty.earliest_claim_expires_at_ms, None);
 }
 
 #[test]

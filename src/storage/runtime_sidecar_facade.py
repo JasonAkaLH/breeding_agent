@@ -232,6 +232,27 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
             _validate_submission_claim(claim)
         elif admission is not None or claim is not None:
             _raise_response_invalid()
+        pending_count = response.get("pending_count")
+        earliest_claim_expires_at_ms = response.get(
+            "earliest_claim_expires_at_ms"
+        )
+        if (
+            not isinstance(pending_count, int)
+            or isinstance(pending_count, bool)
+            or pending_count < 0
+            or found != (pending_count > 0 and earliest_claim_expires_at_ms is None)
+            or (not found and pending_count > 0)
+            != (earliest_claim_expires_at_ms is not None)
+            or (
+            earliest_claim_expires_at_ms is not None
+            and (
+                not isinstance(earliest_claim_expires_at_ms, int)
+                or isinstance(earliest_claim_expires_at_ms, bool)
+                or earliest_claim_expires_at_ms < 0
+            )
+            )
+        ):
+            _raise_response_invalid()
         return
     if operation_name == "submission_claim_renew":
         _validate_submission_claim(response.get("claim"))
@@ -279,6 +300,8 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
         return
     if operation_name == "event_append":
         _validate_event_cursor(response.get("cursor"))
+        if not isinstance(response.get("duplicate"), bool):
+            _raise_response_invalid()
         return
     if operation_name == "event_replay":
         cursors = response.get("cursors")

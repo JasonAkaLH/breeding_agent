@@ -182,6 +182,7 @@ class AgentRunRecoveryCoordinator:
         self,
         run_id: str,
         *,
+        initial_required_tool_name: str | None = None,
         trusted_facts: tuple[str, ...] = (),
         visibility_context: Any | None = None,
         cancellation: Any | None = None,
@@ -234,6 +235,13 @@ class AgentRunRecoveryCoordinator:
         loop_result = await self._resumer.run_claimed(
             run_id,
             handle=handle,
+            initial_required_tool_name=(
+                initial_required_tool_name
+                if len(items) == 1
+                and items[0].kind is AgentItemKind.USER_MESSAGE
+                and items[0].state is AgentItemState.COMMITTED
+                else None
+            ),
             trusted_facts=trusted_facts,
             visibility_context=visibility_context,
             cancellation=cancellation,

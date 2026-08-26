@@ -1,6 +1,6 @@
 # P0 Checkpoint A：Sidecar Submission Admission 实施计划
 
-**状态：** implementation in progress；A1～A3已完成并通过独立终审，下一步为A4 durable Agent handoff与admission recovery primitive
+**状态：** implementation in progress；A1～A4已完成并通过独立终审，下一步为A5全局Message identity与API/Interrupt行为
 
 **设计 authority：** `docs/superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`
 
@@ -249,8 +249,10 @@ python -m ruff check src/core src/storage tests/core/test_submission_admission_c
 - `src/api/runtime.py`：把upload scrub与conversation memory preparation收敛为一次`_prepare_execution_request`；memory先走无summary/event写入的pure seam，receipt与Sidecar prepared胜出后再按确定性identity exact物化既有summary/event。`_schedule_execution`只接收已初始化的同一prepared request并创建本地wakeup，本地 singleflight仍由 `_running_tasks` 管理。
 - `src/storage/sqlalchemy_models.py`、`src/storage/sqlite/repositories.py`、`src/storage/postgres/repositories.py`：新增submission-specific `submission_preparation_receipts`与first-write-exact repository seam；只保存route decision、完整memory context、selector decision及各自/整体digest，不含status、lease、retry或调度字段。
 - `src/lifecycle/agent_run_recovery.py`：仅补齐从 durable initialized Run 恢复所需的 existing seam；不改 waiting/capability result no-replay。
-- 新建 `src/api/submission_admission.py`：只拥有 approved submission canonical JSON/fingerprint、safe continuation envelope、claim驱动的 projection/handoff coordinator；不做通用 workflow。
-- `src/api/runtime.py` startup：增加 pending projection/handoff recovery hook，位置严格早于 `_recover_agent_runs`，且外部网络/LLM 不进 pre-ready projection 阶段。
+- 新建 `src/api/submission_admission.py`：只拥有 approved submission canonical JSON/fingerprint、safe continuation envelope、claim驱动的 projection/handoff coordinator及Sidecar preparation+SQL receipt只读prepared Agent loader；不做通用 workflow。
+- `src/orchestration/conversation_memory.py`：增加零summary/event写入的pure prepare与prepared winner确定性exact materialization，legacy build/merge语义不变。
+- `src/api/runtime.py` startup：增加 pending projection/handoff recovery hook，位置严格早于 `_recover_agent_runs`，且外部网络/LLM 不进 pre-ready projection 阶段；held Agent lease只按authoritative expiry观察，heartbeat延期不抢占，非held后台异常沿原startup hard-failure语义fail-closed退出。
+- Runtime Sidecar Claim响应additive返回cursor-scope `pending_count/earliest_claim_expires_at`，held head不可跳过；AppendEvent响应additive返回`duplicate`，SQL与Sidecar exact payload统一canonical JSON语义，不新增RPC或业务表。
 
 ### 7.2 红测
 
@@ -283,13 +285,15 @@ python -m ruff check src/core src/storage tests/core/test_submission_admission_c
 4. coordinator按project→ack→闭合SQL preparation receipt→CAS Sidecar prepared→durable mutations→initialize/interrupt/intent→handoff ack固定序列；first receipt/snapshot共同约束route/memory/selector/binding；每个admission-owned SQL mutation先锁Conversation并要求ACTIVE；initial-no-server使用上述SQL intent→Sidecar terminal→SQL no-Task materializer恢复链。
 5. 增加 pre-AgentRun recovery hook与仅针对held AgentRun的lease-expiry retry；不改lease算法、不抢未过期lease。只在测试注入新 port，production mode仍未切入。
 
+**A4实施结果：** AgentRun初始化/执行seam、deterministic initialization events、pure memory preparation、唯一immutable SQL receipt、claim驱动coordinator、prepared只读loader、startup两阶段hook及held lease observer均已闭合；required tool只在唯一初始USER item时恢复，memory/execution text/MCP关系/bundle revision逐项exact，terminal与partial retain正确释放/回滚。初始化Event使用独立exact append，普通Event append保持既有merge语义。普通submit与factory保持default-off，未切production mode。API 507、Storage 450（10 skip）、Orchestration 123、Core 54、Lifecycle 46、focused 95、Rust Sidecar 72+Runtime Store 12、真实PostgreSQL receipt 3/3与memory/delete 3/3通过；独立终审最终0 Blocking/0 Major。
+
 ### 7.4 focused gate
 
 ```bash
-conda run -n multi_agent python -m unittest tests.orchestration.test_agent_submission_handoff tests.orchestration.test_agent_loop tests.orchestration.test_agent_invocation tests.storage.test_agent_task_lease tests.api.test_execution_singleflight tests.api.test_submission_admission_recovery tests.lifecycle.test_agent_run_recovery
+conda run -n multi_agent python -m unittest tests.orchestration.test_agent_submission_handoff tests.orchestration.test_agent_loop tests.orchestration.test_agent_invocation tests.storage.test_agent_task_lease tests.api.test_execution_singleflight tests.api.test_submission_admission_recovery tests.api.test_submission_admission_runtime_startup tests.lifecycle.test_agent_run_recovery
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 conda run -n multi_agent python -m compileall -q src tests
-python -m ruff check src/api/submission_admission.py src/api/runtime.py src/orchestration/agent_loop src/lifecycle/agent_run_recovery.py tests/orchestration/test_agent_submission_handoff.py tests/api/test_submission_admission_recovery.py
+python -m ruff check src/api/submission_admission.py src/api/runtime.py src/orchestration/agent_loop src/lifecycle/agent_run_recovery.py tests/orchestration/test_agent_submission_handoff.py tests/api/test_submission_admission_recovery.py tests/api/test_submission_admission_runtime_startup.py
 ```
 
 **停止条件：** durable handoff仍依赖`asyncio.Task`先运行；prepared snapshot无法精确恢复memory/required tool/pinned revisions；memory在prepared前仍写summary/event；selector可在prepared后写不同attachment/Interrupt；initial-no-server仍暗写SQL Task；duplicate lease-held会mark failed或dead owner expiry后无自动进展；拆分改变普通/continuation/waiting Agent状态机；需要重放 capability/remote Tool 才能恢复。

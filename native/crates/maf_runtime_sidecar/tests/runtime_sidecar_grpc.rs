@@ -427,6 +427,8 @@ async fn sqlite_submission_rpc_sequence_persists_all_admission_phases() {
         .unwrap()
         .into_inner();
     assert!(!empty.found);
+    assert_eq!(empty.pending_count, 0);
+    assert_eq!(empty.earliest_claim_expires_at_ms, None);
     assert_eq!(empty.finalization_receipt_sha256, Some(digest));
     let closed = service
         .close_conversation_admission(Request::new(
@@ -445,6 +447,45 @@ async fn sqlite_submission_rpc_sequence_persists_all_admission_phases() {
         runtime_pb::ConversationAdmissionCloseDisposition::Closed as i32
     );
     let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn claim_pending_submission_rpc_exposes_pending_count_and_head_expiry() {
+    let service =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    service
+        .admit_submission(Request::new(pb_admit_request("claim-observation", "hello")))
+        .await
+        .unwrap();
+    let blocked = service
+        .claim_pending_submission(Request::new(runtime_pb::ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 2,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!blocked.found);
+    assert_eq!(blocked.pending_count, 1);
+    assert_eq!(blocked.earliest_claim_expires_at_ms, Some(1_001));
+
+    let claimed = service
+        .claim_pending_submission(Request::new(runtime_pb::ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 1_001,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(claimed.found);
+    assert_eq!(claimed.pending_count, 1);
+    assert_eq!(claimed.earliest_claim_expires_at_ms, None);
 }
 
 fn pb_task(status: &str) -> runtime_pb::TaskRecord {
@@ -564,6 +605,94 @@ async fn tonic_service_rejects_conflicting_top_level_task_identity() {
         "runtime_store_write_failed"
     );
     assert!(response.task.is_none());
+}
+
+#[tokio::test]
+async fn tonic_event_append_replays_exact_and_rejects_drift() {
+    let service = RuntimeSidecarGrpcService::new();
+    let request = |payload_json: &[u8]| runtime_pb::AppendEventRequest {
+        conversation_id: "conv".to_owned(),
+        task_id: "task".to_owned(),
+        event_type: "task.accepted".to_owned(),
+        payload_json: payload_json.to_vec(),
+        idempotency: Some(runtime_pb::Idempotency {
+            key: "event-exact".to_owned(),
+            owner: "python-runtime".to_owned(),
+            deadline_ms: 2_000,
+        }),
+    };
+
+    let first = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("first append")
+        .into_inner();
+    let replay = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("exact replay")
+        .into_inner();
+    assert_eq!(replay.cursor, first.cursor);
+    assert!(!first.duplicate);
+    assert!(replay.duplicate);
+    assert!(replay.error.is_none());
+
+    let conflict = service
+        .append_event(Request::new(request(b"{\"changed\":true}")))
+        .await
+        .expect("typed conflict response")
+        .into_inner();
+    assert!(conflict.cursor.is_none());
+    assert_eq!(
+        conflict.error.expect("idempotency conflict").code,
+        "runtime_store_idempotency_conflict"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_backed_tonic_event_append_replays_exact_and_rejects_drift() {
+    let db_path = temp_db_path("grpc-event-exact");
+    let service = RuntimeSidecarGrpcService::with_sqlite_adapter(
+        RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter"),
+    );
+    let request = |payload_json: &[u8]| runtime_pb::AppendEventRequest {
+        conversation_id: "conv".to_owned(),
+        task_id: "task".to_owned(),
+        event_type: "task.accepted".to_owned(),
+        payload_json: payload_json.to_vec(),
+        idempotency: Some(runtime_pb::Idempotency {
+            key: "event-exact".to_owned(),
+            owner: "python-runtime".to_owned(),
+            deadline_ms: 2_000,
+        }),
+    };
+
+    let first = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("first append")
+        .into_inner();
+    let replay = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("exact replay")
+        .into_inner();
+    assert_eq!(replay.cursor, first.cursor);
+    assert!(!first.duplicate);
+    assert!(replay.duplicate);
+    assert!(replay.error.is_none());
+
+    let conflict = service
+        .append_event(Request::new(request(b"{\"changed\":true}")))
+        .await
+        .expect("typed conflict response")
+        .into_inner();
+    assert!(conflict.cursor.is_none());
+    assert_eq!(
+        conflict.error.expect("idempotency conflict").code,
+        "runtime_store_idempotency_conflict"
+    );
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]

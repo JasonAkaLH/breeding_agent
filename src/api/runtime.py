@@ -318,6 +318,7 @@ from src.orchestration.agent_loop import (
     AgentLoopOrchestrator,
     AgentLoopRunner,
     AgentModelBinding,
+    AgentRun,
     AgentRunStatus,
     AgentStorageConflict,
     RunBoundMCPTextGenerator,
@@ -376,6 +377,11 @@ from src.storage.conversation_files import (
     ConversationFileIndexWriter,
     LocalConversationFileStore,
     build_file_upload_message_projection,
+)
+from src.api.submission_admission import (
+    PreparedAgentRecoveryContext,
+    PreparedAgentRecoveryLoader,
+    SubmissionAdmissionCoordinator,
 )
 
 from .conversation_titles import (
@@ -699,6 +705,8 @@ class ApiRuntime(
         mcp_cp7_verifier_authorized: bool = False,
         mcp_cp7_maintenance_authorization: object | None = None,
         mcp_cp7_maintenance_authorizer: Callable[[object], bool] | None = None,
+        submission_admission_coordinator: SubmissionAdmissionCoordinator | None = None,
+        prepared_agent_recovery_loader: PreparedAgentRecoveryLoader | None = None,
     ) -> None:
         self._engine = engine
         self._mcp_rollout_engine = mcp_rollout_engine
@@ -779,6 +787,8 @@ class ApiRuntime(
         self._mcp_cp7_verifier_authorized = mcp_cp7_verifier_authorized
         self._mcp_cp7_maintenance_authorization = mcp_cp7_maintenance_authorization
         self._mcp_cp7_maintenance_authorizer = mcp_cp7_maintenance_authorizer
+        self._submission_admission_coordinator = submission_admission_coordinator
+        self._prepared_agent_recovery_loader = prepared_agent_recovery_loader
         self._mcp_cp7_requests_stopped = False
         self._mcp_cp7_minute_task: asyncio.Task[None] | None = None
         self._mcp_cp7_clock = lambda: datetime.now(timezone.utc)
@@ -815,6 +825,10 @@ class ApiRuntime(
         self._conversation_delete_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
         self._locally_cancelled_task_ids = local_cancelled_task_ids if local_cancelled_task_ids is not None else set()
         self._agent_cancellation_tokens: dict[str, AgentCancellationToken] = {}
+        self._agent_run_lease_retry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._agent_run_lease_retry_errors: dict[str, str] = {}
+        self._agent_run_lease_retry_sleep = asyncio.sleep
+        self._agent_run_recovery_fatal_exit = os._exit
         self._running_title_tasks: set[asyncio.Task[None]] = set()
         self._running_mcp_shadow_tasks: set[asyncio.Task[None]] = set()
         self._task_skill_bundle_revisions: dict[str, str] = {}
@@ -2576,6 +2590,11 @@ class ApiRuntime(
             if restored_cancelled_task is not None:
                 return
         except Exception as exc:
+            if (
+                isinstance(exc, AgentStorageConflict)
+                and str(exc) == "agent_task_lease_held"
+            ):
+                return
             restored_cancelled_task = await self._restore_cancelled_task_if_requested(
                 request.task_id,
                 request.conversation_id,
@@ -7719,132 +7738,149 @@ class ApiRuntime(
         except Exception:
             self._engine.dispose()
             raise
-        await self._admit_mcp_rollout_instance()
-        aggregate_reconciler = MCPAggregateStartupReconciler(
-            MCPAggregateRecoveryStages(
-                repair_lifecycle_markers=(
-                    self._repair_mcp_terminal_candidate_lifecycle
-                ),
-                enumerate_terminal_candidates=(
-                    self._strict_enumerate_mcp_terminal_candidates
-                ),
-                reconcile_terminal_candidates=(
-                    self._reconcile_mcp_terminal_candidates
-                ),
-                reconcile_remote_bindings=self._reconcile_mcp_remote_bindings,
-                reconcile_mrtr_evidence=(
-                    self._validate_mcp_mrtr_recovery_evidence
-                ),
-                reconcile_pending_actions=(
-                    self._validate_mcp_pending_action_recovery_evidence
-                ),
-                reconcile_resume_envelopes=(
-                    self._validate_mcp_resume_envelope_authority
-                ),
-                recover_expired_claims=(
-                    self._recover_expired_mcp_dispatch_claims
-                ),
-                converge_unknown_no_replay=(
-                    self._converge_inactive_and_unknown_mcp_dispatches
-                ),
-                validate_invariants=self._validate_mcp_aggregate_invariants,
+        submission_projection_pending = False
+        coordinator = getattr(self, "_submission_admission_coordinator", None)
+        if coordinator is not None:
+            await coordinator.project_pending()
+            submission_projection_pending = True
+        try:
+            await self._admit_mcp_rollout_instance()
+            aggregate_reconciler = MCPAggregateStartupReconciler(
+                MCPAggregateRecoveryStages(
+                    repair_lifecycle_markers=(
+                        self._repair_mcp_terminal_candidate_lifecycle
+                    ),
+                    enumerate_terminal_candidates=(
+                        self._strict_enumerate_mcp_terminal_candidates
+                    ),
+                    reconcile_terminal_candidates=(
+                        self._reconcile_mcp_terminal_candidates
+                    ),
+                    reconcile_remote_bindings=self._reconcile_mcp_remote_bindings,
+                    reconcile_mrtr_evidence=(
+                        self._validate_mcp_mrtr_recovery_evidence
+                    ),
+                    reconcile_pending_actions=(
+                        self._validate_mcp_pending_action_recovery_evidence
+                    ),
+                    reconcile_resume_envelopes=(
+                        self._validate_mcp_resume_envelope_authority
+                    ),
+                    recover_expired_claims=(
+                        self._recover_expired_mcp_dispatch_claims
+                    ),
+                    converge_unknown_no_replay=(
+                        self._converge_inactive_and_unknown_mcp_dispatches
+                    ),
+                    validate_invariants=self._validate_mcp_aggregate_invariants,
+                )
             )
-        )
-        await aggregate_reconciler.run()
-        await self._reconcile_mcp_dispatch_recovery()
-        await self._recover_agent_runs()
-        if self._mcp_cp7_safety_facade is not None:
-            if self._mcp_cp7_open_boundary is None:
-                raise RuntimeError("mcp_cp7_open_boundary_missing")
-            if not self._mcp_cp7_safety_facade.opened:
+            await aggregate_reconciler.run()
+            await self._reconcile_mcp_dispatch_recovery()
+            if coordinator is not None:
+                await coordinator.recover_projected_handoffs()
+                submission_projection_pending = False
+        except BaseException:
+            if submission_projection_pending and coordinator is not None:
+                await coordinator.abort_pending()
+            raise
+        try:
+            await self._recover_agent_runs()
+            if self._mcp_cp7_safety_facade is not None:
+                if self._mcp_cp7_open_boundary is None:
+                    raise RuntimeError("mcp_cp7_open_boundary_missing")
+                if not self._mcp_cp7_safety_facade.opened:
+                    try:
+                        await self._mcp_cp7_safety_facade.open_epoch(
+                            self._mcp_cp7_open_boundary,
+                            predecessor=self._mcp_cp7_predecessor_close,
+                            verifier_authorized=self._mcp_cp7_verifier_authorized,
+                        )
+                    except CP7SafetyFatalPersistenceError:
+                        self._mcp_cp7_fatal_exit(70)
+                        raise
+                if self._mcp_cp7_boundary_provider is None:
+                    raise RuntimeError("mcp_cp7_boundary_provider_missing")
+                self._mcp_cp7_minute_task = asyncio.create_task(
+                    self._run_cp7_safety_minutes(), name="mcp-cp7-safety-minute-producer"
+                )
+                self._mcp_cp7_minute_task.add_done_callback(
+                    self._handle_cp7_safety_minute_exit
+                )
+            if self.user_mcp_audit_service is not None:
+                self._mcp_audit_retention_task = asyncio.create_task(
+                    self.user_mcp_audit_service.run_retention_forever(),
+                    name="mcp-audit-retention",
+                )
+            if self.user_mcp_presence_service is not None and self.auth_invalidation_bus is not None:
+                self._mcp_auth_invalidation_queue = self.auth_invalidation_bus.subscribe()
+                self._mcp_auth_invalidation_task = asyncio.create_task(
+                    self._run_mcp_auth_invalidation_listener(),
+                    name="mcp-auth-invalidation-listener",
+                )
+            if self.mcp_remote_task_recovery_worker is not None:
+                await self.mcp_remote_task_recovery_worker.start()
+                self._mcp_continuation_consumer_task = asyncio.create_task(
+                    self._run_mcp_continuation_commands_forever(),
+                    name="mcp-continuation-consumer",
+                )
+            if self.user_mcp_health_runner is not None:
+                await self.user_mcp_health_runner.start()
+            if self.user_mcp_gateway is not None:
+                await self.storage.expire_user_mcp_scope_leases(now=self._utcnow_naive())
+            if self.user_mcp_result_janitor is not None and self.user_mcp_result_store is not None:
+                await self.user_mcp_result_janitor.cleanup_orphans(
+                    active_task_keys=self.user_mcp_result_store.active_task_keys()
+                )
+            if self.user_mcp_config_service is not None:
+                await self.user_mcp_config_service.start()
+            if self.postgres_mcp_invalidation_bus is not None:
                 try:
-                    await self._mcp_cp7_safety_facade.open_epoch(
-                        self._mcp_cp7_open_boundary,
-                        predecessor=self._mcp_cp7_predecessor_close,
-                        verifier_authorized=self._mcp_cp7_verifier_authorized,
-                    )
-                except CP7SafetyFatalPersistenceError:
-                    self._mcp_cp7_fatal_exit(70)
-                    raise
-            if self._mcp_cp7_boundary_provider is None:
-                raise RuntimeError("mcp_cp7_boundary_provider_missing")
-            self._mcp_cp7_minute_task = asyncio.create_task(
-                self._run_cp7_safety_minutes(), name="mcp-cp7-safety-minute-producer"
-            )
-            self._mcp_cp7_minute_task.add_done_callback(
-                self._handle_cp7_safety_minute_exit
-            )
-        if self.user_mcp_audit_service is not None:
-            self._mcp_audit_retention_task = asyncio.create_task(
-                self.user_mcp_audit_service.run_retention_forever(),
-                name="mcp-audit-retention",
-            )
-        if self.user_mcp_presence_service is not None and self.auth_invalidation_bus is not None:
-            self._mcp_auth_invalidation_queue = self.auth_invalidation_bus.subscribe()
-            self._mcp_auth_invalidation_task = asyncio.create_task(
-                self._run_mcp_auth_invalidation_listener(),
-                name="mcp-auth-invalidation-listener",
-            )
-        if self.mcp_remote_task_recovery_worker is not None:
-            await self.mcp_remote_task_recovery_worker.start()
-            self._mcp_continuation_consumer_task = asyncio.create_task(
-                self._run_mcp_continuation_commands_forever(),
-                name="mcp-continuation-consumer",
-            )
-        if self.user_mcp_health_runner is not None:
-            await self.user_mcp_health_runner.start()
-        if self.user_mcp_gateway is not None:
-            await self.storage.expire_user_mcp_scope_leases(now=self._utcnow_naive())
-        if self.user_mcp_result_janitor is not None and self.user_mcp_result_store is not None:
-            await self.user_mcp_result_janitor.cleanup_orphans(
-                active_task_keys=self.user_mcp_result_store.active_task_keys()
-            )
-        if self.user_mcp_config_service is not None:
-            await self.user_mcp_config_service.start()
-        if self.postgres_mcp_invalidation_bus is not None:
-            try:
-                await self.postgres_mcp_invalidation_bus.start()
-            except Exception:
-                pass
-        if self.postgres_auth_invalidation_bus is not None:
-            await self.postgres_auth_invalidation_bus.start()
-        await self.recover_deleting_conversations()
-        if (
-            self._mcp_rollout_metric_recorder is not None
-            and self._mcp_rollout_zero_series_task is None
-        ):
-            self._mcp_rollout_zero_series_task = asyncio.create_task(
-                self._mcp_rollout_metric_recorder.run_continuous_zero_series(),
-                name="mcp-rollout-zero-series",
-            )
-        if (
-            self._mcp_post_ready_recovery_task is None
-            or self._mcp_post_ready_recovery_task.done()
-        ):
-            self._mcp_post_ready_recovery_error = None
-            self._mcp_post_ready_recovery_task = asyncio.create_task(
-                self._reconcile_mcp_dispatch_recovery(),
-                name="mcp-post-ready-dispatch-recovery",
-            )
-            self._mcp_post_ready_recovery_task.add_done_callback(
-                self._handle_mcp_post_ready_recovery_exit
-            )
-        if (
-            self._mcp_result_artifact_projector is not None
-            and self._mcp_durable_result_lifecycle_manager is not None
-            and (
-                self._mcp_result_artifact_reconciler_task is None
-                or self._mcp_result_artifact_reconciler_task.done()
-            )
-        ):
-            self._mcp_result_artifact_reconciler_error = None
-            self._mcp_result_artifact_reconciler_task = asyncio.create_task(
-                self._run_mcp_result_artifact_reconciler_forever(),
-                name="mcp-result-artifact-reconciler",
-            )
-            self._mcp_result_artifact_reconciler_task.add_done_callback(
-                self._handle_mcp_result_artifact_reconciler_exit
-            )
+                    await self.postgres_mcp_invalidation_bus.start()
+                except Exception:
+                    pass
+            if self.postgres_auth_invalidation_bus is not None:
+                await self.postgres_auth_invalidation_bus.start()
+            await self.recover_deleting_conversations()
+            if (
+                self._mcp_rollout_metric_recorder is not None
+                and self._mcp_rollout_zero_series_task is None
+            ):
+                self._mcp_rollout_zero_series_task = asyncio.create_task(
+                    self._mcp_rollout_metric_recorder.run_continuous_zero_series(),
+                    name="mcp-rollout-zero-series",
+                )
+            if (
+                self._mcp_post_ready_recovery_task is None
+                or self._mcp_post_ready_recovery_task.done()
+            ):
+                self._mcp_post_ready_recovery_error = None
+                self._mcp_post_ready_recovery_task = asyncio.create_task(
+                    self._reconcile_mcp_dispatch_recovery(),
+                    name="mcp-post-ready-dispatch-recovery",
+                )
+                self._mcp_post_ready_recovery_task.add_done_callback(
+                    self._handle_mcp_post_ready_recovery_exit
+                )
+            if (
+                self._mcp_result_artifact_projector is not None
+                and self._mcp_durable_result_lifecycle_manager is not None
+                and (
+                    self._mcp_result_artifact_reconciler_task is None
+                    or self._mcp_result_artifact_reconciler_task.done()
+                )
+            ):
+                self._mcp_result_artifact_reconciler_error = None
+                self._mcp_result_artifact_reconciler_task = asyncio.create_task(
+                    self._run_mcp_result_artifact_reconciler_forever(),
+                    name="mcp-result-artifact-reconciler",
+                )
+                self._mcp_result_artifact_reconciler_task.add_done_callback(
+                    self._handle_mcp_result_artifact_reconciler_exit
+                )
+        except BaseException:
+            await self._cancel_agent_run_lease_retries()
+            raise
 
     async def _repair_mcp_terminal_candidate_lifecycle(self) -> None:
         candidate_manager = self._mcp_terminal_candidate_lifecycle_manager
@@ -7861,13 +7897,34 @@ class ApiRuntime(
 
     async def _recover_agent_runs(self) -> None:
         for run in await self.agent_run_repository.list_recoverable_runs():
-            task = await self.storage.get_task(run.task_id)
-            if task is None or task.conversation_id != run.conversation_id:
-                raise RuntimeError("agent_startup_task_identity_mismatch")
-            conversation = await self.storage.get_conversation(run.conversation_id)
-            if conversation is None:
-                raise RuntimeError("agent_startup_conversation_missing")
-            root_message = await self.storage.get_message(task.root_message_id)
+            try:
+                await self._recover_agent_run(run)
+            except AgentStorageConflict as exc:
+                if str(exc) != "agent_task_lease_held":
+                    raise
+                self._schedule_agent_run_lease_retry(run.run_id)
+
+    async def _recover_agent_run(self, run: AgentRun) -> None:
+        task = await self.storage.get_task(run.task_id)
+        if task is None or task.conversation_id != run.conversation_id:
+            raise RuntimeError("agent_startup_task_identity_mismatch")
+        conversation = await self.storage.get_conversation(run.conversation_id)
+        if conversation is None:
+            raise RuntimeError("agent_startup_conversation_missing")
+        root_message = await self.storage.get_message(task.root_message_id)
+        prepared = None
+        prepared_loader = getattr(self, "_prepared_agent_recovery_loader", None)
+        if prepared_loader is not None:
+            prepared = await prepared_loader.load(
+                username=conversation.username,
+                conversation_id=conversation.conversation_id,
+                task_id=task.task_id,
+                message_id=task.root_message_id,
+                root_message_content=(
+                    root_message.content if root_message is not None else None
+                ),
+            )
+        if prepared is None:
             user_message = (
                 root_message.content
                 if root_message is not None
@@ -7885,57 +7942,304 @@ class ApiRuntime(
                 conversation.username,
                 execution_mode=task.mcp_execution_mode,
             )
-            metadata["available_mcp_server_ids"] = [
-                profile.server_id for profile in profiles
-            ]
-            self._agent_invocation_contexts.merge(
-                run.run_id,
-                metadata={
-                    **metadata,
-                    "agent_owner_scope": self._agent_owner_scope(
-                        conversation.username
-                    ),
-                },
-                current_user_input=user_message,
+            owner_scope = self._agent_owner_scope(conversation.username)
+            initial_required_tool_name = None
+        else:
+            (
+                metadata,
+                profiles,
+                owner_scope,
+                user_message,
+                initial_required_tool_name,
+            ) = self._prepared_agent_recovery_values(
+                run=run,
+                task=task,
+                conversation=conversation,
+                prepared=prepared,
             )
-            if run.status in {
-                AgentRunStatus.WAITING_FOR_INPUT,
-                AgentRunStatus.WAITING_FOR_DEPENDENCY,
-            }:
-                continue
-            trusted = tuple(
-                json.dumps(
-                    {key: metadata[key]},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                )
-                for key in (
-                    "capability_missing_fallback",
-                    "conversation_memory",
-                    "mcp_remote_task_result_projection",
-                    "slot_collection",
-                    "uploaded_artifacts",
-                )
-                if key in metadata
+        metadata["available_mcp_server_ids"] = [
+            profile.server_id for profile in profiles
+        ]
+        self._agent_invocation_contexts.merge(
+            run.run_id,
+            metadata={
+                **metadata,
+                "agent_owner_scope": owner_scope,
+            },
+            current_user_input=user_message,
+        )
+        if run.status in {
+            AgentRunStatus.WAITING_FOR_INPUT,
+            AgentRunStatus.WAITING_FOR_DEPENDENCY,
+        }:
+            return
+        trusted = tuple(
+            json.dumps(
+                {key: metadata[key]},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
             )
-            await self._agent_run_recovery.recover_crashed_run(
-                run.run_id,
-                trusted_facts=trusted,
-                visibility_context=CapabilityVisibilityContext(
-                    authenticated_owner_scope=self._agent_owner_scope(
-                        conversation.username
-                    ),
-                    execution_path=str(task.mcp_execution_mode or "default"),
-                    pinned_skill_bundle_revision=str(
-                        metadata.get("skill_bundle_revision") or ""
-                    ).strip()
-                    or None,
-                    safe_mcp_server_profiles=profiles,
+            for key in (
+                "capability_missing_fallback",
+                "conversation_memory",
+                "mcp_remote_task_result_projection",
+                "slot_collection",
+                "uploaded_artifacts",
+            )
+            if key in metadata
+        )
+        recovery_result = await self._agent_run_recovery.recover_crashed_run(
+            run.run_id,
+            initial_required_tool_name=initial_required_tool_name,
+            trusted_facts=trusted,
+            visibility_context=CapabilityVisibilityContext(
+                authenticated_owner_scope=owner_scope,
+                execution_path=str(task.mcp_execution_mode or "default"),
+                pinned_skill_bundle_revision=str(
+                    metadata.get("skill_bundle_revision") or ""
+                ).strip()
+                or None,
+                safe_mcp_server_profiles=profiles,
+            ),
+            cancellation=self._agent_cancellation_token(task.task_id),
+        )
+        if recovery_result.run.status in {
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.FAILED,
+            AgentRunStatus.CANCELLED,
+        }:
+            await self._release_task_skill_revision_if_terminal(task.task_id)
+            await self._release_task_mcp_revision_if_terminal(task.task_id)
+
+    def _prepared_agent_recovery_values(
+        self,
+        *,
+        run: AgentRun,
+        task: Task,
+        conversation: Conversation,
+        prepared: PreparedAgentRecoveryContext,
+    ) -> tuple[
+        dict[str, Any],
+        tuple[UserMCPServerProfile, ...],
+        str,
+        str,
+        str | None,
+    ]:
+        if prepared.username != conversation.username:
+            raise RuntimeError("agent_prepared_owner_mismatch")
+        model_options = dict(prepared.model_options)
+        prepared_model = str(model_options.get("model_edition") or "").strip()
+        if (
+            (prepared_model and prepared_model != run.binding.model_edition)
+            or model_options.get("reasoning_effort") != run.binding.reasoning_effort
+            or model_options.get("thinking_enabled") is not run.binding.thinking_enabled
+        ):
+            raise RuntimeError("agent_prepared_model_binding_mismatch")
+        expected_assignment = self._prepared_task_mcp_assignment(task)
+        if prepared.mcp_assignment != expected_assignment:
+            raise RuntimeError("agent_prepared_mcp_assignment_mismatch")
+
+        metadata = {
+            key: value
+            for key, value in prepared.execution_metadata.items()
+            if value is not None
+        }
+        if prepared_model:
+            metadata["model_edition"] = prepared_model
+        metadata.update(
+            {
+                "deep_thinking": bool(model_options["thinking_enabled"]),
+                "main_agent_thinking_enabled": bool(
+                    model_options["thinking_enabled"]
                 ),
-                cancellation=self._agent_cancellation_token(task.task_id),
+                "main_agent_reasoning_effort": str(
+                    model_options["reasoning_effort"]
+                ),
+                "requested_reasoning_effort": str(
+                    model_options["reasoning_effort"]
+                ),
+            }
+        )
+        for key, value in prepared.bundle_revisions.items():
+            if value is not None:
+                metadata[key] = value
+        if prepared.memory_context is not None:
+            metadata["conversation_memory"] = dict(prepared.memory_context)
+
+        self._restore_prepared_bundle_revisions(
+            task_id=task.task_id,
+            skill_revision=prepared.bundle_revisions.get("skill_bundle_revision"),
+            mcp_revision=prepared.bundle_revisions.get("mcp_bundle_revision"),
+        )
+        return (
+            metadata,
+            tuple(prepared.available_mcp_servers),
+            self._agent_owner_scope(prepared.username),
+            prepared.current_user_input,
+            prepared.initial_required_tool_name,
+        )
+
+    @staticmethod
+    def _prepared_task_mcp_assignment(task: Task) -> dict[str, object] | None:
+        values = (
+            task.mcp_execution_mode,
+            task.mcp_shadow_enabled,
+            task.mcp_rollout_config_version,
+            task.mcp_route_reason_code,
+            task.mcp_rollout_mode,
+        )
+        if all(value is None for value in values):
+            return None
+        if any(value is None for value in values):
+            raise RuntimeError("agent_prepared_task_mcp_assignment_corrupt")
+        return {
+            "execution_mode": task.mcp_execution_mode,
+            "shadow_enabled": task.mcp_shadow_enabled,
+            "rollout_config_version": task.mcp_rollout_config_version,
+            "route_reason_code": task.mcp_route_reason_code,
+            "rollout_mode": task.mcp_rollout_mode,
+        }
+
+    def _restore_prepared_bundle_revisions(
+        self,
+        *,
+        task_id: str,
+        skill_revision: object,
+        mcp_revision: object,
+    ) -> None:
+        candidates = (
+            (
+                "skill",
+                str(skill_revision or "").strip(),
+                self._skill_runtime_state,
+                self._task_skill_bundle_revisions,
+            ),
+            (
+                "mcp",
+                str(mcp_revision or "").strip(),
+                self._mcp_runtime_state,
+                self._task_mcp_bundle_revisions,
+            ),
+        )
+        pending: list[tuple[str, str, Any, dict[str, str]]] = []
+        for kind, revision, state, retained in candidates:
+            if not revision:
+                continue
+            if state is None:
+                raise RuntimeError(f"agent_prepared_{kind}_bundle_runtime_missing")
+            existing = retained.get(task_id)
+            if existing is not None:
+                if existing != revision:
+                    raise RuntimeError(
+                        f"agent_prepared_{kind}_bundle_revision_drift"
+                    )
+                continue
+            state.bundle_for_revision(revision)
+            pending.append((kind, revision, state, retained))
+
+        restored: list[tuple[str, Any, dict[str, str]]] = []
+        try:
+            for _kind, revision, state, retained in pending:
+                state.retain_revision(revision)
+                retained[task_id] = revision
+                restored.append((revision, state, retained))
+        except BaseException:
+            for revision, state, retained in reversed(restored):
+                retained.pop(task_id, None)
+                state.release_revision(revision)
+            raise
+
+    def _schedule_agent_run_lease_retry(self, run_id: str) -> None:
+        existing = self._agent_run_lease_retry_tasks.get(run_id)
+        if existing is not None and not existing.done():
+            return
+        self._agent_run_lease_retry_errors.pop(run_id, None)
+        retry = asyncio.create_task(
+            self._observe_agent_run_lease(run_id),
+            name=f"agent-run-lease-retry:{run_id}",
+        )
+        self._agent_run_lease_retry_tasks[run_id] = retry
+        retry.add_done_callback(
+            lambda handle, identity=run_id: self._finish_agent_run_lease_retry(
+                identity, handle
             )
+        )
+
+    async def _observe_agent_run_lease(self, run_id: str) -> None:
+        terminal = {
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.FAILED,
+            AgentRunStatus.CANCELLED,
+        }
+        waiting = {
+            AgentRunStatus.WAITING_FOR_INPUT,
+            AgentRunStatus.WAITING_FOR_DEPENDENCY,
+        }
+        while True:
+            run = await self.agent_run_repository.get_run(run_id)
+            if run is None:
+                raise RuntimeError("agent_startup_run_missing")
+            if run.status in terminal:
+                await self._release_task_skill_revision_if_terminal(run.task_id)
+                await self._release_task_mcp_revision_if_terminal(run.task_id)
+                return
+            if run.status in waiting:
+                return
+            expires_at = run.lease_expires_at
+            if expires_at is not None:
+                now = self._utcnow_naive()
+                if expires_at.tzinfo is not None:
+                    now = now.replace(tzinfo=timezone.utc)
+                delay = (expires_at - now).total_seconds()
+                if delay > 0:
+                    await self._agent_run_lease_retry_sleep(delay)
+                    continue
+            try:
+                await self._recover_agent_run(run)
+                return
+            except AgentStorageConflict as exc:
+                if str(exc) == "agent_task_lease_held":
+                    continue
+                self._fail_agent_run_recovery_process(run.run_id, exc)
+                return
+            except Exception as exc:
+                self._fail_agent_run_recovery_process(run.run_id, exc)
+                return
+
+    def _fail_agent_run_recovery_process(
+        self, run_id: str, exc: BaseException
+    ) -> None:
+        error_type = type(exc).__name__
+        self._agent_run_lease_retry_errors[run_id] = error_type
+        logger.error(
+            "agent_run_lease_retry_failed",
+            extra={"run_id": run_id, "error_type": error_type},
+        )
+        self._agent_run_recovery_fatal_exit(70)
+
+    def _finish_agent_run_lease_retry(
+        self, run_id: str, handle: asyncio.Task[None]
+    ) -> None:
+        if self._agent_run_lease_retry_tasks.get(run_id) is handle:
+            self._agent_run_lease_retry_tasks.pop(run_id, None)
+        if handle.cancelled():
+            return
+        error = handle.exception()
+        if error is not None:
+            self._fail_agent_run_recovery_process(run_id, error)
+
+    async def _cancel_agent_run_lease_retries(self) -> None:
+        retry_tasks = getattr(self, "_agent_run_lease_retry_tasks", None)
+        if retry_tasks is None:
+            return
+        retries = tuple(retry_tasks.values())
+        retry_tasks.clear()
+        for retry in retries:
+            retry.cancel()
+        if retries:
+            await asyncio.gather(*retries, return_exceptions=True)
 
     async def _strict_enumerate_mcp_terminal_candidates(self) -> None:
         root = self._mcp_terminal_result_root
@@ -9200,6 +9504,12 @@ class ApiRuntime(
             return
 
     async def shutdown(self) -> None:
+        coordinator = getattr(self, "_submission_admission_coordinator", None)
+        try:
+            if coordinator is not None:
+                await coordinator.abort_pending()
+        finally:
+            await self._cancel_agent_run_lease_retries()
         await self._quiesce_cp7_for_shutdown()
         if self._mcp_result_artifact_reconciler_task is not None:
             if not self._mcp_result_artifact_reconciler_task.done():
@@ -11044,6 +11354,13 @@ def build_api_runtime(
         await storage.append_event(event)
         await event_broker.publish(event)
 
+    async def record_initialization_event_exact(event: EventRecord) -> bool:
+        event = _ensure_event_created_at(event)
+        saved, duplicate = await storage.append_event_exact(event)
+        if not duplicate:
+            await event_broker.publish(saved)
+        return duplicate
+
     if user_mcp_enabled:
         assert user_mcp_capacity_values is not None
         assert mcp_durable_result_lifecycle_manager is not None
@@ -12242,6 +12559,7 @@ def build_api_runtime(
         binding_factory=build_agent_model_binding,
         record_event=record_live_event,
         make_event=make_agent_event,
+        initialization_event_recorder=record_initialization_event_exact,
     )
     agent_recovery = AgentRunRecoveryCoordinator(
         runs=agent_repository,

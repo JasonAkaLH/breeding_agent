@@ -93,7 +93,8 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
             + _field_bytes(2, admission)
             + _field_bytes(3, claim)
             + _field_string(4, "finalized")
-            + _field_string(5, "f" * 64),
+            + _field_string(5, "f" * 64)
+            + _field_varint(7, 1),
             "RenewSubmissionClaim": _field_bytes(1, claim),
             "AcknowledgeSubmissionProjection": _field_bytes(
                 1,
@@ -207,6 +208,8 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
 
         self.assertEqual(admitted["disposition"], "created")
         self.assertTrue(claimed["found"])
+        self.assertEqual(claimed["pending_count"], 1)
+        self.assertIsNone(claimed["earliest_claim_expires_at_ms"])
         self.assertEqual(renewed["claim"]["token"], "secret")
         self.assertEqual(projected["admission"]["message_id"], "message")
         self.assertEqual(prepared["admission"]["task_id"], "task")
@@ -320,6 +323,54 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     idempotency_key="submission:message",
                 )
 
+    def test_submission_claim_observability_decoder_is_closed(self) -> None:
+        client = object.__new__(RuntimeSidecarGrpcClient)
+        client._ensure_compatible = Mock()  # type: ignore[method-assign]
+        blocked = (
+            _field_string(4, "finalized")
+            + _field_string(5, "f" * 64)
+            + _field_varint(7, 2)
+            + _field_varint(8, 2_000)
+        )
+        client._unary = Mock(return_value=blocked)  # type: ignore[method-assign]
+
+        response = client.claim_pending_submission(
+            workflow_owner="worker",
+            now_ms=1_000,
+            claim_ttl_ms=1_000,
+        )
+        self.assertFalse(response["found"])
+        self.assertEqual(response["pending_count"], 2)
+        self.assertEqual(response["earliest_claim_expires_at_ms"], 2_000)
+
+        invalid = (
+            _field_varint(1, 1)
+            + _field_string(4, "finalized")
+            + _field_string(5, "f" * 64)
+            + _field_varint(7, 1)
+            + _field_varint(8, 2_000),
+            _field_string(4, "finalized")
+            + _field_string(5, "f" * 64)
+            + _field_varint(7, 1),
+            _field_string(4, "finalized")
+            + _field_string(5, "f" * 64)
+            + _field_varint(8, 2_000),
+            _field_string(4, "finalized")
+            + _field_string(5, "f" * 64)
+            + _field_varint(7, 1)
+            + _field_varint(8, 999),
+        )
+        for payload in invalid:
+            client._unary = Mock(return_value=payload)  # type: ignore[method-assign]
+            with self.subTest(payload=payload), self.assertRaisesRegex(
+                RuntimeError, "runtime_store_response_invalid"
+            ):
+                client.claim_pending_submission(
+                    workflow_owner="worker",
+                    now_ms=1_000,
+                    claim_ttl_ms=1_000,
+                )
+
     def test_submission_decoder_rejects_unknown_disposition(self) -> None:
         client = object.__new__(RuntimeSidecarGrpcClient)
         client._ensure_compatible = Mock()  # type: ignore[method-assign]
@@ -353,6 +404,57 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                 RuntimeError, "malformed protobuf"
             ):
                 _decode_closed_message(payload, 1, 2)
+
+    def test_event_append_exact_decodes_duplicate_and_rejects_open_wire_shape(self) -> None:
+        client = object.__new__(RuntimeSidecarGrpcClient)
+        client._ensure_compatible = Mock()  # type: ignore[method-assign]
+        cursor = (
+            _field_string(1, "conv")
+            + _field_string(2, "task")
+            + _field_varint(3, 1)
+        )
+        client._unary = Mock(  # type: ignore[method-assign]
+            return_value=_field_bytes(1, cursor) + _field_varint(3, 1)
+        )
+
+        response = client.append_event_exact(
+            conversation_id="conv",
+            task_id="task",
+            event_type="task.accepted",
+            payload_json=b"{}",
+            idempotency_key="event-1",
+        )
+
+        self.assertEqual(response["cursor"]["sequence"], 1)
+        self.assertTrue(response["duplicate"])
+        self.assertEqual(
+            client.append_event(
+                conversation_id="conv",
+                task_id="task",
+                event_type="task.accepted",
+                payload_json=b"{}",
+                idempotency_key="event-1",
+            ),
+            response["cursor"],
+        )
+
+        for payload in (
+            _field_bytes(1, cursor) + _field_varint(3, 0) + _field_varint(3, 1),
+            _field_bytes(1, cursor) + _field_varint(99, 1),
+            b"\x1a\x02\x80",
+        ):
+            client._unary = Mock(return_value=payload)  # type: ignore[method-assign]
+            with self.subTest(payload=payload), self.assertRaisesRegex(
+                RuntimeError,
+                "malformed protobuf",
+            ):
+                client.append_event_exact(
+                    conversation_id="conv",
+                    task_id="task",
+                    event_type="task.accepted",
+                    payload_json=b"{}",
+                    idempotency_key="event-1",
+                )
 
     def test_grpc_response_requires_exact_declared_message_length(self) -> None:
         for data in (b"\x00\x00\x00\x00\x05abc", b"\x00\x00\x00\x00\x01ab"):
@@ -462,7 +564,7 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     self.assertEqual(version["component"], "maf_runtime_sidecar")
 
                     client.check_compatibility()
-                    cursor = client.append_event(
+                    first_append = client.append_event_exact(
                         conversation_id="conv",
                         task_id="task",
                         event_type="task.accepted",
@@ -470,7 +572,18 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                         idempotency_key="event-1",
                         owner="python-runtime",
                     )
-                    self.assertEqual(cursor["sequence"], 1)
+                    self.assertEqual(first_append["cursor"]["sequence"], 1)
+                    self.assertFalse(first_append["duplicate"])
+                    replay_append = client.append_event_exact(
+                        conversation_id="conv",
+                        task_id="task",
+                        event_type="task.accepted",
+                        payload_json=b"{}",
+                        idempotency_key="event-1",
+                        owner="python-runtime",
+                    )
+                    self.assertEqual(replay_append["cursor"], first_append["cursor"])
+                    self.assertTrue(replay_append["duplicate"])
 
                     replayed = client.replay_events(
                         conversation_id="conv",

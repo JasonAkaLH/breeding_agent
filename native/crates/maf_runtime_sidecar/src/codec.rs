@@ -621,6 +621,8 @@ pub(super) fn claim_pending_response_to_pb(
         authority_state: response.authority_state,
         finalization_receipt_sha256: response.finalization_receipt_sha256,
         error: response.error.map(typed_error_to_pb),
+        pending_count: response.pending_count,
+        earliest_claim_expires_at_ms: response.earliest_claim_expires_at_ms,
     }
 }
 

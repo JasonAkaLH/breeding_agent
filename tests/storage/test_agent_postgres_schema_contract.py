@@ -15,7 +15,7 @@ from src.storage.sqlite import SQLiteAgentRepository
 class AgentPostgresSchemaContractTest(unittest.TestCase):
     def test_manifest_and_ddl_include_additive_agent_tables_and_constraints(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
-        self.assertEqual(POSTGRES_RUNTIME_SCHEMA_VERSION, "maf.postgresql_fresh_runtime_schema.v9")
+        self.assertEqual(POSTGRES_RUNTIME_SCHEMA_VERSION, "maf.postgresql_fresh_runtime_schema.v10")
         self.assertTrue({"agent_run", "agent_item", "agent_final_receipt"}.issubset(manifest.runtime_table_names))
         self.assertEqual(manifest.table_columns["agent_run"]["lease_expires_at"], "timestamp with time zone")
         self.assertIn("ck_agent_item_agent_item_kind", manifest.check_constraints["agent_item"])

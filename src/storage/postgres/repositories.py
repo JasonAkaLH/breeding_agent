@@ -13,6 +13,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from src.core.enums import ConversationStatus
 from src.core.models import (
     Conversation,
+    ConversationMemorySummary,
     Interrupt,
     InterruptAnswer,
     MCPApprovalDecisionResult,
@@ -51,6 +52,8 @@ from src.core.models import (
     Task,
     SubmissionAdmissionRequest,
     SubmissionAdmissionResult,
+    SubmissionPreparationReceipt,
+    SubmissionPreparationReceiptComponent,
     SubmissionRecoveryRecord,
     UserMCPCredentialRecord,
     UserMCPHealthAttempt,
@@ -175,6 +178,39 @@ class PostgreSQLStorage(SQLiteStorage):
     ) -> None:
         await self._run_submission_write_with_unique_retry(
             lambda state: state.project_submission_admission(record)
+        )
+
+    async def write_submission_preparation_component(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        component: SubmissionPreparationReceiptComponent,
+        canonical_json: bytes,
+        component_sha256: str,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        return await self._run_submission_write_with_unique_retry(
+            lambda state: state.write_submission_preparation_component(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                component=component,
+                canonical_json=canonical_json,
+                component_sha256=component_sha256,
+                written_at=written_at,
+            )
+        )
+
+    async def materialize_conversation_memory_summary_exact(
+        self,
+        summary: ConversationMemorySummary,
+    ) -> ConversationMemorySummary:
+        return await self._run_submission_write_with_unique_retry(
+            lambda state: state.materialize_conversation_memory_summary_exact(
+                summary
+            )
         )
 
     async def _run_submission_write_with_unique_retry(
@@ -2635,6 +2671,7 @@ class PostgreSQLStorage(SQLiteStorage):
 
     def _delete_conversation_physical_sync(self, conversation_id: str) -> dict[str, int]:
         deleted_counts: dict[str, int] = {
+            "submission_preparation_receipts": 0,
             "conversation_file_resource": 0,
             "conversation_memory_summary": 0,
             "conversation_pending_skill_context": 0,
@@ -2669,6 +2706,10 @@ class PostgreSQLStorage(SQLiteStorage):
             return int(rowcount if rowcount is not None and rowcount > 0 else 0)
 
         statements: tuple[tuple[str, str], ...] = (
+            (
+                "submission_preparation_receipts",
+                "DELETE FROM submission_preparation_receipts WHERE conversation_id = :conversation_id",
+            ),
             (
                 "mailbox_delivery",
                 """
@@ -2892,6 +2933,11 @@ class PostgreSQLStorage(SQLiteStorage):
         )
 
         with self._session_factory() as session:
+            session.scalar(
+                select(ConversationRow.conversation_id)
+                .where(ConversationRow.conversation_id == conversation_id)
+                .with_for_update()
+            )
             for name, sql in statements:
                 deleted_counts[name] = _rowcount(session.execute(text(sql), {"conversation_id": conversation_id}))
             session.commit()

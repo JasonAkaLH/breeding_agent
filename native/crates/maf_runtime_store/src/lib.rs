@@ -6,9 +6,9 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260826_submission_admission_a2";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260826_event_append_exact_a4";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260826_submission_admission_a1";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260826_event_append_exact_a4";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";

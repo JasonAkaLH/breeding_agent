@@ -130,6 +130,8 @@ from src.core.models import (
     SubmissionHandoffAcknowledgementRequest,
     SubmissionHandoffState,
     SubmissionPreparationLookup,
+    SubmissionPreparationReceipt,
+    SubmissionPreparationReceiptComponent,
     SubmissionPreparationRecord,
     SubmissionPreparationRequest,
     SubmissionPreparationState,
@@ -222,6 +224,7 @@ from src.storage.sqlalchemy_models import (
     AuthUserTokenRow,
     CheckpointRow,
     ConversationRow,
+    SubmissionPreparationReceiptRow,
     ConversationMemorySummaryRow,
     ConversationFileIndexRepairMarkerRow,
     ConversationFileResourceRow,
@@ -1048,6 +1051,53 @@ def _row_to_conversation_memory_summary(row: ConversationMemorySummaryRow) -> Co
     )
 
 
+def _conversation_memory_summary_row(
+    summary: ConversationMemorySummary,
+) -> ConversationMemorySummaryRow:
+    return ConversationMemorySummaryRow(
+        summary_id=summary.summary_id,
+        conversation_id=summary.conversation_id,
+        username=summary.username,
+        covered_until_turn_id=summary.covered_until_turn_id,
+        covered_until_message_id=summary.covered_until_message_id,
+        covered_until_created_at=summary.covered_until_created_at,
+        summary_text=summary.summary_text,
+        source_message_count=summary.source_message_count,
+        source_message_ids_hash=summary.source_message_ids_hash,
+        estimated_tokens=summary.estimated_tokens,
+        summary_version=summary.summary_version,
+        compression_policy_version=summary.compression_policy_version,
+        model_metadata_safe=dict(summary.model_metadata_safe),
+        last_error=summary.last_error,
+        created_at=summary.created_at,
+        updated_at=summary.updated_at,
+    )
+
+
+def _conversation_memory_summary_exact(
+    existing: ConversationMemorySummary,
+    candidate: ConversationMemorySummary,
+) -> bool:
+    def _utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    return replace(
+        existing,
+        covered_until_created_at=_utc(existing.covered_until_created_at),
+        created_at=_utc(existing.created_at),
+        updated_at=_utc(existing.updated_at),
+    ) == replace(
+        candidate,
+        covered_until_created_at=_utc(candidate.covered_until_created_at),
+        created_at=_utc(candidate.created_at),
+        updated_at=_utc(candidate.updated_at),
+    )
+
+
 def _row_to_pending_skill_context(row: PendingSkillContextRow) -> PendingSkillContext:
     return PendingSkillContext(
         context_id=row.context_id,
@@ -1869,6 +1919,24 @@ def _ensure_event_append_payload_within_rust_contract(event: EventRecord) -> Non
         raise ValueError(f"{error_code}: event payload exceeds Rust runtime sidecar limit of {limit} bytes")
 
 
+def _event_records_are_exact(left: EventRecord, right: EventRecord) -> bool:
+    return (
+        replace(left, payload={}) == replace(right, payload={})
+        and _canonical_event_payload_bytes(left.payload)
+        == _canonical_event_payload_bytes(right.payload)
+    )
+
+
+def _canonical_event_payload_bytes(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+
+
 def _ensure_event_replay_policy_compatible_with_rust_contract() -> tuple[int, int]:
     policy = runtime_operation_policy("event_replay")
     if policy.get("kind") != "read" or policy.get("python_legacy_write_fallback") is not False:
@@ -1917,6 +1985,132 @@ def _ensure_runtime_store_write_allowed_by_rust_contract(
         component="runtime_store",
         operation_name=operation_name,
         unavailable_error_code="runtime_store_unavailable",
+    )
+
+
+_SUBMISSION_PREPARATION_RECEIPT_DOMAIN = b"maf.submission.preparation_receipt.v1\0"
+_SUBMISSION_PREPARATION_COMPONENT_COLUMNS = {
+    SubmissionPreparationReceiptComponent.ROUTE_DECISION: (
+        "route_decision_json",
+        "route_decision_sha256",
+    ),
+    SubmissionPreparationReceiptComponent.MEMORY_CONTEXT: (
+        "memory_context_json",
+        "memory_context_sha256",
+    ),
+    SubmissionPreparationReceiptComponent.SELECTOR_DECISION: (
+        "selector_decision_json",
+        "selector_decision_sha256",
+    ),
+}
+
+
+def _is_bare_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _submission_preparation_canonical_text(
+    canonical_json: bytes,
+    component_sha256: str,
+) -> str:
+    if not isinstance(canonical_json, bytes):
+        raise ValueError("submission_preparation_component_invalid")
+    try:
+        decoded = json.loads(
+            canonical_json,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+        rendered = json.dumps(
+            decoded,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="strict")
+    except (
+        UnicodeDecodeError,
+        UnicodeEncodeError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError("submission_preparation_component_invalid") from exc
+    if decoded is not None and not isinstance(decoded, dict):
+        raise ValueError("submission_preparation_component_invalid")
+    if rendered != canonical_json:
+        raise ValueError("submission_preparation_component_not_canonical")
+    if not _is_bare_sha256(component_sha256):
+        raise ValueError("submission_preparation_component_sha256_invalid")
+    if hashlib.sha256(canonical_json).hexdigest() != component_sha256:
+        raise ValueError("submission_preparation_component_sha256_mismatch")
+    return canonical_json.decode("utf-8", errors="strict")
+
+
+def _submission_preparation_receipt_sha256(
+    route_decision: bytes,
+    memory_context: bytes,
+    selector_decision: bytes,
+) -> str:
+    return hashlib.sha256(
+        _SUBMISSION_PREPARATION_RECEIPT_DOMAIN
+        + route_decision
+        + b"\0"
+        + memory_context
+        + b"\0"
+        + selector_decision
+    ).hexdigest()
+
+
+def _row_to_submission_preparation_receipt(
+    row: SubmissionPreparationReceiptRow,
+) -> SubmissionPreparationReceipt:
+    components: dict[str, bytes | None] = {}
+    for name in ("route_decision", "memory_context", "selector_decision"):
+        value = getattr(row, f"{name}_json")
+        digest = getattr(row, f"{name}_sha256")
+        if (value is None) != (digest is None):
+            raise RuntimeError("submission_preparation_receipt_corrupt")
+        if value is None:
+            components[name] = None
+            continue
+        canonical = str(value).encode("utf-8", errors="strict")
+        try:
+            _submission_preparation_canonical_text(canonical, str(digest))
+        except ValueError as exc:
+            raise RuntimeError("submission_preparation_receipt_corrupt") from exc
+        components[name] = canonical
+    receipt_sha256 = row.receipt_sha256
+    if receipt_sha256 is not None:
+        if not _is_bare_sha256(receipt_sha256) or any(
+            components[name] is None
+            for name in ("route_decision", "memory_context", "selector_decision")
+        ):
+            raise RuntimeError("submission_preparation_receipt_corrupt")
+        expected = _submission_preparation_receipt_sha256(
+            cast(bytes, components["route_decision"]),
+            cast(bytes, components["memory_context"]),
+            cast(bytes, components["selector_decision"]),
+        )
+        if receipt_sha256 != expected:
+            raise RuntimeError("submission_preparation_receipt_corrupt")
+    if row.created_at is None or row.updated_at is None:
+        raise RuntimeError("submission_preparation_receipt_corrupt")
+    return SubmissionPreparationReceipt(
+        task_id=row.task_id,
+        conversation_id=row.conversation_id,
+        route_decision=components["route_decision"],
+        route_decision_sha256=row.route_decision_sha256,
+        memory_context=components["memory_context"],
+        memory_context_sha256=row.memory_context_sha256,
+        selector_decision=components["selector_decision"],
+        selector_decision_sha256=row.selector_decision_sha256,
+        receipt_sha256=receipt_sha256,
+        created_at=cast(datetime, row.created_at),
+        updated_at=cast(datetime, row.updated_at),
     )
 
 
@@ -2343,27 +2537,33 @@ class SQLiteStateRepository:
         return _row_to_conversation(row)
 
     def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary:
-        row = ConversationMemorySummaryRow(
-            summary_id=summary.summary_id,
-            conversation_id=summary.conversation_id,
-            username=summary.username,
-            covered_until_turn_id=summary.covered_until_turn_id,
-            covered_until_message_id=summary.covered_until_message_id,
-            covered_until_created_at=summary.covered_until_created_at,
-            summary_text=summary.summary_text,
-            source_message_count=summary.source_message_count,
-            source_message_ids_hash=summary.source_message_ids_hash,
-            estimated_tokens=summary.estimated_tokens,
-            summary_version=summary.summary_version,
-            compression_policy_version=summary.compression_policy_version,
-            model_metadata_safe=dict(summary.model_metadata_safe),
-            last_error=summary.last_error,
-            created_at=summary.created_at,
-            updated_at=summary.updated_at,
-        )
+        row = _conversation_memory_summary_row(summary)
         merged = self._session.merge(row)
         self._session.flush()
         return _row_to_conversation_memory_summary(merged)
+
+    def materialize_conversation_memory_summary_exact(
+        self,
+        summary: ConversationMemorySummary,
+    ) -> ConversationMemorySummary:
+        self._lock_active_conversation_owner(
+            username=summary.username,
+            conversation_id=summary.conversation_id,
+        )
+        row = self._session.scalar(
+            select(ConversationMemorySummaryRow)
+            .where(ConversationMemorySummaryRow.summary_id == summary.summary_id)
+            .with_for_update()
+        )
+        if row is None:
+            row = _conversation_memory_summary_row(summary)
+            self._session.add(row)
+            self._session.flush()
+            return _row_to_conversation_memory_summary(row)
+        existing = _row_to_conversation_memory_summary(row)
+        if not _conversation_memory_summary_exact(existing, summary):
+            raise RuntimeError("conversation_memory_summary_materialization_conflict")
+        return summary
 
     def get_conversation_memory_summary(self, summary_id: str) -> ConversationMemorySummary | None:
         row = self._session.get(ConversationMemorySummaryRow, summary_id)
@@ -2500,6 +2700,148 @@ class SQLiteStateRepository:
         self._session.flush()
         return _row_to_pending_skill_context(row)
 
+    def _lock_active_conversation_owner(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+    ) -> ConversationRow:
+        conversation = self._session.scalar(
+            select(ConversationRow)
+            .where(ConversationRow.conversation_id == conversation_id)
+            .with_for_update()
+        )
+        if (
+            conversation is None
+            or conversation.username != username
+            or conversation.status != str(ConversationStatus.ACTIVE)
+        ):
+            raise RuntimeError("conversation_not_available")
+        return conversation
+
+    def write_submission_preparation_component(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        component: SubmissionPreparationReceiptComponent,
+        canonical_json: bytes,
+        component_sha256: str,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        self._lock_active_conversation_owner(
+            username=username,
+            conversation_id=conversation_id,
+        )
+        try:
+            component = SubmissionPreparationReceiptComponent(component)
+        except ValueError as exc:
+            raise ValueError("submission_preparation_component_invalid") from exc
+        canonical_text = _submission_preparation_canonical_text(
+            canonical_json,
+            component_sha256,
+        )
+        row = self._session.scalar(
+            select(SubmissionPreparationReceiptRow)
+            .where(SubmissionPreparationReceiptRow.task_id == task_id)
+            .with_for_update()
+        )
+        if row is None:
+            row = SubmissionPreparationReceiptRow(
+                task_id=task_id,
+                conversation_id=conversation_id,
+                route_decision_json=None,
+                route_decision_sha256=None,
+                memory_context_json=None,
+                memory_context_sha256=None,
+                selector_decision_json=None,
+                selector_decision_sha256=None,
+                receipt_sha256=None,
+                created_at=written_at,
+                updated_at=written_at,
+            )
+            self._session.add(row)
+            self._session.flush()
+        elif row.conversation_id != conversation_id:
+            raise RuntimeError("submission_preparation_receipt_conflict")
+
+        value_column, sha_column = _SUBMISSION_PREPARATION_COMPONENT_COLUMNS[
+            component
+        ]
+        existing_value = getattr(row, value_column)
+        existing_sha = getattr(row, sha_column)
+        if existing_value is not None:
+            if existing_value != canonical_text or existing_sha != component_sha256:
+                raise RuntimeError("submission_preparation_receipt_conflict")
+            return _row_to_submission_preparation_receipt(row)
+        if row.receipt_sha256 is not None:
+            raise RuntimeError("submission_preparation_receipt_corrupt")
+        setattr(row, value_column, canonical_text)
+        setattr(row, sha_column, component_sha256)
+        row.updated_at = written_at
+        self._session.flush()
+        return _row_to_submission_preparation_receipt(row)
+
+    def close_submission_preparation_receipt(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        closed_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        self._lock_active_conversation_owner(
+            username=username,
+            conversation_id=conversation_id,
+        )
+        row = self._session.scalar(
+            select(SubmissionPreparationReceiptRow)
+            .where(SubmissionPreparationReceiptRow.task_id == task_id)
+            .with_for_update()
+        )
+        if row is None or row.conversation_id != conversation_id:
+            raise RuntimeError("submission_preparation_receipt_not_available")
+        record = _row_to_submission_preparation_receipt(row)
+        if record.receipt_sha256 is not None:
+            return record
+        if (
+            record.route_decision is None
+            or record.memory_context is None
+            or record.selector_decision is None
+        ):
+            raise RuntimeError("submission_preparation_receipt_incomplete")
+        row.receipt_sha256 = _submission_preparation_receipt_sha256(
+            record.route_decision,
+            record.memory_context,
+            record.selector_decision,
+        )
+        row.updated_at = closed_at
+        self._session.flush()
+        return _row_to_submission_preparation_receipt(row)
+
+    def get_submission_preparation_receipt(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+    ) -> SubmissionPreparationReceipt | None:
+        self._lock_active_conversation_owner(
+            username=username,
+            conversation_id=conversation_id,
+        )
+        row = self._session.scalar(
+            select(SubmissionPreparationReceiptRow)
+            .where(SubmissionPreparationReceiptRow.task_id == task_id)
+            .with_for_update()
+        )
+        if row is None:
+            return None
+        if row.conversation_id != conversation_id:
+            raise RuntimeError("submission_preparation_receipt_conflict")
+        return _row_to_submission_preparation_receipt(row)
+
     def delete_conversation(self, conversation_id: str) -> dict[str, int]:
         task_ids = list(
             self._session.scalars(select(TaskRow.task_id).where(TaskRow.conversation_id == conversation_id)).all()
@@ -2537,6 +2879,7 @@ class SQLiteStateRepository:
             slot_event_conditions.append(SlotEventRow.collection_id.in_(slot_collection_ids))
 
         deleted_counts: dict[str, int] = {
+            "submission_preparation_receipts": 0,
             "conversation_file_resource": 0,
             "conversation_memory_summary": 0,
             "conversation_pending_skill_context": 0,
@@ -2641,6 +2984,12 @@ class SQLiteStateRepository:
         _delete(
             "conversation_pending_skill_context",
             delete(PendingSkillContextRow).where(PendingSkillContextRow.conversation_id == conversation_id),
+        )
+        _delete(
+            "submission_preparation_receipts",
+            delete(SubmissionPreparationReceiptRow).where(
+                SubmissionPreparationReceiptRow.conversation_id == conversation_id
+            ),
         )
         _delete(
             "conversation_file_index_repair_marker",
@@ -12732,6 +13081,38 @@ class SQLiteCollaborationRepository:
         self._session.flush()
         return _row_to_event_record(merged)
 
+    def save_event_record_exact(self, event: EventRecord) -> tuple[EventRecord, bool]:
+        _ensure_event_append_payload_within_rust_contract(event)
+        values = {
+            "event_id": event.event_id,
+            "conversation_id": event.conversation_id,
+            "task_id": event.task_id,
+            "node_id": event.node_id,
+            "agent_id": event.agent_id,
+            "event_type": event.event_type,
+            "payload": dict(event.payload),
+            "visibility": event.visibility,
+            "created_at": event.created_at,
+        }
+        dialect_name = self._session.get_bind().dialect.name
+        statement = (
+            postgresql_insert(EventRecordRow).values(**values)
+            if dialect_name == "postgresql"
+            else sqlite_insert(EventRecordRow).values(**values)
+        )
+        inserted_event_id = self._session.scalar(
+            statement.on_conflict_do_nothing(index_elements=["event_id"]).returning(
+                EventRecordRow.event_id
+            )
+        )
+        self._session.flush()
+        existing = self._session.get(EventRecordRow, event.event_id)
+        assert existing is not None
+        saved = _row_to_event_record(existing)
+        if not _event_records_are_exact(saved, event):
+            raise RuntimeError("runtime_store_idempotency_conflict: event record differs")
+        return saved, inserted_event_id is None
+
     def get_event_record(self, event_id: str) -> EventRecord | None:
         row = self._session.get(EventRecordRow, event_id)
         return None if row is None else _row_to_event_record(row)
@@ -15561,6 +15942,61 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def write_submission_preparation_component(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        component: SubmissionPreparationReceiptComponent,
+        canonical_json: bytes,
+        component_sha256: str,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        return await self._run(
+            lambda state, collab: state.write_submission_preparation_component(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                component=component,
+                canonical_json=canonical_json,
+                component_sha256=component_sha256,
+                written_at=written_at,
+            )
+        )
+
+    async def close_submission_preparation_receipt(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        closed_at: datetime,
+    ) -> SubmissionPreparationReceipt:
+        return await self._run(
+            lambda state, collab: state.close_submission_preparation_receipt(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                closed_at=closed_at,
+            )
+        )
+
+    async def get_submission_preparation_receipt(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+    ) -> SubmissionPreparationReceipt | None:
+        return await self._run(
+            lambda state, collab: state.get_submission_preparation_receipt(
+                username=username,
+                conversation_id=conversation_id,
+                task_id=task_id,
+            )
+        )
+
     async def save_conversation(self, conversation: Conversation) -> Conversation:
         return await self._run(lambda state, collab: state.save_conversation(conversation))
 
@@ -15858,6 +16294,16 @@ class SQLiteStorage(StoragePort):
     async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary:
         return await self._run(lambda state, collab: state.save_conversation_memory_summary(summary))
 
+    async def materialize_conversation_memory_summary_exact(
+        self,
+        summary: ConversationMemorySummary,
+    ) -> ConversationMemorySummary:
+        return await self._run(
+            lambda state, collab: state.materialize_conversation_memory_summary_exact(
+                summary
+            )
+        )
+
     async def get_conversation_memory_summary(self, summary_id: str) -> ConversationMemorySummary | None:
         return await self._run(lambda state, collab: state.get_conversation_memory_summary(summary_id))
 
@@ -15981,6 +16427,14 @@ class SQLiteStorage(StoragePort):
             authority_state=SubmissionAuthorityState(str(response["authority_state"])),
             finalization_receipt_sha256=response.get(
                 "finalization_receipt_sha256"
+            ),
+            pending_count=int(response["pending_count"]),
+            earliest_claim_expires_at=(
+                None
+                if response.get("earliest_claim_expires_at_ms") is None
+                else _epoch_ms_datetime(
+                    int(response["earliest_claim_expires_at_ms"])
+                )
             ),
             record=record,
             handle=handle,
@@ -16986,7 +17440,21 @@ class SQLiteStorage(StoragePort):
             _consume_runtime_sidecar_response("event_append", response)
             return event
         saved = await self._run(lambda state, collab: collab.save_event_record(event))
-        payload_json = json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8")
+        await self._record_event_append_shadow(event, saved)
+        return saved
+
+    async def _record_event_append_shadow(
+        self,
+        event: EventRecord,
+        saved: EventRecord,
+        *,
+        payload_json: bytes | None = None,
+    ) -> None:
+        payload_json = payload_json or json.dumps(
+            event.payload,
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
         await record_runtime_sidecar_shadow_write(
             component="event_log",
             operation_name="event_append",
@@ -17017,7 +17485,41 @@ class SQLiteStorage(StoragePort):
                 "task_id": str(envelope.get("cursor", {}).get("task_id", "")),
             },
         )
-        return saved
+
+    async def append_event_exact(self, event: EventRecord) -> tuple[EventRecord, bool]:
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="event_log",
+            operation_name="event_append",
+            unavailable_error_code="event_log_unavailable",
+        )
+        if sidecar_client is not None:
+            _ensure_event_append_payload_within_rust_limit(event)
+            append_exact = getattr(sidecar_client, "append_event_exact", None)
+            if not callable(append_exact):
+                raise RuntimeError(
+                    "event_log_unavailable: Rust runtime sidecar client does not expose exact event append"
+                )
+            response = await _resolve_runtime_sidecar_call(
+                append_exact(
+                    conversation_id=event.conversation_id,
+                    task_id=event.task_id,
+                    event_type=event.event_type,
+                    payload_json=_canonical_event_payload_bytes(event.payload),
+                    idempotency_key=event.event_id,
+                )
+            )
+            envelope = _consume_runtime_sidecar_response("event_append", response)
+            return event, bool(envelope["duplicate"])
+
+        saved, duplicate = await self._run(
+            lambda state, collab: collab.save_event_record_exact(event)
+        )
+        await self._record_event_append_shadow(
+            event,
+            saved,
+            payload_json=_canonical_event_payload_bytes(event.payload),
+        )
+        return saved, duplicate
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]:
         self._ensure_event_replay_available()

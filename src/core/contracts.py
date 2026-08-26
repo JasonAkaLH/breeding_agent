@@ -83,6 +83,8 @@ from .models import (
     SubmissionClaimResult,
     SubmissionHandoffAcknowledgementRequest,
     SubmissionPreparationLookup,
+    SubmissionPreparationReceipt,
+    SubmissionPreparationReceiptComponent,
     SubmissionPreparationRecord,
     SubmissionPreparationRequest,
     SubmissionProjectionAcknowledgementRequest,
@@ -1327,6 +1329,38 @@ class ConversationTaskAdmissionPort(Protocol):
 
 
 @runtime_checkable
+class SubmissionPreparationReceiptStoragePort(Protocol):
+    async def write_submission_preparation_component(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        component: SubmissionPreparationReceiptComponent,
+        canonical_json: bytes,
+        component_sha256: str,
+        written_at: datetime,
+    ) -> SubmissionPreparationReceipt: ...
+
+    async def close_submission_preparation_receipt(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        closed_at: datetime,
+    ) -> SubmissionPreparationReceipt: ...
+
+    async def get_submission_preparation_receipt(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+    ) -> SubmissionPreparationReceipt | None: ...
+
+
+@runtime_checkable
 class ConversationStoragePort(Protocol):
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
 
@@ -1700,6 +1734,7 @@ class StoragePort(
     MCPRolloutStoragePort,
     AuthStoragePort,
     ConversationTaskAdmissionPort,
+    SubmissionPreparationReceiptStoragePort,
     ConversationStoragePort,
     PendingSkillContextStoragePort,
     MessageStoragePort,

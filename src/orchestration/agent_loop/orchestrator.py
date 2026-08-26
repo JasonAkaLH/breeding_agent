@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Mapping
 
 from src.core.enums import TaskStatus
@@ -12,11 +13,14 @@ from .capability_invoker import AgentInvocationContextStore
 from .final_output import AgentFinalOutputPublisher
 from .models import (
     AgentCancellationToken,
+    AgentItemKind,
+    AgentItemState,
     AgentModelBinding,
     AgentRun,
     AgentRunStatus,
     AgentStorageConflict,
     AgentUserMessageCommit,
+    AgentUserMessageCommitResult,
     provider_safe_tool_name,
 )
 from .repository import AgentAtomicWriter, AgentRunRepository
@@ -64,6 +68,13 @@ class AgentOrchestrationResult:
     final_message_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _InitializedAgentRun:
+    request: AgentExecutionRequest
+    task: Task
+    run: AgentRun
+
+
 class AgentLoopOrchestrator:
     """The single production entry for starting or resuming an AgentRun."""
 
@@ -80,6 +91,10 @@ class AgentLoopOrchestrator:
         binding_factory: Callable[[AgentExecutionRequest], AgentModelBinding],
         record_event: Callable[[EventRecord], Awaitable[None]],
         make_event: Callable[..., EventRecord],
+        event_loader: Callable[[str, str], Awaitable[EventRecord | None]] | None = None,
+        initialization_event_recorder: (
+            Callable[[EventRecord], Awaitable[bool]] | None
+        ) = None,
     ) -> None:
         self._runs = runs
         self._writer = writer
@@ -91,6 +106,8 @@ class AgentLoopOrchestrator:
         self._binding_factory = binding_factory
         self._record_event = record_event
         self._make_event = make_event
+        self._load_event = event_loader
+        self._record_initialization_event = initialization_event_recorder
 
     async def start_or_resume(
         self,
@@ -98,24 +115,39 @@ class AgentLoopOrchestrator:
         *,
         cancellation: AgentCancellationToken | None = None,
     ) -> AgentOrchestrationResult:
+        initialized = await self.initialize_run(request)
+        return await self.run_initialized(initialized, cancellation=cancellation)
+
+    async def initialize_run(
+        self,
+        request: AgentExecutionRequest,
+    ) -> _InitializedAgentRun:
         task = await self._load_task(request.task_id)
-        if task is None or task.conversation_id != request.conversation_id:
+        if not _task_matches_request(task, request):
             raise AgentStorageConflict("agent_task_identity_mismatch")
+        assert task is not None
         task = await self._ensure_task_running(task)
+        if not _task_matches_request(task, request):
+            raise AgentStorageConflict("agent_task_identity_mismatch")
+        binding = self._binding_factory(request)
+        expected_run = AgentRun(
+            run_id=_agent_run_id(request.task_id),
+            task_id=request.task_id,
+            conversation_id=request.conversation_id,
+            status=AgentRunStatus.RUNNING,
+            binding=binding,
+        )
         run = await self._runs.get_run_for_task(request.task_id)
-        created = run is None
         if run is None:
-            run = await self._runs.create_run(
-                AgentRun(
-                    run_id=f"agent-run:{request.task_id}",
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    status=AgentRunStatus.RUNNING,
-                    binding=self._binding_factory(request),
-                )
-            )
-        elif run.binding != self._binding_factory(request):
-            raise AgentStorageConflict("agent_run_binding_mismatch")
+            try:
+                run = await self._runs.create_run(expected_run)
+            except AgentStorageConflict as create_error:
+                if str(create_error) != "agent_run_task_already_bound":
+                    raise
+                run = await self._runs.get_run_for_task(request.task_id)
+                if run is None:
+                    raise create_error
+        _validate_run_identity(run, expected_run, check_binding=True)
         initialized = await self._writer.commit_agent_user_message(
             AgentUserMessageCommit(
                 run_id=run.run_id,
@@ -125,6 +157,57 @@ class AgentLoopOrchestrator:
             )
         )
         run = initialized.run
+        _validate_initialized_user_item(initialized, expected_run)
+        await self._ensure_initialization_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="task.graph_created",
+                payload={
+                    "edge_count": 0,
+                    "node_count": 0,
+                },
+            ),
+            event_id=f"evt-agent-task-graph-created:{request.task_id}",
+            created_at=run.created_at,
+        )
+        await self._ensure_initialization_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="agent.run.started",
+                payload={
+                    "model_option_digests": dict(run.binding.option_digests),
+                    "routing_mode": str(task.routing_mode),
+                },
+            ),
+            event_id=f"evt-agent-run-started:{run.run_id}",
+            created_at=run.created_at,
+        )
+        return _InitializedAgentRun(request=request, task=task, run=run)
+
+    async def run_initialized(
+        self,
+        initialized: _InitializedAgentRun,
+        *,
+        cancellation: AgentCancellationToken | None = None,
+    ) -> AgentOrchestrationResult:
+        request = initialized.request
+        task = initialized.task
+        run = initialized.run
+        if not _task_matches_request(task, request):
+            raise AgentStorageConflict("agent_task_identity_mismatch")
+        _validate_run_identity(
+            run,
+            AgentRun(
+                run_id=_agent_run_id(request.task_id),
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                status=run.status,
+                binding=run.binding,
+            ),
+            check_binding=False,
+        )
         self._contexts.register(
             run.run_id,
             metadata={
@@ -133,29 +216,6 @@ class AgentLoopOrchestrator:
             },
             current_user_input=request.user_message,
         )
-        if created:
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    event_type="task.graph_created",
-                    payload={
-                        "edge_count": 0,
-                        "node_count": 0,
-                    },
-                )
-            )
-            await self._record_event(
-                self._make_event(
-                    task_id=request.task_id,
-                    conversation_id=request.conversation_id,
-                    event_type="agent.run.started",
-                    payload={
-                        "model_option_digests": dict(run.binding.option_digests),
-                        "routing_mode": str(task.routing_mode),
-                    },
-                )
-            )
         visibility = CapabilityVisibilityContext(
             authenticated_owner_scope=request.owner_scope,
             execution_path=str(task.mcp_execution_mode or "default"),
@@ -181,6 +241,31 @@ class AgentLoopOrchestrator:
             cancellation=cancellation,
         )
         return await self._finish(loop_result)
+
+    async def _ensure_initialization_event(
+        self,
+        event: EventRecord,
+        *,
+        event_id: str,
+        created_at: datetime | None,
+    ) -> None:
+        if created_at is None:
+            raise AgentStorageConflict("agent_run_created_at_missing")
+        expected = replace(event, event_id=event_id, created_at=created_at)
+        if self._record_initialization_event is not None:
+            await self._record_initialization_event(expected)
+            return
+        if self._load_event is not None:
+            existing = await self._load_event(expected.task_id, event_id)
+            if existing is not None:
+                if existing != expected:
+                    raise AgentStorageConflict("agent_initialization_event_conflict")
+                return
+        await self._record_event(expected)
+        if self._load_event is not None:
+            stored = await self._load_event(expected.task_id, event_id)
+            if stored != expected:
+                raise AgentStorageConflict("agent_initialization_event_write_conflict")
 
     async def _finish(
         self, result: AgentLoopRunResult
@@ -286,6 +371,56 @@ class AgentLoopOrchestrator:
                 raise AgentStorageConflict("agent_task_start_conflict")
             return latest
         return running
+
+
+def _agent_run_id(task_id: str) -> str:
+    return f"agent-run:{task_id}"
+
+
+def _task_matches_request(
+    task: Task | None,
+    request: AgentExecutionRequest,
+) -> bool:
+    return bool(
+        task is not None
+        and task.task_id == request.task_id
+        and task.conversation_id == request.conversation_id
+        and task.root_message_id == request.root_message_id
+    )
+
+
+def _validate_run_identity(
+    run: AgentRun,
+    expected: AgentRun,
+    *,
+    check_binding: bool,
+) -> None:
+    if (
+        run.run_id != expected.run_id
+        or run.task_id != expected.task_id
+        or run.conversation_id != expected.conversation_id
+    ):
+        raise AgentStorageConflict("agent_run_identity_mismatch")
+    if check_binding and run.binding != expected.binding:
+        raise AgentStorageConflict("agent_run_binding_mismatch")
+
+
+def _validate_initialized_user_item(
+    initialized: AgentUserMessageCommitResult,
+    expected_run: AgentRun,
+) -> None:
+    run = initialized.run
+    item = initialized.item
+    _validate_run_identity(run, expected_run, check_binding=True)
+    if (
+        item.item_id != f"agent-item:{expected_run.run_id}:user-initial"
+        or item.run_id != expected_run.run_id
+        or item.task_id != expected_run.task_id
+        or item.sequence != 1
+        or item.kind is not AgentItemKind.USER_MESSAGE
+        or item.state is not AgentItemState.COMMITTED
+    ):
+        raise AgentStorageConflict("agent_user_message_identity_mismatch")
 
 
 def model_binding_digest(*, name: str, value: str) -> str:

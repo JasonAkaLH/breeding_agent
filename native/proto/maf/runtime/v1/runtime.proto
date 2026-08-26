@@ -273,6 +273,8 @@ message ClaimPendingSubmissionResponse {
   string authority_state = 4;
   optional string finalization_receipt_sha256 = 5;
   maf.common.v1.TypedError error = 6;
+  uint64 pending_count = 7;
+  optional int64 earliest_claim_expires_at_ms = 8;
 }
 
 message RenewSubmissionClaimRequest {
@@ -563,6 +565,7 @@ message AppendEventRequest {
 message AppendEventResponse {
   EventCursor cursor = 1;
   maf.common.v1.TypedError error = 2;
+  bool duplicate = 3;
 }
 
 message ReplayEventsRequest {

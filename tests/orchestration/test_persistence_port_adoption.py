@@ -9,6 +9,8 @@ from src.core import contracts
 from src.capabilities.main_agent import skill_output_artifacts
 from src.orchestration import conversation_memory, visible_message_history
 from src.orchestration.agent_loop import task_projection
+from src.storage.postgres.repositories import PostgreSQLStorage
+from src.storage.sqlite.repositories import SQLiteStorage
 
 
 EXPECTED_COMPOSITE_BASES = {
@@ -17,6 +19,7 @@ EXPECTED_COMPOSITE_BASES = {
         contracts.MessageStoragePort,
         contracts.TaskStoragePort,
         contracts.ArtifactStoragePort,
+        conversation_memory.ConversationMemorySummaryMaterializationPort,
     ),
     "SkillOutputArtifactStoragePort": (
         contracts.ArtifactStoragePort,
@@ -33,6 +36,11 @@ EXPECTED_COMPOSITE_BASES = {
 
 
 class PersistencePortAdoptionTest(unittest.TestCase):
+    def test_production_storages_adopt_exact_memory_materialization_port(self) -> None:
+        port = conversation_memory.ConversationMemorySummaryMaterializationPort
+        self.assertTrue(issubclass(SQLiteStorage, port))
+        self.assertTrue(issubclass(PostgreSQLStorage, port))
+
     def test_p2_composite_ports_have_no_methods_and_exact_narrow_bases(self) -> None:
         modules = (
             conversation_memory,

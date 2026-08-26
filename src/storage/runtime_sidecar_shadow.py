@@ -117,7 +117,12 @@ def normalize_runtime_sidecar_response(operation_name: str, response: Any) -> An
     if not isinstance(response, dict) or response.get("operation") == operation_name:
         return response
     if operation_name == "event_append":
-        return {"operation": operation_name, "cursor": response, "error": None}
+        return {
+            "operation": operation_name,
+            "cursor": response,
+            "duplicate": False,
+            "error": None,
+        }
     if operation_name == "artifact_save":
         return {"operation": operation_name, "artifact": response, "error": None}
     return response

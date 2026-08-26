@@ -907,6 +907,49 @@ class ConversationRow(SQLiteBase):
     delete_phase: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class SubmissionPreparationReceiptRow(SQLiteBase):
+    __tablename__ = "submission_preparation_receipts"
+    __table_args__ = (
+        Index(
+            "idx_submission_preparation_receipt_conversation",
+            "conversation_id",
+        ),
+        CheckConstraint(
+            "(route_decision_json IS NULL AND route_decision_sha256 IS NULL) OR "
+            "(route_decision_json IS NOT NULL AND route_decision_sha256 IS NOT NULL)",
+            name="submission_preparation_route_pair",
+        ),
+        CheckConstraint(
+            "(memory_context_json IS NULL AND memory_context_sha256 IS NULL) OR "
+            "(memory_context_json IS NOT NULL AND memory_context_sha256 IS NOT NULL)",
+            name="submission_preparation_memory_pair",
+        ),
+        CheckConstraint(
+            "(selector_decision_json IS NULL AND selector_decision_sha256 IS NULL) OR "
+            "(selector_decision_json IS NOT NULL AND selector_decision_sha256 IS NOT NULL)",
+            name="submission_preparation_selector_pair",
+        ),
+        CheckConstraint(
+            "receipt_sha256 IS NULL OR "
+            "(route_decision_json IS NOT NULL AND memory_context_json IS NOT NULL "
+            "AND selector_decision_json IS NOT NULL)",
+            name="submission_preparation_overall_settled",
+        ),
+    )
+
+    task_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    route_decision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    route_decision_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_context_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selector_decision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selector_decision_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    receipt_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
 
 
 class ConversationFileResourceRow(SQLiteBase):

@@ -202,6 +202,48 @@ class RuntimeSidecarGrpcClient:
         owner: str = "python-runtime",
         timeout_seconds: float = 5,
     ) -> dict[str, Any]:
+        return self._append_event_response(
+            conversation_id=conversation_id,
+            task_id=task_id,
+            event_type=event_type,
+            payload_json=payload_json,
+            idempotency_key=idempotency_key,
+            owner=owner,
+            timeout_seconds=timeout_seconds,
+        )["cursor"]
+
+    def append_event_exact(
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        event_type: str,
+        payload_json: bytes,
+        idempotency_key: str,
+        owner: str = "python-runtime",
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        return self._append_event_response(
+            conversation_id=conversation_id,
+            task_id=task_id,
+            event_type=event_type,
+            payload_json=payload_json,
+            idempotency_key=idempotency_key,
+            owner=owner,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _append_event_response(
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        event_type: str,
+        payload_json: bytes,
+        idempotency_key: str,
+        owner: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
         self._ensure_compatible(timeout_seconds=timeout_seconds)
         idempotency = _field_string(1, idempotency_key) + _field_string(2, owner) + _field_varint(3, 0)
         request = b"".join(
@@ -214,14 +256,15 @@ class RuntimeSidecarGrpcClient:
             ]
         )
         payload = self._unary("AppendEvent", request, timeout_seconds=timeout_seconds)
-        fields = _decode_message(payload)
+        fields = _decode_closed_message(payload, 1, 2, 3)
         response = {
             "operation": "event_append",
             "cursor": _optional_event_cursor(fields, 1),
             "error": _optional_typed_error(fields, 2),
+            "duplicate": _first_bool(fields, 3),
         }
         _consume_response("event_append", response)
-        return response["cursor"]
+        return response
 
     def submit_task(
         self,
@@ -452,6 +495,8 @@ class RuntimeSidecarGrpcClient:
             4,
             5,
             6,
+            7,
+            8,
         )
         response = {
             "operation": "submission_pending_claim",
@@ -461,8 +506,29 @@ class RuntimeSidecarGrpcClient:
             "authority_state": _first_string(fields, 4),
             "finalization_receipt_sha256": _optional_string(fields, 5),
             "error": _optional_typed_error(fields, 6),
+            "pending_count": _first_int(fields, 7),
+            "earliest_claim_expires_at_ms": _optional_int(fields, 8),
         }
         _consume_response("submission_pending_claim", response)
+        earliest_claim_expires_at_ms = response["earliest_claim_expires_at_ms"]
+        if (
+            earliest_claim_expires_at_ms is not None
+            and earliest_claim_expires_at_ms <= now_ms
+        ):
+            raise RuntimeError(
+                "runtime_store_response_invalid: pending submission claim expiry is not in the future"
+            )
+        admission = response["admission"]
+        if (
+            admission is not None
+            and after_created_at_ms is not None
+            and after_message_id is not None
+            and (admission["created_at_ms"], admission["message_id"])
+            <= (after_created_at_ms, after_message_id)
+        ):
+            raise RuntimeError(
+                "runtime_store_response_invalid: pending submission claim precedes its cursor"
+            )
         if response["claim"] is not None and response["claim"]["owner"] != workflow_owner:
             _raise_task_identity_invalid(
                 "submission_pending_claim response owner differs from request"

@@ -351,7 +351,112 @@ fn submission_claim_projection_preparation_and_handoff_are_cas_closed() {
         })
         .expect("empty claim response");
     assert!(!empty.found);
+    assert_eq!(empty.pending_count, 0);
+    assert_eq!(empty.earliest_claim_expires_at_ms, None);
     assert_eq!(empty.finalization_receipt_sha256, Some("f".repeat(64)));
+}
+
+#[test]
+fn submission_claim_observability_is_cursor_scoped_and_never_skips_held_head() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    let head = kernel
+        .admit_submission(admission_request(
+            "head-message",
+            "head-task",
+            "head-conversation",
+        ))
+        .expect("head admission");
+    let head_claim = head.claim.expect("head claim");
+    let mut tail_request = admission_request("tail-message", "tail-task", "tail-conversation");
+    tail_request.now_ms = 20;
+    tail_request.message_created_at_ms = 20;
+    tail_request.claim_ttl_ms = 20;
+    kernel
+        .admit_submission(tail_request)
+        .expect("tail admission");
+
+    let blocked = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 50,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .expect("held head is observable");
+    assert!(!blocked.found);
+    assert_eq!(blocked.pending_count, 2);
+    assert_eq!(blocked.earliest_claim_expires_at_ms, Some(110));
+
+    let tail = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 50,
+            claim_ttl_ms: 100,
+            after_created_at_ms: Some(10),
+            after_message_id: Some("head-message".to_owned()),
+        })
+        .expect("cursor excludes held head");
+    assert!(tail.found);
+    assert_eq!(tail.pending_count, 1);
+    assert_eq!(tail.earliest_claim_expires_at_ms, None);
+    assert_eq!(
+        tail.admission.expect("tail admission").message_id,
+        "tail-message"
+    );
+
+    let renewed = kernel
+        .renew_submission_claim(RenewSubmissionClaimRequest {
+            message_id: "head-message".to_owned(),
+            workflow_owner: head_claim.owner,
+            claim_token: head_claim.token,
+            now_ms: 60,
+            claim_ttl_ms: 200,
+        })
+        .expect("head heartbeat");
+    assert_eq!(renewed.expires_at_ms, 260);
+    let heartbeat_blocked = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "other".to_owned(),
+            now_ms: 259,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .expect("heartbeat deadline is observable");
+    assert!(!heartbeat_blocked.found);
+    assert_eq!(heartbeat_blocked.pending_count, 2);
+    assert_eq!(heartbeat_blocked.earliest_claim_expires_at_ms, Some(260));
+
+    let taken_over = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "other".to_owned(),
+            now_ms: 260,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .expect("expired head is claimable");
+    assert!(taken_over.found);
+    assert_eq!(taken_over.pending_count, 2);
+    assert_eq!(taken_over.earliest_claim_expires_at_ms, None);
+    assert_eq!(
+        taken_over.admission.expect("head admission").message_id,
+        "head-message"
+    );
+
+    let empty = kernel
+        .claim_pending_submission(ClaimPendingSubmissionRequest {
+            workflow_owner: "other".to_owned(),
+            now_ms: 260,
+            claim_ttl_ms: 100,
+            after_created_at_ms: Some(20),
+            after_message_id: Some("tail-message".to_owned()),
+        })
+        .expect("cursor after backlog");
+    assert!(!empty.found);
+    assert_eq!(empty.pending_count, 0);
+    assert_eq!(empty.earliest_claim_expires_at_ms, None);
 }
 
 #[test]
@@ -1248,8 +1353,8 @@ fn version_and_compatibility_are_owned_by_rust_kernel() {
 #[test]
 fn append_event_is_idempotent_and_replay_uses_single_cursor_semantics() {
     let mut kernel = RuntimeSidecarKernel::new();
-    let first = kernel
-        .append_event(
+    let (first, first_duplicate) = kernel
+        .append_event_exact(
             "conv",
             "task",
             "task.accepted",
@@ -1258,16 +1363,67 @@ fn append_event_is_idempotent_and_replay_uses_single_cursor_semantics() {
             "event-1",
         )
         .expect("first append");
-    let duplicate = kernel
-        .append_event(
+    let (duplicate, replay_duplicate) = kernel
+        .append_event_exact(
+            "conv",
+            "task",
+            "task.accepted",
+            b"{\"ok\":true}".to_vec(),
+            10,
+            "event-1",
+        )
+        .expect("duplicate append");
+    assert!(!first_duplicate);
+    assert!(replay_duplicate);
+    for (conversation_id, task_id, event_type, payload_json, created_at_ms) in [
+        (
+            "other-conv",
+            "task",
+            "task.accepted",
+            b"{\"ok\":true}".to_vec(),
+            10,
+        ),
+        (
+            "conv",
+            "other-task",
+            "task.accepted",
+            b"{\"ok\":true}".to_vec(),
+            10,
+        ),
+        (
+            "conv",
+            "task",
+            "task.changed",
+            b"{\"ok\":true}".to_vec(),
+            10,
+        ),
+        (
             "conv",
             "task",
             "task.accepted",
             b"{\"changed\":true}".to_vec(),
+            10,
+        ),
+        (
+            "conv",
+            "task",
+            "task.accepted",
+            b"{\"ok\":true}".to_vec(),
             11,
-            "event-1",
-        )
-        .expect("duplicate append");
+        ),
+    ] {
+        let error = kernel
+            .append_event(
+                conversation_id,
+                task_id,
+                event_type,
+                payload_json,
+                created_at_ms,
+                "event-1",
+            )
+            .expect_err("event identity drift must conflict");
+        assert_eq!(error.code, "runtime_store_idempotency_conflict");
+    }
     let second = kernel
         .append_event(
             "conv",

@@ -18,6 +18,7 @@ from src.core.models import (
     SubmissionAdmissionPhase,
     SubmissionAdmissionRequest,
     SubmissionAdmissionState,
+    SubmissionClaimRequest,
     SubmissionHandoffState,
     SubmissionPreparationState,
     SubmissionProjectionState,
@@ -264,6 +265,41 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
             self.assertIsNotNone(session.get(MessageRow, request.message_id))
             self.assertIsNone(session.get(TaskRow, request.task.task_id))
 
+    def test_enforce_claim_maps_cursor_scoped_pending_observability(self) -> None:
+        sidecar = _FakeSubmissionSidecar()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            mcp_task_authority_mode="enforce",
+        )
+        now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+        expires_at = now + timedelta(seconds=60)
+        sidecar.claim_response = {
+            "operation": "submission_pending_claim",
+            "found": False,
+            "admission": None,
+            "claim": None,
+            "authority_state": "finalized",
+            "finalization_receipt_sha256": "f" * 64,
+            "pending_count": 2,
+            "earliest_claim_expires_at_ms": int(expires_at.timestamp() * 1000),
+            "error": None,
+        }
+
+        result = asyncio.run(
+            storage.claim_pending_submission(
+                SubmissionClaimRequest(
+                    claim_owner="worker",
+                    now=now,
+                    claim_expires_at=now + timedelta(seconds=30),
+                )
+            )
+        )
+
+        self.assertFalse(result.found)
+        self.assertEqual(result.pending_count, 2)
+        self.assertEqual(result.earliest_claim_expires_at, expires_at)
+
     def _assert_no_admission_rows(self) -> None:
         self.assertIsNone(asyncio.run(self.storage.get_conversation("conversation-1")))
         self.assertIsNone(asyncio.run(self.storage.get_message("message-1")))
@@ -446,6 +482,7 @@ class _FakeSubmissionSidecar:
     def __init__(self) -> None:
         self.admission: dict[str, object] | None = None
         self.ack_count = 0
+        self.claim_response: dict[str, object] | None = None
 
     def admit_submission(self, **request: object) -> dict[str, object]:
         task = dict(request["task"])
@@ -498,3 +535,7 @@ class _FakeSubmissionSidecar:
             "duplicate": False,
             "error": None,
         }
+
+    def claim_pending_submission(self, **_request: object) -> dict[str, object]:
+        assert self.claim_response is not None
+        return self.claim_response

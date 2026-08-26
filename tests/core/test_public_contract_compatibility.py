@@ -58,6 +58,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "clear_auth_user_token": "(self, username: 'str', *, api_token_hash: 'str', at: 'datetime', auth_generation_reason: 'str | None' = None) -> 'AuthUserToken | None'",
   "clear_user_mcp_tool_grants": "(self, owner_user_id: 'str', server_id: 'str') -> 'int'",
   "close_conversation_admission": "(self, request: 'ConversationAdmissionCloseRequest') -> 'ConversationAdmissionCloseResult'",
+  "close_submission_preparation_receipt": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', closed_at: 'datetime') -> 'SubmissionPreparationReceipt'",
   "commit_authoritative_mcp_terminal_result": "(self, call_id: 'str', candidate_id: 'str', occurred_at: 'datetime') -> 'MCPTerminalResultCommitResult'",
   "commit_mcp_call_terminal": "(self, call_id: 'str', candidate_id: 'str', outbox_id: 'str', expected_outbox_revision: 'int', claim_owner: 'str | None', claim_token: 'str | None', candidate_snapshot: 'MCPTerminalCandidateSnapshot', result_snapshot: 'MCPDurableResultSnapshot | None', occurred_at: 'datetime', *, remote_binding_ref: 'str | None' = None, remote_claim_owner: 'str | None' = None, remote_claim_token: 'str | None' = None, remote_expected_revision: 'int | None' = None) -> 'MCPTerminalResultCommitResult'",
   "compare_and_set_artifact_storage_ref": "(self, artifact_id: 'str', expected_storage_ref: 'str', replacement_storage_ref: 'str') -> 'bool'",
@@ -151,6 +152,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "get_slot_collection": "(self, collection_id: 'str') -> 'SlotCollection | None'",
   "get_slot_event_by_idempotency_key": "(self, collection_id: 'str', key: 'str') -> 'SlotEvent | None'",
   "get_submission_preparation": "(self, request: 'SubmissionPreparationLookup') -> 'SubmissionPreparationRecord | None'",
+  "get_submission_preparation_receipt": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str') -> 'SubmissionPreparationReceipt | None'",
   "get_task": "(self, task_id: 'str') -> 'Task | None'",
   "get_task_node": "(self, node_id: 'str') -> 'TaskNode | None'",
   "get_user_mcp_credential": "(self, owner_user_id: 'str', server_id: 'str') -> 'UserMCPCredentialRecord | None'",
@@ -279,7 +281,8 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "update_mcp_remote_task_binding_status": "(self, owner_user_id: 'str', task_id: 'str', safe_remote_task_ref: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', last_status: 'str', next_poll_at: 'datetime | None', updated_at: 'datetime', terminal_at: 'datetime | None' = None) -> 'MCPRemoteTaskBinding | None'",
   "update_user_mcp_server": "(self, owner_user_id: 'str', server_id: 'str', *, changes: 'Mapping[str, Any]', credential_operation: 'str' = 'retain', credential: 'UserMCPCredentialRecord | None' = None, security_sensitive: 'bool' = False, expected_config_version: 'int | None' = None, expected_security_version: 'int | None' = None, updated_at: 'datetime') -> 'UserMCPServer | None'",
   "upsert_file_upload_message": "(self, projection: 'FileUploadMessageProjection', *, now: 'datetime') -> 'Message'",
-  "upsert_mcp_rollout_metric_bucket": "(self, bucket: 'MCPRolloutMetricBucket') -> 'MCPRolloutMetricBucket'"
+  "upsert_mcp_rollout_metric_bucket": "(self, bucket: 'MCPRolloutMetricBucket') -> 'MCPRolloutMetricBucket'",
+  "write_submission_preparation_component": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', component: 'SubmissionPreparationReceiptComponent', canonical_json: 'bytes', component_sha256: 'str', written_at: 'datetime') -> 'SubmissionPreparationReceipt'"
 }
 
 FORBIDDEN_CORE_IMPORT_PREFIXES = (
@@ -318,7 +321,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 268)
+        self.assertEqual(len(actual), 271)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(

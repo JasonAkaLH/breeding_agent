@@ -22,6 +22,8 @@ from src.core.models import (
     SubmissionAdmissionRequest,
     SubmissionAdmissionState,
     SubmissionHandoffState,
+    SubmissionClaimResult,
+    SubmissionAuthorityState,
     SubmissionPreparationState,
     SubmissionPreparationRecord,
     SubmissionProjectionState,
@@ -192,6 +194,20 @@ class SubmissionAdmissionContractTest(unittest.TestCase):
         self.assertNotIn("fingerprint", result_fields)
         self.assertNotIn("reserved_at", result_fields)
         self.assertFalse(hasattr(models, "MessageIdentityRecord"))
+
+    def test_claim_result_exposes_only_cursor_scoped_backlog_observability(self) -> None:
+        expires_at = datetime(2026, 8, 26, tzinfo=timezone.utc)
+        result = SubmissionClaimResult(
+            found=False,
+            authority_state=SubmissionAuthorityState.FINALIZED,
+            finalization_receipt_sha256="f" * 64,
+            pending_count=2,
+            earliest_claim_expires_at=expires_at,
+        )
+
+        self.assertEqual(result.pending_count, 2)
+        self.assertEqual(result.earliest_claim_expires_at, expires_at)
+        self.assertNotIn("blocked", tuple(field.name for field in fields(result)))
 
     def test_message_identity_conflict_error_is_stable_and_low_sensitivity(self) -> None:
         error = MessageIdentityConflictError()

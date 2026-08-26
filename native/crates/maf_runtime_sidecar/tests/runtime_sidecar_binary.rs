@@ -209,6 +209,20 @@ async fn runtime_sidecar_binary_restarts_with_durable_sqlite_admission() {
         created.disposition,
         runtime_pb::SubmissionAdmissionDisposition::Created as i32
     );
+    let blocked = first_client
+        .claim_pending_submission(runtime_pb::ClaimPendingSubmissionRequest {
+            workflow_owner: "binary-recovery".to_owned(),
+            now_ms: 2,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!blocked.found);
+    assert_eq!(blocked.pending_count, 1);
+    assert_eq!(blocked.earliest_claim_expires_at_ms, Some(1_001));
     first_child.kill().unwrap();
     first_child.wait().unwrap();
 

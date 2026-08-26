@@ -87,6 +87,37 @@ class PostgresRuntimeSchemaManifestTest(unittest.TestCase):
         self.assertIn("idx_task_input_attachment_conversation_task", index_ddl)
         self.assertIn("idx_task_input_attachment_upload", index_ddl)
 
+    def test_submission_preparation_receipt_is_narrow_and_constraint_backed(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        self.assertEqual(
+            manifest.table_columns["submission_preparation_receipts"],
+            {
+                "task_id": "text",
+                "conversation_id": "text",
+                "route_decision_json": "text",
+                "route_decision_sha256": "text",
+                "memory_context_json": "text",
+                "memory_context_sha256": "text",
+                "selector_decision_json": "text",
+                "selector_decision_sha256": "text",
+                "receipt_sha256": "text",
+                "created_at": "timestamp with time zone",
+                "updated_at": "timestamp with time zone",
+            },
+        )
+        constraints = manifest.check_constraints[
+            "submission_preparation_receipts"
+        ]
+        self.assertEqual(len(constraints), 4)
+        self.assertTrue(
+            any("receipt_sha256 IS NULL OR" in value for value in constraints.values())
+        )
+        index_ddl = build_runtime_index_schema_ddl()
+        self.assertIn(
+            "idx_submission_preparation_receipt_conversation",
+            index_ddl,
+        )
+
     def test_dag_only_schema_is_absent_from_fresh_manifest(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
         self.assertNotIn("planner_replan_claim", manifest.runtime_table_names)

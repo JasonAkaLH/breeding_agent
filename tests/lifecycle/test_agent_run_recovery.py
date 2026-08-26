@@ -41,6 +41,7 @@ from src.orchestration.agent_loop.models import (
     AgentTaskLease,
     AgentToolCall,
     AgentUsage,
+    AgentUserMessageCommit,
 )
 from src.storage.sqlite import (
     SQLiteAgentRepository,
@@ -106,9 +107,27 @@ class _RecordingResumer:
     def __init__(self, repository) -> None:
         self.repository = repository
         self.run_ids = []
+        self.recovery_arguments = []
 
-    async def run_claimed(self, run_id, *, handle, **_kwargs):
+    async def run_claimed(
+        self,
+        run_id,
+        *,
+        handle,
+        initial_required_tool_name=None,
+        trusted_facts=(),
+        visibility_context=None,
+        cancellation=None,
+    ):
         self.run_ids.append(run_id)
+        self.recovery_arguments.append(
+            {
+                "initial_required_tool_name": initial_required_tool_name,
+                "trusted_facts": trusted_facts,
+                "visibility_context": visibility_context,
+                "cancellation": cancellation,
+            }
+        )
         run = await self.repository.get_run(run_id)
         return SimpleNamespace(run=run, state="resumed", handle=handle)
 
@@ -714,6 +733,125 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(tool_result.payload_json)
         self.assertEqual(payload["outcome"], "aborted")
         self.assertEqual(payload["safe_error_code"], "side_effect_unknown_no_replay")
+
+    async def test_startup_recovery_only_forwards_initial_tool_for_pristine_run(self) -> None:
+        initialized_runs = {}
+        for suffix in ("pristine", "assistant", "tool", "default"):
+            with self.sessions.begin() as session:
+                session.add(
+                    TaskRow(
+                        task_id=f"task-{suffix}",
+                        conversation_id=f"conv-{suffix}",
+                        root_message_id=f"message-{suffix}",
+                        status="running",
+                        routing_mode="auto",
+                    )
+                )
+            run = await self.repository.create_run(
+                AgentRun(
+                    f"run-{suffix}",
+                    f"task-{suffix}",
+                    f"conv-{suffix}",
+                    AgentRunStatus.RUNNING,
+                    self.binding,
+                )
+            )
+            initialized_runs[suffix] = await self.repository.commit_agent_user_message(
+                AgentUserMessageCommit(
+                    run_id=run.run_id,
+                    expected_revision=run.revision,
+                    expected_claim_token=None,
+                    text=f"input-{suffix}",
+                )
+            )
+
+        await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                run_id="run-assistant",
+                expected_revision=initialized_runs["assistant"].run.revision,
+                expected_claim_token=None,
+                sample=AgentSample(
+                    sample_id="sample-assistant",
+                    binding=self.binding,
+                    visible_text="answer",
+                    tool_calls=(),
+                    usage=AgentUsage(status="usage_unavailable"),
+                    finish=AgentFinishMetadata("stop", 1),
+                ),
+                capability_ids_by_tool_name={},
+            )
+        )
+        await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                run_id="run-tool",
+                expected_revision=initialized_runs["tool"].run.revision,
+                expected_claim_token=None,
+                sample=AgentSample(
+                    sample_id="sample-tool",
+                    binding=self.binding,
+                    visible_text="",
+                    tool_calls=(AgentToolCall("call-tool", "tool_safe", "{}", 0),),
+                    usage=AgentUsage(status="usage_unavailable"),
+                    finish=AgentFinishMetadata("tool_calls", 1),
+                ),
+                capability_ids_by_tool_name={"tool_safe": "skill.safe"},
+            )
+        )
+
+        visibility_context = object()
+        cancellation = object()
+        await self.coordinator.recover_crashed_run(
+            "run-pristine",
+            initial_required_tool_name="tool_required",
+            trusted_facts=("fact-a", "fact-b"),
+            visibility_context=visibility_context,
+            cancellation=cancellation,
+        )
+        await self.coordinator.recover_crashed_run(
+            "run-assistant",
+            initial_required_tool_name="tool_must_not_repeat",
+        )
+        await self.coordinator.recover_crashed_run(
+            "run-tool",
+            initial_required_tool_name="tool_must_not_repeat",
+        )
+        await self.coordinator.recover_crashed_run("run-default")
+
+        self.assertEqual(
+            self.resumer.recovery_arguments[0],
+            {
+                "initial_required_tool_name": "tool_required",
+                "trusted_facts": ("fact-a", "fact-b"),
+                "visibility_context": visibility_context,
+                "cancellation": cancellation,
+            },
+        )
+        self.assertEqual(
+            self.resumer.recovery_arguments[1],
+            {
+                "initial_required_tool_name": None,
+                "trusted_facts": (),
+                "visibility_context": None,
+                "cancellation": None,
+            },
+        )
+        self.assertEqual(
+            self.resumer.recovery_arguments[2:],
+            [
+                {
+                    "initial_required_tool_name": None,
+                    "trusted_facts": (),
+                    "visibility_context": None,
+                    "cancellation": None,
+                },
+                {
+                    "initial_required_tool_name": None,
+                    "trusted_facts": (),
+                    "visibility_context": None,
+                    "cancellation": None,
+                },
+            ],
+        )
 
     async def test_startup_recovery_terminal_and_waiting_stop_after_reconcile(self) -> None:
         waiting_locator, _, _ = await self._seed_waiting(
