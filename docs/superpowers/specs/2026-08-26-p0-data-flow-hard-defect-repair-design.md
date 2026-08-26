@@ -130,6 +130,35 @@ Runtime 在构造 Message/Task 后只调用一次原子准入：
 
 `create_user_mcp_initial_intent` 继续更新已准入的同一个 Task，不再承担该 Task 的首次创建主权。它的 RETRY_ROUTE/terminal 行为不变。
 
+### 4.5 实施期 authority 审计与暂停条件
+
+实施红测已经分别复现 Message 覆盖、精确重放创建第二个 Task 和同会话并发双准入，但随后确认本节原有“Conversation/Message/Task 均由同一 SQL storage authority 承担”的假设只在 runtime-store `off/shadow` 成立，在可达的 `enforce` 模式不成立：
+
+- `ApiRuntime` 的 Conversation/Message 继续写 `SQLiteStorage` 或 `PostgreSQLStorage`；
+- `SQLiteStorage.save_task` 在 `runtime_store=enforce` 时通过现有 `SubmitTask` RPC 把 Task 只写 Rust Runtime Sidecar，并且既有合同测试明确禁止 Python SQL Task row；
+- Runtime Sidecar 使用独立 SQLite adapter。现有 `SubmitTask` 在自己的 SQLite transaction 中立即提交 Task 与 idempotency receipt；
+- 现有 RPC 只有 Task submit/get/list/active，没有 Conversation/Message 写入，也没有 Task prepare/commit/abort/delete；
+- Python SQL session 与 Sidecar SQLite connection 之间不存在共享 transaction、two-phase commit 或共同 WAL。
+
+因此在不修改 schema/proto 的约束下，以下顺序都不能满足本设计第三条不可变约束：
+
+| 顺序 | 不可闭合窗口 |
+|---|---|
+| SQL commit → Sidecar Task submit | 进程在两步之间退出会留下 Message/Conversation，但没有 Task |
+| Sidecar Task submit → SQL commit | 进程退出或 SQL commit 失败会留下无 Message/Conversation 的 active Task |
+| 持有 SQL row lock 时调用 Sidecar | 只能串行化并发，不能让两个独立数据库共同 commit/rollback |
+| 失败后补偿 Task | 现有 RPC 无 abort/delete；进程退出也会跳过补偿 |
+| 只依赖 idempotency retry | 没有 durable prepared/admission authority 时，无法区分仍在提交、已崩溃和永久孤儿，也不能恢复没有外部 `client_message_id` 的请求 |
+
+给现有 `SubmitTask` 增加“每 Conversation 只允许一个 active Task”的内部检查可以关闭 TOCTOU，但仍不能关闭跨存储半提交，所以不能作为 Checkpoint A 完成证据。进程锁、PostgreSQL advisory lock、延长超时或 startup 猜测清理同样不构成原子提交。
+
+Checkpoint A 因此按本设计第 9 节的停止条件暂停。要恢复实施，必须先获得一个新的 authority 设计授权，至少允许以下二者之一：
+
+1. 把 Conversation/Message/admission 与 Task 移到一个共同事务 authority；或
+2. 增加 durable prepared admission/outbox 及其明确的 commit/abort/recovery 状态。
+
+在获得该授权前，不允许只为 `off/shadow` 实现、在 `enforce` 降级、暗写 SQL Task shadow、引入进程锁或提交带半提交窗口的 saga；这些做法都会缩小原目标或制造新的硬伤。
+
 ## 5. Checkpoint B：heartbeat token 与 capability 提交线性化
 
 ### 5.1 根因边界
