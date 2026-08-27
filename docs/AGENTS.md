@@ -57,7 +57,8 @@
 - `superpowers/specs/2026-08-27-thinking-state-reasoning-effort-configuration-implementation-plan.md`：上述设计的`complete`实施账本；Checkpoint A～D对应`4e3962f`、`093b2bf`、`9bc9e81`、`7658a67`，Final Gate lint收口为`e2917b8`；真实矩阵52/52 matched、本地UI/API与完整回归闭合，Git-ignored敏感`config.yaml`仅本地迁移未提交。
 - `superpowers/specs/2026-08-27-agent-reasoning-stream-and-seedpilot-identity-design.md`：用户已批准、经两轮document-perfectization以100/100 Pass且已完成仓库实现/本地真实验收的Agent reasoning实时展示与SeedPilot身份恢复设计；采用最小attempt reset实现真正逐段展示，Runner/Frontend双512 KiB上限与sink fail-open闭合可靠性，reasoning仅经当前Task transient SSE进入前端、不持久化或进入历史，实际stable rules复用既有SeedPilot合同，Conversation Memory边界保持不变。
 - `superpowers/specs/2026-08-27-agent-reasoning-stream-and-seedpilot-identity-implementation-plan.md`：上述100/100 Pass设计的`complete`实施账本；记录Provider adapter、Runner/reset/SSE/SeedPilot prompt、Frontend、文档全域门禁和本地真实验收五个检查点、完整测试数、零持久化与同会话上下文证据；`prod`未更新。
-- `superpowers/specs/2026-08-27-main-doubao-removal-and-initial-high-default-design.md`：用户已批准的方案A；main本地模型列表移除豆包Seed 2.1 Pro/Turbo，首次空白对话初始为关闭深度思考+`high`，后续新建对话保持现有设置继承行为；历史Task、通用effort合同与`prod`不变。
+- `superpowers/specs/2026-08-27-main-doubao-removal-and-initial-high-default-design.md`：已放弃的旧范围；用户后续确认不移除豆包模型，不作为实施依据。
+- `superpowers/specs/2026-08-27-initial-high-reasoning-effort-default-design.md`：当前唯一实施依据；只将全新App实例的首次空白对话初始为关闭深度思考+`high`，后续新建对话继续沿用当前设置；模型列表、backend、`config.yaml`与`prod`不变。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。
