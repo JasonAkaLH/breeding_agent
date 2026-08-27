@@ -183,7 +183,7 @@ prepared handoff 只是 Task 初始化前的 crash-safe 交接 authority，不�
 
 Python recovery loader、SQLite facade/repository 与 Rust Sidecar 必须先读取 canonical JSON 的 schema，再选择对应 exact keys 与 digest domain：v1 只接受原 v1 keys/domain，v2 只接受 v2 keys/domain，未知版本 fail closed。禁止先按某个固定 domain 验 digest再猜版本，也禁止把 v1 记录补字段后保存为 v2。
 
-HTTP 202 只能在 AgentRun 已完成 durable initialization 后返回。旧前端/新后端与新前端/旧后端不得混合发布；旧后端会把 `hint` 错当成 required Tool。
+HTTP 202 只能在一种 closed durable handoff 已完成后返回：AgentRun 已原子初始化、pre-Agent Interrupt 已完整持久化并可恢复，或 no-server intent 已完整持久化。仅写入 Message/Task、prepared snapshot 尚未 handoff、Interrupt authority 不完整或 Agent initialization 未完成时均不得返回 202。旧前端/新后端与新前端/旧后端不得混合发布；旧后端会把 `hint` 错当成 required Tool。
 
 ## 7. AgentRun 持久化设计
 
@@ -270,7 +270,7 @@ Profile 继续经过现有 allowlist/sanitizer。contract-v2 的 `parameters` �
 
 - Invocation boundary 读取现有 items；
 - capability ID、revision 与 profile digest 完全一致时复用既有 activation；
-- Tool outcome 不再追加第二个 profile item，而是提交 `maf.agent.delegated_skill_activation.v1` safe result；其中包含 activation identity、pinned revision、profile digest、`instruction_body` 与 `instruction_sha256`；
+- Tool outcome 不再追加第二个 profile item，而是继续提交统一 `maf.agent.model_result.v1` safe result；其 `projection_revision=delegated-skill-instruction-v1`、`projection_mode=inline`、`projection_truncated=false`，`model_view` 内包含 `schema=maf.agent.delegated_skill_activation.v1`、activation identity、pinned revision、profile digest、`instruction_body` 与 `instruction_sha256`；不得建立第二种顶层 safe-result wire；
 - `instruction_body` 只能取自 pinned manifest 已解析的 `SKILL.md` 正文，不含 frontmatter，不读取当前活动 bundle；它作为低于平台 system/safety rules 的 Skill 指令上下文，不能覆盖 soft-binding、安全、权限或数据边界；
 - `instruction_body` 必须完整且不超过 20,000 Unicode code points，组合后的 safe result 不超过 80,000 UTF-8 bytes，完整 Tool result AgentItem 不超过 131,072 bytes；不得截断指令后继续执行；
 - 超限、正文缺失、digest 不一致或 pinned revision 不可用时提交 typed failed outcome `delegated_skill_instruction_invalid`，不激活不完整指令；
@@ -309,7 +309,7 @@ Profile 继续经过现有 allowlist/sanitizer。contract-v2 的 `parameters` �
 |---|---|
 | `mcp.dispatch` | 复用已经生成的 `agent_projection`/`text` 和小型状态字段；`user_view`、raw result 与重复 `structured_content` 不进入 `safe_result` |
 | 普通 Skill | 小结果经敏感 key/text sanitizer 后 inline；大结果保留 `answer`、`response_text`、`summary`、`search_summary`、状态、缺参/错误和安全文件描述等优先字段，bulk arrays/mappings 只进入 managed Artifact |
-| `delegated_main_agent` | soft-binding 首轮只见 PublicSkillProfile；被模型实际调用后，safe result 保存 bounded pinned `instruction_body`、activation identity、状态和 digest，不复制第二份 profile 或 activation |
+| `delegated_main_agent` | soft-binding 首轮只见 PublicSkillProfile；被模型实际调用后，统一 model-result envelope 的 `model_view` 保存 bounded pinned `instruction_body`、activation identity、状态和 digest，不复制第二份 profile/activation，也不建立第二种顶层 safe-result schema |
 
 普通 Skill 的完整原始结果超过模型预算时，无论 Skill 是否已经生成其他输出文件，平台都必须用 call item ID、raw SHA 与 projection revision 派生确定性的 `skill_result.json` managed Artifact，保证被省略的 JSON 字段有完整权威副本。其 file metadata 使用独立 `source_kind=skill_result`、`retention_status=active`、owner/Task/conversation/call identity、raw SHA、projection revision、filename、MIME、size 和 opaque storage key；不得冒充 `skill_output`，也不得参与业务文件的 conversation-wide supersede。已有 Skill output file Artifact 保持不变；新的 result Artifact 只补足完整结构化结果，不取代业务文件。
 
@@ -330,7 +330,9 @@ Agent CAS 成功后再以 call item ID 和 committed result digest 为幂等 ide
 
 这里的原子性是“公开 authority 原子性”，不是文件系统与数据库的物理分布式事务：CAS 前 staged file 只有 `0700/0600` 私有文件权限且没有 Artifact metadata，API、历史、模型和用户均不可发现；CAS 成功后 result metadata 与 `tool_result` 同时成为公开 authority。任何公共查询或下载都必须先通过 owner-bound Artifact metadata，禁止仅凭 storage key访问文件。
 
-Artifact ID 与 storage key 对相同 call item ID、raw SHA、projection revision 必须确定且幂等。CAS loser 不得立即删除该 deterministic file，因为 winner 或 exact replay 可能引用同一文件。新增 staged-result janitor 只清理“mtime 已超过 24 小时、仍无匹配 Artifact metadata”的私有文件；已登记且 size/SHA 匹配的文件不得删除。exact replay 复用同一文件、Artifact ID、projection revision 和逐字节相同的 `safe_result`。
+Artifact ID 与 storage key 对相同 call item ID、raw SHA、projection revision 必须确定且幂等。CAS loser 不得立即删除该 deterministic file，因为 winner 或 exact replay 可能引用同一文件。stager 必须在独立私有 stage namespace 写一个非 authority manifest，至少绑定 artifact ID、Task ID、call item ID、raw SHA、projection revision、storage key、size 与 staged-at；manifest 和 raw file 均使用 `0700/0600` 权限并在返回 staging handle 前 fsync。公共 API 与模型不得读取或枚举 manifest。
+
+startup 顺序必须先完成 Agent run/result recovery，再运行 staged-result janitor。janitor 对每个 manifest 执行闭合判断：若已存在 size/SHA/storage ref 完全匹配的 Artifact metadata，只删除私有 manifest并保留结果文件；若不存在 metadata，只有同时满足 mtime 超过 24 小时、对应 Tool result 不再 reserved、AgentRun 不在 recoverable 状态，并且 Task 已终态或不存在时，才删除 manifest 和 raw file。任一查询失败或 identity 不一致时保留并记录低敏诊断，不进行猜测性删除。exact replay 复用同一文件、Artifact ID、projection revision 和逐字节相同的 `safe_result`。
 
 Task/Conversation 删除继续复用 managed file cleanup，但 `skill_result` 的 retention 不受新业务文件 supersede；Task 正常终态不会自动删除可下载结果。Artifact response、Task artifact listing 和 download endpoint 必须显式 allowlist `source_kind=skill_result`，继续执行 task owner校验、opaque storage key解析、digest/regular-file校验和 attachment-only 下载。
 
@@ -411,7 +413,8 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - startup recovery 只信任 prepared 中已经固定的 pending/activation authority，不重新查询 active pending 改变当前 Task；新请求只能看到仍为 `pending_user_input` 的历史 context，不能复活 consumed/superseded 记录。
 - fixed revision 在 Task 终态前保持 pinned，终态后按现有生命周期释放。
 - completed Tool 只从 durable model projection 和 owner-bound Artifact refs 恢复；不得重新执行 Capability 或用当前代码重新投影改变历史 bytes。
-- staged result Artifact 使用独立 result stager 与 24 小时 orphan janitor；现有 Skill output manager 只提供底层文件/下载安全先例，不承担 result staging、CAS loser cleanup 或 retention。
+- staged result Artifact 使用独立 result stager、私有 stage manifest 与 recovery-aware 24 小时 orphan janitor；现有 Skill output manager 只提供底层文件/下载安全先例，不承担 result staging、CAS loser cleanup 或 retention。
+- startup 必须先恢复 prepared handoff 与 Agent runs/results，再执行 staged-result janitor；janitor 不得删除任何 reserved call 或 recoverable run 对应的文件。
 - 旧 Task 不回填 hint profile，不复活历史失败 Task。
 
 ### 10.3 事件与审计
@@ -476,8 +479,9 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - MCP safe result 只含 agent projection，不重复 user view/raw `structured_content`。
 - Artifact staging、Agent repository CAS 或最终 envelope 校验故障均提交 typed failed outcome，不遗留 reserved item。
 - Agent-owned invocation 在 projector/Agent CAS 前不持久化 terminal Node；fault injection 必须证明不存在 Node completed/failed 而 Agent result 仍 reserved 的组合，CAS 后缺失的 terminal lifecycle event可幂等补写。
-- CAS loser 不删除 winner 可复用的 deterministic file；未登记 staged file 超过 24 小时后由 janitor 删除，已登记匹配文件保留。
+- CAS loser 不删除 winner 可复用的 deterministic file；janitor 在 Agent recovery 后运行，reserved/recoverable/非终态 Task 文件全部保留，只有满足完整 24 小时闭合条件的未登记 stage 才删除，已登记匹配文件只清理私有 manifest。
 - delegated Skill 在首轮 hint 上下文中不含 `SKILL.md` 正文；实际 Tool call 后下一轮收到 pinned、完整且有界的 instruction body，exact replay bytes 一致，memory/history 中不出现正文。
+- delegated result 继续使用统一 `maf.agent.model_result.v1` 顶层 envelope，instruction activation 只出现在 `model_view`；断言不存在第二种顶层 safe-result schema。
 - 没有额外 decision LLM 调用、Replanner 或 DAG shape。
 
 ### 11.5 核心业务验收
@@ -507,11 +511,12 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 1. 前端定向测试、完整测试、typecheck、production build。
 2. Agent Loop、API、Agent storage、Skill integration 与 recovery 定向测试。
 3. Agent result projector、Skill result Artifact、80,000-byte projection、131,072-byte完整 envelope 与 failure convergence 定向测试。
-4. result stager/CAS fault injection、`skill_result` owner-only listing/download、legacy `skill_output` supersede 不回归，以及 24 小时 janitor 边界测试。
+4. result stager/CAS fault injection、`skill_result` owner-only listing/download、legacy `skill_output` supersede 不回归，以及 stage manifest、startup recovery-before-janitor、reserved/recoverable/Task status 和 24 小时 janitor 边界测试。
 5. 根 AGENTS 定义的相关后端分层回归。
 6. Runtime Sidecar contract/Rust gate；若修改其 wire/contract，执行完整统一 Rust 质量门禁。
 7. `git diff --check`、Ruff/compileall 和最终 diff 审查。
 8. 本地前后端成对重建后真实 UI/API smoke，分别验证“询问不执行”和“明确任务会执行且大结果完成”。
+9. HTTP acceptance fault injection 验证只有 AgentRun、pre-Agent Interrupt 或 no-server intent 任一 closed durable handoff 完成后才返回 202；prepared-only 与部分 Interrupt 状态不得返回成功。
 
 ## 12. 实施边界
 
@@ -553,7 +558,7 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 7. execution 消息可调用同一选中 Skill，且现有执行/Interrupt/final 路径不回归。
 8. 所有 Capability outcome 在 repository 前经过唯一 result projector，`safe_result` 不再是 raw `output_payload` 的浅拷贝。
 9. 超大 strict-JSON 结果无损进入 owner-bound managed Artifact，`model_view` 不超过 20,000 code points、完整 `safe_result` 不超过 80,000 UTF-8 bytes，完整 AgentItem 不超过 131,072 bytes。
-10. `skill_result` 由独立 stager 写私有 deterministic file，只在 Agent outcome CAS 中原子公开 metadata；owner-only 下载、24 小时 orphan janitor、no-loser-delete 与不参与业务 supersede 均成立。
+10. `skill_result` 由独立 stager 写私有 deterministic file 与 stage manifest，只在 Agent outcome CAS 中原子公开 metadata；owner-only 下载、recovery-aware 24 小时 orphan janitor、no-loser-delete 与不参与业务 supersede 均成立。
 11. invalid/spill/projection 故障提交 typed failed outcome，不产生 `execution_crash` 或 reserved-result 残留。
 12. delegated Skill 不重复 activation。
 13. contract-v2 PublicSkillProfile 足以回答公开参数、输入格式、默认值、约束和输出格式；soft-binding 首轮不含 raw `SKILL.md`，delegated Skill 被实际调用后才获得 pinned bounded instruction body。
