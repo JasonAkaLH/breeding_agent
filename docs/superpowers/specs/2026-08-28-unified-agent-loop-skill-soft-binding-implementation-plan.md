@@ -17,7 +17,7 @@
 只有以下事实同时成立，才可把功能状态改为 `complete`：
 
 - Skill picker 与 `/skill-name` 显式提交 `routing_mode=hint + capability_id=skill.*`；普通消息提交 `auto + null`，MCP `$Server` 继续提交 `force_capability + mcp.dispatch`。
-- `hint` 的 public/enabled/pinned Skill authority 在 Message、Task、附件、AgentRun 和 audit 副作用前完成校验；不可用目标统一低敏返回 HTTP 409 `skill_hint_unavailable`。
+- `hint` 的 public/enabled/pinned Skill authority 在 Message、Task、附件、AgentRun 和 submission-scoped audit 副作用前完成校验；不可用目标统一低敏返回 HTTP 409 `skill_hint_unavailable`。
 - 所有新 submission 都写 `maf.submission.prepared_execution.v2`；部署前 v1 只按原 exact keys 和 digest domain 读取，未知或混合版本 fail closed。
 - hint 的 canonical activation 从 prepared v2 原子初始化为 `user_message + skill_activation` 两个 AgentItem；SQLite、PostgreSQL 和 Runtime Sidecar 三条 repository 路径保持 all-or-zero、CAS 和 exact replay 等价。
 - hint 在初始化、普通执行、waiting resume 和 startup recovery 中始终使用 auto Tool choice；只有原始 `force_capability` Task 使用 required Tool。
@@ -72,14 +72,14 @@
 | `AgentCapabilityInvoker` | `safe_result_payload = dict(result.output_payload)` | 调唯一 projector；typed failure 收敛 |
 | `AgentTaskInvocationCommitPort` | projector 前先持久化 terminal Node/event | completed/failed/route-rejected 只返回 terminal candidate；Agent outcome CAS 是唯一 terminal writer |
 | 三条 Agent repository | outcome CAS 已能同事务提交 result、Node、Artifact refs 和 Run revision | 复用并加 `skill_result` closed metadata、exact replay 和 fault injection |
-| `LocalArtifactFileStore` / Artifact routes | active managed output 仅 `skill_output`/`mcp_result`；下载只允许 `skill_output` | 加 closed `skill_result` allowlist、deterministic bytes staging、owner-only download |
+| `LocalArtifactFileStore` / Artifact routes | active managed output 仅 `skill_output`/`mcp_result`；下载只允许 `skill_output`，现有 route 未按 metadata 复验 regular file、size/SHA | 加 closed `skill_result` allowlist、deterministic bytes staging、owner 校验与基础文件完整性验证 |
 | `ApiRuntime.start` | Agent recovery 先于现有 MCP janitor | 在 Agent recovery 后运行 staged Skill result janitor，并测试顺序 |
 
 ## 4. 实施策略选择
 
 考虑过三种执行顺序：
 
-1. **Authority-first，按持久化边界横向闭合（采用）**：先 profile/activation、prepared v2、pending transition、三 repository 初始化与恢复，再接 context/Tool choice、projector、Artifact/CAS，最后切前端。优点是任何已接受 Task 都有可恢复 authority；缺点是中间提交不能单独发布。
+1. **Authority-first，按持久化边界横向闭合（采用）**：先 profile/activation、prepared v2，再连续完成三 repository 初始化/恢复、context/Tool choice、hint admission 和 pending transition；随后接 projector、Artifact/CAS，最后切前端。Checkpoint C、D 是同一开发阶段，D 完成前不得发布或切换前端。
 2. **Frontend 到后端的纵向最小切片**：先让 picker hint 跑通 informational case，再补 recovery 和大结果。初期演示快，但会产生只能在正常路径工作、崩溃后可能升级为 force 或丢 activation 的在途 Task，不接受。
 3. **先修大结果 crash，再恢复 soft binding**：能优先消除 `AgentPayloadError`，但会延后用户最直接的“询问却执行”回归，且 projector 仍需随后与 hint/delegated activation 重接一次，不采用。
 
@@ -92,12 +92,24 @@
 | 0 | 基线、红测清单与不变量冻结 | 当前 forced/required/oversize 故障可重复；MCP 与 legacy Artifact 基线通过 |
 | A | Public profile 与 canonical activation | 字段级 profile、两层大小边界、无 raw body/内部字段 |
 | B | prepared execution v2 双读与 v2-only writer | Python/SQLite/Sidecar/Rust exact keys/domain/cross-version 门禁 |
-| C | API hint admission 与 PendingSkillContext exact transition | 422/409 零副作用、hint supersede、auto consume-once、HTTP 202 handoff |
-| D | 三 repository 原子初始化、context、Tool choice、delegated | user+activation all-or-zero；hint auto；instruction 只在调用后出现 |
+| C | 三 repository 原子初始化、context 与 Tool choice | user+activation all-or-zero；prepared recovery逐字节一致；hint全入口auto |
+| D | API hint admission、PendingSkillContext exact transition 与 delegated | 422/409零submission副作用、transition receipt、HTTP 202闭合、instruction只在调用后出现 |
 | E | 唯一纯 `AgentCallResultProjector` | inline/MCP/delegated 投影、双预算、strict JSON、deterministic bytes |
 | F | `skill_result` staging、Agent CAS、terminal reconciliation 与 janitor | CAS 前不可见、CAS 后 owner-only、fault/replay/orphan 全闭合 |
 | G | Frontend soft-binding 切换 | picker/Slash hint，MCP force 不变，选择一次性清除 |
 | H | 审计、文档、全量门禁、真实 smoke 与发布/回滚证据 | 17 项完成条件逐项有证据；`prod` 未变 |
+
+### 5.1 非功能要求与证据合同
+
+| NFR | 固定要求 | 自动证据 |
+|---|---|---|
+| 模型调用 | 不增加独立 decision LLM、`main_agent.respond`、Replanner 或 DAG 阶段；所有模型调用仍是同一 AgentRun 的普通 sample/retry | fake model recorder 断言 decision-call=0；informational case无Tool时只出现既有Agent sample类别；静态扫描退役入口零生产引用 |
+| I/O 与资源 | inline projector 为纯 CPU/内存且零文件/网络 I/O；artifact-backed 每个 call 只持久化一份 canonical raw、一个小型manifest和既有数据库metadata，不复制第二份raw | spy断言 inline零stager调用；28-record/约285 KiB fixture断言raw文件数量=1、SHA/size精确、safe result双预算成立 |
+| 安全与隐私 | profile/instruction/raw/model view、绝对路径、storage key、credential 不进入公共Message、普通history、memory、audit正文或日志 | leak scan + cross-owner/guess-key/non-regular-file/size-SHA drift下载测试 |
+| 可靠性 | 任一pre-CAS失败必须终态化；CAS结果未知时只能exact-winner确认或startup no-replay收敛；janitor fail-safe保留 | fault matrix、response-lost replay、startup recovery-before-janitor测试 |
+| 兼容性 | v1只读、v2-only新写；MCP wire/DTO/raw安全边界、`skill_output`生命周期、三Skill runtime mode均不变 | Python/Rust cross-version vectors、MCP/Skill完整回归、static contract扫描 |
+| 可访问性 | picker/Slash文案变化不得破坏键盘选择、Escape关闭、焦点、badge取消按钮aria-label、busy/Interrupt gate | 现有App/Slash a11y与键盘测试保留并改写为hint语义 |
+| 可观测性 | 新事件低基数且不含正文；执行与否只由同一Agent Tool call/Node/Skill事实证明 | audit payload exact-key tests、指标closed-label tests、事件数量/幂等测试 |
 
 ## 6. Checkpoint 0：基线与红测清单冻结
 
@@ -228,7 +240,7 @@ feat(agent): build pinned skill hint activation
 
 红测矩阵：
 
-- v1 只接受原 22 个 exact keys、原 v1 domain 和原关系；新增 `routing_mode/skill_activation` 任一字段都拒绝。
+- v1 只接受当前源码冻结的原 21 个 exact keys、原 v1 domain 和原关系；测试从权威legacy fixture逐项断言key set，禁止只用手写计数替代。新增 `routing_mode/skill_activation` 任一字段都拒绝。
 - v2 必须在 v1 keys 基础上准确新增 `routing_mode/skill_activation`，digest domain 固定 `maf.submission.prepared_execution.v2\0`。
 - decoder 必须先解析 canonical JSON 的 `schema`，再选 exact keys/domain；未知 schema、v1 bytes + v2 digest、v2 bytes + v1 digest 全部拒绝。
 - v2 `hint` 必须是同一 `skill.*` capability、activation exact two-key wrapper、activation identity一致、`initial_required_tool_name=null`。
@@ -283,97 +295,11 @@ cargo test -p maf_runtime_sidecar --tests
 feat(submission): version prepared agent execution authority
 ```
 
-## 9. Checkpoint C：API hint admission 与 PendingSkillContext exact transition
+## 9. Checkpoint C：原子初始化、恢复、Context 与 Tool Choice
 
-### C1. DTO 与 HTTP 红测
+Checkpoint C 只建立内部 durable foundation，测试用受信 prepared fixture 驱动初始化；Checkpoint D 随后接入 public admission。C、D 作为一个不可拆分发布的开发阶段，只有 D 的 HTTP handoff 门禁全部通过后才允许切换前端或形成发布候选。
 
-修改：
-
-- `src/api/dto.py`
-- `src/api/routes/conversations.py`
-- `tests/api/test_message_submission.py`
-- `tests/api/test_mcp_server_explicit_agent_loop.py`
-
-先断言：
-
-- `hint` 缺 capability、hint + 非 `skill.*`、auto + capability、force 缺 capability 返回 422，零持久化副作用。
-- hint 不允许用户提交 profile、bundle revision、profile digest、activation 或其他 system identity metadata。
-- private/disabled/missing/non-Skill target、alias 指向不可用 target、pinned revision 不可用返回 409 `{"code":"skill_hint_unavailable"}`，不区分私有 capability 是否存在。
-- 合法 alias 被 canonicalize；Task 和 prepared 只保存 canonical capability，audit 可保存安全 alias 摘要但不作为 authority。
-- MCP DTO 的精确组合、错误码和 metadata allowlist 原样通过。
-
-### C2. admission 必须先于副作用
-
-修改 `src/api/runtime.py::submit_message`，把 hint preflight 放在 Message/Task/附件绑定/AgentRun/audit 前：
-
-1. 解析 closed routing mode 和 canonical capability ID。
-2. 从 public Capability Registry 校验存在、public、enabled、`skill.*`。
-3. 固定当前 Skill bundle revision并从该 bundle 取 manifest/descriptor/contract/input schema。
-4. 调 Checkpoint A 的唯一 builder 得到完整 canonical activation；先验证 activation 131,072-byte，再验证 prepared v2 131,072-byte。
-5. 将 activation 作为 server-private immutable continuation/prepared authority；不写 Message metadata、公共 Task metadata或 history。
-6. 只有以上和附件/Sheet preflight 全部成功后，才允许 submission admission materialization。
-
-定义一个窄的 `SkillHintUnavailableError`，chat-message route 只映射为低敏 409 code。结构错误仍由 Pydantic 422 处理，不能回退成当前通用 400。
-
-### C3. exact pending transition
-
-修改：
-
-- `src/core/contracts.py` 中 PendingSkillContext storage port
-- `src/storage/sqlite/repositories.py`
-- `src/storage/postgres/repositories.py`
-- `src/api/runtime.py` submission materialization callback
-- `tests/storage/test_sqlite_pending_skill_context.py`
-- `tests/storage/test_submission_admission_postgres_integration.py`
-- `tests/api/test_pending_skill_context.py`
-- `tests/api/test_submission_preparation_callbacks.py`
-
-实现一个统一 exact transition seam，不增加列：
-
-- 输入绑定 authenticated owner、conversation、current Task/admission、prepared transition plan、context ID 集合、目标状态、reason 和 occurred_at。
-- transition 前复验 current Task 的 prepared authority；hint prepared 的 `pending_context=null` 且 plan 为全部 active context `superseded/new_skill_hint`。
-- auto + null capability 可把唯一 active context 的完整 facts 固定到 prepared，再 exact 改为 `consumed`；当前 Task 从 prepared 使用一次。
-- force/MCP 继续 supersede，但 reason 保持现有语义；hint 使用 `new_skill_hint`。
-- 首次 transition 只允许 `pending_user_input -> consumed|superseded`；同一 Task/plan/target/occurred_at exact replay 返回相同 receipt/count。
-- status、context 集合、owner、conversation、prepared Task identity 或 occurred_at 冲突 fail closed；不初始化 Agent。
-- `defer_task_completed_until_pending_skill_context_processed` 仅 auto pending continuation 为 true；hint/force/MCP/普通 auto 均为 null。
-- production Agent Loop 路径不再调用 `save_pending_skill_context`；用 spy/static regression 证明没有新 writer。
-
-审计事件：
-
-- `skill.hint_bound`：capability ID、安全 revision 引用、profile digest；无 profile body/user text。
-- `pending_skill_context.superseded`：count、current Task、reason；无旧正文。
-- `pending_skill_context.consumed`：context/current Task identity；无 original/missing values。
-
-### C4. HTTP 202 闭合
-
-为以下 fault point 加测试：prepared-only、pending transition 后/Agent init 前、partial Interrupt、Agent init transaction fault。HTTP 202 只允许在 AgentRun、完整 pre-Agent Interrupt 或 no-server intent 任一 durable handoff闭合后返回；其余必须失败或由同一 idempotency key恢复，不得返回 accepted。
-
-### C5. Green 门禁
-
-```bash
-conda run -n multi_agent python -m unittest \
-  tests.api.test_message_submission \
-  tests.api.test_pending_skill_context \
-  tests.api.test_submission_preparation_callbacks \
-  tests.api.test_mcp_server_explicit_agent_loop \
-  tests.storage.test_sqlite_pending_skill_context \
-  tests.storage.test_submission_admission_postgres_integration
-
-git diff --check
-```
-
-真实 PostgreSQL DSN 未提供或测试 skip 不能记作通过；Checkpoint C 保持未完成。
-
-检查点提交建议：
-
-```text
-feat(api): admit soft skill hints before persistence
-```
-
-## 10. Checkpoint D：原子初始化、恢复、Context、Tool Choice 与 delegated Skill
-
-### D1. 三 repository 原子初始化红测
+### C1. 三 repository 原子初始化红测
 
 修改：
 
@@ -397,7 +323,7 @@ feat(api): admit soft skill hints before persistence
 - 在 user write 后、activation write 后、run update 前后注入 fault，三 repository 都必须 all-or-zero。
 - Runtime Sidecar 复用现有 multi-item Agent state commit；如 Rust closed validator已支持 `skill_activation`，不改 proto，只补事务/fixture测试。
 
-### D2. prepared authority 驱动初始化与恢复
+### C2. prepared authority 驱动初始化与恢复
 
 修改：
 
@@ -417,7 +343,7 @@ feat(api): admit soft skill hints before persistence
 - v1、v2 auto、v2 force 仍只初始化 user item。
 - auto legacy pending continuation 也只初始化 user item；facts 只来自 prepared，数据库 context 已 consumed。
 
-### D3. 唯一 Tool choice helper
+### C3. 唯一 Tool choice helper
 
 在 orchestration 层新增小型纯 helper，输入 `RoutingMode + requested capability`：
 
@@ -434,7 +360,7 @@ auto             -> auto
 - crash before/after initialization 和 waiting resume 不升级 hint。
 - MCP force required 行为完全不变。
 
-### D4. Context 顺序
+### C4. Context 顺序
 
 修改 `src/orchestration/agent_loop/context.py` 与 `tests/orchestration/test_agent_context_builder.py`：
 
@@ -443,19 +369,7 @@ auto             -> auto
 - 普通 delegated activation 和 Tool result 继续按持久化 sequence 渲染，不能全局前移。
 - hint profile 不重复为 trusted fact，不进入 summary/history Message。
 
-### D5. delegated Skill 调用后指令激活
-
-修改 runtime 中 `activate_delegated_skill` wiring，或将其收敛到 `skill_activation.py` 的窄 service：
-
-- 调用前读取 run items；capability/revision/profile digest 与既有 hint activation完全一致时复用，不追加第二 activation。
-- instruction body 只取 pinned bundle 中已经解析、去 frontmatter 的 `manifest.body`；不读取 active bundle补齐。
-- body 必须完整且不超过 20,000 code points；统一 safe result 不超过 80,000 bytes，完整 Tool result 不超过 131,072 bytes。
-- 顶层继续使用 `maf.agent.model_result.v1`；`projection_revision=delegated-skill-instruction-v1`、`projection_mode=inline`、`projection_truncated=false`。
-- `model_view.schema=maf.agent.delegated_skill_activation.v1`，包含 activation identity、revision、profile digest、instruction body 和 instruction SHA。
-- body 缺失、超限或 digest mismatch 提交 `delegated_skill_instruction_invalid`；不截断、不激活半份指令。
-- committed Tool result 是恢复唯一 authority；conversation history、memory candidate、summary 和公共 Artifact 都不得出现 body。
-
-### D6. Green 门禁
+### C5. Green 门禁
 
 ```bash
 conda run -n multi_agent python -m unittest \
@@ -470,10 +384,134 @@ conda run -n multi_agent python -m unittest \
   tests.api.test_submission_admission_recovery
 ```
 
+真实PostgreSQL测试skip不得记为green。Checkpoint C 的 green 只证明内部初始化、恢复、Context 与 Tool choice 合同，不宣称 public hint 已可用。
+
 检查点提交建议：
 
 ```text
 feat(agent): initialize and recover soft skill hints
+```
+
+## 10. Checkpoint D：API hint admission、PendingSkillContext exact transition 与 delegated Skill
+
+### D1. DTO 与 HTTP 红测
+
+修改：
+
+- `src/api/dto.py`
+- `src/api/routes/conversations.py`
+- `tests/api/test_message_submission.py`
+- `tests/api/test_mcp_server_explicit_agent_loop.py`
+
+先断言：
+
+- `hint` 缺 capability、auto + capability、force 缺 capability 返回422，零submission副作用。
+- hint 不允许用户提交profile、bundle revision、profile digest、activation或其他system identity metadata。
+- private/disabled/missing/non-Skill target、alias指向不可用target、pinned revision不可用返回409 `{"code":"skill_hint_unavailable"}`，不区分私有capability是否存在。
+- 合法alias被canonicalize；Task和prepared只保存canonical capability，audit可保存安全alias摘要但不作为authority。
+- MCP DTO的精确组合、错误码和metadata allowlist原样通过。
+
+### D2. admission、active registry 与零submission副作用
+
+修改 `src/api/runtime.py::submit_message`，顺序固定为：
+
+1. routing shape 由 DTO/Pydantic 在进入 runtime 前闭合；结构错误返回422。
+2. conversation owner/幂等身份确认后，沿用现有catalog refresh并读取本次请求看到的active public Capability Registry。
+3. 从该registry校验存在/public/enabled/`skill.*`并canonicalize alias；非Skill、private、disabled、missing target统一返回低敏409，随后固定active bundle revision。
+4. 从固定bundle取manifest/descriptor/contract/input schema，调用Checkpoint A唯一builder得到canonical activation。
+5. 分别验证完整activation与完整prepared v2的131,072-byte边界；hint prepared必须含同一payload/sha且`initial_required_tool_name=null`。
+6. 完成附件/Sheet和model option预校验后，才允许Message/Task/附件绑定、pending transition、Agent初始化及submission-scoped audit。
+
+这里的“零submission副作用”精确定义为：失败hint不得新增/修改Message、Task、TaskInputAttachment、PendingSkillContext状态、AgentRun/AgentItem、submission receipt/handoff或`skill.hint_bound`等请求级事件。沿用既有catalog refresh行为不属于本功能的submission authority，不能把它的调整扩入本计划。
+
+定义窄 `SkillHintUnavailableError`，chat-message route只映射为低敏409 code。结构错误仍由Pydantic 422处理，不能回退成当前通用400。
+
+### D3. 无新列的 exact pending transition receipt
+
+修改：
+
+- `src/core/contracts.py` 中PendingSkillContext/Event窄storage port
+- `src/storage/sqlite/repositories.py`
+- `src/storage/postgres/repositories.py`
+- `src/api/runtime.py` submission materialization callback
+- `tests/storage/test_sqlite_pending_skill_context.py`
+- `tests/storage/test_submission_admission_postgres_integration.py`
+- `tests/api/test_pending_skill_context.py`
+- `tests/api/test_submission_preparation_callbacks.py`
+
+不增加表或列；在PendingSkillContext同一SQL事务内写一条deterministic audit-only EventRecord作为transition receipt。receipt exact payload固定为：
+
+```json
+{
+  "schema": "maf.pending_skill_context.transition_receipt.v1",
+  "task_id": "task-...",
+  "conversation_id": "conv-...",
+  "prepared_execution_sha256": "...",
+  "context_ids_sha256": "...",
+  "target_status": "consumed|superseded",
+  "reason": "legacy_pending_continued|new_skill_hint|new_forced_capability|new_mcp_binding",
+  "occurred_at": "canonical timestamp",
+  "count": 0
+}
+```
+
+实现规则：
+
+- event ID由domain、Task ID、prepared SHA、target status确定性派生；receipt不含旧用户正文、missing values、capability或raw context ID，只保存排序context ID列表的canonical SHA。
+- storage事务先锁conversation owner和候选pending rows，再根据prepared SHA、routing mode和prepared `pending_context`生成目标集合。
+- auto continuation要求prepared中有且只有一个context ID；数据库出现多个active context、ID/status不一致或prepared facts不匹配时fail closed。
+- hint/force/MCP的prepared `pending_context=null`；事务选择全部active rows。即使count=0也写receipt，证明该Task观察到的闭合空集合。
+- 同一事务完成`pending_user_input -> consumed|superseded`和receipt insert；首次提交后再由runtime best-effort发布已持久化audit event，不另写第二条authority。
+- exact replay先读取同event ID，重算当前`target_status + occurred_at`行集合digest并逐字段比较receipt；完全一致返回同一count，不一致fail closed。
+- 不同Task、prepared SHA、target、reason、时间或context集合不能借相同status/updated_at冒充replay。
+- `defer_task_completed_until_pending_skill_context_processed`仅auto pending continuation为true；hint/force/MCP/普通auto均为null。
+- production Agent Loop路径不再调用`save_pending_skill_context`；用spy/static regression证明没有新writer。
+
+`skill.hint_bound`只记录capability ID、安全revision引用和profile digest。transition receipt/audit只记录上面的safe identity/count；不记录旧正文。
+
+### D4. delegated Skill 调用后指令激活
+
+修改 runtime 中 `activate_delegated_skill` wiring，或将其收敛到 `skill_activation.py` 的窄 service：
+
+- 调用前读取 run items；capability/revision/profile digest 与既有 hint activation完全一致时复用，不追加第二 activation。
+- instruction body 只取 pinned bundle 中已经解析、去 frontmatter 的 `manifest.body`；不读取 active bundle补齐。
+- body 必须完整且不超过 20,000 code points；统一 safe result 不超过 80,000 bytes，完整 Tool result 不超过 131,072 bytes。
+- 顶层继续使用 `maf.agent.model_result.v1`；`projection_revision=delegated-skill-instruction-v1`、`projection_mode=inline`、`projection_truncated=false`。
+- `model_view.schema=maf.agent.delegated_skill_activation.v1`，包含 activation identity、revision、profile digest、instruction body 和 instruction SHA。
+- body 缺失、超限或 digest mismatch 提交 `delegated_skill_instruction_invalid`；不截断、不激活半份指令。
+- committed Tool result 是恢复唯一 authority；conversation history、memory candidate、summary 和公共 Artifact 都不得出现 body。
+
+### D5. HTTP 202 闭合
+
+为prepared-only、pending transition后/Agent init前、partial Interrupt、Agent init transaction fault加测试。HTTP 202只允许在以下任一closed durable handoff后返回：
+
+- AgentRun已通过Checkpoint C原子提交user + 可选hint activation；
+- pre-Agent Interrupt及原v2 prepared authority完整持久化并可恢复；
+- no-server intent完整持久化。
+
+合法hint的HTTP成功测试必须同时读取Agent items，证明activation bytes/digest与prepared逐字节一致且首轮Tool choice为auto。任何partial state必须失败或由同一idempotency key恢复，不能先返回accepted。
+
+### D6. Green 门禁
+
+```bash
+conda run -n multi_agent python -m unittest \
+  tests.api.test_message_submission \
+  tests.api.test_pending_skill_context \
+  tests.api.test_submission_preparation_callbacks \
+  tests.api.test_mcp_server_explicit_agent_loop \
+  tests.api.test_submission_admission_runtime_startup \
+  tests.orchestration.test_agent_loop \
+  tests.orchestration.test_agent_skill_activation \
+  tests.storage.test_sqlite_pending_skill_context \
+  tests.storage.test_submission_admission_postgres_integration
+```
+
+真实PostgreSQL DSN未提供或测试skip不能记作通过；Checkpoint D保持未完成。
+
+检查点提交建议：
+
+```text
+feat(api): admit recoverable soft skill hints
 ```
 
 ## 11. Checkpoint E：唯一纯 `AgentCallResultProjector`
@@ -511,7 +549,7 @@ feat(agent): initialize and recover soft skill hints
    - 大结果按固定优先级保留 `answer/response_text/summary/search_summary/status/missing/error/安全文件描述`；bulk arrays/maps 只进入 spill raw。
    - 固定排序和裁剪算法；任何改变 bytes/预览选择/Artifact identity 的修改必须升级 `skill-result-v1` revision。
 3. **delegated adapter**
-   - 复用 D5 已构建的 instruction model view。
+   - 复用 D4 已构建的 instruction model view。
    - 不再生成第二种顶层 schema或第二份 profile。
 
 ### E4. 双预算与最终 envelope 预检
@@ -581,14 +619,16 @@ filename = "skill_result.json"
 stager 行为：
 
 - 输入只能是 E 的 canonical raw bytes 和 identity facts。
-- 使用现有 managed file root 下独立 private stage namespace；目录 0700、file/manifest 0600。
-- raw file 与 manifest 在返回 handle 前 flush + fsync file/dir。
-- manifest exact schema 至少包含 artifact/task/conversation/node/call/raw SHA/projection revision/storage key/size/staged_at。
-- manifest 不写 owner username、正文、下载 URL 或内部绝对路径；owner 通过 Task/Artifact metadata authority校验。
-- deterministic file 已存在时逐字节 size/SHA 比对后复用；identity 同、内容不同 fail closed。
+- canonical raw直接写入现有managed file store的最终deterministic路径`<artifact-root>/<sanitized-artifact-id>/skill_result.json`；CAS前没有Artifact metadata，所以虽位于最终路径仍不可通过API发现。CAS不移动或重命名raw file。
+- manifest写入factory显式配置的独立sibling root（例如`<runtime-root>/agent_skill_result_stage_manifests/<artifact-id>.json`），绝不放入artifact目录，也不生成可被`open_path`解析的storage key。
+- artifact root、artifact目录、manifest root均0700；raw/manifest均0600。raw file与manifest在返回handle前分别flush + fsync file/dir。
+- manifest exact schema 至少包含 artifact/task/conversation/node/call、raw SHA/projection revision/storage key/size/staged_at。
+- manifest 不写 owner username、正文、下载 URL 或内部绝对路径；owner authority 只沿 Artifact -> Task -> Conversation 的既有关系校验，不新增 HMAC owner 引用。
+- deterministic raw已存在时逐字节size/SHA比对后复用；identity同、内容不同fail closed。
+- manifest采用first-writer-wins：已存在且稳定identity字段完全匹配时保留首次`staged_at`并复用，不按replay wall clock重写；任一稳定字段冲突fail closed。双worker创建必须用no-clobber/O_EXCL或等价原子操作。
 - stager 只返回 `AgentStagedArtifact`，不调用 `storage.save_artifact`、不发公共 event、不执行 supersede。
 
-`storage_ref` 使用 closed `source_kind=skill_result` metadata，包含 version、retention、Task/conversation/node/call、raw SHA、projection revision、filename/MIME/size/opaque storage key；不含 filesystem path。
+`storage_ref` 使用 closed `source_kind=skill_result` metadata，包含 version、retention、Task/conversation/node/call、raw SHA、projection revision、filename/MIME/size/opaque两段storage key；不含 filesystem path。公共 listing/download 必须先由 Artifact 的 `task_id` 复用既有 owner 校验。
 
 ### F2. terminal Node 与 result/artifact 同一 CAS
 
@@ -613,6 +653,14 @@ stager 行为：
 - exact replay 比较逐字节 safe result、Artifact identity/storage ref 和 terminal status；冲突 fail closed。
 - CAS loser 不删除 deterministic raw file或manifest。
 
+Agent outcome CAS异常必须分三类闭合：
+
+1. **response lost / revision changed**：重新读取call result、Node和Artifact metadata；若winner的status、safe payload digest、artifact refs/storage ref逐字节一致，按exact success继续并补terminal event。
+2. **storage unavailable / commit outcome unknown**：当前进程不得重执行Capability或重新project；保留raw和manifest并退出本轮。startup沿用`AgentRunRecoveryCoordinator`，将仍reserved的非waiting call提交typed `side_effect_unknown_no_replay` aborted outcome，使Node/result同一CAS终态化；随后janitor仍等待Task终态和24小时。
+3. **identity/payload conflict**：fail closed并记录低敏冲突；不得覆盖winner、不得删除file。若result仍reserved，startup仍按no-replay路径收敛；若已有非exact committed winner，Run进入一致性故障而不是伪造typed success。
+
+故障测试必须区分“CAS明确未提交”“响应丢失但exact winner已提交”“真实identity conflict”，不能把三者统一当作staging失败。
+
 ### F3. terminal lifecycle event reconciliation
 
 - Agent CAS 成功后，用 `call_item_id + committed result digest` 派生 exact `node.completed|node.failed` event ID。
@@ -636,7 +684,8 @@ stager 行为：
 
 - `is_active_managed_output_file` 增加 `skill_result`；原 `is_active_skill_output_file` 语义不变，避免 business supersede误收 result。
 - task Artifact listing 和 history 只在 metadata 已由 Agent CAS 发布后返回 file card。
-- download 接口 allowlist `skill_output|skill_result`，继续先取 Artifact metadata、再验证 Task owner、opaque storage key、regular file、size/SHA，attachment-only返回。
+- 复用或最小扩展`LocalArtifactFileStore`的安全路径与哈希校验能力，按Artifact metadata验证opaque storage key、regular file、expected size和SHA；不为本功能另建通用文件传输抽象。
+- download 接口 allowlist `skill_output|skill_result`，先取Artifact metadata、再验证Task owner、closed source kind和上述文件完整性，强制attachment disposition返回。MCP result继续404。
 - 直接猜 storage key、跨用户、metadata 缺失/不匹配和 CAS 前 stage 全部 404。
 - Task/Conversation 删除复用 managed file cleanup；正常 Task 终态不删除 result。
 - startup 顺序固定：submission/prepared recovery -> Agent run/result/terminal event recovery -> staged-result janitor -> 其他后台服务。
@@ -659,14 +708,17 @@ janitor 只有在以下全部成立时删除 orphan raw + manifest：
 1. raw invalid，零 stage，Node/result 同步 failed。
 2. raw 含禁止内部字段，零“删字段后完整”Artifact。
 3. file create/write/fsync/manifest fsync任一点失败。
-4. stage 成功、Agent CAS 失败；文件不可发现，janitor按规则处理。
-5. CAS exact replay，复用同一 file/Artifact/safe bytes。
-6. 双 worker CAS竞争，loser 不删除 winner文件。
-7. CAS 成功、terminal event失败，startup补写。
-8. registered Artifact + leftover manifest，只清 manifest。
-9. reserved/recoverable/nonterminal/未满24h orphan全部保留。
-10. `skill_output` supersede 不影响 `skill_result`，反向也不影响。
-11. MCP raw result从未进入 `skill_result` 下载通道。
+4. raw/manifest首次创建后exact replay复用首次`staged_at`；manifest identity冲突fail closed。
+5. stage成功、CAS明确失败或storage unavailable；文件不可发现，startup no-replay终态化后janitor按规则处理。
+6. CAS response lost但winner已exact committed；重读识别成功，不提交failed outcome。
+7. CAS exact replay，复用同一file/Artifact/safe bytes。
+8. 双worker CAS竞争，loser不删除winner文件。
+9. CAS成功、terminal event失败，startup补写。
+10. registered Artifact + leftover manifest，只清manifest。
+11. reserved/recoverable/nonterminal/未满24h orphan全部保留。
+12. `skill_output` supersede不影响`skill_result`，反向也不影响。
+13. MCP raw result从未进入`skill_result`下载通道。
+14. download拒绝非法storage key、non-regular file、错误owner、size/SHA drift和跨用户请求；正常`skill_output`与`skill_result`均可下载。
 
 ### F6. Green 门禁
 
@@ -676,6 +728,7 @@ conda run -n multi_agent python -m unittest \
   tests.orchestration.test_agent_result_projection \
   tests.orchestration.test_agent_invocation \
   tests.orchestration.test_agent_loop \
+  tests.lifecycle.test_agent_run_recovery \
   tests.storage.test_agent_storage_conformance \
   tests.storage.test_artifact_file_store \
   tests.api.test_skill_output_artifacts \
@@ -712,6 +765,7 @@ feat(agent): publish large skill results with outcome cas
 - Skill/MCP intent继续互斥；冲突/unknown Slash仍阻止发送。
 - API client 若 routing/capability组合不合法，在发 HTTP 前本地抛稳定错误；这只是 developer guard，后端仍是 authority。
 - 前端不再提交 `forced_by_slash_command` 或其他名称含 forced 的 Skill metadata；后端不依赖 picker/Slash来源。
+- Slash菜单的键盘上下选择、Enter确认、Escape关闭、焦点保持、badge取消按钮`aria-label`、busy gate和Interrupt gate必须保留现有行为；只改routing语义和文案。
 
 ### G2. 一次性选择状态
 
@@ -758,6 +812,7 @@ feat(frontend): submit selected skills as soft hints
 - `docs/AGENTS.md`
 - 根 `CHANGELOG.md`
 - 本 design 与 plan 的状态行
+- 新建 `docs/superpowers/specs/2026-08-28-unified-agent-loop-skill-soft-binding-implementation-evidence.md` 作为唯一稳定、脱敏的完成证据索引
 
 文档必须明确：
 
@@ -823,7 +878,7 @@ prepared v2 修改了 Runtime Sidecar closed contract，因此完整统一 Rust 
 6. final answer若只消费 preview，明确提示完整结果在 Artifact，不声称分析未进入 model view 的全部记录。
 7. `germplasm-mcp` informational 零 MCP call；execution进入现有 MCP approval/dispatch链，并复用一个 activation。
 
-### H6. 本地成对 UI/API smoke
+### H6. 本地成对 UI/API smoke 与证据归档
 
 在 `main` 本地开发环境成对重建 backend、frontend 和 Runtime Sidecar；不得只替换一侧。记录脱敏 evidence：
 
@@ -835,6 +890,8 @@ prepared v2 修改了 Runtime Sidecar closed contract，因此完整统一 Rust 
 - restart pre-Agent file/sheet Interrupt和restart staged result各一次，证明 prepared v2与janitor顺序。
 
 任何真实外部网络/Skill不可用都必须报告为外部证据缺口；不能用单元测试替代“真实 smoke 已通过”的声明。
+
+稳定证据写入 `2026-08-28-unified-agent-loop-skill-soft-binding-implementation-evidence.md`，由Checkpoint H执行者维护、最终release reviewer复核。exact sections为：commit/branch、A～H checkpoint commits、定向与全量测试计数、真实PostgreSQL、Rust/Frontend gate、fault matrix、发布/回滚检查结果、smoke Task IDs和result size/SHA摘要、已知gap、`prod_untouched=true`。原始日志只保存在Git-ignored `runtime/evidence/`，不得提交凭据、DSN、绝对路径、profile/instruction/raw正文。
 
 ### H7. Final checkpoint 提交建议
 
@@ -849,20 +906,20 @@ docs(agent): close skill soft binding rollout evidence
 | Design 完成条件 | 主责 checkpoint | 必要证据 |
 |---|---|---|
 | 1. picker/Slash 使用 hint | G | Slash/client/App tests + UI smoke |
-| 2. hint 全入口 auto choice | D | orchestrator/recovery/waiting tests |
-| 3. profile 首次采样前 durable/pinned | A、C、D | activation bytes + atomic init + restart |
+| 2. hint 全入口 auto choice | C、D | orchestrator/recovery/waiting tests + HTTP handoff |
+| 3. profile 首次采样前 durable/pinned | A、B、C、D | activation bytes + atomic init + restart |
 | 4. 新 submission v2、旧 v1 精确读 | B | Python/SQLite/Rust cross-version matrix |
-| 5. hint supersede、auto consume一次 | C | SQLite/PG exact transition + crash replay |
-| 6. informational 零执行 | D、H | deterministic E2E + real Task evidence |
-| 7. execution/Interrupt/final 不回归 | D、H | Agent/Skill/MCP regression + smoke |
+| 5. hint supersede、auto consume一次 | D | SQLite/PG atomic transition receipt + crash replay |
+| 6. informational 零执行 | C、D、H | deterministic E2E + real Task evidence |
+| 7. execution/Interrupt/final 不回归 | C、D、H | Agent/Skill/MCP regression + smoke |
 | 8. outcome 必经 projector | E | static scan + invoker tests |
 | 9. 三层预算和无损 spill | E、F | boundary tests + 28-record fixture |
-| 10. staged/CAS/owner/janitor | F | fault matrix + cross-owner API tests |
+| 10. staged/CAS/owner/janitor | F | final-path/manifest topology、CAS/recovery fault matrix、verified-download tests |
 | 11. failure typed 收敛 | E、F | invalid/staging/envelope injection |
 | 12. delegated 不重复 activation | D | item count/digest/replay tests |
 | 13. profile字段充分、raw body延迟 | A、D | profile allowlist + delegated instruction tests |
 | 14. MCP语义/投影不变 | E、G、H | MCP regression + `$Server` smoke |
-| 15. 前后端/Rust/真实 smoke | H | Final Gate logs/evidence |
+| 15. 前后端/Rust/真实 smoke | H | Final Gate、成对build/commit与稳定evidence文档 |
 | 16. 文档/索引/CHANGELOG一致 | H | diff review |
 | 17. `prod` 未修改 | 0、H | branch/deploy evidence |
 
@@ -872,14 +929,14 @@ docs(agent): close skill soft binding rollout evidence
 
 - 确认 A～H 全 green，当前 commit就是成对镜像输入。
 - 停止新 submission，等待正在写 prepared handoff 的请求收敛。
-- 检查没有 prepared-only、partial Interrupt、recoverable v2 Task 或 orphan reserved result。
+- 用现有只读管理查询确认没有prepared-only、partial Interrupt、recoverable v2 Task或orphan reserved result，并把SQL/Runtime Sidecar两侧的脱敏计数写入稳定evidence文档；任一authority不可查询时不发布。
 - 同一维护窗口成对替换 backend/frontend/Runtime Sidecar；不允许新前端连旧后端或新 backend连旧 Sidecar validator。
 - 启动顺序必须让 submission/Agent recovery先于 result janitor。
 
 ### 16.2 回滚
 
 - 回滚前再次停止新 submission。
-- 等待所有由新 writer 创建的 v2 submission、pre-Agent Interrupt和Task终态；旧 backend不能读取在途 v2。
+- 等待所有由新writer创建的v2 submission、pre-Agent Interrupt和Task终态；用现有只读管理查询确认两侧无recoverable/reserved v2 authority后才可继续，旧backend不能读取在途v2。
 - backend/frontend/Sidecar成对回滚。
 - 不删除 v2 bytes、AgentItem、Task、Message、Artifact、audit 或 raw result file。
 - projector回滚只能进入“小结果 bounded inline、超大结果 typed failure”的 safe mode；禁止恢复 raw `dict(output_payload)` 直通。
@@ -893,13 +950,15 @@ docs(agent): close skill soft binding rollout evidence
 |---|---|
 | prepared v2 任一路径仍写 v1 | 停止进入 Frontend checkpoint；先修 writer/fixture |
 | hint admission 在副作用后才发现 profile/revision失败 | 视为阻断，补 fault test，不用清理补偿掩盖 |
-| 三 repository 任一无法原子提交 user+activation | Checkpoint D 不通过；不以“随后补写 activation”降级 |
+| 三 repository 任一无法原子提交 user+activation | Checkpoint C 不通过；不以“随后补写 activation”降级 |
 | PostgreSQL/Rust外部环境缺失 | 明确验证缺口，状态保持未完成 |
 | result raw含禁止字段 | typed invalid；不得删字段或 redact 后发布“完整 raw” |
 | CAS loser清理 deterministic file | 立即停止，修复 no-loser-delete和janitor判断 |
 | terminal Node 与 result再次出现不一致 | 视为数据完整性阻断，不把 reconcile当正常写路径 |
+| download无法完成owner、regular-file、size/SHA验证 | 视为安全阻断，不绕过managed file store校验 |
 | live Skill返回数量变化 | 自动 fixture继续锁28；真实 smoke记录实际N且不伪造 |
 | Frontend/backend/Sidecar无法成对发布 | 不发布，不增加静默兼容推断 |
+| 发布/回滚前无法读取任一durable authority或脱敏检查证据未归档 | 不发布/不回滚，不以口头确认替代 |
 | 需要新表、proto字段或通用 Artifact读取Tool | 超出 design，停止并回到设计审批 |
 | 发现需要修改 `prod` 或 Skill脚本 | 超出授权，停止并请求用户决定 |
 
