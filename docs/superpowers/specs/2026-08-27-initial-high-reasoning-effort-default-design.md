@@ -1,6 +1,6 @@
 # 首次空白对话 High 思考强度默认设计
 
-状态：用户已批准；ready for implementation planning
+状态：用户已批准；`ready_for_implementation`
 日期：2026-08-27
 目标分支：`main`
 替代范围：本文档是当前唯一实施依据；不实施同日“Main 豆包模型移除与首次对话 High
