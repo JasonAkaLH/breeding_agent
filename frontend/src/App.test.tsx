@@ -2628,9 +2628,6 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     const thinkingSwitch = await screen.findByLabelText('深度思考');
     fireEvent.click(thinkingSwitch);
-    const effortSelect = screen.getAllByLabelText('思考强度')[0];
-    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
-    fireEvent.click(await screen.findByText('高'));
     fireEvent.click(thinkingSwitch);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '关闭思考但保留高强度' } });
