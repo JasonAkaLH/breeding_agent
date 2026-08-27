@@ -272,7 +272,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [defaultModelEdition, setDefaultModelEdition] = useState<ModelEdition | null>(null);
   const [modelEdition, setModelEdition] = useState<ModelEdition | null>(null);
   const [deepThinking, setDeepThinking] = useState(false);
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('minimal');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
   const selectedModelEdition = useMemo(
     () => modelEditionOptions.find((option) => option.value === modelEdition) ?? null,
     [modelEdition, modelEditionOptions],

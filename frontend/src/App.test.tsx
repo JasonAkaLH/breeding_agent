@@ -1682,7 +1682,11 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '你好' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'chat' })));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'chat',
+      deepThinking: false,
+      reasoningEffort: 'high',
+    })));
     expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-flash-260425' }));
     await screen.findByText('思考内容');
     await screen.findByText('先分析。');
@@ -2566,7 +2570,33 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'chat',
       deepThinking: true,
-      reasoningEffort: 'minimal',
+      reasoningEffort: 'high',
+    })));
+  });
+
+  it('keeps current thinking and effort when starting a new conversation', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('最高'));
+
+    const previousConversationId = localStorage.getItem('maf.frontend.conversation_id.alice');
+    expect(previousConversationId).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '新建对话' }));
+    await waitFor(() => expect(localStorage.getItem('maf.frontend.conversation_id.alice')).not.toBe(previousConversationId));
+    const nextConversationId = localStorage.getItem('maf.frontend.conversation_id.alice');
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '继承当前设置' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: nextConversationId,
+      deepThinking: true,
+      reasoningEffort: 'max',
     })));
   });
 
