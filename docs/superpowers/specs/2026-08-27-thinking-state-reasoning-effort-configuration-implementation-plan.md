@@ -91,12 +91,22 @@
 - 多模型缺失 model edition 继续 fail closed；
 - injected registry 继续不读取根配置。
 
+新增 `tests/integrations/test_smoke_main_agent_llm_options.py`，锁定现有手工 main-agent smoke 的 CLI
+选项会进入显式请求 metadata，而不是继续依赖 factory fallback：
+
+- 未显式传 effort 时省略 `main_agent_reasoning_effort`，由模型状态 default 决定；
+- 显式 `--reasoning-effort` 原样写入 metadata；
+- `--thinking enabled|disabled` 映射到 `deep_thinking`；
+- 可选 `--model-edition` 写入顶层请求字段；
+- CLI 不再维护跨模型固定 effort choices，合法性由生产 parser/resolver 校验。
+
 红测命令：
 
 ```bash
 conda run -n multi_agent python -m unittest \
   tests.integrations.test_model_editions \
-  tests.integrations.test_llm_request_options
+  tests.integrations.test_llm_request_options \
+  tests.integrations.test_smoke_main_agent_llm_options
 ```
 
 预期：旧实现因缺少新 dataclass/policy、仍读取旧字段或仍按 disabled-safe 布尔值判断而失败。不得为
@@ -136,6 +146,11 @@ conda run -n multi_agent python -m unittest \
 `build_agent_model_binding()` 不再把 factory 的 `main_agent_reasoning_effort` 作为配置模型 fallback。
 `_resolve_main_agent_stream_binding()` 中与 injected stream/static metadata 有关的既有 factory 参数保持原职责，
 不借本任务扩大删除范围。
+
+同步修改 `scripts/smoke_main_agent_llm.py`，避免其现有 `--reasoning-effort` 在 fallback 退出产品路径后静默
+失效：保留该 CLI 选项但默认改为省略；新增 `--thinking enabled|disabled` 和可选
+`--model-edition`；构造 `SubmitMessageRequest` 时显式写入顶层 model edition、deep-thinking metadata 和用户
+实际提供的 effort。该脚本继续只做手工真实 main-agent smoke，不并入默认 CI。
 
 稳定错误至少区分：
 
@@ -198,7 +213,8 @@ conda run -n multi_agent python -m unittest \
   tests.integrations.test_llm_request_options \
   tests.integrations.test_llm_client \
   tests.integrations.test_llm_runtime \
-  tests.integrations.test_agent_model_gate
+  tests.integrations.test_agent_model_gate \
+  tests.integrations.test_smoke_main_agent_llm_options
 
 conda run -n multi_agent python -m unittest tests.api.test_model_edition_selection
 ```
@@ -301,10 +317,15 @@ feat(frontend): select efforts with thinking disabled
 
 - 未带 `--live` 时只生成 52-case plan，不执行网络调用；
 - `--live` 时逐模型覆盖 enabled/disabled × 公共 options 全目录；
-- expected supported + accepted 和 expected unsupported + rejected 都是 match；
-- expected supported 被拒绝、expected unsupported 被接受都是 mismatch；
-- HTTP rejection 只保留 status 和稳定 provider code；
-- transport/client error 标记 inconclusive，不能误判 unsupported；
+- expected supported + accepted 是 match；
+- 只有 HTTP 400、provider code=`InvalidParameter` 且内部错误文本匹配已验证的
+  `Invalid combination of reasoning_effort and thinking type` 签名，才分类为 capability rejection；签名只用于
+  内部分类，随后丢弃且不得输出；
+- expected unsupported + capability rejection 才是 rejected match；
+- expected supported + capability rejection、expected unsupported + accepted 都是 mismatch；
+- 400 的其他 code/签名，以及 401/403/404/408/409/429、5xx、timeout 和 transport/client error 全部标记
+  inconclusive，不能误判 unsupported；
+- HTTP 结果只输出 status 和稳定 provider code；
 - 输出不含 prompt、answer、api key、base URL、header、exception 原文或 request ID；
 - 每个 client 最终关闭；
 - exit code：0=plan/matched，2=config/usage error，3=inconclusive，4=capability mismatch。
@@ -320,8 +341,9 @@ feat(frontend): select efforts with thinking disabled
 - live 时使用短提示、`max_retries=0`、指定 timeout；
 - 最多每个模型一个 in-flight probe，模型之间可并行，避免单模型突发和不必要串行等待；
 - 成功响应只记录 accepted，不记录回答或长度；
-- provider 4xx/5xx 只记录安全 code/status；
-- 网络错误进入 inconclusive，不修改配置、不重试、不猜测能力。
+- provider error 先按 C1 的精确规则分类，再只记录安全 code/status；
+- 除已验证非法组合签名外，所有鉴权、模型不可用、限流、server error、timeout 和网络错误都进入
+  inconclusive，不修改配置、不重试、不猜测能力。
 
 更新 `scripts/AGENTS.md`，把新脚本登记为手工真实 provider smoke；明确它不进入服务启动、请求路径或默认
 CI。
@@ -374,8 +396,8 @@ conda run -n multi_agent python -m unittest tests.api.test_developer_docs
 git diff --check
 ```
 
-实现完成时把设计和本计划状态更新为 `implemented/complete`，记录实际测试数量与真实 smoke 结果，不提前
-写成完成。
+本检查点只更新 schema/API 使用说明，并把实施状态保持为 `in_progress`；不得在 Final Gate 之前写入实际
+测试数量、真实 smoke 结果或 `implemented/complete`。
 
 检查点提交：
 
@@ -396,6 +418,7 @@ conda run -n multi_agent python -m unittest \
   tests.integrations.test_llm_client \
   tests.integrations.test_llm_runtime \
   tests.integrations.test_agent_model_gate \
+  tests.integrations.test_smoke_main_agent_llm_options \
   tests.integrations.test_model_reasoning_matrix_smoke
 
 conda run -n multi_agent python -m unittest \
@@ -407,7 +430,34 @@ conda run -n multi_agent python -m unittest \
   tests.api.test_developer_docs
 ```
 
-对本次修改的 Python 文件运行仓库现有 Ruff 入口；不得顺手修复无关历史告警。
+对预期修改的 Python 文件运行精确 Ruff 命令：
+
+```bash
+conda run -n multi_agent ruff check \
+  src/integrations/model_editions.py \
+  src/integrations/llm_request_options.py \
+  src/api/dto.py \
+  src/api/runtime.py \
+  scripts/smoke_main_agent_llm.py \
+  scripts/smoke_model_reasoning_matrix.py \
+  tests/integrations/test_model_editions.py \
+  tests/integrations/test_llm_request_options.py \
+  tests/integrations/test_llm_client.py \
+  tests/integrations/test_llm_runtime.py \
+  tests/integrations/test_agent_model_gate.py \
+  tests/integrations/test_smoke_main_agent_llm_options.py \
+  tests/integrations/test_model_reasoning_matrix_smoke.py \
+  tests/api/support.py \
+  tests/api/test_conversation_titles.py \
+  tests/api/test_model_edition_selection.py \
+  tests/api/test_skill_output_artifacts.py \
+  tests/api/test_user_mcp_runtime_wiring.py \
+  tests/api/test_user_mcp_task_assignment_restart.py \
+  tests/api/test_developer_docs.py
+```
+
+若 `src/api/routes/config.py` 因 DTO 构造实际发生修改，必须把它追加到同一 Ruff 命令。不得顺手修复无关
+历史告警。
 
 ### 7.2 受影响全域回归
 
@@ -468,20 +518,40 @@ conda run -n multi_agent python scripts/smoke_model_reasoning_matrix.py \
 - `AGENTS.md`/`CHANGELOG.md` 已按实际影响同步；
 - 无新增依赖或 license 变化。
 
-## 8. 回滚
+## 8. Checkpoint E：最终证据、状态闭合与完成提交
+
+只有 7.1～7.5 全部完成且真实矩阵 `mismatch=0, inconclusive=0` 后，才执行本检查点：
+
+- 把批准设计状态更新为 `implemented`；
+- 把本计划状态更新为 `complete`；
+- 在本计划追加实际定向/全域测试数量、skip 或环境缺口、52 组合结果和本地 UI/API smoke 结果；
+- 更新 `docs/AGENTS.md` 的当前状态；
+- 在 `CHANGELOG.md` 追加实现完成记录，明确 `prod`/外部部署未更新和接口接受不等同效果评测；
+- 重新运行 `tests.api.test_developer_docs`、`git diff --check` 和敏感配置 ignore/untracked 检查；
+- 复核最终 `git status` 干净，且完成记录没有密钥、base URL、回答正文或 request ID。
+
+最终闭合提交：
+
+```text
+docs: close thinking-state reasoning effort rollout
+```
+
+若任何 Final Gate 项失败或未运行，本检查点不得执行，设计/计划保持 `in_progress` 并记录精确缺口。
+
+## 9. 回滚
 
 本功能无数据库或持久化数据迁移，但 code、API response、frontend 和本地配置是一个锁步合同：
 
 - 未完成全部检查点前不得把中间提交部署为可用版本；
-- 回滚时按 D → C → B → A 的逆序回滚版本化提交；
+- 回滚时按 E → D → C → B → A 的逆序回滚版本化提交；
 - 本地 `config.yaml` 只在代码回到旧 parser 后恢复旧 reasoning block；
 - 不允许新后端配旧前端、旧后端配新前端或新 parser 配旧 config 的混合运行；
 - smoke 脚本和文档可随整体版本回滚，不影响数据；
 - 旧 Task/Message/AgentRun 无 schema 变化，不需要恢复、重放或修复。
 
-## 9. 风险与停止条件
+## 10. 风险与停止条件
 
-### 9.1 主要风险
+### 10.1 主要风险
 
 - 忽略文件 `config.yaml` 漏迁移，导致本地启动失败；
 - 某个内联测试 fixture 仍使用旧 schema，造成宽 API/Integrations 回归失败；
@@ -490,7 +560,7 @@ conda run -n multi_agent python scripts/smoke_model_reasoning_matrix.py \
 - provider 接受组合但实际忽略 effort，被误写成效果证明；
 - 静态 API 文档仍保留旧字段，外部客户端按错误 schema 实现。
 
-### 9.2 停止条件
+### 10.2 停止条件
 
 出现以下任一情况必须停止并先修正，不继续后续检查点：
 
@@ -501,7 +571,7 @@ conda run -n multi_agent python scripts/smoke_model_reasoning_matrix.py \
 - 发现外部客户端或部署必须与本仓库同批协调，而当前没有相应授权；
 - 修改范围扩展到数据库、Rust sidecar、部署或 `prod`。
 
-## 10. 预计版本化文件清单
+## 11. 预计版本化文件清单
 
 生产源码：
 
@@ -512,6 +582,7 @@ conda run -n multi_agent python scripts/smoke_model_reasoning_matrix.py \
 - `frontend/src/api/types.ts`
 - `frontend/src/App.tsx`
 - `scripts/smoke_model_reasoning_matrix.py`
+- `scripts/smoke_main_agent_llm.py`
 
 测试与 fixtures：
 
@@ -521,6 +592,7 @@ conda run -n multi_agent python scripts/smoke_model_reasoning_matrix.py \
 - `tests/integrations/test_llm_runtime.py`
 - `tests/integrations/test_agent_model_gate.py`
 - `tests/integrations/test_model_reasoning_matrix_smoke.py`
+- `tests/integrations/test_smoke_main_agent_llm_options.py`
 - `tests/api/support.py`
 - `tests/api/test_conversation_titles.py`
 - `tests/api/test_model_edition_selection.py`
@@ -549,7 +621,7 @@ conda run -n multi_agent python scripts/smoke_model_reasoning_matrix.py \
 只有 DTO 构造或路由类型确实要求时才修改 `src/api/routes/config.py`；只有 typecheck 证明需要时才修改
 `frontend/src/api/client.ts`。不得因“顺手整理”扩大清单。
 
-## 11. License Requirement
+## 12. License Requirement
 
 计划仅复用现有 Python、PyYAML、OpenAI-compatible SDK、FastAPI/Pydantic、React/TypeScript、Vitest 和
 YAML 配置机制。实现不新增第三方依赖、供应链输入或许可变更。

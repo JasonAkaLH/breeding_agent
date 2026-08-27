@@ -54,7 +54,7 @@
 - `superpowers/specs/2026-08-27-four-role-llm-message-contract-design.md`：用户已批准、第二轮`100/100 Pass`且已完成仓库实现/本地真实冒烟的四角色模型消息合同；系统仅保留`system/assistant/user/tool`，现有developer逐条一对一改为system，不按模型启用developer，也不增加运行时外部探测。
 - `superpowers/specs/2026-08-27-four-role-llm-message-contract-implementation-plan.md`：上述四角色合同的`complete`实施账本；Agent/config、PromptEnvelope/LLM/provider边界、fixture/当前合同、完整回归和默认模型真实Task均已闭合，未纳入模型探测、异步流告警及其他目标。
 - `superpowers/specs/2026-08-27-thinking-state-reasoning-effort-configuration-design.md`：用户已批准、implementation pending 的 thinking 状态感知 reasoning effort 配置设计；以公共选项目录和 enabled/disabled 独立支持集合/默认值取代旧布尔 schema，允许前端在关闭 thinking 时继续选择合法强度，并以五模型52组合真实脱敏 smoke 作为首版配置证据。
-- `superpowers/specs/2026-08-27-thinking-state-reasoning-effort-configuration-implementation-plan.md`：上述批准设计的可执行实施计划；按后端合同/API、前端状态感知选择、脱敏真实矩阵smoke、文档和最终门禁四个检查点推进，明确Git-ignored敏感`config.yaml`只做本地迁移不提交，并以52组合复测和前后端锁步回滚闭合。
+- `superpowers/specs/2026-08-27-thinking-state-reasoning-effort-configuration-implementation-plan.md`：上述批准设计的可执行实施计划；经一轮批准的document-perfectization修订，补齐旧main-agent smoke显式metadata、精确provider rejection/inconclusive分类、Final Gate后独立完成提交和精确Ruff门禁；按后端、前端、矩阵smoke、文档、最终证据五个检查点推进，Git-ignored敏感`config.yaml`只做本地迁移不提交。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。

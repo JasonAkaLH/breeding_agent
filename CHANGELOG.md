@@ -2,7 +2,7 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- thinking 状态感知的模型 reasoning effort 配置实施计划已成文：按后端新schema/resolver/API、前端关闭thinking仍可选择合法强度、显式live门禁的脱敏52组合smoke、API文档与最终全域验证四个检查点执行；计划锁定合法值保留/非法值才回退、非法组合provider前拒绝、旧schema无生产fallback和前后端锁步发布/回滚。根`config.yaml`含本地凭据且Git-ignored，只迁移五个reasoning block，绝不输出、强制暂存或提交；数据库、Rust sidecar、部署与`prod`不在范围。当前仅计划、索引与变更记录，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变更。
+- thinking 状态感知的模型 reasoning effort 配置实施计划已成文并完成一轮批准的document-perfectization修订：按后端新schema/resolver/API、前端关闭thinking仍可选择合法强度、显式live门禁的脱敏52组合smoke、API文档和Final Gate后独立证据闭合五个检查点执行；补齐旧main-agent smoke由CLI显式写入model/thinking/effort metadata，只有HTTP 400 `InvalidParameter`且命中已验证非法组合签名才算capability rejection，鉴权/限流/5xx/timeout等统一inconclusive，并列出精确Ruff门禁。计划锁定合法值保留/非法值才回退、非法组合provider前拒绝、旧schema无生产fallback和前后端锁步发布/回滚。根`config.yaml`含本地凭据且Git-ignored，只迁移五个reasoning block，绝不输出、强制暂存或提交；数据库、Rust sidecar、部署与`prod`不在范围。当前仅计划、索引与变更记录，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变更。
 
 - thinking 状态感知的模型 reasoning effort 配置设计已获用户批准：后续以公共 effort 目录加 `thinking.enabled/disabled` 独立 `supported/default` 策略取代旧 `default/disabled_default/allow_when_thinking_disabled` schema，关闭 thinking 后前端继续允许选择当前模型合法强度，切换状态或模型时合法值保留、非法值才回退；后端继续在provider调用前fail closed。2026-08-27已对五模型完成enabled/disabled共52组合真实脱敏smoke：DeepSeek V4 Flash/Pro GA与GLM-5.2两种状态均接受六档，豆包Seed 2.1 Pro/Turbo enabled接受四档而disabled仅接受minimal；接口接受不等同效果评测。当前仅设计、索引与变更记录，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变更。
 
