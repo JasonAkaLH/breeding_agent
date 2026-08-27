@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 from collections.abc import Mapping
 from ipaddress import ip_address
@@ -534,14 +535,9 @@ def _validate_submission_admission_record(admission: Any) -> None:
             or len(prepared) > resource_limit("submission_prepared_execution_bytes")
         ):
             _raise_response_invalid()
-        _validate_canonical_json_object(prepared)
-        _validate_sha256(prepared_sha)
-        if hashlib.sha256(
-            b"maf.submission.prepared_execution.v1\0" + prepared
-        ).hexdigest() != prepared_sha:
-            _raise_response_invalid()
         prepared_value = json.loads(prepared)
-        if set(prepared_value) != {
+        schema = prepared_value.get("schema")
+        prepared_keys = {
             "schema",
             "task_id",
             "conversation_id",
@@ -563,9 +559,23 @@ def _validate_submission_admission_record(admission: Any) -> None:
             "available_mcp_servers",
             "pending_context",
             "planned_handoff_kind",
-        } or (
-            prepared_value.get("schema")
-            != "maf.submission.prepared_execution.v1"
+        }
+        if schema == "maf.submission.prepared_execution.v2":
+            prepared_keys |= {"routing_mode", "skill_activation"}
+            prepared_domain = b"maf.submission.prepared_execution.v2\0"
+        elif schema == "maf.submission.prepared_execution.v1":
+            prepared_domain = b"maf.submission.prepared_execution.v1\0"
+        else:
+            _raise_response_invalid()
+        _validate_canonical_json_object(prepared)
+        _validate_sha256(prepared_sha)
+        if hashlib.sha256(prepared_domain + prepared).hexdigest() != prepared_sha:
+            _raise_response_invalid()
+        if set(prepared_value) != prepared_keys or (
+            schema not in {
+                "maf.submission.prepared_execution.v1",
+                "maf.submission.prepared_execution.v2",
+            }
             or prepared_value.get("task_id") != admission["task_id"]
             or prepared_value.get("conversation_id")
             != admission["conversation_id"]
@@ -589,6 +599,7 @@ def _validate_submission_admission_record(admission: Any) -> None:
         _validate_model_options(prepared_value.get("model_options"))
         _validate_bundle_revisions(prepared_value.get("bundle_revisions"))
         _validate_execution_metadata(prepared_value.get("execution_metadata"))
+        _validate_prepared_version_relations(prepared_value)
         _validate_safe_references(
             prepared_value,
             admission["conversation_id"],
@@ -661,6 +672,126 @@ def _validate_canonical_json_object(value: bytes) -> None:
     ).encode("utf-8")
     if canonical != value:
         _raise_response_invalid()
+
+
+def _validate_prepared_version_relations(value: Mapping[str, Any]) -> None:
+    if value.get("schema") == "maf.submission.prepared_execution.v1":
+        capability_id = value.get("requested_capability_id")
+        expected = (
+            None
+            if capability_id is None
+            else _provider_safe_tool_name(str(capability_id))
+        )
+        if value.get("initial_required_tool_name") != expected:
+            _raise_response_invalid()
+        return
+    routing_mode = value.get("routing_mode")
+    capability_id = value.get("requested_capability_id")
+    activation = value.get("skill_activation")
+    if routing_mode not in {"auto", "hint", "force_capability"}:
+        _raise_response_invalid()
+    expected = (
+        _provider_safe_tool_name(capability_id)
+        if routing_mode == "force_capability" and _non_empty_string(capability_id)
+        else None
+    )
+    if value.get("initial_required_tool_name") != expected:
+        _raise_response_invalid()
+    if routing_mode == "hint":
+        if (
+            not _non_empty_string(capability_id)
+            or not str(capability_id).startswith("skill.")
+            or value.get("pending_context") is not None
+        ):
+            _raise_response_invalid()
+        _validate_prepared_skill_activation(
+            activation,
+            capability_id=str(capability_id),
+            skill_bundle_revision=value["bundle_revisions"].get(
+                "skill_bundle_revision"
+            ),
+        )
+        return
+    if activation is not None:
+        _raise_response_invalid()
+    if routing_mode == "force_capability":
+        if not _non_empty_string(capability_id):
+            _raise_response_invalid()
+        return
+    if capability_id is None:
+        return
+    pending = value.get("pending_context")
+    if not isinstance(pending, Mapping) or pending.get("capability_id") != capability_id:
+        _raise_response_invalid()
+
+
+def _validate_prepared_skill_activation(
+    value: Any,
+    *,
+    capability_id: str,
+    skill_bundle_revision: Any,
+) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "payload",
+        "payload_sha256",
+    }:
+        _raise_response_invalid()
+    payload_text = value.get("payload")
+    payload_sha256 = value.get("payload_sha256")
+    if not isinstance(payload_text, str):
+        _raise_response_invalid()
+    _validate_sha256(payload_sha256)
+    if hashlib.sha256(payload_text.encode("utf-8")).hexdigest() != payload_sha256:
+        _raise_response_invalid()
+    try:
+        payload = json.loads(
+            payload_text,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except (json.JSONDecodeError, ValueError):
+        _raise_response_invalid()
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "binding_mode",
+        "pinned_bundle_revision",
+        "profile",
+        "profile_digest",
+    }:
+        _raise_response_invalid()
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ) + "\n"
+    profile = payload.get("profile")
+    if canonical != payload_text or not isinstance(profile, Mapping):
+        _raise_response_invalid()
+    profile_text = json.dumps(
+        profile,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ) + "\n"
+    if (
+        payload.get("binding_mode") != "hint"
+        or payload.get("pinned_bundle_revision") != skill_bundle_revision
+        or not _non_empty_string(skill_bundle_revision)
+        or profile.get("capability_id") != capability_id
+        or payload.get("profile_digest")
+        != hashlib.sha256(profile_text.encode("utf-8")).hexdigest()
+    ):
+        _raise_response_invalid()
+
+
+def _provider_safe_tool_name(capability_id: str) -> str:
+    source = capability_id.strip()
+    if not source:
+        _raise_response_invalid()
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "_", source).strip("_-") or "tool"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    return f"{normalized[:51]}_{digest}"
 
 
 def _closed_json_mapping(

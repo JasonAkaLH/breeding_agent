@@ -4809,7 +4809,10 @@ pub(crate) fn validate_task_record(task: &TaskRecord) -> Result<(), RuntimeSidec
             "TaskRecord status is not in the closed TaskStatus set",
         ));
     }
-    if !matches!(task.routing_mode.as_str(), "auto" | "force_capability") {
+    if !matches!(
+        task.routing_mode.as_str(),
+        "auto" | "hint" | "force_capability"
+    ) {
         return Err(write_failed(
             "TaskRecord routing_mode is not in the closed RoutingMode set",
         ));
@@ -5264,73 +5267,64 @@ pub(crate) fn validate_prepared_execution(
     bytes: &[u8],
     digest: &str,
 ) -> Result<(), RuntimeSidecarError> {
-    validate_canonical_json_object(
-        bytes,
-        SUBMISSION_PREPARED_EXECUTION_MAX_BYTES,
-        &[
-            "schema",
-            "task_id",
-            "conversation_id",
-            "message_id",
-            "prepared_kind",
-            "owner_scope",
-            "execution_text_source",
-            "execution_text_sha256",
-            "requested_capability_id",
-            "initial_required_tool_name",
-            "model_options",
-            "bundle_revisions",
-            "execution_metadata",
-            "preparation_receipt",
-            "upload_refs",
-            "sheet_selections",
-            "mcp_binding",
-            "mcp_assignment",
-            "available_mcp_servers",
-            "pending_context",
-            "planned_handoff_kind",
-        ],
-        "prepared execution",
-    )?;
-    if digest != domain_digest(b"maf.submission.prepared_execution.v1\0", &[bytes]) {
-        return Err(write_failed("prepared execution digest mismatch"));
+    if bytes.is_empty() || bytes.len() > SUBMISSION_PREPARED_EXECUTION_MAX_BYTES {
+        return Err(write_failed(
+            "prepared execution exceeds its closed size contract",
+        ));
     }
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|_| write_failed("prepared execution JSON is invalid"))?;
-    let object = exact_object(
-        &value,
-        &[
-            "schema",
-            "task_id",
-            "conversation_id",
-            "message_id",
-            "prepared_kind",
-            "owner_scope",
-            "execution_text_source",
-            "execution_text_sha256",
-            "requested_capability_id",
-            "initial_required_tool_name",
-            "model_options",
-            "bundle_revisions",
-            "execution_metadata",
-            "preparation_receipt",
-            "upload_refs",
-            "sheet_selections",
-            "mcp_binding",
-            "mcp_assignment",
-            "available_mcp_servers",
-            "pending_context",
-            "planned_handoff_kind",
-        ],
+    let schema = value["schema"]
+        .as_str()
+        .ok_or_else(|| write_failed("prepared execution schema is invalid"))?;
+    let mut expected_keys = vec![
+        "schema",
+        "task_id",
+        "conversation_id",
+        "message_id",
+        "prepared_kind",
+        "owner_scope",
+        "execution_text_source",
+        "execution_text_sha256",
+        "requested_capability_id",
+        "initial_required_tool_name",
+        "model_options",
+        "bundle_revisions",
+        "execution_metadata",
+        "preparation_receipt",
+        "upload_refs",
+        "sheet_selections",
+        "mcp_binding",
+        "mcp_assignment",
+        "available_mcp_servers",
+        "pending_context",
+        "planned_handoff_kind",
+    ];
+    let domain = match schema {
+        "maf.submission.prepared_execution.v1" => {
+            b"maf.submission.prepared_execution.v1\0".as_slice()
+        }
+        "maf.submission.prepared_execution.v2" => {
+            expected_keys.extend(["routing_mode", "skill_activation"]);
+            b"maf.submission.prepared_execution.v2\0".as_slice()
+        }
+        _ => return Err(write_failed("prepared execution schema is unknown")),
+    };
+    validate_canonical_json_object(
+        bytes,
+        SUBMISSION_PREPARED_EXECUTION_MAX_BYTES,
+        &expected_keys,
         "prepared execution",
     )?;
+    if digest != domain_digest(domain, &[bytes]) {
+        return Err(write_failed("prepared execution digest mismatch"));
+    }
+    let object = exact_object(&value, &expected_keys, "prepared execution")?;
     let prepared_kind = non_empty_string(object, "prepared_kind", "prepared execution")?;
-    if value["schema"].as_str() != Some("maf.submission.prepared_execution.v1")
-        || !matches!(
-            prepared_kind,
-            "agent_run" | "interrupt" | "no_server_intent"
-        )
-        || value["planned_handoff_kind"].as_str() != Some(prepared_kind)
+    if !matches!(
+        prepared_kind,
+        "agent_run" | "interrupt" | "no_server_intent"
+    ) || value["planned_handoff_kind"].as_str() != Some(prepared_kind)
         || !matches!(
             value["execution_text_source"].as_str(),
             Some("root_message" | "pending_context" | "memory_context")
@@ -5350,6 +5344,16 @@ pub(crate) fn validate_prepared_execution(
     validate_model_options(&value["model_options"])?;
     validate_bundle_revisions(&value["bundle_revisions"])?;
     validate_execution_metadata(&value["execution_metadata"])?;
+    if schema == "maf.submission.prepared_execution.v1" {
+        let expected = value["requested_capability_id"]
+            .as_str()
+            .map(provider_safe_tool_name);
+        if value["initial_required_tool_name"].as_str() != expected.as_deref() {
+            return Err(write_failed("prepared v1 routing relation is invalid"));
+        }
+    } else {
+        validate_prepared_v2_relations(object)?;
+    }
     validate_safe_references(
         object,
         value["conversation_id"].as_str().unwrap_or_default(),
@@ -5378,6 +5382,134 @@ pub(crate) fn validate_prepared_execution(
         return Err(write_failed("preparation receipt binding is invalid"));
     }
     Ok(())
+}
+
+fn validate_prepared_v2_relations(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), RuntimeSidecarError> {
+    let routing_mode = object["routing_mode"]
+        .as_str()
+        .ok_or_else(|| write_failed("prepared v2 routing mode is invalid"))?;
+    let capability_id = object["requested_capability_id"].as_str();
+    let expected_required = if routing_mode == "force_capability" {
+        Some(provider_safe_tool_name(capability_id.ok_or_else(|| {
+            write_failed("prepared v2 force capability is missing")
+        })?))
+    } else {
+        None
+    };
+    if object["initial_required_tool_name"].as_str() != expected_required.as_deref() {
+        return Err(write_failed("prepared v2 routing relation is invalid"));
+    }
+    match routing_mode {
+        "hint" => {
+            let capability_id = capability_id
+                .filter(|value| value.starts_with("skill."))
+                .ok_or_else(|| write_failed("prepared v2 hint capability is invalid"))?;
+            if !object["pending_context"].is_null() {
+                return Err(write_failed("prepared v2 hint pending context is invalid"));
+            }
+            validate_prepared_skill_activation(
+                &object["skill_activation"],
+                capability_id,
+                &object["bundle_revisions"]["skill_bundle_revision"],
+            )?;
+        }
+        "force_capability" => {
+            if capability_id.is_none() || !object["skill_activation"].is_null() {
+                return Err(write_failed("prepared v2 force relation is invalid"));
+            }
+        }
+        "auto" => {
+            if !object["skill_activation"].is_null() {
+                return Err(write_failed("prepared v2 auto activation is invalid"));
+            }
+            if let Some(capability_id) = capability_id {
+                if object["pending_context"]["capability_id"].as_str() != Some(capability_id) {
+                    return Err(write_failed("prepared v2 auto capability is invalid"));
+                }
+            }
+        }
+        _ => return Err(write_failed("prepared v2 routing mode is invalid")),
+    }
+    Ok(())
+}
+
+fn validate_prepared_skill_activation(
+    value: &serde_json::Value,
+    capability_id: &str,
+    skill_bundle_revision: &serde_json::Value,
+) -> Result<(), RuntimeSidecarError> {
+    let wrapper = exact_object(
+        value,
+        &["payload", "payload_sha256"],
+        "prepared skill activation",
+    )?;
+    let payload_text = wrapper["payload"]
+        .as_str()
+        .ok_or_else(|| write_failed("prepared skill activation payload is invalid"))?;
+    let payload_sha256 = wrapper["payload_sha256"]
+        .as_str()
+        .filter(|value| is_sha256(value))
+        .ok_or_else(|| write_failed("prepared skill activation digest is invalid"))?;
+    if format!("{:x}", Sha256::digest(payload_text.as_bytes())) != payload_sha256
+        || payload_text.len() > 131_072
+    {
+        return Err(write_failed(
+            "prepared skill activation identity is invalid",
+        ));
+    }
+    let payload: serde_json::Value = serde_json::from_str(payload_text)
+        .map_err(|_| write_failed("prepared skill activation JSON is invalid"))?;
+    let payload_object = exact_object(
+        &payload,
+        &[
+            "binding_mode",
+            "pinned_bundle_revision",
+            "profile",
+            "profile_digest",
+        ],
+        "prepared skill activation payload",
+    )?;
+    let mut canonical = serde_json::to_vec(&payload)
+        .map_err(|_| write_failed("prepared skill activation cannot be canonicalized"))?;
+    canonical.push(b'\n');
+    if canonical != payload_text.as_bytes() {
+        return Err(write_failed("prepared skill activation is not canonical"));
+    }
+    let profile = payload_object["profile"]
+        .as_object()
+        .ok_or_else(|| write_failed("prepared skill activation profile is invalid"))?;
+    let mut profile_canonical = serde_json::to_vec(&payload_object["profile"])
+        .map_err(|_| write_failed("prepared skill profile cannot be canonicalized"))?;
+    profile_canonical.push(b'\n');
+    let profile_digest = format!("{:x}", Sha256::digest(&profile_canonical));
+    if payload_object["binding_mode"].as_str() != Some("hint")
+        || payload_object["pinned_bundle_revision"].as_str() != skill_bundle_revision.as_str()
+        || skill_bundle_revision.as_str().is_none()
+        || profile["capability_id"].as_str() != Some(capability_id)
+        || payload_object["profile_digest"].as_str() != Some(profile_digest.as_str())
+    {
+        return Err(write_failed("prepared skill activation binding is invalid"));
+    }
+    Ok(())
+}
+
+fn provider_safe_tool_name(capability_id: &str) -> String {
+    let source = capability_id.trim();
+    let mut slug = String::with_capacity(source.len());
+    for character in source.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            slug.push(character);
+        } else {
+            slug.push('_');
+        }
+    }
+    let trimmed = slug.trim_matches(['_', '-']);
+    let normalized = if trimmed.is_empty() { "tool" } else { trimmed };
+    let prefix: String = normalized.chars().take(51).collect();
+    let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+    format!("{prefix}_{}", &digest[..12])
 }
 
 fn exact_object<'a>(

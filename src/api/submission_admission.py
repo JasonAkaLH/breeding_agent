@@ -52,9 +52,15 @@ from src.storage.runtime_sidecar_facade import (
     _validate_safe_references,
     validate_runtime_sidecar_submission_envelopes,
 )
+from src.storage.agent_payload import AgentPayloadError, canonicalize_agent_payload
 
 
-_PREPARED_DOMAIN = b"maf.submission.prepared_execution.v1\0"
+_PREPARED_SCHEMA_V1 = "maf.submission.prepared_execution.v1"
+_PREPARED_SCHEMA_V2 = "maf.submission.prepared_execution.v2"
+_PREPARED_DOMAINS = {
+    _PREPARED_SCHEMA_V1: b"maf.submission.prepared_execution.v1\0",
+    _PREPARED_SCHEMA_V2: b"maf.submission.prepared_execution.v2\0",
+}
 _REQUEST_DOMAIN = b"maf.submission.request.v1\0"
 _PROJECTION_DOMAIN = b"maf.submission.projection.v1\0"
 _CONTINUATION_DOMAIN = b"maf.submission.continuation.v1\0"
@@ -413,8 +419,11 @@ class PreparedAgentRecoveryContext:
     mcp_binding: Mapping[str, Any] | None
     mcp_assignment: Mapping[str, Any] | None
     available_mcp_servers: tuple[UserMCPServerProfile, ...]
+    routing_mode: str = "auto"
     upload_refs: tuple[Mapping[str, Any], ...] = ()
     selected_upload_ids: tuple[str, ...] = ()
+    skill_activation_payload_json: str | None = None
+    skill_activation_payload_sha256: str | None = None
 
 
 class PreparedAgentRecoveryLoader(Protocol):
@@ -468,8 +477,8 @@ class SubmissionPreparedAgentRecoveryLoader:
             or preparation.handoff_identity != f"agent-run:{task_id}"
         ):
             raise SubmissionRecoveryError("submission_prepared_agent_handoff_drift")
-        if preparation.prepared_execution_sha256 != _domain_sha256(
-            _PREPARED_DOMAIN, preparation.prepared_execution
+        if preparation.prepared_execution_sha256 != _prepared_execution_digest(
+            preparation.prepared_execution
         ):
             raise SubmissionRecoveryError("submission_prepared_digest_mismatch")
 
@@ -559,6 +568,7 @@ def _build_prepared_agent_recovery_context(
     return PreparedAgentRecoveryContext(
         username=prepared["owner_scope"],
         current_user_input=current_user_input,
+        routing_mode=_prepared_routing_mode(prepared),
         initial_required_tool_name=prepared["initial_required_tool_name"],
         model_options=dict(prepared["model_options"]),
         bundle_revisions=dict(prepared["bundle_revisions"]),
@@ -580,6 +590,8 @@ def _build_prepared_agent_recovery_context(
         ),
         upload_refs=upload_refs,
         selected_upload_ids=selected_upload_ids,
+        skill_activation_payload_json=_prepared_activation_payload(prepared),
+        skill_activation_payload_sha256=_prepared_activation_sha256(prepared),
     )
 
 
@@ -1094,7 +1106,7 @@ class SubmissionAdmissionCoordinator:
                 or record.prepared_execution is None
                 or record.prepared_execution_sha256 is None
                 or record.prepared_execution_sha256
-                != _domain_sha256(_PREPARED_DOMAIN, record.prepared_execution)
+                != _prepared_execution_digest(record.prepared_execution)
             ):
                 raise SubmissionRecoveryError("submission_prepared_snapshot_missing")
             prepared_bytes = record.prepared_execution
@@ -1109,7 +1121,7 @@ class SubmissionAdmissionCoordinator:
                 record, continuation, keeper
             )
             prepared_bytes = _build_prepared_snapshot(record, continuation, receipt)
-            prepared_sha256 = _domain_sha256(_PREPARED_DOMAIN, prepared_bytes)
+            prepared_sha256 = _prepared_execution_digest(prepared_bytes)
             await keeper.renew_now()
             prepared_record = await keeper.call(
                 lambda handle: self._admission.prepare_submission_handoff(
@@ -1132,8 +1144,8 @@ class SubmissionAdmissionCoordinator:
             ):
                 raise SubmissionRecoveryError("submission_prepare_response_invalid")
             prepared_bytes = prepared_record.prepared_execution
-            if prepared_record.prepared_execution_sha256 != _domain_sha256(
-                _PREPARED_DOMAIN, prepared_bytes
+            if prepared_record.prepared_execution_sha256 != _prepared_execution_digest(
+                prepared_bytes
             ):
                 raise SubmissionRecoveryError("submission_prepared_digest_mismatch")
             prepared = _validated_prepared_snapshot(
@@ -1171,9 +1183,7 @@ class SubmissionAdmissionCoordinator:
             lambda handle: self._admission.acknowledge_submission_handoff(
                 SubmissionHandoffAcknowledgementRequest(
                     handle=handle,
-                    prepared_execution_sha256=_domain_sha256(
-                        _PREPARED_DOMAIN, prepared_bytes
-                    ),
+                    prepared_execution_sha256=_prepared_execution_digest(prepared_bytes),
                     handoff_kind=handoff.kind,
                     handoff_identity=handoff.identity,
                     acknowledged_at=self._now(),
@@ -1413,7 +1423,7 @@ def _build_prepared_snapshot(
         execution_source,
     )
     value = {
-        "schema": "maf.submission.prepared_execution.v1",
+        "schema": _PREPARED_SCHEMA_V2,
         "task_id": record.task_id,
         "conversation_id": record.conversation_id,
         "message_id": record.message_id,
@@ -1422,7 +1432,9 @@ def _build_prepared_snapshot(
         "execution_text_source": execution_source,
         "execution_text_sha256": hashlib.sha256(execution_text.encode("utf-8")).hexdigest(),
         "requested_capability_id": continuation["requested_capability_id"],
-        "initial_required_tool_name": _initial_required_tool_name(continuation),
+        "initial_required_tool_name": _initial_required_tool_name(
+            continuation["routing_mode"], continuation["requested_capability_id"]
+        ),
         "model_options": continuation["model_options"],
         "bundle_revisions": continuation["bundle_revisions"],
         "execution_metadata": continuation["execution_metadata"],
@@ -1445,6 +1457,8 @@ def _build_prepared_snapshot(
         ),
         "pending_context": continuation["pending_context"],
         "planned_handoff_kind": planned_kind,
+        "routing_mode": continuation["routing_mode"],
+        "skill_activation": continuation.get("skill_activation"),
     }
     _reject_forbidden(value)
     rendered = canonical_json_bytes(value)
@@ -1469,8 +1483,12 @@ def _validated_prepared_snapshot(
         value.get("owner_scope") != continuation["owner_scope"]
         or value.get("requested_capability_id")
         != continuation["requested_capability_id"]
+        or value.get("routing_mode") != continuation["routing_mode"]
+        or value.get("skill_activation") != continuation.get("skill_activation")
         or value.get("initial_required_tool_name")
-        != _initial_required_tool_name(continuation)
+        != _initial_required_tool_name(
+            continuation["routing_mode"], continuation["requested_capability_id"]
+        )
         or value.get("model_options") != continuation["model_options"]
         or value.get("bundle_revisions") != continuation["bundle_revisions"]
         or value.get("execution_metadata") != continuation["execution_metadata"]
@@ -1494,7 +1512,7 @@ def _validated_prepared_content(
     if len(content) > _MAX_PREPARED_BYTES:
         raise SubmissionRecoveryError("submission_prepared_snapshot_oversize")
     value = _parse_canonical_mapping(content)
-    expected_keys = {
+    legacy_keys = {
         "schema",
         "task_id",
         "conversation_id",
@@ -1517,9 +1535,17 @@ def _validated_prepared_content(
         "pending_context",
         "planned_handoff_kind",
     }
+    schema = value.get("schema")
+    expected_keys = (
+        legacy_keys
+        if schema == _PREPARED_SCHEMA_V1
+        else legacy_keys | {"routing_mode", "skill_activation"}
+        if schema == _PREPARED_SCHEMA_V2
+        else None
+    )
     try:
-        if set(value) != expected_keys or (
-            value.get("schema") != "maf.submission.prepared_execution.v1"
+        if expected_keys is None or set(value) != expected_keys or (
+            schema not in {_PREPARED_SCHEMA_V1, _PREPARED_SCHEMA_V2}
             or value.get("task_id") != task_id
             or value.get("conversation_id") != conversation_id
             or value.get("message_id") != message_id
@@ -1530,11 +1556,16 @@ def _validated_prepared_content(
             or value.get("planned_handoff_kind") != value.get("prepared_kind")
             or value.get("execution_text_source")
             not in {"root_message", "pending_context", "memory_context"}
-            or value.get("initial_required_tool_name")
-            != _initial_required_tool_name(value)
             or not _is_sha256(value.get("execution_text_sha256"))
         ):
             raise SubmissionRecoveryError("submission_prepared_snapshot_invalid")
+        if schema == _PREPARED_SCHEMA_V1:
+            if value.get("initial_required_tool_name") != _legacy_initial_required_tool_name(
+                value.get("requested_capability_id")
+            ):
+                raise SubmissionRecoveryError("submission_prepared_snapshot_invalid")
+        else:
+            _validate_prepared_v2_relations(value)
         _validate_model_options(value.get("model_options"))
         _validate_bundle_revisions(value.get("bundle_revisions"))
         _validate_execution_metadata(value.get("execution_metadata"))
@@ -1563,6 +1594,138 @@ def _validated_prepared_content(
         raise SubmissionRecoveryError("submission_prepared_snapshot_invalid")
     _reject_forbidden(value)
     return value
+
+
+def _prepared_execution_digest(content: bytes) -> str:
+    if len(content) > _MAX_PREPARED_BYTES:
+        raise SubmissionRecoveryError("submission_prepared_snapshot_oversize")
+    value = _parse_canonical_mapping(content)
+    domain = _PREPARED_DOMAINS.get(value.get("schema"))
+    if domain is None:
+        raise SubmissionRecoveryError("submission_prepared_schema_unknown")
+    return _domain_sha256(domain, content)
+
+
+def _validate_prepared_v2_relations(value: Mapping[str, Any]) -> None:
+    routing_mode = value.get("routing_mode")
+    requested_capability_id = value.get("requested_capability_id")
+    activation = value.get("skill_activation")
+    if routing_mode not in {"auto", "hint", "force_capability"}:
+        raise SubmissionRecoveryError("submission_prepared_routing_invalid")
+    expected_required = _initial_required_tool_name(
+        routing_mode,
+        requested_capability_id,
+    )
+    if value.get("initial_required_tool_name") != expected_required:
+        raise SubmissionRecoveryError("submission_prepared_routing_invalid")
+    if routing_mode == "hint":
+        if (
+            not isinstance(requested_capability_id, str)
+            or not requested_capability_id.startswith("skill.")
+        ):
+            raise SubmissionRecoveryError("submission_prepared_hint_invalid")
+        _validate_prepared_skill_activation(
+            activation,
+            requested_capability_id=requested_capability_id,
+            skill_bundle_revision=value["bundle_revisions"].get(
+                "skill_bundle_revision"
+            ),
+        )
+        if value.get("pending_context") is not None:
+            raise SubmissionRecoveryError("submission_prepared_hint_invalid")
+        return
+    if activation is not None:
+        raise SubmissionRecoveryError("submission_prepared_activation_unexpected")
+    if routing_mode == "force_capability":
+        if not isinstance(requested_capability_id, str) or not requested_capability_id:
+            raise SubmissionRecoveryError("submission_prepared_force_invalid")
+        return
+    if requested_capability_id is None:
+        return
+    pending = value.get("pending_context")
+    if (
+        not isinstance(pending, Mapping)
+        or pending.get("capability_id") != requested_capability_id
+    ):
+        raise SubmissionRecoveryError("submission_prepared_auto_capability_invalid")
+
+
+def _validate_prepared_skill_activation(
+    activation: object,
+    *,
+    requested_capability_id: str,
+    skill_bundle_revision: object,
+) -> None:
+    if not isinstance(activation, Mapping) or set(activation) != {
+        "payload",
+        "payload_sha256",
+    }:
+        raise SubmissionRecoveryError("submission_prepared_hint_activation_invalid")
+    payload_text = activation.get("payload")
+    payload_sha256 = activation.get("payload_sha256")
+    if (
+        not isinstance(payload_text, str)
+        or not _is_sha256(payload_sha256)
+        or hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+        != payload_sha256
+    ):
+        raise SubmissionRecoveryError("submission_prepared_hint_activation_invalid")
+    try:
+        payload_value = json.loads(payload_text)
+        canonical = canonicalize_agent_payload(payload_value)
+    except (json.JSONDecodeError, AgentPayloadError, TypeError, ValueError) as exc:
+        raise SubmissionRecoveryError(
+            "submission_prepared_hint_activation_invalid"
+        ) from exc
+    if canonical.json_text != payload_text or set(payload_value) != {
+        "binding_mode",
+        "pinned_bundle_revision",
+        "profile",
+        "profile_digest",
+    }:
+        raise SubmissionRecoveryError("submission_prepared_hint_activation_invalid")
+    profile = payload_value.get("profile")
+    if not isinstance(profile, Mapping):
+        raise SubmissionRecoveryError("submission_prepared_hint_activation_invalid")
+    try:
+        profile_payload = canonicalize_agent_payload(dict(profile))
+    except AgentPayloadError as exc:
+        raise SubmissionRecoveryError(
+            "submission_prepared_hint_activation_invalid"
+        ) from exc
+    if (
+        payload_value.get("binding_mode") != "hint"
+        or payload_value.get("pinned_bundle_revision") != skill_bundle_revision
+        or not isinstance(skill_bundle_revision, str)
+        or not skill_bundle_revision
+        or profile.get("capability_id") != requested_capability_id
+        or payload_value.get("profile_digest") != profile_payload.sha256
+    ):
+        raise SubmissionRecoveryError("submission_prepared_hint_activation_invalid")
+
+
+def _prepared_routing_mode(prepared: Mapping[str, Any]) -> str:
+    if prepared.get("schema") == _PREPARED_SCHEMA_V2:
+        return str(prepared["routing_mode"])
+    return (
+        "force_capability"
+        if prepared.get("initial_required_tool_name") is not None
+        else "auto"
+    )
+
+
+def _prepared_activation_payload(prepared: Mapping[str, Any]) -> str | None:
+    activation = prepared.get("skill_activation")
+    return str(activation["payload"]) if isinstance(activation, Mapping) else None
+
+
+def _prepared_activation_sha256(prepared: Mapping[str, Any]) -> str | None:
+    activation = prepared.get("skill_activation")
+    return (
+        str(activation["payload_sha256"])
+        if isinstance(activation, Mapping)
+        else None
+    )
 
 
 def _validate_prepared_mcp_relations(prepared: Mapping[str, Any]) -> None:
@@ -2108,9 +2271,23 @@ def submission_interrupt_handoff_id(task_id: str, selector_decision_sha256: str)
     return f"submission-interrupt:v1:{task_id}:{selector_decision_sha256}"
 
 
-def _initial_required_tool_name(continuation: Mapping[str, Any]) -> str | None:
-    capability_id = continuation.get("requested_capability_id")
-    return None if capability_id is None else provider_safe_tool_name(capability_id)
+def _initial_required_tool_name(
+    routing_mode: object,
+    requested_capability_id: object,
+) -> str | None:
+    if routing_mode != "force_capability":
+        return None
+    if not isinstance(requested_capability_id, str) or not requested_capability_id:
+        raise SubmissionRecoveryError("submission_prepared_routing_invalid")
+    return provider_safe_tool_name(requested_capability_id)
+
+
+def _legacy_initial_required_tool_name(capability_id: object) -> str | None:
+    return (
+        None
+        if capability_id is None
+        else provider_safe_tool_name(str(capability_id))
+    )
 
 
 def _execution_text_from_components(

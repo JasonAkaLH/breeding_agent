@@ -6,7 +6,7 @@
 
 计划日期：2026-08-28
 
-状态：`in_progress`（Checkpoint A 已完成；Checkpoint B～H、镜像重建与部署尚未完成）
+状态：`in_progress`（Checkpoint A～B 已完成；Checkpoint C～H、镜像重建与部署尚未完成）
 
 目标分支：`main`
 

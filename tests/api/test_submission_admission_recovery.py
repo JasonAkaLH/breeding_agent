@@ -17,6 +17,7 @@ from src.api.submission_admission import (
     SubmissionRecoveryStatus,
     submission_interrupt_handoff_id,
     submission_memory_event_id,
+    _validated_prepared_content,
 )
 from src.core.models import (
     SubmissionAdmissionDisposition,
@@ -35,6 +36,10 @@ from src.core.models import (
     SubmissionRecoveryRecord,
 )
 from src.integrations.mcp.cp7_artifacts import mcp_no_server_intent_id
+from src.integrations.agent_skills.public_profile import PublicSkillProfile
+from src.orchestration.agent_loop.skill_activation import (
+    build_canonical_skill_activation,
+)
 from src.orchestration.conversation_memory import (
     COMPRESSION_POLICY_VERSION,
     SUMMARY_VERSION,
@@ -560,6 +565,82 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay_callbacks.agent_creates, 0)
         self.assertEqual(admission.handoff_acks, ["1"])
 
+    async def test_new_prepared_writer_uses_v2_domain_and_closed_auto_authority(self) -> None:
+        admission = _FakeAdmission([_record("47")], self.clock)
+        callbacks = _Callbacks(admission)
+        callbacks.fail_handoff_once = True
+        with self.assertRaisesRegex(RuntimeError, "handoff_crash"):
+            await self._coordinator(
+                admission,
+                _FakeReceipts(),
+                callbacks,
+            ).recover_pending()
+
+        prepared = admission.entries[0].record.prepared_execution
+        prepared_sha256 = admission.entries[0].record.prepared_execution_sha256
+        assert prepared is not None
+        value = json.loads(prepared)
+        self.assertEqual(value["schema"], "maf.submission.prepared_execution.v2")
+        self.assertEqual(value["routing_mode"], "auto")
+        self.assertIsNone(value["skill_activation"])
+        self.assertIsNone(value["initial_required_tool_name"])
+        self.assertEqual(
+            prepared_sha256,
+            hashlib.sha256(
+                b"maf.submission.prepared_execution.v2\0" + prepared
+            ).hexdigest(),
+        )
+
+    async def test_v2_hint_requires_exact_canonical_activation_binding(self) -> None:
+        admission = _FakeAdmission([_record("50")], self.clock)
+        callbacks = _Callbacks(admission)
+        callbacks.fail_handoff_once = True
+        with self.assertRaisesRegex(RuntimeError, "handoff_crash"):
+            await self._coordinator(
+                admission,
+                _FakeReceipts(),
+                callbacks,
+            ).recover_pending()
+        prepared = admission.entries[0].record.prepared_execution
+        assert prepared is not None
+        value = json.loads(prepared)
+        value["routing_mode"] = "hint"
+        value["requested_capability_id"] = "skill.report"
+        value["bundle_revisions"]["skill_bundle_revision"] = "revision-1"
+        activation = build_canonical_skill_activation(
+            binding_mode="hint",
+            profile=PublicSkillProfile(
+                capability_id="skill.report",
+                name="report",
+                display_name="Report",
+                description="safe",
+                triggers=(),
+            ),
+            pinned_bundle_revision="revision-1",
+            resolved_bundle_revision="revision-1",
+        )
+        value["skill_activation"] = {
+            "payload": activation.payload_json,
+            "payload_sha256": activation.payload_sha256,
+        }
+        hint_prepared = _canonical(value)
+
+        validated = _validated_prepared_content(
+            hint_prepared,
+            conversation_id="conversation-50",
+            message_id="50",
+            task_id="task-50",
+        )
+        self.assertEqual(validated["routing_mode"], "hint")
+
+        value["skill_activation"]["extra"] = True
+        with self.assertRaisesRegex(SubmissionRecoveryError, "activation_invalid"):
+            _validated_prepared_content(
+                _canonical(value),
+                conversation_id="conversation-50",
+                message_id="50",
+                task_id="task-50",
+            )
     async def test_authority_receipt_is_pinned_on_found_and_empty_claims(self) -> None:
         admission = _FakeAdmission([_record("1")], self.clock)
         admission.finalization_receipt = "e" * 64
@@ -728,7 +809,9 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_requested_capability_uses_provider_safe_tool_name(self) -> None:
         record = _with_continuation(
-            _record("1"), requested_capability_id="skill.tool/unsafe"
+            _record("1"),
+            routing_mode="force_capability",
+            requested_capability_id="skill.tool/unsafe",
         )
         admission = _FakeAdmission([record], self.clock)
         callbacks = _Callbacks(admission)
@@ -1061,6 +1144,61 @@ class PreparedAgentRecoveryLoaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(admission.read_count, 1)
         self.assertEqual(receipts.read_count, 0)
 
+    async def test_legacy_v1_prepared_record_remains_exactly_readable(self) -> None:
+        record = _record("48")
+        loader, admission, _receipts = await self._loader_for(record)
+        assert admission.preparation is not None
+        value = json.loads(admission.preparation.prepared_execution)
+        value["schema"] = "maf.submission.prepared_execution.v1"
+        value.pop("routing_mode")
+        value.pop("skill_activation")
+        content = _canonical(value)
+        admission.preparation = replace(
+            admission.preparation,
+            prepared_execution=content,
+            prepared_execution_sha256=hashlib.sha256(
+                b"maf.submission.prepared_execution.v1\0" + content
+            ).hexdigest(),
+        )
+
+        loaded = await loader.load(
+            username=record.username,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            message_id=record.message_id,
+            root_message_content="hello-48",
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.routing_mode, "auto")
+        self.assertIsNone(loaded.skill_activation_payload_json)
+        self.assertIsNone(loaded.skill_activation_payload_sha256)
+
+    async def test_v2_content_with_v1_digest_is_rejected(self) -> None:
+        record = _record("49")
+        loader, admission, receipts = await self._loader_for(record)
+        assert admission.preparation is not None
+        content = admission.preparation.prepared_execution
+        admission.preparation = replace(
+            admission.preparation,
+            prepared_execution_sha256=hashlib.sha256(
+                b"maf.submission.prepared_execution.v1\0" + content
+            ).hexdigest(),
+        )
+
+        with self.assertRaisesRegex(
+            SubmissionRecoveryError,
+            "prepared_digest_mismatch",
+        ):
+            await loader.load(
+                username=record.username,
+                conversation_id=record.conversation_id,
+                task_id=record.task_id,
+                message_id=record.message_id,
+                root_message_content="hello-49",
+            )
+        self.assertEqual(receipts.read_count, 0)
+
     async def test_root_pending_and_large_memory_sources_recover_exactly(self) -> None:
         cases: list[tuple[str, SubmissionRecoveryRecord, object, str]] = [
             ("root", _record("31"), None, "hello-31"),
@@ -1104,7 +1242,8 @@ class PreparedAgentRecoveryLoaderTest(unittest.IsolatedAsyncioTestCase):
                 "memory",
                 _with_continuation(
                     memory_record,
-                    requested_capability_id="skill.tool/unsafe",
+                    routing_mode="force_capability",
+                    requested_capability_id="mcp.dispatch",
                     bundle_revisions={
                         "skill_bundle_revision": "skill-r7",
                         "mcp_bundle_revision": "mcp-r9",
@@ -2081,12 +2220,16 @@ def _mutate_preparation(
     value = json.loads(preparation.prepared_execution)
     mutate(value)
     content = _canonical(value)
+    schema = value.get("schema")
+    domain = (
+        b"maf.submission.prepared_execution.v2\0"
+        if schema == "maf.submission.prepared_execution.v2"
+        else b"maf.submission.prepared_execution.v1\0"
+    )
     return replace(
         preparation,
         prepared_execution=content,
-        prepared_execution_sha256=hashlib.sha256(
-            b"maf.submission.prepared_execution.v1\0" + content
-        ).hexdigest(),
+        prepared_execution_sha256=hashlib.sha256(domain + content).hexdigest(),
     )
 
 

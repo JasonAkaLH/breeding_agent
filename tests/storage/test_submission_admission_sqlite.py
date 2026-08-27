@@ -295,11 +295,7 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
         request = _request()
         admitted = asyncio.run(self.storage.admit_submission(request))
         self.assertIsNotNone(admitted.handle)
-        prepared = json.dumps(
-            {"schema": "test-prepared", "required_tool": "skill_exact"},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+        prepared = _legacy_prepared(request)
         prepared_sha = hashlib.sha256(
             b"maf.submission.prepared_execution.v1\0" + prepared
         ).hexdigest()
@@ -313,14 +309,22 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
                 )
             )
         )
+        conflicting_value = json.loads(prepared)
+        conflicting_value["execution_text_sha256"] = "e" * 64
+        conflicting = json.dumps(
+            conflicting_value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
         with self.assertRaisesRegex(RuntimeError, "submission_preparation_conflict"):
             asyncio.run(
                 self.storage.prepare_submission_handoff(
                     SubmissionPreparationRequest(
                         handle=admitted.handle,
-                        prepared_execution=b"{}",
+                        prepared_execution=conflicting,
                         prepared_execution_sha256=hashlib.sha256(
-                            b"maf.submission.prepared_execution.v1\0{}"
+                            b"maf.submission.prepared_execution.v1\0" + conflicting
                         ).hexdigest(),
                         prepared_at=request.message_created_at,
                     )
@@ -721,9 +725,10 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
             **sidecar.admission,
             "projection_state": "projected",
             "preparation_state": "prepared",
-            "prepared_execution_json": b"{}",
+            "prepared_execution_json": _legacy_prepared(request),
             "prepared_execution_sha256": hashlib.sha256(
-                b"maf.submission.prepared_execution.v1\0{}"
+                b"maf.submission.prepared_execution.v1\0"
+                + _legacy_prepared(request)
             ).hexdigest(),
             "handoff_state": "handed_off",
             "handoff_kind": "agent_run",
@@ -919,6 +924,44 @@ def _record(request: SubmissionAdmissionRequest) -> SubmissionRecoveryRecord:
         ),
         created_at=request.message_created_at,
     )
+
+
+def _legacy_prepared(request: SubmissionAdmissionRequest) -> bytes:
+    continuation = json.loads(request.continuation)
+    return json.dumps(
+        {
+            "schema": "maf.submission.prepared_execution.v1",
+            "task_id": request.task.task_id,
+            "conversation_id": request.conversation_id,
+            "message_id": request.message_id,
+            "prepared_kind": "agent_run",
+            "owner_scope": request.username,
+            "execution_text_source": "root_message",
+            "execution_text_sha256": continuation["message_content_sha256"],
+            "requested_capability_id": None,
+            "initial_required_tool_name": None,
+            "model_options": continuation["model_options"],
+            "bundle_revisions": continuation["bundle_revisions"],
+            "execution_metadata": continuation["execution_metadata"],
+            "preparation_receipt": {
+                "task_id": request.task.task_id,
+                "receipt_sha256": "a" * 64,
+                "route_decision_sha256": "b" * 64,
+                "memory_context_sha256": "c" * 64,
+                "selector_decision_sha256": "d" * 64,
+            },
+            "upload_refs": continuation["upload_refs"],
+            "sheet_selections": continuation["sheet_selections"],
+            "mcp_binding": continuation["mcp_binding"],
+            "mcp_assignment": continuation["mcp_assignment"],
+            "available_mcp_servers": continuation["available_mcp_servers"],
+            "pending_context": continuation["pending_context"],
+            "planned_handoff_kind": "agent_run",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
 
 def _mutate_request(

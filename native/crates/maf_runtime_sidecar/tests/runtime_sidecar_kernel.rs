@@ -301,7 +301,7 @@ fn submission_claim_projection_preparation_and_handoff_are_cas_closed() {
         })
         .expect("projection ack");
     let prepared = prepared_execution("task-flow", "conv-flow", "message-flow");
-    let prepared_digest = domain_digest(b"maf.submission.prepared_execution.v1\0", &[&prepared]);
+    let prepared_digest = domain_digest(b"maf.submission.prepared_execution.v2\0", &[&prepared]);
     let prepared_result = kernel
         .prepare_submission_handoff(PrepareSubmissionHandoffRequest {
             message_id: "message-flow".to_owned(),
@@ -791,8 +791,10 @@ fn prepared_execution(task_id: &str, conversation_id: &str, message_id: &str) ->
         },
         "prepared_kind": "agent_run",
         "requested_capability_id": null,
-        "schema": "maf.submission.prepared_execution.v1",
+        "routing_mode": "auto",
+        "schema": "maf.submission.prepared_execution.v2",
         "sheet_selections": {},
+        "skill_activation": null,
         "task_id": task_id,
         "upload_refs": [],
     }))

@@ -1214,13 +1214,21 @@ def _submission_private_handoff(value: object) -> dict[str, Any] | None:
         raise RuntimeError("submission_preparation_corrupt")
     prepared = result["prepared_execution"].encode("utf-8")
     try:
-        _canonical_json_object(
+        prepared_value = _canonical_json_object(
             prepared,
             context="submission_prepared_execution",
         )
     except ValueError as exc:
         raise RuntimeError("submission_preparation_corrupt") from exc
-    if hashlib.sha256(b"maf.submission.prepared_execution.v1\0" + prepared).hexdigest() != result[
+    schema = prepared_value.get("schema")
+    domain = (
+        b"maf.submission.prepared_execution.v1\0"
+        if schema == "maf.submission.prepared_execution.v1"
+        else b"maf.submission.prepared_execution.v2\0"
+        if schema == "maf.submission.prepared_execution.v2"
+        else None
+    )
+    if domain is None or hashlib.sha256(domain + prepared).hexdigest() != result[
         "prepared_execution_sha256"
     ]:
         raise RuntimeError("submission_preparation_corrupt")
