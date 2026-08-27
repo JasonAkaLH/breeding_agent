@@ -4,7 +4,7 @@
 
 设计提交：`d4154ae`
 
-状态：`in_progress`（Checkpoint A～C 已完成，D 文档同步中，Final Gate/E 未完成）
+状态：`complete`（Checkpoint A～E 与 Final Gate 已完成）
 
 目标分支：`main`
 
@@ -517,6 +517,29 @@ conda run -n multi_agent python scripts/smoke_model_reasoning_matrix.py \
 - 不存在旧 schema 的生产引用；
 - `AGENTS.md`/`CHANGELOG.md` 已按实际影响同步；
 - 无新增依赖或 license 变化。
+
+### 7.6 实际验收结果（2026-08-27）
+
+- Checkpoint commits：后端 `4e3962f`、前端 `093b2bf`、矩阵 smoke `9bc9e81`、API 文档
+  `7658a67`、Final Gate 测试 lint 收口 `e2917b8`。
+- Python：`compileall` 通过；两组定向回归分别为 69 与 52 项；Integrations 755 项通过、2 项因当前
+  macOS 平台跳过（Linux RLIMIT gate、Linux terminable regex gate）；API 591 项、E2E 7 项通过。
+  lint 收口后 `test_user_mcp_runtime_wiring` 22 项复跑通过，计划列出的精确 Ruff 文件集全部通过。
+- Frontend：24 个 Vitest 文件、324 项测试通过，TypeScript typecheck 与 production build 通过；仅有既有
+  Ant Design chunk 大于 500 kB 的构建警告。
+- 真实 provider：首轮 52 组合为 51 matched、0 mismatch、1 inconclusive；同一完整矩阵复跑后为
+  52 matched、0 mismatch、0 inconclusive，其中 46 accepted、6 个豆包 disabled 非 minimal 组合以
+  HTTP 400 `InvalidParameter` capability rejection 闭合。输出只包含脱敏分类证据；接口接受不等同效果评测。
+- 本地 UI/API：隔离 SQLite、临时安全根密钥与确定性回答后端上，DeepSeek disabled 六档可选且
+  `false + high` Task 完成；豆包 enabled 四档、关闭后回退 minimal 且下拉保持可用/仅一档；切回 GLM
+  保留 minimal，随后 `false + xhigh` Task 完成。两个 `agent_run` 均持久化预期 model/effort/thinking；
+  配置 API 返回 5 个模型、新 schema 且旧字段为零。
+- 本地启动环境记录：真实默认 runtime 因未提供固定 `MAF_MASTER_KEY_FILE` 按设计 fail closed；既有
+  `run_fullstack_dev.py --fake-backend` 仍传递已删除的 `enable_llm_planner` 参数。验收使用不改仓库文件的
+  隔离启动方式完成；这两个开发环境/脚本问题未放宽产品校验，也未纳入本功能实现范围。
+- 仓库：`git diff --check` 通过；`config.yaml` 与 `docker_cmd.md` 仍被 Git ignore 且未提交；旧 schema
+  只保留在启动拒绝逻辑、负向测试和历史设计记录中，不存在生产接受路径。未新增依赖或 license 变化；
+  `prod` 与外部部署配置未更新。
 
 ## 8. Checkpoint E：最终证据、状态闭合与完成提交
 
