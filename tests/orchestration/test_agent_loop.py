@@ -17,7 +17,12 @@ from src.orchestration.agent_loop.models import (
     AgentToolCall,
     AgentUsage,
 )
-from src.orchestration.agent_loop.runner import AgentCallExecution, AgentLoopRunner
+from src.orchestration.agent_loop.runner import (
+    AGENT_REASONING_TRUNCATED_MARKER,
+    MAX_AGENT_REASONING_BYTES,
+    AgentCallExecution,
+    AgentLoopRunner,
+)
 from src.orchestration.agent_loop.tool_catalog import (
     AgentToolCatalogBuilder,
     CapabilityInvocationPolicy,
@@ -71,6 +76,27 @@ class _QueuedModel:
                 attempts=1,
                 mixed_text_and_tool_calls=bool(text and calls),
             ),
+        )
+
+
+class _ReasoningModel:
+    def __init__(self, binding: AgentModelBinding, actions: list[tuple[str, str | None]]) -> None:
+        self.binding = binding
+        self.actions = actions
+
+    async def sample_agent(self, request):
+        for action, value in self.actions:
+            if action == "delta":
+                await request.reasoning_delta_sink(value or "")
+            elif action == "reset":
+                await request.reasoning_reset_sink()
+        return AgentSample(
+            sample_id="reasoning-sample",
+            binding=self.binding,
+            visible_text="final answer",
+            tool_calls=(),
+            usage=AgentUsage(status="usage_unavailable"),
+            finish=AgentFinishMetadata("stop", 1),
         )
 
 
@@ -183,7 +209,15 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
         await super().asyncTearDown()
 
-    def _runner(self, model, invoker, *, repository=None):
+    def _runner(
+        self,
+        model,
+        invoker,
+        *,
+        repository=None,
+        reasoning_delta_sink=None,
+        reasoning_reset_sink=None,
+    ):
         repository = repository or self.repository
         return AgentLoopRunner(
             runs=repository,
@@ -197,7 +231,81 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
             lease_controller=AgentLeaseController(repository, ttl_seconds=30),
             invoker=invoker,
             owner_id="worker-1",
+            reasoning_delta_sink=reasoning_delta_sink,
+            reasoning_reset_sink=reasoning_reset_sink,
         )
+
+    async def test_reasoning_reset_keeps_ordinal_monotonic_and_budget_consumed(self) -> None:
+        deltas: list[tuple[str, int]] = []
+        resets: list[tuple[str, int]] = []
+
+        async def record_delta(_run, delta: str, ordinal: int) -> None:
+            deltas.append((delta, ordinal))
+
+        async def record_reset(_run, sample_id: str, ordinal: int) -> None:
+            resets.append((sample_id, ordinal))
+
+        content_limit = MAX_AGENT_REASONING_BYTES - len(
+            AGENT_REASONING_TRUNCATED_MARKER.encode("utf-8")
+        )
+        model = _ReasoningModel(
+            self.binding,
+            [
+                ("delta", "a" * (content_limit - 1)),
+                ("reset", None),
+                ("delta", "界"),
+                ("reset", None),
+                ("delta", "ignored"),
+            ],
+        )
+        result = await self._runner(
+            model,
+            _RecordingInvoker(),
+            reasoning_delta_sink=record_delta,
+            reasoning_reset_sink=record_reset,
+        ).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(
+            deltas,
+            [
+                ("a" * (content_limit - 1), 1),
+                (AGENT_REASONING_TRUNCATED_MARKER, 2),
+            ],
+        )
+        self.assertEqual(
+            resets,
+            [
+                ("agent-sample:run-1:r1", 1),
+                ("agent-sample:run-1:r1", 2),
+            ],
+        )
+        published_bytes = sum(len(delta.encode("utf-8")) for delta, _ in deltas)
+        self.assertLessEqual(published_bytes, MAX_AGENT_REASONING_BYTES)
+
+    async def test_reasoning_utf8_boundary_preserves_complete_codepoints(self) -> None:
+        deltas: list[str] = []
+
+        async def record_delta(_run, delta: str, _ordinal: int) -> None:
+            deltas.append(delta)
+
+        content_limit = MAX_AGENT_REASONING_BYTES - len(
+            AGENT_REASONING_TRUNCATED_MARKER.encode("utf-8")
+        )
+        model = _ReasoningModel(
+            self.binding,
+            [("delta", "a" * (content_limit - 2) + "界")],
+        )
+        result = await self._runner(
+            model,
+            _RecordingInvoker(),
+            reasoning_delta_sink=record_delta,
+        ).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(deltas[-1], AGENT_REASONING_TRUNCATED_MARKER)
+        self.assertTrue(deltas[0].endswith("a"))
+        self.assertNotIn("�", deltas[0])
 
     async def test_multi_step_loop_orders_outcomes_and_serializes_exclusive_wave(self) -> None:
         calls = (

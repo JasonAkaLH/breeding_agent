@@ -6,7 +6,11 @@ import unittest
 
 from src.api.agent_projection import AgentEventProjector, AgentTaskProjectionService
 from src.api.runtime import build_api_runtime
-from src.api.sse import InMemoryEventBroker, publish_agent_reasoning_delta
+from src.api.sse import (
+    InMemoryEventBroker,
+    publish_agent_reasoning_delta,
+    publish_agent_reasoning_reset,
+)
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Conversation, EventRecord, Message, Task
 from src.orchestration.capability_fallback import (
@@ -243,6 +247,8 @@ class AgentTaskProjectionAPITest(APITestCase):
         runtime_source = inspect.getsource(build_api_runtime)
         self.assertIn("AgentTaskProjectionService", runtime_source)
         self.assertIn("agent_task_projection", runtime_source)
+        self.assertIn("MAIN_AGENT_SYSTEM_CONTRACT_LINES", runtime_source)
+        self.assertNotIn("你是统一同模型Agent", runtime_source)
         self.assertNotIn("OrchestrationService", runtime_source)
 
     async def test_agent_run_initialization_projects_empty_graph_created_event(self) -> None:
@@ -264,6 +270,15 @@ class AgentTaskProjectionAPITest(APITestCase):
             replayed.payload,
             {"edge_count": 0, "node_count": 0},
         )
+
+    def test_runtime_agent_prompt_uses_seedpilot_identity_and_tool_rules(self) -> None:
+        runner = self.runtime.agent_loop_orchestrator._runner
+        rules = runner._context_builder._rules
+
+        self.assertIn("育种助手（SeedPilot）", rules.stable_rules)
+        self.assertIn("当前公开Tool catalog", rules.stable_rules)
+        self.assertNotIn("你是统一同模型Agent", rules.stable_rules)
+        self.assertIn("只能调用本轮catalog中的Tool", rules.safe_tool_rules)
 
 
 class AgentEventProjectionTest(unittest.IsolatedAsyncioTestCase):
@@ -307,6 +322,25 @@ class AgentEventProjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit.records, [])
         subscription.close()
 
+    async def test_reasoning_reset_is_transient_and_bypasses_audit(self) -> None:
+        audit = _RecordingAuditSink()
+        broker = InMemoryEventBroker(audit_sink=audit)
+        subscription = broker.subscribe("task-1")
+        event = AgentEventProjector().reasoning_reset(
+            event_id="reasoning-reset-1",
+            conversation_id="conv-1",
+            task_id="task-1",
+            sample_id="sample-1",
+        )
+
+        await publish_agent_reasoning_reset(broker, event)
+        received = await subscription.get()
+
+        self.assertEqual(received, event)
+        self.assertEqual(event.payload, {"sample_id": "sample-1"})
+        self.assertEqual(audit.records, [])
+        subscription.close()
+
     async def test_unknown_or_unsafe_durable_event_fails_closed(self) -> None:
         projector = AgentEventProjector()
         with self.assertRaisesRegex(ValueError, "contract_invalid"):
@@ -316,6 +350,14 @@ class AgentEventProjectionTest(unittest.IsolatedAsyncioTestCase):
                 task_id="task-1",
                 event_type="agent.reasoning_delta",
                 payload={"delta": "must stay transient"},
+            )
+        with self.assertRaisesRegex(ValueError, "contract_invalid"):
+            projector.durable(
+                event_id="event-reset",
+                conversation_id="conv-1",
+                task_id="task-1",
+                event_type="agent.reasoning_reset",
+                payload={"sample_id": "sample-1"},
             )
         with self.assertRaisesRegex(ValueError, "contract_invalid"):
             projector.durable(

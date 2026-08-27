@@ -32,6 +32,13 @@ from .tool_catalog import (
 )
 
 
+MAX_AGENT_REASONING_BYTES = 524_288
+AGENT_REASONING_TRUNCATED_MARKER = "思考内容过长，已截断"
+_AGENT_REASONING_TRUNCATED_MARKER_BYTES = len(
+    AGENT_REASONING_TRUNCATED_MARKER.encode("utf-8")
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentCallExecution:
     status: AgentCallOutcomeStatus
@@ -80,6 +87,7 @@ class AgentLoopRunner:
         invoker: AgentCallInvoker,
         owner_id: str,
         reasoning_delta_sink=None,
+        reasoning_reset_sink=None,
     ) -> None:
         self._runs = runs
         self._writer = writer
@@ -91,6 +99,7 @@ class AgentLoopRunner:
         self._invoker = invoker
         self._owner_id = owner_id
         self._reasoning_delta_sink = reasoning_delta_sink
+        self._reasoning_reset_sink = reasoning_reset_sink
 
     async def run(
         self,
@@ -127,6 +136,8 @@ class AgentLoopRunner:
         if handle.current.run_id != run_id:
             raise AgentStorageConflict("agent_task_lease_run_mismatch")
         required_tool_name = initial_required_tool_name
+        reasoning_bytes_published = 0
+        reasoning_truncated = False
         while True:
             self._check_cancel(cancellation)
             run = await self._require_active_run(run_id)
@@ -176,21 +187,62 @@ class AgentLoopRunner:
             model_request = replace(model_request, cancellation=cancellation)
             if self._reasoning_delta_sink is not None:
                 reasoning_ordinal = 0
+                reasoning_reset_ordinal = 0
+                sample_id = f"agent-sample:{run.run_id}:r{run.revision}"
 
                 async def publish_reasoning(delta: str) -> None:
-                    nonlocal reasoning_ordinal
-                    if not delta:
+                    nonlocal reasoning_bytes_published, reasoning_ordinal, reasoning_truncated
+                    if not delta or reasoning_truncated:
                         return
+                    content_limit = (
+                        MAX_AGENT_REASONING_BYTES
+                        - _AGENT_REASONING_TRUNCATED_MARKER_BYTES
+                    )
+                    remaining = max(0, content_limit - reasoning_bytes_published)
+                    encoded = delta.encode("utf-8")
+                    if len(encoded) <= remaining:
+                        reasoning_ordinal += 1
+                        await self._reasoning_delta_sink(
+                            run,
+                            delta,
+                            reasoning_ordinal,
+                        )
+                        reasoning_bytes_published += len(encoded)
+                        return
+
+                    fragment = _truncate_utf8(delta, remaining)
+                    if fragment:
+                        reasoning_ordinal += 1
+                        await self._reasoning_delta_sink(
+                            run,
+                            fragment,
+                            reasoning_ordinal,
+                        )
+                        reasoning_bytes_published += len(fragment.encode("utf-8"))
+                    reasoning_truncated = True
                     reasoning_ordinal += 1
                     await self._reasoning_delta_sink(
                         run,
-                        delta,
+                        AGENT_REASONING_TRUNCATED_MARKER,
                         reasoning_ordinal,
+                    )
+                    reasoning_bytes_published += _AGENT_REASONING_TRUNCATED_MARKER_BYTES
+
+                async def reset_reasoning() -> None:
+                    nonlocal reasoning_reset_ordinal
+                    if self._reasoning_reset_sink is None:
+                        return
+                    reasoning_reset_ordinal += 1
+                    await self._reasoning_reset_sink(
+                        run,
+                        sample_id,
+                        reasoning_reset_ordinal,
                     )
 
                 model_request = replace(
                     model_request,
                     reasoning_delta_sink=publish_reasoning,
+                    reasoning_reset_sink=reset_reasoning,
                 )
             sample = await self._leases.run_active_phase(
                 "model_sample",
@@ -348,6 +400,15 @@ def _parallel_safe(
     capability_id = tool_to_capability.get(call.provider_safe_name)
     policy = policies.get(capability_id or "")
     return bool(policy is not None and policy.parallel_safe)
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _pending_active_batch(

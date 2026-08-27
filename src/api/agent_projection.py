@@ -350,6 +350,25 @@ class AgentEventProjector:
             visibility=EventVisibility.FRONTEND,
         )
 
+    def reasoning_reset(
+        self,
+        *,
+        event_id: str,
+        conversation_id: str,
+        task_id: str,
+        sample_id: str,
+        node_id: str | None = None,
+    ) -> EventRecord:
+        return EventRecord(
+            event_id=_bounded_id(event_id),
+            conversation_id=_bounded_id(conversation_id),
+            task_id=_bounded_id(task_id),
+            node_id=None if node_id is None else _bounded_id(node_id),
+            event_type="agent.reasoning_reset",
+            payload={"sample_id": _bounded_id(sample_id)},
+            visibility=EventVisibility.FRONTEND,
+        )
+
     def _validate_payload(self, payload: Mapping[str, Any]) -> None:
         _reject_forbidden_keys(payload, self._FORBIDDEN_KEYS)
         for key, value in payload.items():

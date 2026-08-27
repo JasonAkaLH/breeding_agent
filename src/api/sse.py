@@ -149,5 +149,20 @@ async def publish_agent_reasoning_delta(
     await broker.publish_transient(event)
 
 
+async def publish_agent_reasoning_reset(
+    broker: InMemoryEventBroker,
+    event: EventRecord,
+) -> None:
+    if (
+        event.event_type != "agent.reasoning_reset"
+        or event.visibility is not EventVisibility.FRONTEND
+        or set(event.payload) != {"sample_id"}
+        or not isinstance(event.payload.get("sample_id"), str)
+        or not event.payload["sample_id"]
+    ):
+        raise ValueError("agent_reasoning_reset_contract_invalid")
+    await broker.publish_transient(event)
+
+
 def _to_isoformat(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None

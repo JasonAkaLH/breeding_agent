@@ -34,7 +34,10 @@ from src.capabilities.main_agent import (
     SkillOutputArtifactManager,
     StreamGenerator,
 )
-from src.capabilities.main_agent.prompt_builder import MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT
+from src.capabilities.main_agent.prompt_builder import (
+    MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT,
+    MAIN_AGENT_SYSTEM_CONTRACT_LINES,
+)
 from src.capabilities.mcp_dispatch import (
     MCP_DISPATCH_CAPABILITY_DESCRIPTOR,
     MCPDispatchExecutor,
@@ -14887,6 +14890,25 @@ def build_api_runtime(
                 visibility=EventVisibility.FRONTEND,
             )
         )
+
+    async def publish_agent_reasoning_reset(
+        run,
+        sample_id: str,
+        reset_ordinal: int,
+    ) -> None:
+        await publish_transient_event(
+            EventRecord(
+                event_id=(
+                    f"{run.run_id}:reasoning-reset:{run.revision}:{reset_ordinal}"
+                ),
+                conversation_id=run.conversation_id,
+                task_id=run.task_id,
+                node_id=run.active_sample_item_id,
+                event_type="agent.reasoning_reset",
+                payload={"sample_id": sample_id},
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
     agent_invoker = AgentCapabilityInvoker(
         invocation_service=invocation_service,
         runs=agent_repository,
@@ -14906,8 +14928,13 @@ def build_api_runtime(
         context_builder=AgentContextBuilder(
             AgentContextRules(
                 stable_rules=(
-                    "你是统一同模型Agent。根据用户请求选择公开Tool，观察结果并继续；"
-                    "不需要Tool时直接给出最终回答。"
+                    "\n".join(
+                        (
+                            *MAIN_AGENT_SYSTEM_CONTRACT_LINES,
+                            "根据当前公开Tool catalog选择Tool，观察结果并继续；"
+                            "不需要Tool时直接给出最终回答。",
+                        )
+                    )
                 ),
                 safe_tool_rules=(
                     "只能调用本轮catalog中的Tool；不得伪造Tool结果、凭据、隐藏路径或内部状态。"
@@ -14921,6 +14948,7 @@ def build_api_runtime(
         invoker=agent_invoker,
         owner_id=f"api-agent:{uuid4().hex}",
         reasoning_delta_sink=publish_agent_reasoning,
+        reasoning_reset_sink=publish_agent_reasoning_reset,
     )
     final_output_publisher = AgentFinalOutputPublisher(
         runs=agent_repository,
