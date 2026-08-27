@@ -17,19 +17,20 @@ from unittest.mock import patch
 import src.api.runtime as api_runtime
 from src.api.dto import SubmitMessageRequest
 from src.api.runtime import build_api_runtime as _build_api_runtime
+from src.core.enums import UserMCPHealthStatus, UserMCPTransport
+from src.core.models import UserMCPServer
+from src.orchestration.agent_loop.tool_catalog import CapabilityVisibilityContext
+from src.integrations.master_key import MasterKeyError
+from src.integrations.mcp.credentials import CredentialSecurityError
+from tests.api.support import InMemoryTaskRuntimeSidecar
+from src.storage.rust_contract import load_runtime_sidecar_contract, migration_policy
+
 
 build_api_runtime = partial(
     _build_api_runtime,
     skill_roots=(),
     public_skill_roots=(),
 )
-from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
-from src.core.models import Task, UserMCPServer
-from src.orchestration.agent_loop.tool_catalog import CapabilityVisibilityContext
-from src.integrations.master_key import MasterKeyError
-from src.integrations.mcp.credentials import CredentialSecurityError
-from tests.api.support import InMemoryTaskRuntimeSidecar
-from src.storage.rust_contract import load_runtime_sidecar_contract, migration_policy
 
 
 class _EnforceAuthoritySidecar(InMemoryTaskRuntimeSidecar):
