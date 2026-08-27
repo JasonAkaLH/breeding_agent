@@ -39,6 +39,50 @@ def _item(
 
 
 class AgentContextBuilderTest(unittest.TestCase):
+    def test_recovered_summary_and_skill_activation_keep_order_and_become_system_messages(self) -> None:
+        run = AgentRun(
+            "run-1",
+            "task-1",
+            "conv-1",
+            AgentRunStatus.RUNNING,
+            AgentModelBinding("edition-a"),
+            next_item_sequence=4,
+            compacted_through_sequence=1,
+            revision=3,
+        )
+        old_user = _item("user", 1, AgentItemKind.USER_MESSAGE, {"text": "old"})
+        summary = _item(
+            "summary",
+            2,
+            AgentItemKind.CONTEXT_SUMMARY,
+            {"covered_end_sequence": 1, "summary": "compressed"},
+        )
+        activation = _item(
+            "activation",
+            3,
+            AgentItemKind.SKILL_ACTIVATION,
+            {"skill_id": "skill.one"},
+        )
+
+        request = AgentContextBuilder(
+            AgentContextRules("stable", "tool rules", "final guard")
+        ).build(
+            run=run,
+            items=(activation, old_user, summary),
+            catalog=AgentToolCatalog((), {}),
+        )
+
+        self.assertEqual(
+            [(message.role, message.content) for message in request.messages],
+            [
+                ("system", "stable"),
+                ("system", "tool rules"),
+                ("system", '{"covered_end_sequence":1,"summary":"compressed"}'),
+                ("system", '{"skill_id":"skill.one"}'),
+                ("system", "final guard"),
+            ],
+        )
+
     def test_multi_call_sample_is_rebuilt_as_one_assistant_message_then_ordered_results(self) -> None:
         run = AgentRun(
             "run-1",
@@ -112,4 +156,14 @@ class AgentContextBuilderTest(unittest.TestCase):
         )
         self.assertEqual(request.messages[0].content, "stable")
         self.assertEqual(request.messages[-1].content, "final guard")
+        self.assertEqual(
+            [(message.role, message.content) for message in request.messages if message.role == "system"],
+            [
+                ("system", "stable"),
+                ("system", "tool rules"),
+                ("system", '{"trusted_facts":["fact"]}'),
+                ("system", "final guard"),
+            ],
+        )
+        self.assertNotIn("developer", {message.role for message in request.messages})
         self.assertEqual(request.binding, run.binding)

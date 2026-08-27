@@ -211,7 +211,7 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "model": "fake",
                 "messages": {
                     "supports_messages": True,
-                    "roles": ["system", "developer", "user"],
+                    "roles": ["system", "user", "assistant", "tool"],
                 },
             }
         )
@@ -220,7 +220,7 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             metadata["provider_role_capabilities"],
-            {"supports_messages": True, "roles": ["system", "developer", "user"]},
+            {"supports_messages": True, "roles": ["system", "user", "assistant", "tool"]},
         )
 
     async def test_static_metadata_includes_safe_provider_cache_capabilities(self) -> None:

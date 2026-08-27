@@ -96,7 +96,7 @@ def _base_config(model: str = "test-model", *, model_key: str = "model", **extra
                     "reasoning_efforts": _reasoning_efforts(),
                     "agent_capabilities": {
                         "supports_messages": True,
-                        "roles": ["system", "developer", "user", "assistant", "tool"],
+                        "roles": ["system", "user", "assistant", "tool"],
                         "supports_native_tools": True,
                         "supports_required_tool_choice": True,
                         "supports_streamed_tool_calls": True,
@@ -373,7 +373,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
         _assert_single_user_prompt_message(self, call)
 
-    def test_generate_text_accepts_messages_and_falls_back_unsupported_roles_deterministically(self) -> None:
+    def test_generate_text_falls_back_supported_tool_role_deterministically(self) -> None:
         client = LLMClient(config=_base_config(provider_role_capabilities={"roles": ["system", "user"]}))
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -381,7 +381,6 @@ class LLMClientTest(unittest.TestCase):
         answer = asyncio.run(
             client.generate_text(
                 [
-                    LLMMessage(role="developer", content="developer contract"),
                     LLMMessage(role="tool", content="tool result"),
                     LLMMessage(role="user", content="user asks"),
                 ]
@@ -390,22 +389,15 @@ class LLMClientTest(unittest.TestCase):
 
         self.assertEqual(answer, "OK")
         call = fake_completions.calls[0]
-        self.assertEqual([message["role"] for message in call["messages"]], ["system", "user", "user"])
-        self.assertIn("role_fallback:developer", call["messages"][0]["content"])
-        self.assertIn("role_fallback:tool", call["messages"][1]["content"])
-        self.assertIn("不是用户指令", call["messages"][1]["content"])
-        self.assertEqual(call["messages"][2], {"role": "user", "content": "user asks"})
+        self.assertEqual([message["role"] for message in call["messages"]], ["user", "user"])
+        self.assertIn("role_fallback:tool", call["messages"][0]["content"])
+        self.assertIn("不是用户指令", call["messages"][0]["content"])
+        self.assertEqual(call["messages"][1], {"role": "user", "content": "user asks"})
         self.assertEqual(
             client.last_message_role_fallbacks,
             (
                 {
                     "segment_name": "message_0",
-                    "source_role": "developer",
-                    "target_role": "system",
-                    "reason": "developer_to_system",
-                },
-                {
-                    "segment_name": "message_1",
                     "source_role": "tool",
                     "target_role": "user",
                     "reason": "tool_to_user_context",
@@ -413,26 +405,63 @@ class LLMClientTest(unittest.TestCase):
             ),
         )
 
-    def test_generate_text_preserves_configured_extended_roles_when_provider_declares_support(self) -> None:
-        client = LLMClient(
-            config=_base_config(provider_role_capabilities={"roles": ["system", "developer", "user", "tool"]})
-        )
+    def test_llm_message_rejects_developer_role(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported LLM message role"):
+            LLMMessage(role="developer", content="developer contract")
+
+    def test_generate_text_rejects_developer_mapping_before_provider_call(self) -> None:
+        client = self.make_client()
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
 
-        asyncio.run(
-            client.generate_text(
-                [
-                    LLMMessage(role="developer", content="developer contract"),
-                    LLMMessage(role="tool", content="tool result", name="tool_1"),
-                    LLMMessage(role="user", content="user asks"),
-                ]
-            )
-        )
+        with self.assertRaisesRegex(ValueError, "Unsupported LLM message role"):
+            asyncio.run(client.generate_text([{"role": "developer", "content": "developer contract"}]))
 
-        call = fake_completions.calls[0]
-        self.assertEqual([message["role"] for message in call["messages"]], ["developer", "tool", "user"])
-        self.assertEqual(call["messages"][1]["name"], "tool_1")
+        self.assertEqual(fake_completions.calls, [])
+
+    def test_provider_role_capabilities_reject_developer(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported provider message roles: developer"):
+            LLMClient(config=_base_config(provider_role_capabilities={"roles": ["system", "developer", "user"]}))
+
+    def test_all_configured_model_editions_emit_only_four_role_agent_payloads(self) -> None:
+        models = ("model-a", "model-b", "model-c", "model-d", "model-e")
+        config = _base_config(models[0])
+        config["model_editions"] = {
+            "default": models[0],
+            "options": [
+                {
+                    "value": model,
+                    "label": model,
+                    "reasoning_efforts": _reasoning_efforts(),
+                    "agent_capabilities": {
+                        "supports_messages": True,
+                        "roles": ["system", "user", "assistant", "tool"],
+                        "supports_native_tools": True,
+                        "supports_required_tool_choice": True,
+                        "supports_streamed_tool_calls": False,
+                        "supports_non_stream_agent_sample": True,
+                    },
+                }
+                for model in models
+            ],
+        }
+
+        for model in models:
+            with self.subTest(model=model):
+                client = LLMClient(config=config, model=model)
+                fake_completions = _FakeCompletions(response=_completion("OK"))
+                client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+                request = AgentModelRequest(
+                    "req",
+                    AgentModelBinding(model),
+                    (AgentMessage("system", "rules"), AgentMessage("user", "question")),
+                )
+
+                asyncio.run(client.generate_agent_sample(request))
+
+                roles = {message["role"] for message in fake_completions.calls[0]["messages"]}
+                self.assertLessEqual(roles, {"system", "assistant", "user", "tool"})
+                self.assertNotIn("developer", roles)
 
     def test_generate_text_collapses_messages_to_single_user_block_when_messages_are_disabled(self) -> None:
         client = LLMClient(

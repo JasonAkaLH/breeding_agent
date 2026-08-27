@@ -9,7 +9,12 @@ import yaml
 from openai import AsyncOpenAI
 
 from src.core.coercion import coerce_truthy
-from src.orchestration.agent_loop.models import AgentModelRequest, AgentProtocolRetryPolicy, AgentSample
+from src.orchestration.agent_loop.models import (
+    AgentModelRequest,
+    AgentProtocolRetryPolicy,
+    AgentSample,
+    MODEL_MESSAGE_ROLES,
+)
 
 from .model_editions import default_model_edition, model_edition_options, validate_model_reasoning_effort_configs
 from .openai_agent_model_adapter import OpenAIAgentModelAdapter
@@ -458,7 +463,11 @@ def _coerce_message_roles(value: Any) -> frozenset[str]:
         candidates = value
     else:
         return frozenset()
-    return frozenset(str(role).strip().lower() for role in candidates if str(role).strip())
+    roles = frozenset(str(role).strip().lower() for role in candidates if str(role).strip())
+    unsupported_roles = sorted(roles - MODEL_MESSAGE_ROLES)
+    if unsupported_roles:
+        raise ValueError("Unsupported provider message roles: " + ", ".join(unsupported_roles))
+    return roles
 
 
 def _coerce_llm_messages(messages: Sequence[LLMMessage | Mapping[str, Any]]) -> tuple[LLMMessage, ...]:
@@ -488,23 +497,6 @@ def _fallback_messages_for_supported_roles(
         role = str(message.role or "user").strip().lower() or "user"
         if role in supported_roles:
             normalized.append(LLMMessage(role=role, content=message.content, name=message.name))
-            continue
-        if role == "developer" and "system" in supported_roles:
-            normalized.append(
-                LLMMessage(
-                    role="system",
-                    content=f"# message_{index} role_fallback:developer\n以下内容由 provider role fallback 折叠到 system；仍按 developer/system 约束处理。\n{message.content}",
-                    name=message.name,
-                )
-            )
-            fallbacks.append(
-                PromptRoleFallbackAudit(
-                    segment_name=f"message_{index}",
-                    source_role=role,
-                    target_role="system",
-                    reason="developer_to_system",
-                )
-            )
             continue
         normalized.append(
             LLMMessage(

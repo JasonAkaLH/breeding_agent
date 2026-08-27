@@ -11,8 +11,9 @@ from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
 
-AgentMessageRole = Literal["system", "developer", "user", "assistant", "tool"]
+AgentMessageRole = Literal["system", "user", "assistant", "tool"]
 AgentToolChoiceMode = Literal["auto", "required", "none"]
+MODEL_MESSAGE_ROLES = frozenset({"system", "assistant", "user", "tool"})
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -160,7 +161,7 @@ class AgentMessage:
     tool_calls: tuple[AgentToolCall, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.role not in {"system", "developer", "user", "assistant", "tool"}:
+        if self.role not in MODEL_MESSAGE_ROLES:
             raise ValueError(f"Unsupported Agent message role: {self.role}")
         if self.role == "tool" and not (self.tool_call_id or "").strip():
             raise ValueError("tool messages require tool_call_id")

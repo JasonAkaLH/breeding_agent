@@ -2,7 +2,7 @@
 
 依据：`2026-08-27-four-role-llm-message-contract-design.md`（`100/100 Pass`）
 
-状态：实施中
+状态：`complete`
 
 ## 1. 范围与完成声明
 
@@ -72,3 +72,16 @@ developer生产点逐条一对一改为system。不得加入模型探测、请�
 
 本计划不迁移数据。代码检查点可整体回滚；旧终态Task不复活，active/waiting
 Run仍由当前代码从既有AgentItem重建。
+
+## 4. 实施结果
+
+- AgentMessage、LLMMessage、PromptSegment、模型能力配置和provider payload
+  已闭合为四角色；Agent Context四个developer生产点均逐条改为system。
+- 当前五个本地模型配置和所有受影响fixture只声明四角色；developer仅保留
+  在明确的拒绝测试、历史文档和非模型角色的`developer-docs`路由名中。
+- 定向84项、受影响API 50项、Orchestration 125项、Integrations 734项
+  （2项既有平台skip）及API 590项通过；compileall、Ruff（本次修改文件）和
+  diff-check通过。
+- 本地backend已重建；真实默认模型Task`task-de61bb288177`完成并生成唯一
+  complete assistant消息，日志没有developer role 400。
+- 未修改数据库、Sidecar/proto、Frontend或部署合同，未新增依赖。

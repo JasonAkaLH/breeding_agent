@@ -21,7 +21,7 @@ def _reasoning():
 def _capabilities(**overrides):
     value = {
         "supports_messages": True,
-        "roles": ["system", "developer", "user", "assistant", "tool"],
+        "roles": ["system", "user", "assistant", "tool"],
         "supports_native_tools": True,
         "supports_required_tool_choice": True,
         "supports_streamed_tool_calls": True,
@@ -56,6 +56,14 @@ class AgentModelGateTest(unittest.TestCase):
     def test_default_unready_edition_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "Default model edition is not Agent-ready"):
             validate_agent_model_gate(_config(default="missing-profile"))
+
+    def test_extra_message_role_is_not_agent_ready(self) -> None:
+        config = _config()
+        config["model_editions"]["options"][0]["agent_capabilities"]["roles"].append("developer")
+
+        report = evaluate_agent_model_gate(config)
+
+        self.assertEqual(report.rejected_editions["ready"], ("roles=unsupported:developer",))
 
     def test_public_selection_rejects_unready_edition(self) -> None:
         self.assertEqual(validate_agent_model_edition("ready", config=_config()), "ready")

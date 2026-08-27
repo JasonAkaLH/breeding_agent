@@ -2,7 +2,7 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- 新增四角色LLM消息合同实施计划：严格按已通过`100/100`设计，以A～E检查点完成基线/红测、Agent/config四角色闭合、PromptEnvelope/LLM/provider边界、恢复/fixture/当前合同以及完整回归和默认模型真实Task冒烟；明确排除模型探测、请求重试、异步流告警、数据库/Sidecar/Frontend和其他重构。当前业务代码尚未实施。License Requirement：仅计划文档变更，无新增依赖或许可变更。
+- 四角色LLM消息合同实施已`complete`：AgentMessage、LLMMessage、PromptSegment、Agent Context、模型能力配置与provider payload固定只支持`system/assistant/user/tool`，四个developer生产点逐条一对一改为system且不改消息数量、顺序或正文；五模型配置/fixture闭合extra-role拒绝，active/waiting Run由既有AgentItem按新规则恢复。定向84项、受影响API 50项、Orchestration 125项、Integrations 734项（2项既有平台skip）和API 590项通过，compileall、修改文件Ruff与diff-check通过；本地backend重建后真实Task`task-de61bb288177`完成并生成唯一complete assistant消息，日志无developer role 400。未增加模型探测、请求重试或异步流修复，未修改数据库、Sidecar/proto、Frontend或部署合同。License Requirement：复用既有Python/OpenAI-compatible/PromptEnvelope/Agent模型合同，无新增依赖或许可变更。
 
 - 四角色LLM消息合同设计已按首轮信心审查获批修订，并在第二轮以`100/100 Pass`通过：系统固定只支持`system/assistant/user/tool`，现有developer逐条一对一改为system且保持消息数量、顺序、正文与关联；补齐Agent/LLMMessage/PromptEnvelope/config/provider四层闭合、active/waiting恢复、五模型fake payload矩阵、默认模型真实冒烟、无新增I/O的NFR和精确追踪。仍不增加模型探测、请求级兜底、数据库/Sidecar/Frontend或部署修改；当前仅文档、索引与变更记录，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变更。
 

@@ -39,14 +39,14 @@ class AgentContextBuilder:
     ) -> AgentModelRequest:
         messages: list[AgentMessage] = [
             AgentMessage(role="system", content=self._rules.stable_rules),
-            AgentMessage(role="developer", content=self._rules.safe_tool_rules),
+            AgentMessage(role="system", content=self._rules.safe_tool_rules),
         ]
         ordered_items = tuple(sorted(items, key=lambda value: value.sequence))
         summary_item = _active_summary(ordered_items, run.compacted_through_sequence)
         if summary_item is not None:
             messages.append(
                 AgentMessage(
-                    role="developer",
+                    role="system",
                     content=summary_item.payload_json.rstrip("\n"),
                 )
             )
@@ -62,7 +62,7 @@ class AgentContextBuilder:
         if trusted_facts:
             messages.append(
                 AgentMessage(
-                    role="developer",
+                    role="system",
                     content=json.dumps(
                         {"trusted_facts": list(trusted_facts)},
                         ensure_ascii=False,
@@ -145,7 +145,7 @@ def _message_from_item(
             ),
         )
     if item.kind in {AgentItemKind.SKILL_ACTIVATION, AgentItemKind.CONTEXT_SUMMARY}:
-        return AgentMessage(role="developer", content=item.payload_json.rstrip("\n"))
+        return AgentMessage(role="system", content=item.payload_json.rstrip("\n"))
     if item.kind is AgentItemKind.CONTINUATION:
         return AgentMessage(role="user", content=item.payload_json.rstrip("\n"))
     return None

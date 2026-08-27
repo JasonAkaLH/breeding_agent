@@ -17,7 +17,7 @@ def _test_reasoning_efforts() -> dict:
 def _agent_capabilities() -> dict:
     return {
         "supports_messages": True,
-        "roles": ["system", "developer", "user", "assistant", "tool"],
+        "roles": ["system", "user", "assistant", "tool"],
         "supports_native_tools": True,
         "supports_required_tool_choice": True,
         "supports_streamed_tool_calls": True,

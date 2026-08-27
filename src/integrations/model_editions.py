@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.core.coercion import coerce_positive_int, coerce_truthy
+from src.orchestration.agent_loop.models import MODEL_MESSAGE_ROLES
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +56,12 @@ class AgentModelCapabilities:
         missing: list[str] = []
         if not self.supports_messages:
             missing.append("messages")
-        required_roles = {"system", "user", "assistant", "tool"}
-        absent_roles = sorted(required_roles - self.roles)
+        absent_roles = sorted(MODEL_MESSAGE_ROLES - self.roles)
         if absent_roles:
             missing.append("roles=" + ",".join(absent_roles))
+        unsupported_roles = sorted(self.roles - MODEL_MESSAGE_ROLES)
+        if unsupported_roles:
+            missing.append("roles=unsupported:" + ",".join(unsupported_roles))
         if not self.supports_native_tools:
             missing.append("native_tools")
         if not self.supports_required_tool_choice:

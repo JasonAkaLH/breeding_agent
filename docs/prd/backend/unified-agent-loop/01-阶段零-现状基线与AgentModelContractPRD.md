@@ -104,7 +104,7 @@ model_editions:
     - value: example-edition
       agent_capabilities:
         supports_messages: true
-        roles: [system, developer, user, assistant, tool]
+        roles: [system, user, assistant, tool]
         supports_native_tools: true
         supports_required_tool_choice: true
         supports_streamed_tool_calls: true

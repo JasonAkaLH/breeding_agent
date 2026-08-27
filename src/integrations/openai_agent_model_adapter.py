@@ -18,6 +18,7 @@ from src.orchestration.agent_loop.models import (
     AgentSamplingCancelled,
     AgentToolCall,
     AgentUsage,
+    MODEL_MESSAGE_ROLES,
     canonical_json,
     validate_provider_safe_tool_name,
 )
@@ -236,6 +237,8 @@ class OpenAIAgentModelAdapter:
 
 
 def _message_payload(message: AgentMessage) -> dict[str, Any]:
+    if message.role not in MODEL_MESSAGE_ROLES:
+        raise ValueError(f"Unsupported provider message role: {message.role}")
     payload: dict[str, Any] = {"role": message.role, "content": message.content}
     if message.role == "tool":
         payload["tool_call_id"] = message.tool_call_id

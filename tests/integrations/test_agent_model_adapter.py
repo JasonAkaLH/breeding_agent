@@ -99,6 +99,26 @@ def _request(*, choice=None, cancellation=None, tools=None) -> AgentModelRequest
 
 
 class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_message_rejects_developer_role(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported Agent message role"):
+            AgentMessage("developer", "legacy contract")
+
+    async def test_provider_payload_revalidates_message_role(self) -> None:
+        message = AgentMessage("user", "question")
+        object.__setattr__(message, "role", "developer")
+        request = AgentModelRequest("req", _binding(), (message,))
+        completions = _Completions([])
+
+        with self.assertRaisesRegex(ValueError, "Unsupported provider message role"):
+            await OpenAIAgentModelAdapter(
+                completions=completions,
+                model="edition-a",
+                retry_policy=AgentProtocolRetryPolicy(0),
+                stream=False,
+            ).sample_agent(request)
+
+        self.assertEqual(completions.calls, [])
+
     async def test_non_stream_fallback_closes_native_tool_sample(self) -> None:
         response = _ns(
             id="sample-non-stream",

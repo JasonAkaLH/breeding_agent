@@ -7,6 +7,8 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .agent_loop.models import AgentMessageRole, MODEL_MESSAGE_ROLES
+
 TokenEstimator = Callable[[str], int]
 
 _DEFAULT_TRIM_MAX_TOKENS = 8_000
@@ -50,6 +52,10 @@ class PromptSegment:
     security_role: str
     token_estimate: int | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.role not in MODEL_MESSAGE_ROLES and self.role != "context":
+            raise ValueError(f"Unsupported prompt segment role: {self.role}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +131,13 @@ class RenderedPrompt:
 
 @dataclass(frozen=True, slots=True)
 class LLMMessage:
-    role: str
+    role: AgentMessageRole
     content: str
     name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.role not in MODEL_MESSAGE_ROLES:
+            raise ValueError(f"Unsupported LLM message role: {self.role}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,6 +507,9 @@ def _supported_message_roles(role_capabilities: Iterable[str] | Mapping[str, obj
     }
     if not roles:
         roles = {"system", "user"}
+    unsupported_roles = sorted(roles - MODEL_MESSAGE_ROLES)
+    if unsupported_roles:
+        raise ValueError("Unsupported provider message roles: " + ", ".join(unsupported_roles))
     if "user" not in roles:
         roles.add("user")
     return frozenset(roles)
@@ -506,13 +519,13 @@ def _desired_message_role(segment: PromptSegment) -> str:
     if segment.security_role in {"instruction", "tool_rule", "guard"}:
         return "system"
     if segment.security_role == "active_note":
-        return "developer"
+        return "system"
     if segment.security_role == "tool_result":
         return "tool"
     if segment.security_role == "user_input":
         return "user"
     role = str(segment.role or "").strip().lower()
-    if role in {"system", "developer", "user", "assistant", "tool", "context"}:
+    if role in MODEL_MESSAGE_ROLES or role == "context":
         return role
     return "context"
 
@@ -526,10 +539,6 @@ def _fallback_message_role(
 ) -> tuple[str, str, str | None]:
     if source_role in supported_roles:
         return source_role, content, None
-    if source_role == "developer":
-        if "system" in supported_roles:
-            return "system", _role_block("developer", segment, content), "developer_to_system"
-        return "user", _role_block("developer", segment, content), "developer_to_user_context"
     if source_role == "system":
         return "user", _role_block("system", segment, content), "system_to_user_context"
     if source_role == "tool":
