@@ -1,6 +1,6 @@
 # Thinking 状态感知的模型 Reasoning Effort 配置设计
 
-状态：用户已批准；implementation pending
+状态：用户已批准；implementation in progress（Checkpoint A～C 已完成，D 文档同步中，Final Gate/E 未完成）
 日期：2026-08-27
 分支：`main`
 取代：`2026-06-25-model-reasoning-effort-design.md` 中的 reasoning-effort schema、前端关闭 thinking 时禁用强度选择及对应验证口径

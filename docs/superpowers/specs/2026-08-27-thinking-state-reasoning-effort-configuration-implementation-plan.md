@@ -4,7 +4,7 @@
 
 设计提交：`d4154ae`
 
-状态：`ready_for_implementation`
+状态：`in_progress`（Checkpoint A～C 已完成，D 文档同步中，Final Gate/E 未完成）
 
 目标分支：`main`
 

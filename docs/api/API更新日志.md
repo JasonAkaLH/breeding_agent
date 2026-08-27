@@ -191,6 +191,9 @@ fail closed为空列表。任务SSE加法新增`mcp.result_artifact_projection`�
 
 ### 响应变化
 
+> 2026-08-27 后续变更：本节保留原 main/prod 扫描基线，同时记录 `main` 在该基线后的
+> thinking-state reasoning effort contract。该记录不表示 `prod` 或外部部署配置已经更新。
+
 `prod` 中的模型选项只有：
 
 ```json
@@ -207,20 +210,26 @@ fail closed为空列表。任务SSE加法新增`mcp.result_artifact_projection`�
   "value": "model-a",
   "label": "Model A",
   "reasoning_efforts": {
-    "default": "medium",
-    "disabled_default": "minimal",
     "options": [
       {
         "value": "minimal",
-        "label": "Minimal",
-        "allow_when_thinking_disabled": true
+        "label": "Minimal"
       },
       {
         "value": "medium",
-        "label": "Medium",
-        "allow_when_thinking_disabled": false
+        "label": "Medium"
       }
-    ]
+    ],
+    "thinking": {
+      "enabled": {
+        "default": "medium",
+        "supported": ["minimal", "medium"]
+      },
+      "disabled": {
+        "default": "minimal",
+        "supported": ["minimal", "medium"]
+      }
+    }
   }
 }
 ```
@@ -229,11 +238,12 @@ fail closed为空列表。任务SSE加法新增`mcp.result_artifact_projection`�
 
 | 字段 | 类型 | 约束 |
 |---|---|---|
-| `default` | `string` | 开启深度思考且客户端未指定 effort 时使用；必须引用 `options[].value` |
-| `disabled_default` | `string \| null` | 关闭深度思考时的默认值；非空时必须引用 disabled-safe option |
 | `options[].value` | `string` | 当前模型自己的 effort 值；不再是全局固定枚举 |
 | `options[].label` | `string` | 客户端展示文本 |
-| `options[].allow_when_thinking_disabled` | `boolean` | `deep_thinking=false` 时是否允许使用 |
+| `thinking.enabled.supported` | `string[]` | thinking 开启时允许使用的 effort；必须引用 `options[].value` |
+| `thinking.enabled.default` | `string` | thinking 开启且请求未指定 effort 时使用；必须属于 enabled supported |
+| `thinking.disabled.supported` | `string[]` | thinking 关闭时允许使用的 effort；为空表示该模型不能关闭 thinking |
+| `thinking.disabled.default` | `string \| null` | disabled supported 非空时必须属于该集合；集合为空时必须为 null |
 
 ### 请求行为变化
 
@@ -255,21 +265,21 @@ fail closed为空列表。任务SSE加法新增`mcp.result_artifact_projection`�
 
 - `model_edition` 仍是顶层可选字段，值必须来自模型配置接口。
 - `metadata.main_agent_reasoning_effort` 按所选模型校验，不再使用全局 `minimal | high | max` 假设。
-- `deep_thinking=true` 且未显式提供 effort 时，使用该模型的 `default`。
-- `deep_thinking=false` 且未显式提供 effort 时，使用该模型的 `disabled_default`。
-- `deep_thinking=false` 时显式提交非 disabled-safe effort，返回 HTTP 400。
-- 模型没有 disabled-safe option 时，不允许关闭深度思考；客户端应将开关固定为开启。
+- 未显式提供 effort 时，使用当前 thinking 状态的 `default`。
+- 显式 effort 必须属于当前 thinking 状态的 `supported`，否则返回 HTTP 400。
+- disabled supported 为空时不允许关闭深度思考；客户端应将开关固定为开启。
 - 多模型配置下，无法确定所选模型时会 fail closed，而不是静默套用其他模型默认值。
-- 后端启动时会验证所有模型的 `reasoning_efforts`：缺失、重复值、无效 default 或无效 disabled default 都会阻止错误配置进入运行态。
+- 后端启动时会验证所有模型的目录、两套状态策略、重复/未知引用、孤儿 option 和状态 default；非法配置会阻止启动。
 
 ### 客户端迁移要求
 
 - 不要写死 effort 列表。
-- 切换模型时同步切换 effort 选项和默认值。
+- 按当前 thinking 状态的 supported 过滤 effort；关闭 thinking 后 Select 仍可选择合法值。
+- 切换模型或 thinking 时，当前 effort 仍受支持则保留，否则切换到新状态 default。
 - 未由用户显式选择 effort 时可以省略 `metadata.main_agent_reasoning_effort`，让服务端使用模型默认值。
 - 严格响应解码器必须把 `reasoning_efforts` 加入 `ModelEditionOptionResponse`。
 
-兼容性：**响应模型对严格客户端属于破坏性变化；请求字段本身保持兼容。**
+兼容性：**2026-08-27 的 reasoning-effort 响应结构对严格客户端属于再次破坏性变化；请求字段本身保持兼容，前后端必须锁步升级。**
 
 ## 4.2 历史消息响应与文件上传历史
 
@@ -532,7 +542,7 @@ assistant 历史消息会在 `metadata.capability_missing_fallback` 中持久化
 
 - [ ] 更新 `ModelEditionOptionResponse`，把 `reasoning_efforts` 视为必填。
 - [ ] reasoning effort UI 按当前模型动态渲染，不使用全局常量。
-- [ ] 关闭深度思考前检查 `allow_when_thinking_disabled` 和 `disabled_default`。
+- [ ] 按 `thinking.enabled/disabled.supported` 过滤强度，并用对应状态 `default` 处理非法旧值。
 - [ ] 更新 `MessageResponse` 类型，接收 `message_type`、`metadata`、`updated_at`。
 - [ ] 历史列表支持 `role=system` + `message_type=file_upload`，同时继续隐藏其他 system message。
 - [ ] `file_status=deleted` 的文件只作历史展示，不重新附加。
