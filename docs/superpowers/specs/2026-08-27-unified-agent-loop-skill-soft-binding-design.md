@@ -41,6 +41,7 @@ Codex 0.149.1 会在 function/tool output 进入 model-visible history 时施加
 15. 本期只实现单次 Capability outcome 的投影和溢出处理；不新增跨并行 Tool 的聚合预算，也不新增让模型任意读取 Artifact 正文的通用 Tool。
 16. 后端 catalog、admission 和执行层可以读取 pinned revision 的 `SKILL.md`；但 soft binding 首轮采样只能接收字段级 PublicSkillProfile，不得收到未经筛选的 Skill 指令正文。只有模型实际调用 `delegated_main_agent` 后，下一轮采样才可通过 durable Tool result 接收该 pinned revision 的有界 Skill 指令正文。
 17. 所有新 submission 统一生成 `maf.submission.prepared_execution.v2`；v1 只用于读取部署前已经持久化的旧 prepared record，不原地改义、不转换重写，也不继续产生新的 v1。
+18. 本期只让新增的 `skill_result.json` 使用 Agent staged/CAS publication；现有 Skill 业务文件继续沿用 `SkillOutputArtifactManager` 的既有保存与 supersede 生命周期，不声称它们与 Agent outcome 具有跨系统原子性。
 
 第 7 项的“必要恢复”只指恢复原本就以 `force_capability` 创建的 Task；任何原始 `routing_mode=hint` Task 在普通、waiting 或 startup recovery 中都必须继续保持 auto Tool choice，禁止恢复时升级为 force。
 
@@ -88,7 +89,8 @@ Codex 0.149.1 会在 function/tool output 进入 model-visible history 时施加
 | SkillExecutor | 执行意图成立后原样复用 |
 | Agent recovery | 从 durable items 恢复，不重新运行旧 decision 阶段 |
 | MCP `build_agent_projection` / `build_user_view` | 复用现有 20,000 code points / 80,000 UTF-8 bytes 投影预算和 raw/user/agent 分层先例；不改变 MCP wire 与公共 DTO |
-| Skill output Artifact manager | 复用 managed file、owner/Task 绑定、SHA、确定性 Artifact identity、下载 API 和失败清理能力 |
+| managed file store / `AgentStagedArtifact` | 复用私有文件权限、owner/Task 下载校验、SHA 与现有 Agent outcome CAS metadata publication；新增独立 result stager，不直接复用会提前保存 metadata 和执行 supersede 的 `SkillOutputArtifactManager.process*` |
+| `SkillOutputArtifactManager` | 保持现有 Skill 业务文件的随机 identity、提前登记和 conversation-wide supersede 语义；本期不重构为 Agent staged artifact transaction |
 | `AgentCallResultProjector` | 在 Capability execution 与 Agent repository 之间新增唯一纯投影边界；替换 `dict(output_payload)` 直通 |
 | Agent canonical payload codec | 继续作为完整 `tool_result` 131,072-byte 最终硬门禁，不承担业务字段裁剪 |
 
@@ -264,6 +266,7 @@ Profile 继续经过现有 allowlist/sanitizer。contract-v2 的 `parameters` �
 ```json
 {
   "schema": "maf.agent.model_result.v1",
+  "projection_revision": "skill-result-v1",
   "projection_mode": "inline|artifact_backed",
   "model_view": {},
   "original_size_bytes": 285483,
@@ -276,6 +279,7 @@ Profile 继续经过现有 allowlist/sanitizer。contract-v2 的 `parameters` �
 - `inline`：脱敏后的完整 `model_view` 不超过 20,000 code points，组合后的完整 `safe_result` canonical JSON 不超过 80,000 UTF-8 bytes；`projection_truncated=false`。
 - `artifact_backed`：完整 canonical raw result 已进入 owner-bound managed Artifact，`model_view` 只含有界摘要/预览；`projection_truncated=true` 表示模型视图不完整，不表示完整业务结果丢失。
 - `original_size_bytes` 和 `raw_sha256` 基于 strict canonical raw JSON；禁止 NaN、Infinity、非字符串 key 或不可 JSON 序列化对象。
+- `projection_revision` 是 projector byte contract 的闭合版本；任何会改变 canonical `safe_result`、预览选择或 Artifact identity 的修改都必须升级 revision，恢复不得用新 revision 重算旧结果。
 - `projected_size_bytes` 以最终 `safe_result` canonical UTF-8 bytes 计算。code-point 与 byte 两项任一超限都必须继续缩减 `model_view`，不能依赖字符数近似字节数。
 - `artifact_refs` 继续位于现有 `tool_result` 外层；`safe_result` 不复制 Artifact 正文、内部 storage path、凭据、Base64 或 raw MCP Result。
 
@@ -287,18 +291,28 @@ Profile 继续经过现有 allowlist/sanitizer。contract-v2 的 `parameters` �
 | 普通 Skill | 小结果经敏感 key/text sanitizer 后 inline；大结果保留 `answer`、`response_text`、`summary`、`search_summary`、状态、缺参/错误和安全文件描述等优先字段，bulk arrays/mappings 只进入 managed Artifact |
 | `delegated_main_agent` | soft-binding 首轮只见 PublicSkillProfile；被模型实际调用后，safe result 保存 bounded pinned `instruction_body`、activation identity、状态和 digest，不复制第二份 profile 或 activation |
 
-普通 Skill 的完整原始结果超过模型预算时，无论 Skill 是否已经生成其他输出文件，平台都必须用 call item ID 与 raw SHA 派生确定性的 `skill_result.json` managed Artifact，保证被省略的 JSON 字段有完整权威副本。已有 Skill output file Artifact 保持不变；新的 result Artifact 只补足完整结构化结果，不取代业务文件。
+普通 Skill 的完整原始结果超过模型预算时，无论 Skill 是否已经生成其他输出文件，平台都必须用 call item ID、raw SHA 与 projection revision 派生确定性的 `skill_result.json` managed Artifact，保证被省略的 JSON 字段有完整权威副本。其 file metadata 使用独立 `source_kind=skill_result`、`retention_status=active`、owner/Task/conversation/call identity、raw SHA、projection revision、filename、MIME、size 和 opaque storage key；不得冒充 `skill_output`，也不得参与业务文件的 conversation-wide supersede。已有 Skill output file Artifact 保持不变；新的 result Artifact 只补足完整结构化结果，不取代业务文件。
+
+`skill_result` 是 owner-downloadable 的 Skill 业务结果，因此 staging 前除 strict JSON 外还必须递归拒绝闭合的内部字段集合：credential、password、secret、API/access/refresh token、authorization、internal/source/storage path/key、handler/runtime/config 与原始 Tool arguments。普通业务 URL、文献字段和声明的 Skill output fields 不得因名称近似被误删。命中禁止字段时整个结果按 `agent_result_invalid` fail closed，不生成“去掉部分字段后仍称完整 raw”的 Artifact。
 
 ### 7.5 原子提交与失败收敛
 
-大结果路径必须先把 canonical raw JSON 写入现有 managed file store 的 staged 区，再由 `commit_agent_call_outcome` 在同一 CAS 事务中提交：
+大结果路径由独立 `AgentSkillResultArtifactStager` 先把 canonical raw JSON 写入现有 private managed file store。stager 只能返回一个 `AgentStagedArtifact`，不得调用 `storage.save_artifact`、不得执行 supersede、不得发送公共 Artifact 事件。随后由现有 `commit_agent_call_outcome` 在同一 Agent CAS 中提交：
 
 1. bounded `tool_result`；
 2. result Artifact metadata；
-3. Skill 已有业务 Artifact metadata；
+3. 对 Skill 已有业务 Artifact identity/storage ref 的现有一致性校验与引用；这些 metadata 可能已由 legacy manager 提前登记，不属于本期原子性承诺；
 4. TaskNode/output refs 与 AgentRun revision。
 
-事务失败、CAS loser 或 Task 已终态时，沿用现有 Artifact manager 精确清理未登记 staged file；不得留下公共 orphan。exact replay 以 call item ID、raw SHA、projection schema/revision 生成同一 Artifact ID 和逐字节相同 `safe_result`。
+为避免再次出现“Node completed、Agent result reserved”，Agent-owned invocation 的 terminal TaskNode projection 必须延后：`AgentTaskInvocationCommitPort.commit_completed/commit_failed` 可以持久化已完成的 Capability 业务事件，但不得在 projector/Agent CAS 前保存 terminal Node、output refs 或发送 `node.completed/node.failed` lifecycle event；它只返回内存中的 terminal candidate。`AgentCallResultProjector`、result staging 和 envelope validation 完成后，`commit_agent_call_outcome` 才是 terminal Node status、output refs、Tool result、result Artifact metadata 与 Run revision 的唯一原子 writer。waiting/Interrupt 路径继续使用现有 durable waiting authority，不受此延后规则影响。
+
+Agent CAS 成功后再以 call item ID 和 committed result digest 为幂等 identity 投影 terminal lifecycle event；若进程在 CAS 后、事件写入前崩溃，startup reconciliation 必须从 committed Agent result/Node 补写同一事件。CAS 前的 projector/staging/validation 失败必须生成 typed failed Agent outcome，由同一 CAS 把 Node 和 result 一起收敛为 failed，不能先留下 completed Node。
+
+这里的原子性是“公开 authority 原子性”，不是文件系统与数据库的物理分布式事务：CAS 前 staged file 只有 `0700/0600` 私有文件权限且没有 Artifact metadata，API、历史、模型和用户均不可发现；CAS 成功后 result metadata 与 `tool_result` 同时成为公开 authority。任何公共查询或下载都必须先通过 owner-bound Artifact metadata，禁止仅凭 storage key访问文件。
+
+Artifact ID 与 storage key 对相同 call item ID、raw SHA、projection revision 必须确定且幂等。CAS loser 不得立即删除该 deterministic file，因为 winner 或 exact replay 可能引用同一文件。新增 staged-result janitor 只清理“mtime 已超过 24 小时、仍无匹配 Artifact metadata”的私有文件；已登记且 size/SHA 匹配的文件不得删除。exact replay 复用同一文件、Artifact ID、projection revision 和逐字节相同的 `safe_result`。
+
+Task/Conversation 删除继续复用 managed file cleanup，但 `skill_result` 的 retention 不受新业务文件 supersede；Task 正常终态不会自动删除可下载结果。Artifact response、Task artifact listing 和 download endpoint 必须显式 allowlist `source_kind=skill_result`，继续执行 task owner校验、opaque storage key解析、digest/regular-file校验和 attachment-only 下载。
 
 如果 raw result 不是 strict JSON、managed Artifact staging 失败，或投影后完整 `tool_result` 仍超过 131,072 bytes，必须把原 reserved result 收敛为一个小型 committed failed outcome，分别使用 `agent_result_invalid`、`agent_result_artifact_persist_failed` 或 `agent_result_projection_too_large`。这些错误不得冒泡成通用 `execution_crash`，也不得让 Node 显示 completed 而 result 长期 reserved。
 
@@ -372,7 +386,7 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - startup recovery、waiting resume 与普通入口使用相同 routing-mode-to-tool-choice helper。
 - fixed revision 在 Task 终态前保持 pinned，终态后按现有生命周期释放。
 - completed Tool 只从 durable model projection 和 owner-bound Artifact refs 恢复；不得重新执行 Capability 或用当前代码重新投影改变历史 bytes。
-- staged result Artifact 的恢复、精确清理和 exact replay 沿用现有 managed Skill output Artifact 生命周期。
+- staged result Artifact 使用独立 result stager 与 24 小时 orphan janitor；现有 Skill output manager 只提供底层文件/下载安全先例，不承担 result staging、CAS loser cleanup 或 retention。
 - 旧 Task 不回填 hint profile，不复活历史失败 Task。
 
 ### 10.3 事件与审计
@@ -428,8 +442,11 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - execution sample 调用 Tool 后走现有 outcome/final 流程。
 - 小型 Skill 结果形成 `inline` safe result；原始对象不会绕过 projector。
 - 超大 Skill 结果形成确定性 result Artifact 和不超过 80,000 UTF-8 bytes 的 `artifact_backed` safe result。
+- `skill_result` 在 Agent CAS 前不可通过 API 枚举或下载，CAS 后与 `tool_result` 同时可见；source kind、owner、Task、call、raw SHA 与 projection revision 绑定正确且不触发业务 output supersede。
 - MCP safe result 只含 agent projection，不重复 user view/raw `structured_content`。
 - Artifact staging、Agent repository CAS 或最终 envelope 校验故障均提交 typed failed outcome，不遗留 reserved item。
+- Agent-owned invocation 在 projector/Agent CAS 前不持久化 terminal Node；fault injection 必须证明不存在 Node completed/failed 而 Agent result 仍 reserved 的组合，CAS 后缺失的 terminal lifecycle event可幂等补写。
+- CAS loser 不删除 winner 可复用的 deterministic file；未登记 staged file 超过 24 小时后由 janitor 删除，已登记匹配文件保留。
 - delegated Skill 在首轮 hint 上下文中不含 `SKILL.md` 正文；实际 Tool call 后下一轮收到 pinned、完整且有界的 instruction body，exact replay bytes 一致，memory/history 中不出现正文。
 - 没有额外 decision LLM 调用、Replanner 或 DAG shape。
 
@@ -460,10 +477,11 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 1. 前端定向测试、完整测试、typecheck、production build。
 2. Agent Loop、API、Agent storage、Skill integration 与 recovery 定向测试。
 3. Agent result projector、Skill result Artifact、80,000-byte projection、131,072-byte完整 envelope 与 failure convergence 定向测试。
-4. 根 AGENTS 定义的相关后端分层回归。
-5. Runtime Sidecar contract/Rust gate；若修改其 wire/contract，执行完整统一 Rust 质量门禁。
-6. `git diff --check`、Ruff/compileall 和最终 diff 审查。
-7. 本地前后端成对重建后真实 UI/API smoke，分别验证“询问不执行”和“明确任务会执行且大结果完成”。
+4. result stager/CAS fault injection、`skill_result` owner-only listing/download、legacy `skill_output` supersede 不回归，以及 24 小时 janitor 边界测试。
+5. 根 AGENTS 定义的相关后端分层回归。
+6. Runtime Sidecar contract/Rust gate；若修改其 wire/contract，执行完整统一 Rust 质量门禁。
+7. `git diff --check`、Ruff/compileall 和最终 diff 审查。
+8. 本地前后端成对重建后真实 UI/API smoke，分别验证“询问不执行”和“明确任务会执行且大结果完成”。
 
 ## 12. 实施边界
 
@@ -474,10 +492,12 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - `src/api/submission_admission.py`、`src/storage/runtime_sidecar_facade.py`、`src/storage/sqlite/repositories.py` 与 `native/crates/maf_runtime_sidecar/src/lib.rs` 的 v1/v2 schema/domain decoder、v2-only writer及对应 Python/Rust 测试；
 - `src/orchestration/agent_loop/orchestrator.py`、`context.py`、`skill_activation.py`、初始化/recovery helper及测试；
 - `src/orchestration/agent_loop/capability_invoker.py`、新增的单一结果 projector、Skill managed result Artifact staging/cleanup及测试；
+- `src/orchestration/agent_loop/task_projection.py` 与 terminal event reconciliation：Agent-owned completed/failed 只生成候选，terminal Node/result/artifact refs 由 Agent outcome CAS 唯一提交；waiting/Interrupt 行为保持现状；
+- `src/storage/artifact_files.py`、`src/api/artifact_responses.py`、Artifact listing/download route 与独立 staged-result janitor 的 `skill_result` allowlist、retention 和 owner-bound 测试；
 - SQLite/PostgreSQL/Runtime Sidecar Agent repository 的初始化原子提交合同及测试；
 - API 文档、目录索引、CHANGELOG 与必要的 AGENTS 索引。
 
-实施计划必须先以当前 HEAD 核对 exact seam，优先扩展现有 atomic writer、profile builder、MCP projection 预算和 Skill output Artifact manager，不创建第二套 Skill binding service、第二模型阶段、新数据库表、匿名/非 owner-bound raw-result 旁路或 MCP raw-result 公共旁路。owner-bound Skill result Artifact 是本设计明确允许的完整业务输出通道。repository 只验证最终 envelope，不承担按业务字段裁剪 raw output。
+实施计划必须先以当前 HEAD 核对 exact seam，优先扩展现有 atomic writer、profile builder、MCP projection 预算、managed file store 与 `AgentStagedArtifact`，不创建第二套 Skill binding service、第二模型阶段、新数据库表、匿名/非 owner-bound raw-result 旁路或 MCP raw-result 公共旁路。不得直接复用 `SkillOutputArtifactManager.process*` staging result，也不得顺带重构 legacy Skill 业务文件生命周期。owner-bound Skill result Artifact 是本设计明确允许的完整业务输出通道。repository 只验证最终 envelope，不承担按业务字段裁剪 raw output。
 
 ## 13. 发布与回滚
 
@@ -501,13 +521,14 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 6. execution 消息可调用同一选中 Skill，且现有执行/Interrupt/final 路径不回归。
 7. 所有 Capability outcome 在 repository 前经过唯一 result projector，`safe_result` 不再是 raw `output_payload` 的浅拷贝。
 8. 超大 strict-JSON 结果无损进入 owner-bound managed Artifact，`model_view` 不超过 20,000 code points、完整 `safe_result` 不超过 80,000 UTF-8 bytes，完整 AgentItem 不超过 131,072 bytes。
-9. invalid/spill/projection 故障提交 typed failed outcome，不产生 `execution_crash` 或 reserved-result 残留。
-10. delegated Skill 不重复 activation。
-11. contract-v2 PublicSkillProfile 足以回答公开参数、输入格式、默认值、约束和输出格式；soft-binding 首轮不含 raw `SKILL.md`，delegated Skill 被实际调用后才获得 pinned bounded instruction body。
-12. MCP 显式绑定语义完全不变，现有 MCP agent/user/raw projection 分层不回归。
-13. 前后端和相关后端/Rust门禁通过，实际本地 smoke 通过。
-14. 文档、索引、CHANGELOG 与实现状态一致。
-15. `prod` 未修改或部署。
+9. `skill_result` 由独立 stager 写私有 deterministic file，只在 Agent outcome CAS 中原子公开 metadata；owner-only 下载、24 小时 orphan janitor、no-loser-delete 与不参与业务 supersede 均成立。
+10. invalid/spill/projection 故障提交 typed failed outcome，不产生 `execution_crash` 或 reserved-result 残留。
+11. delegated Skill 不重复 activation。
+12. contract-v2 PublicSkillProfile 足以回答公开参数、输入格式、默认值、约束和输出格式；soft-binding 首轮不含 raw `SKILL.md`，delegated Skill 被实际调用后才获得 pinned bounded instruction body。
+13. MCP 显式绑定语义完全不变，现有 MCP agent/user/raw projection 分层不回归。
+14. 前后端和相关后端/Rust门禁通过，实际本地 smoke 通过。
+15. 文档、索引、CHANGELOG 与实现状态一致。
+16. `prod` 未修改或部署。
 
 License Requirement：复用现有 Python、Rust/Runtime Sidecar、FastAPI/Pydantic、React/TypeScript、Agent Loop、PublicSkillProfile、MCP projection budget、managed Artifact store 与 Skill runtime 能力；不新增第三方依赖或许可类型。
 
