@@ -90,6 +90,7 @@ API不得新增Task waiting status。状态不一致为fatal consistency error�
 | `agent.run.lease_lost` | audit | closed phase/reason、lease revision；无token |
 | `agent.run.completed/failed/cancelled` | frontend/audit | terminal outcome、counts、duration |
 | `agent.reasoning_delta` | transient | delta、ordinal、sample ID；不得durable |
+| `agent.reasoning_reset` | transient | 精确 `{sample_id}`；只回滚失败 attempt 的当前 sample |
 
 现有Node、MCP、Skill、`main_agent.output_delta/final`和fallback events继续生效。新路径不产生
 `planner.reasoning_delta`/`soft_skill.reasoning_delta`。
@@ -105,7 +106,9 @@ Waiting Task不占model/capability worker，但仍受Task资源和MCP lease配�
 ## 8. Frontend行为
 
 - 保持现有消息、Task progress、approval dialog、Interrupt、Artifact/download和history体验；
-- reasoning只渲染transient `agent.reasoning_delta`；tool result不渲染为assistant answer；
+- reasoning只渲染transient `agent.reasoning_delta`；匹配的 `agent.reasoning_reset` 只回滚当前
+  sample，二者都不持久化或replay；tool result不渲染为assistant answer；
+- Runner与Frontend各限制524,288 UTF-8 bytes，超限只保留一次固定截断提示；
 - 多waiting按event的interrupt/node ID逐个呈现，回答后若仍waiting继续显示；
 - refresh/reconnect从Task graph/history/open Interrupt恢复，不依赖DAG edges；
 - final delta重放按event ID去重；

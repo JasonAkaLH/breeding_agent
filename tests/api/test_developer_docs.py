@@ -100,6 +100,7 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("schemas/", response.text)
         self.assertIn("config.yaml", response.text)
         self.assertIn("agent.reasoning_delta", response.text)
+        self.assertIn("agent.reasoning_reset", response.text)
         self.assertIn("agent.run.completed", response.text)
         self.assertIn("文件产物判定规则", response.text)
         self.assertIn("sandbox:/mnt/data", response.text)
@@ -150,6 +151,7 @@ class DeveloperDocsAPITest(APITestCase):
             "node.ready_to_resume",
             "node.resuming",
             "agent.reasoning_delta",
+            "agent.reasoning_reset",
             "interrupt.reasoning_delta",
             "memory.reasoning_delta",
             "agent.run.waiting",

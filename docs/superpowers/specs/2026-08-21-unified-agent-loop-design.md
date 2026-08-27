@@ -803,10 +803,11 @@ TaskNode/Skill/MCP progress，但不渲染 tool result 为 assistant answer。
 | `agent.context.compacted` | audit | covered range/digest、token counts、duration、outcome |
 | `agent.run.completed/failed/cancelled` | frontend/audit | terminal outcome、sample/tool/compaction counts、duration |
 | `agent.reasoning_delta` | transient frontend | delta、ordinal、sample ID；不得 durable persist content |
+| `agent.reasoning_reset` | transient frontend | 精确 `{sample_id}`；回滚失败 attempt 的当前 sample；不得 durable |
 
 现有 `node.*`、MCP、Skill、`main_agent.output_delta/final` 和 capability fallback事件继续生效。
 `planner.reasoning_delta`、`soft_skill.reasoning_delta` 不再由新任务产生；Frontend改为消费
-`agent.reasoning_delta`。事件、audit和日志不得保存完整 prompt、assistant observation、tool arguments/result或
+`agent.reasoning_delta`，并以 `agent.reasoning_reset` 清除失败 attempt 的已展示文本。事件、audit和日志不得保存完整 prompt、assistant observation、tool arguments/result或
 Skill instructions，只保存 closed code、计数、大小和 digest。
 
 ### 15.2 指标

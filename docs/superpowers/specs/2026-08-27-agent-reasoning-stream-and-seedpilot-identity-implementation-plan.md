@@ -4,7 +4,7 @@
 
 设计提交：`361430d`；两轮 perfectization 提交：`2cd4b02`
 
-状态：`ready_for_implementation`
+状态：`checkpoint_d_validation`
 目标分支：`main`
 
 ## 1. 完成声明

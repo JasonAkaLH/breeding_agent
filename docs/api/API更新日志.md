@@ -8,6 +8,18 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-27 增量：Agent reasoning 真正流式展示与 SeedPilot 身份恢复
+
+thinking 开启时，Provider `reasoning_content` 现在按原始顺序转换为当前 Task 的
+`agent.reasoning_delta`，payload 精确为 `delta` / `ordinal` / `sample_id`。若已展示 reasoning 的
+model attempt 因协议重试、取消或流异常失败，服务端发送 `agent.reasoning_reset`，payload 精确为
+`{sample_id}`；客户端只回滚该 sample，保留此前已成功 sample 的思考文本。
+
+两个 reasoning 事件都只走 owner-authenticated transient SSE，不写入 Message、AgentItem、EventRecord、
+Conversation Memory、Artifact、audit 或最终回答，刷新和历史恢复也不 replay。Runner 与前端各自限制
+524,288 UTF-8 bytes，超限只展示一次“思考内容过长，已截断”。用户可见助手身份回复为
+“育种助手（SeedPilot）”；“统一 Agent”仅是内部执行机制名称。HTTP endpoint 与持久化 schema 无变化。
+
 ## 2026-08-23 增量：统一Agent Loop clean cutover
 
 `POST /api/v1/conversations/chat-messages`点名公开Skill时，客户端直接提交`routing_mode=force_capability`和当前`capability_id=skill.*`；不再提交`main_agent.respond`或`metadata.soft_skill_binding`。点名`mcp.dispatch`仍必须使用已验证的`metadata.mcp_server_binding`，Server authority由后端固定，模型不可改写。
