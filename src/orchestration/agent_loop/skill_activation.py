@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from src.integrations.agent_skills.public_profile import PublicSkillProfile
-from src.storage.agent_payload import canonicalize_agent_payload
+from src.storage.agent_payload import CanonicalAgentPayload, canonicalize_agent_payload
 
 from .models import AgentItem, AgentItemKind, AgentItemState, AgentRun
 
@@ -19,6 +19,97 @@ class SkillActivationCommitPort(Protocol):
 class DelegatedSkillActivation:
     item: AgentItem
     profile_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalSkillActivation:
+    binding_mode: str
+    capability_id: str
+    pinned_bundle_revision: str
+    profile_digest: str
+    payload_json: str
+    payload_sha256: str
+    size_bytes: int
+
+
+def build_canonical_skill_activation(
+    *,
+    binding_mode: str,
+    profile: PublicSkillProfile,
+    pinned_bundle_revision: str,
+    resolved_bundle_revision: str,
+) -> CanonicalSkillActivation:
+    mode = str(binding_mode).strip()
+    if mode not in {"hint", "delegated"}:
+        raise ValueError("agent_skill_activation_binding_mode_invalid")
+    revision = str(pinned_bundle_revision).strip()
+    if not revision or revision != str(resolved_bundle_revision).strip():
+        raise ValueError("agent_skill_pinned_revision_mismatch")
+    safe_profile = _safe_profile(profile)
+    profile_payload = canonicalize_agent_payload(safe_profile)
+    payload = canonicalize_agent_payload(
+        {
+            "binding_mode": mode,
+            "pinned_bundle_revision": revision,
+            "profile": safe_profile,
+            "profile_digest": profile_payload.sha256,
+        }
+    )
+    return _activation_from_payload(
+        binding_mode=mode,
+        capability_id=profile.capability_id,
+        pinned_bundle_revision=revision,
+        profile_digest=profile_payload.sha256,
+        payload=payload,
+    )
+
+
+def build_skill_activation_item(
+    *,
+    run: AgentRun,
+    sequence: int,
+    activation: CanonicalSkillActivation,
+    committed_at: datetime,
+) -> AgentItem:
+    if sequence != run.next_item_sequence:
+        raise ValueError("agent_skill_activation_sequence_mismatch")
+    identity = hashlib.sha256(
+        (
+            f"{run.run_id}\0{activation.capability_id}\0"
+            f"{activation.pinned_bundle_revision}"
+        ).encode()
+    ).hexdigest()[:24]
+    return AgentItem(
+        item_id=f"agent-item:{run.run_id}:skill-activation:{identity}",
+        run_id=run.run_id,
+        task_id=run.task_id,
+        sequence=sequence,
+        kind=AgentItemKind.SKILL_ACTIVATION,
+        state=AgentItemState.COMMITTED,
+        payload_json=activation.payload_json,
+        payload_sha256=activation.payload_sha256,
+        created_at=committed_at,
+        committed_at=committed_at,
+    )
+
+
+def _activation_from_payload(
+    *,
+    binding_mode: str,
+    capability_id: str,
+    pinned_bundle_revision: str,
+    profile_digest: str,
+    payload: CanonicalAgentPayload,
+) -> CanonicalSkillActivation:
+    return CanonicalSkillActivation(
+        binding_mode=binding_mode,
+        capability_id=capability_id,
+        pinned_bundle_revision=pinned_bundle_revision,
+        profile_digest=profile_digest,
+        payload_json=payload.json_text,
+        payload_sha256=payload.sha256,
+        size_bytes=payload.size_bytes,
+    )
 
 
 class DelegatedSkillActivationService:
@@ -65,39 +156,19 @@ class DelegatedSkillActivationService:
         pinned_bundle_revision: str,
         resolved_bundle_revision: str,
     ) -> tuple[AgentItem, str]:
-        if (
-            not pinned_bundle_revision.strip()
-            or pinned_bundle_revision != resolved_bundle_revision
-        ):
-            raise ValueError("agent_skill_pinned_revision_mismatch")
-        if sequence != run.next_item_sequence:
-            raise ValueError("agent_skill_activation_sequence_mismatch")
-        safe_profile = _safe_profile(profile)
-        profile_payload = canonicalize_agent_payload(safe_profile)
-        payload = canonicalize_agent_payload(
-            {
-                "pinned_bundle_revision": pinned_bundle_revision,
-                "profile": safe_profile,
-                "profile_digest": profile_payload.sha256,
-            }
+        activation = build_canonical_skill_activation(
+            binding_mode="delegated",
+            profile=profile,
+            pinned_bundle_revision=pinned_bundle_revision,
+            resolved_bundle_revision=resolved_bundle_revision,
         )
-        identity = hashlib.sha256(
-            f"{run.run_id}\0{profile.capability_id}\0{pinned_bundle_revision}".encode()
-        ).hexdigest()[:24]
-        now = self._now()
-        item = AgentItem(
-            item_id=f"agent-item:{run.run_id}:skill-activation:{identity}",
-            run_id=run.run_id,
-            task_id=run.task_id,
+        item = build_skill_activation_item(
+            run=run,
             sequence=sequence,
-            kind=AgentItemKind.SKILL_ACTIVATION,
-            state=AgentItemState.COMMITTED,
-            payload_json=payload.json_text,
-            payload_sha256=payload.sha256,
-            created_at=now,
-            committed_at=now,
+            activation=activation,
+            committed_at=self._now(),
         )
-        return item, profile_payload.sha256
+        return item, activation.profile_digest
 
 
 def _safe_profile(profile: PublicSkillProfile) -> dict[str, Any]:

@@ -59,6 +59,10 @@ input_schemas:
 outputs:
   demo_output:
     required: [response_text]
+    artifacts:
+      - extensions: [.json]
+        mime_types: [application/json]
+        storage_key: must-not-leak
 resources:
   usage:
     path: references/usage.md
@@ -82,6 +86,34 @@ inputs:
       supported_file_types: [csv]
       helpful_columns: [ped_id]
       disambiguation_hint: 优先选择材料表。
+  mode:
+    type: string
+    title: 模式
+    description: 处理模式
+    aliases: [运行模式]
+    default: summary
+    enum: [summary, full]
+    question: 请选择处理模式。
+    clarification:
+      examples: [summary]
+  max_results:
+    type: integer
+    title: 最大结果数
+    description: 最多返回多少条结果。
+    required_when: {mode: full}
+    default: 30
+    validation: {min: 1, max: 100, regex: must-not-leak}
+    source: {allowed: [llm]}
+    patterns: ['\\d+']
+  internal_token:
+    type: string
+    expose: false
+    default: secret-value
+constraints:
+  - any_of: [material_file, mode]
+  - dependencies: {max_results: [mode]}
+slot_policy: {max_rounds: 3}
+entrypoint_mapping: run
 """,
             encoding="utf-8",
         )
@@ -101,6 +133,43 @@ inputs:
         self.assertEqual(profile["display_name"], "演示 Skill")
         self.assertEqual(profile["resource_index"][0]["resource_id"], "usage")
         self.assertEqual(profile["schema_summaries"][0]["schema_id"], "demo_input")
+        fields = profile["schema_summaries"][0]["fields"]
+        self.assertEqual([field["name"] for field in fields], ["material_file", "max_results", "mode"])
+        max_results = fields[1]
+        self.assertEqual(max_results["default"], 30)
+        self.assertEqual(max_results["required_when"], {"mode": "full"})
+        self.assertEqual(max_results["validation"], {"max": 100.0, "min": 1.0})
+        self.assertEqual(fields[2]["clarification"], {"examples": ["summary"]})
+        self.assertNotIn("internal_token", payload)
+        self.assertNotIn('"source":', payload)
+        self.assertNotIn("patterns", payload)
+        self.assertNotIn("regex", payload)
+        self.assertNotIn("slot_policy", payload)
+        self.assertNotIn("entrypoint_mapping", payload)
+        self.assertEqual(
+            profile["schema_summaries"][0]["constraints"],
+            [
+                {"any_of": ["material_file", "mode"]},
+                {"dependencies": {"max_results": ["mode"]}},
+            ],
+        )
+        self.assertEqual(
+            profile["outputs"],
+            {
+                "output_contracts": [
+                    {
+                        "artifacts": [
+                            {
+                                "extensions": [".json"],
+                                "mime_types": ["application/json"],
+                            }
+                        ],
+                        "output_id": "demo_output",
+                        "required_fields": ["response_text"],
+                    }
+                ]
+            },
+        )
         self.assertTrue(profile["file_selection"]["required"])
         self.assertEqual(profile["file_selection_summaries"][0]["field"], "material_file")
         tool_schemas = build_tool_input_schemas_from_profiles([profile])
@@ -129,6 +198,42 @@ inputs:
         self.assertNotIn("scripts/", serialized)
         self.assertNotIn("handler", serialized)
         self.assertNotIn("platform_service", serialized)
+
+    def test_unknown_constraint_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = self._write_v2_skill(root)
+            schema_path = skill_dir / "schemas" / "demo.input.yaml"
+            schema_path.write_text(
+                schema_path.read_text(encoding="utf-8")
+                + "\nconstraints:\n  - unsupported_shape: [mode]\n",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+            manifest = catalog.get("demo-skill")
+            assert manifest is not None
+
+            with self.assertRaisesRegex(ValueError, "constraint"):
+                build_public_skill_profile(manifest, capability_id="skill.demo")
+
+    def test_forbidden_strict_json_default_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = self._write_v2_skill(root)
+            schema_path = skill_dir / "schemas" / "demo.input.yaml"
+            schema_path.write_text(
+                schema_path.read_text(encoding="utf-8").replace(
+                    "default: 30",
+                    "default: {storage_key: private}",
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+            manifest = catalog.get("demo-skill")
+            assert manifest is not None
+
+            with self.assertRaisesRegex(ValueError, "forbidden"):
+                build_public_skill_profile(manifest, capability_id="skill.demo")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -10,7 +11,7 @@ from .manifest import SkillManifest
 
 _FORBIDDEN_KEY_PARTS = (
     "source_path", "script", "handler", "handler_module", "handler_factory", "runtime", "sidecar", "endpoint",
-    "base_url", "url", "dsn", "token", "secret", "password", "api_key", "authorization", "config", "module", "path", "sql",
+    "base_url", "url", "dsn", "token", "secret", "password", "api_key", "authorization", "config", "module", "path", "storage", "sql",
 )
 _FORBIDDEN_TEXT_PARTS = (
     "scripts/", "runtime/", "python_subprocess", "platform_service", "handler", "config.yaml", "mysql://",
@@ -63,10 +64,13 @@ def build_public_skill_profile(
     if manifest.contract is not None:
         contract = manifest.contract
         resolved_capability_id = contract.capability.id
+        if capability_id != resolved_capability_id:
+            raise ValueError("public_skill_profile_capability_mismatch")
+        schemas = load_input_schemas_for_contract(contract)
         display_name = _public_text(contract.capability.display_name, fallback=manifest.name)
         description = _public_text(contract.capability.description or manifest.description)
         file_selection = _public_file_selection(contract)
-        file_selection_summaries = _public_file_selection_summaries(contract)
+        file_selection_summaries = _public_file_selection_summaries(schemas)
         return PublicSkillProfile(
             capability_id=resolved_capability_id,
             name=_public_text(manifest.name, fallback=resolved_capability_id),
@@ -79,7 +83,7 @@ def build_public_skill_profile(
                 **({"file_selection": file_selection} if file_selection else {}),
                 **({"file_selection_summaries": list(file_selection_summaries)} if file_selection_summaries else {}),
             },
-            outputs={"output_contracts": sorted(contract.outputs)},
+            outputs={"output_contracts": _public_output_contracts(contract)},
             public_usage={},
             resource_index=tuple(
                 {
@@ -91,15 +95,7 @@ def build_public_skill_profile(
                 for resource in contract.resources.values()
                 if any(item in {"main_agent", "slot_question"} for item in resource.audience)
             ),
-            schema_summaries=tuple(
-                {
-                    "schema_id": ref.schema_id,
-                    "title": _public_text(ref.title, fallback=ref.schema_id),
-                    "description": _public_text(ref.description),
-                    "aliases": list(_public_text_tuple(ref.aliases)),
-                }
-                for ref in contract.input_schemas.values()
-            ),
+            schema_summaries=_public_schema_summaries(contract, schemas),
             routing_examples=_public_text_tuple(contract.routing.examples),
             file_selection=file_selection,
             file_selection_summaries=file_selection_summaries,
@@ -142,11 +138,7 @@ def _public_file_selection(contract: Any) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value not in (False, "", [], {})}
 
 
-def _public_file_selection_summaries(contract: Any) -> tuple[dict[str, Any], ...]:
-    try:
-        schemas = load_input_schemas_for_contract(contract)
-    except Exception:
-        return ()
+def _public_file_selection_summaries(schemas: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
     summaries: list[dict[str, Any]] = []
     for schema in schemas.values():
         for input_field in schema.inputs.values():
@@ -178,6 +170,181 @@ def _public_file_selection_summaries(contract: Any) -> tuple[dict[str, Any], ...
                 summary["description"] = _public_text(input_field.description)
             summaries.append({key: value for key, value in summary.items() if value not in (False, "", [], {})})
     return tuple(summaries)
+
+
+def _public_schema_summaries(contract: Any, schemas: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    summaries: list[dict[str, Any]] = []
+    for schema_id in sorted(contract.input_schemas):
+        ref = contract.input_schemas[schema_id]
+        schema = schemas.get(schema_id)
+        if schema is None:
+            raise ValueError("public_skill_profile_schema_missing")
+        exposed_names = {
+            field.name for field in schema.inputs.values() if field.expose
+        }
+        fields = [
+            _public_input_field(field, exposed_names=exposed_names)
+            for field in sorted(schema.inputs.values(), key=lambda item: item.name)
+            if field.expose
+        ]
+        summaries.append(
+            {
+                "schema_id": schema_id,
+                "title": _public_text(ref.title or schema.title, fallback=schema_id),
+                "description": _public_text(ref.description or schema.description),
+                "aliases": list(_public_text_tuple(ref.aliases)),
+                "fields": fields,
+                "constraints": _public_constraints(
+                    schema.constraints,
+                    exposed_names=exposed_names,
+                ),
+            }
+        )
+    return tuple(summaries)
+
+
+def _public_input_field(field: Any, *, exposed_names: set[str]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": field.name,
+        "type": field.type,
+        "required": bool(field.required),
+    }
+    for key in ("title", "description", "question"):
+        value = _public_text(getattr(field, key, ""))
+        if value:
+            payload[key] = value
+    aliases = _public_text_tuple(field.aliases)
+    if aliases:
+        payload["aliases"] = list(aliases)
+    if field.required_when:
+        unknown = set(field.required_when) - exposed_names
+        if unknown:
+            raise ValueError("public_skill_profile_required_when_hidden_field")
+        payload["required_when"] = _strict_public_json(field.required_when)
+    if field.default is not None:
+        payload["default"] = _strict_public_json(field.default)
+    if field.enum:
+        payload["enum"] = _strict_public_json(list(field.enum))
+    if field.const is not None:
+        payload["const"] = _strict_public_json(field.const)
+    examples = _public_text_tuple(field.clarification.examples)
+    if examples:
+        payload["clarification"] = {"examples": list(examples)}
+    validation = {
+        key: value
+        for key, value in {
+            "min": field.validation.min,
+            "max": field.validation.max,
+            "min_length": field.validation.min_length,
+            "max_length": field.validation.max_length,
+            "file_extensions": list(field.validation.file_extensions),
+        }.items()
+        if value not in (None, [], ())
+    }
+    if validation:
+        payload["validation"] = _strict_public_json(validation)
+    file_selection = {
+        key: value
+        for key, value in {
+            "required": bool(field.file_selection.required),
+            "allow_multiple": bool(field.file_selection.allow_multiple),
+            "expected_content": list(_public_text_tuple(field.file_selection.expected_content)),
+            "supported_file_types": list(_public_text_tuple(field.file_selection.supported_file_types)),
+            "helpful_columns": list(_public_text_tuple(field.file_selection.helpful_columns)),
+            "disambiguation_hint": _public_text(field.file_selection.disambiguation_hint),
+        }.items()
+        if value not in (False, "", [], {})
+    }
+    if file_selection:
+        payload["file_selection"] = file_selection
+    return payload
+
+
+def _public_constraints(
+    constraints: tuple[Mapping[str, Any], ...],
+    *,
+    exposed_names: set[str],
+) -> list[dict[str, Any]]:
+    supported = {"any_of", "one_of", "mutually_exclusive", "dependencies"}
+    normalized: list[dict[str, Any]] = []
+    for constraint in constraints:
+        unknown = set(constraint) - supported
+        if unknown or not constraint:
+            raise ValueError("public_skill_profile_constraint_unsupported")
+        item: dict[str, Any] = {}
+        for key in ("any_of", "one_of", "mutually_exclusive"):
+            if key not in constraint:
+                continue
+            fields = tuple(sorted(_public_text_tuple(constraint.get(key))))
+            if not fields or any(field not in exposed_names for field in fields):
+                raise ValueError("public_skill_profile_constraint_field_invalid")
+            item[key] = list(fields)
+        if "dependencies" in constraint:
+            dependencies = constraint.get("dependencies")
+            if not isinstance(dependencies, Mapping):
+                raise ValueError("public_skill_profile_constraint_dependencies_invalid")
+            public_dependencies: dict[str, list[str]] = {}
+            for field_name in sorted(str(key) for key in dependencies):
+                required = tuple(sorted(_public_text_tuple(dependencies[field_name])))
+                if (
+                    field_name not in exposed_names
+                    or not required
+                    or any(name not in exposed_names for name in required)
+                ):
+                    raise ValueError("public_skill_profile_constraint_field_invalid")
+                public_dependencies[field_name] = list(required)
+            item["dependencies"] = public_dependencies
+        if not item:
+            raise ValueError("public_skill_profile_constraint_unsupported")
+        normalized.append(item)
+    return normalized
+
+
+def _public_output_contracts(contract: Any) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for output_id in sorted(contract.outputs):
+        output = contract.outputs[output_id]
+        artifacts: list[dict[str, Any]] = []
+        for artifact in output.artifacts:
+            summary = {
+                key: list(_public_text_tuple(artifact.get(key)))
+                for key in ("extensions", "mime_types")
+                if _public_text_tuple(artifact.get(key))
+            }
+            if summary:
+                artifacts.append(summary)
+        summaries.append(
+            {
+                "output_id": output.output_id,
+                "required_fields": list(_public_text_tuple(output.required)),
+                "artifacts": artifacts,
+            }
+        )
+    return summaries
+
+
+def _strict_public_json(value: Any) -> Any:
+    if value is None or isinstance(value, str | bool | int):
+        if isinstance(value, str) and _contains_forbidden_text(value):
+            raise ValueError("public_skill_profile_forbidden_text")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("public_skill_profile_non_finite_number")
+        return value
+    if isinstance(value, list | tuple):
+        return [_strict_public_json(item) for item in value]
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError("public_skill_profile_non_string_key")
+            key_text = key.strip()
+            if not key_text or _is_forbidden_key(key_text):
+                raise ValueError("public_skill_profile_forbidden_key")
+            normalized[key_text] = _strict_public_json(child)
+        return {key: normalized[key] for key in sorted(normalized)}
+    raise ValueError("public_skill_profile_non_json_value")
 
 
 def _public_text(value: Any, *, fallback: str = "") -> str:

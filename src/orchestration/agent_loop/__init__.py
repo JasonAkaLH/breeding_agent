@@ -18,9 +18,12 @@ from .tool_catalog import (
     default_agent_invocation_policy,
 )
 from .skill_activation import (
+    CanonicalSkillActivation,
     DelegatedSkillActivation,
     DelegatedSkillActivationService,
     SkillActivationCommitPort,
+    build_canonical_skill_activation,
+    build_skill_activation_item,
 )
 from .mcp_binding import RunBoundMCPTextGenerator
 from .context import AgentContextBuilder, AgentContextRules
@@ -128,6 +131,9 @@ __all__ = [
     "DelegatedSkillActivation",
     "DelegatedSkillActivationService",
     "SkillActivationCommitPort",
+    "CanonicalSkillActivation",
+    "build_canonical_skill_activation",
+    "build_skill_activation_item",
     "RunBoundMCPTextGenerator",
     "AgentContextBuilder",
     "AgentContextRules",

@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 统一Agent Loop Skill soft binding Checkpoint A已完成：contract-v2 `PublicSkillProfile`从pinned input schema确定性投影exposed字段、公开validation/file-selection、闭合constraints和output Artifact摘要，hidden/source/regex/runtime/storage等内部字段fail closed；新增唯一canonical activation builder，固定`binding_mode/pinned_bundle_revision/profile/profile_digest`四键、完整131,072-byte外壳边界，并让delegated activation复用同一codec。定向8项与Ruff通过；Checkpoint B～H、镜像和部署仍未完成，`prod`未变。License Requirement：复用现有Python合同与canonical payload工具，无新增依赖或许可变化。
+
 - 统一Agent Loop Skill soft binding回归实施计划已成文：以当前`main@81a8ec1`为基线，按PublicSkillProfile/canonical activation、prepared execution v2精确双读与v2-only writer、SQLite/PostgreSQL/Runtime Sidecar原子user+activation初始化、Context/Tool choice、hint admission与历史PendingSkillContext exact consumed/superseded transition、delegated instruction、唯一Capability结果projector、`skill_result.json`私有staging+Agent outcome CAS+terminal event reconciliation+24小时janitor、Frontend锁步切换和最终全量/真实smoke九个检查点执行。计划锁定422/409零submission副作用、hint全恢复入口保持auto、20,000 code points/80,000 UTF-8 bytes/131,072 bytes三层预算、CAS前不可发现与owner-only下载、typed failure无reserved残留，以及前后端/Sidecar成对发布回滚；当前仅计划、索引和design状态同步，业务代码、测试、镜像与部署尚未开始，`prod`不变。License Requirement：仅文档变更，无新增依赖或许可变化。
 
 - 首次空白对话`high`思考强度默认rollout已`complete`：`8f05818`只将`App.tsx`的React `reasoningEffort`初始值从`minimal`改为`high`，并锁定首次`false+high`提交与新建对话继承；`131e1e6`收敛一条已多余的旧测试选择操作。Frontend 24 files/331 tests、typecheck、build和diff-check通过，仅保留既有2条React act警告和>500 kB chunk警告。`config.yaml` digest前后一致，API仍返回5模型/2豆包；只重建建frontend，backend/Sidecar ID不变。浏览器确认首次“关+高”，改为“开+最高”后新建对话继承，豆包Pro/Turbo仍可见。`config.yaml`、`docker_cmd.md`仍ignored/untracked，`prod`未更新。License Requirement：无新增依赖、第三方代码或许可变化。
