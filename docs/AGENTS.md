@@ -51,7 +51,7 @@
 - `superpowers/specs/2026-08-26-p0-data-flow-hard-defect-repair-design.md`：已批准方案A并以96/100完成书面自审的四项P0硬伤手术式修复设计；Checkpoint B当前lease提交与C remote terminal单向约束已完成，A的原SQL-only假设已被双authority证据否定并由下述方案1规格接管；三项P1和其他deferred behavior仍明确排除。
 - `superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md`：用户已批准方案1、经多轮实施挑战修正跨crash内部矛盾后以98/100 ready的Checkpoint A替代规格；A1～A5已完成Core/9-RPC、Sidecar SQLite authority、Python/SQL admission projection、durable prepared+Agent handoff recovery及全局Message/Interrupt identity，A6～A7继续覆盖delete/migration与最终证明；不迁移完整Conversation/Message，不纳入P1、Frontend、部署或`prod`。
 - `superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-implementation-plan.md`：上述批准规格的A1～A7自主实施计划；A1～A5已逐检查点闭合，下一步仅做delete coordination、离线migration cutover和最终fault/full proof；production-mode接线仍须在A6全部delete/v2 evidence闭合后执行。
-- `superpowers/specs/2026-08-27-four-role-llm-message-contract-design.md`：待用户书面复核的四角色模型消息合同；系统仅保留`system/assistant/user/tool`，现有developer语义统一并入system，不按模型启用developer，也不增加运行时外部探测。
+- `superpowers/specs/2026-08-27-four-role-llm-message-contract-design.md`：用户已批准并以第二轮`100/100 Pass`通过信心门的四角色模型消息合同；系统仅保留`system/assistant/user/tool`，现有developer逐条一对一改为system，不按模型启用developer，也不增加运行时外部探测。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。
@@ -79,7 +79,7 @@
 | `superpowers/specs/2026-08-26-p0-data-flow-hard-defect-repair-design.md` | 方案A已批准；Checkpoint B、C已实施；A原SQL-only设计已被双authority证据否定 | A只按下述Sidecar admission替代规格恢复；不得回到跨系统半提交、暗写SQL Task或进程锁。三项P1、Frontend和`prod`仍排除。 |
 | `superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-design.md` | 方案1书面规格已批准；A1～A5已完成并独立终审0 Blocking/0 Major | 严格继续A6～A7；只允许delete coordination、migration evidence与最终证明，不执行部署或`prod`。 |
 | `superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-implementation-plan.md` | A1～A5已完成：Core/9-RPC、Sidecar authority、SQL投影、durable prepared+Agent handoff recovery及全局Message/Interrupt identity均green；A5真实PostgreSQL双连接、API/Storage/Integrations全量通过 | 从A6继续逐检查点红测、最小实现、focused green和独立commit；最终以Backend/Rust/真实PostgreSQL全量证明闭合。 |
-| `superpowers/specs/2026-08-27-four-role-llm-message-contract-design.md` | 用户已确定四角色方向；书面设计待复核，代码尚未实施 | 复核后生成实施计划；只迁移developer到system并闭合配置/DTO/provider边界与回归，不扩展模型探测或其他错误处理。 |
+| `superpowers/specs/2026-08-27-four-role-llm-message-contract-design.md` | 用户已批准；第二轮信心审查`100/100 Pass`，代码尚未实施 | 生成实施计划；只迁移developer到system并闭合配置/DTO/provider边界与回归，不扩展模型探测或其他错误处理。 |
 | `prd/backend/unified-agent-loop/README.md`（来源：统一Agent Loop架构与PRD decomposition design） | `complete`；当前任务编排authority | r3/r4备份继续保留到用户明确结束rollback窗口；后续变更须维持单Agent控制面与Agent-only schema。 |
 | `个人桌面长任务Agent总体设计总纲.md` | 总纲已确认；实现尚未开始 | 基于该总纲生成分阶段实施计划；个人版以 Rust daemon 为唯一可信控制 runtime，必须支持受控子 Agent spawn 以及主 Agent 决策、Runtime 仲裁的权限/上下文/交接边界，一次性替换服务端架构，旧历史只读导入。 |
 | `prd/backend/capability-missing-fallback/README.md`（父入口：`prd/backend/23-能力缺失LLMFallback披露PRD.md`） | Phase 0 至 Phase 4 代码实现已落地 | 后续仅在新增 fallback reason、artifact 政策或能力注册语义时同步更新 PRD、sanitizer、前端 notice 与测试矩阵。 |
