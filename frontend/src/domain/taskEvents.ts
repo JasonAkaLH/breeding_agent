@@ -158,6 +158,9 @@ export interface TaskEventState {
   memoryReasoningText: string;
   interruptReasoningText: string;
   answerReasoningText: string;
+  answerReasoningSampleId: string | null;
+  answerReasoningSampleStart: number;
+  reasoningTruncated: boolean;
   errorMessage: string | null;
   fallbackNotice: CapabilityFallbackNotice | null;
   agentWaiting: AgentWaitingState[];
@@ -182,6 +185,9 @@ export function createInitialTaskEventState(): TaskEventState {
     memoryReasoningText: '',
     interruptReasoningText: '',
     answerReasoningText: '',
+    answerReasoningSampleId: null,
+    answerReasoningSampleStart: 0,
+    reasoningTruncated: false,
     errorMessage: null,
     fallbackNotice: null,
     agentWaiting: [],
@@ -405,19 +411,54 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
       return markNodeResumeProgress(withEvent, event, '正在恢复执行', '正在恢复执行', '正在恢复执行');
     case 'agent.reasoning_delta': {
       const delta = event.payload.delta as string;
-      const answerReasoningText = `${state.answerReasoningText}${delta}`;
+      const sampleId = event.payload.sample_id as string;
+      const sampleStart = state.answerReasoningSampleId === sampleId
+        ? state.answerReasoningSampleStart
+        : state.answerReasoningText.length;
+      let answerReasoningText = state.answerReasoningText;
+      let reasoningTruncated = state.reasoningTruncated;
+      if (delta === AGENT_REASONING_TRUNCATED_MARKER) {
+        reasoningTruncated = true;
+      } else if (!reasoningTruncated) {
+        const candidate = `${answerReasoningText}${delta}`;
+        if (textEncoder.encode(candidate).length <= MAX_AGENT_REASONING_BYTES) {
+          answerReasoningText = candidate;
+        } else {
+          answerReasoningText = truncateUtf8(candidate, MAX_AGENT_REASONING_CONTENT_BYTES);
+          reasoningTruncated = true;
+        }
+      }
       return {
         ...withEvent,
         phase: 'streaming',
         statusText: '正在思考并生成答案',
         currentActivityText: null,
         answerReasoningText,
+        answerReasoningSampleId: sampleId,
+        answerReasoningSampleStart: sampleStart,
+        reasoningTruncated,
         reasoningText: composeReasoningText({
           memory: state.memoryReasoningText,
           interrupt: state.interruptReasoningText,
-          answer: answerReasoningText,
+          answer: reasoningAnswerForDisplay(answerReasoningText, reasoningTruncated),
         }),
         errorMessage: null,
+      };
+    }
+    case 'agent.reasoning_reset': {
+      const sampleId = event.payload.sample_id as string;
+      if (sampleId !== state.answerReasoningSampleId) return withEvent;
+      const answerReasoningText = state.answerReasoningText.slice(0, state.answerReasoningSampleStart);
+      return {
+        ...withEvent,
+        answerReasoningText,
+        answerReasoningSampleId: null,
+        answerReasoningSampleStart: answerReasoningText.length,
+        reasoningText: composeReasoningText({
+          memory: state.memoryReasoningText,
+          interrupt: state.interruptReasoningText,
+          answer: reasoningAnswerForDisplay(answerReasoningText, state.reasoningTruncated),
+        }),
       };
     }
     case 'memory.reasoning_delta': {
@@ -432,7 +473,7 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         reasoningText: composeReasoningText({
           memory: memoryReasoningText,
           interrupt: state.interruptReasoningText,
-          answer: state.answerReasoningText,
+          answer: reasoningAnswerForDisplay(state.answerReasoningText, state.reasoningTruncated),
         }),
         errorMessage: null,
       };
@@ -449,7 +490,7 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         reasoningText: composeReasoningText({
           memory: state.memoryReasoningText,
           interrupt: interruptReasoningText,
-          answer: state.answerReasoningText,
+          answer: reasoningAnswerForDisplay(state.answerReasoningText, state.reasoningTruncated),
         }),
         errorMessage: null,
       };
@@ -713,6 +754,7 @@ const KNOWN_TASK_EVENT_TYPES = new Set([
   'skill.progress',
   'agent.run.waiting', 'agent.run.resumed', 'agent.run.completed',
   'agent.run.failed', 'agent.run.cancelled', 'agent.reasoning_delta',
+  'agent.reasoning_reset',
 ]);
 
 const AGENT_FRONTEND_EVENT_TYPES = new Set([
@@ -722,6 +764,7 @@ const AGENT_FRONTEND_EVENT_TYPES = new Set([
   'agent.run.failed',
   'agent.run.cancelled',
   'agent.reasoning_delta',
+  'agent.reasoning_reset',
 ]);
 
 const AGENT_OUTCOMES = new Set([
@@ -857,6 +900,10 @@ function isClosedAgentFrontendEvent(
     return hasExactKeys(payload, ['delta', 'ordinal', 'sample_id'])
       && isNonEmptyString(payload.delta)
       && isNonNegativeInteger(payload.ordinal)
+      && isNonEmptyString(payload.sample_id);
+  }
+  if (event.event_type === 'agent.reasoning_reset') {
+    return hasExactKeys(payload, ['sample_id'])
       && isNonEmptyString(payload.sample_id);
   }
   if (event.event_type === 'agent.run.waiting') {
@@ -1324,6 +1371,30 @@ function composeReasoningText(parts: {
     .filter(([, text]) => text)
     .map(([label, text]) => `### ${label}\n${text}`)
     .join('\n\n');
+}
+
+const MAX_AGENT_REASONING_BYTES = 524_288;
+const AGENT_REASONING_TRUNCATED_MARKER = '思考内容过长，已截断';
+const textEncoder = new TextEncoder();
+const MAX_AGENT_REASONING_CONTENT_BYTES = MAX_AGENT_REASONING_BYTES
+  - textEncoder.encode(AGENT_REASONING_TRUNCATED_MARKER).length;
+
+function reasoningAnswerForDisplay(answer: string, truncated: boolean): string {
+  if (!truncated) return answer;
+  return `${answer}${AGENT_REASONING_TRUNCATED_MARKER}`;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const encoded = textEncoder.encode(value);
+  if (encoded.length <= maxBytes) return value;
+  for (let end = maxBytes; end > 0; end -= 1) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(encoded.slice(0, end));
+    } catch {
+      // A valid UTF-8 code point is at most four bytes, so this loop backs up only a few bytes.
+    }
+  }
+  return '';
 }
 
 function markNodeResumeProgress(

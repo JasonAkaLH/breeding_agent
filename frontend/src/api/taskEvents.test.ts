@@ -115,9 +115,16 @@ describe('taskEvents', () => {
       event_type: 'agent.reasoning_delta',
       payload: { delta: '瞬时思考', ordinal: 0, sample_id: 'sample-1' },
     };
+    const reasoningReset = {
+      ...waiting,
+      event_id: 'agent-reasoning-reset-1',
+      event_type: 'agent.reasoning_reset',
+      payload: { sample_id: 'sample-1' },
+    };
 
     expect(parseTaskEventData(JSON.stringify(waiting))).toMatchObject(waiting);
     expect(parseTaskEventData(JSON.stringify(reasoning))).toMatchObject(reasoning);
+    expect(parseTaskEventData(JSON.stringify(reasoningReset))).toMatchObject(reasoningReset);
     expect(parseTaskEventData(JSON.stringify({
       ...waiting,
       payload: { ...waiting.payload, prompt: 'must-not-pass' },
@@ -125,6 +132,10 @@ describe('taskEvents', () => {
     expect(parseTaskEventData(JSON.stringify({
       ...reasoning,
       payload: { ...reasoning.payload, ordinal: -1 },
+    }))).toBeNull();
+    expect(parseTaskEventData(JSON.stringify({
+      ...reasoningReset,
+      payload: { ...reasoningReset.payload, detail: 'must-not-pass' },
     }))).toBeNull();
   });
 

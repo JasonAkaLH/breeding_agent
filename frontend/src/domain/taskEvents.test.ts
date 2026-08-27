@@ -350,8 +350,90 @@ describe('applyTaskEvent', () => {
 
     expect(state.reasoningText).toBe('继续分析工具结果');
     expect(state.answerReasoningText).toBe('继续分析工具结果');
+    expect(state.answerReasoningSampleId).toBe('sample-1');
+    expect(state.answerReasoningSampleStart).toBe(0);
+    expect(state.reasoningTruncated).toBe(false);
     expect(state.assistantText).toBe('');
     expect(state.seenEventIds).toEqual(['agent-reasoning-1']);
+  });
+
+  it('rolls back only the failed Agent sample and ignores stale resets', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('agent.reasoning_delta', {
+      delta: '已完成的分析。', ordinal: 0, sample_id: 'sample-1',
+    }, 'agent-reasoning-1'));
+    state = applyTaskEvent(state, event('agent.reasoning_delta', {
+      delta: '尝试调用工具。', ordinal: 1, sample_id: 'sample-2',
+    }, 'agent-reasoning-2'));
+    const reset = event('agent.reasoning_reset', { sample_id: 'sample-2' }, 'agent-reset-1');
+
+    state = applyTaskEvent(state, reset);
+    const afterDuplicate = applyTaskEvent(state, reset);
+    const afterStale = applyTaskEvent(afterDuplicate, event(
+      'agent.reasoning_reset', { sample_id: 'sample-1' }, 'agent-reset-stale',
+    ));
+
+    expect(state.answerReasoningText).toBe('已完成的分析。');
+    expect(state.reasoningText).toBe('已完成的分析。');
+    expect(state.answerReasoningSampleId).toBeNull();
+    expect(afterDuplicate).toBe(state);
+    expect(afterStale.answerReasoningText).toBe('已完成的分析。');
+  });
+
+  it('keeps the global truncation marker when the current sample is reset', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('agent.reasoning_delta', {
+      delta: '上一次分析。', ordinal: 0, sample_id: 'sample-1',
+    }, 'agent-reasoning-1'));
+    state = applyTaskEvent(state, event('agent.reasoning_delta', {
+      delta: '本次失败分析。', ordinal: 1, sample_id: 'sample-2',
+    }, 'agent-reasoning-2'));
+    state = applyTaskEvent(state, event('agent.reasoning_delta', {
+      delta: '思考内容过长，已截断', ordinal: 2, sample_id: 'sample-2',
+    }, 'agent-reasoning-marker'));
+    state = applyTaskEvent(state, event(
+      'agent.reasoning_reset', { sample_id: 'sample-2' }, 'agent-reset-1',
+    ));
+    state = applyTaskEvent(state, event('agent.reasoning_delta', {
+      delta: '不应继续展示', ordinal: 3, sample_id: 'sample-2',
+    }, 'agent-reasoning-after-limit'));
+
+    expect(state.answerReasoningText).toBe('上一次分析。');
+    expect(state.reasoningTruncated).toBe(true);
+    expect(state.reasoningText).toBe('上一次分析。思考内容过长，已截断');
+  });
+
+  it.each([524_287, 524_288])(
+    'keeps %i UTF-8 bytes without a defensive truncation marker',
+    (size) => {
+      const state = applyTaskEvent(createInitialTaskEventState(), event('agent.reasoning_delta', {
+        delta: 'a'.repeat(size), ordinal: 0, sample_id: `sample-${size}`,
+      }, `agent-reasoning-${size}`));
+
+      expect(state.reasoningTruncated).toBe(false);
+      expect(new TextEncoder().encode(state.reasoningText)).toHaveLength(size);
+    },
+  );
+
+  it('truncates 524,289 UTF-8 bytes to the exact bounded display size', () => {
+    const state = applyTaskEvent(createInitialTaskEventState(), event('agent.reasoning_delta', {
+      delta: 'a'.repeat(524_289), ordinal: 0, sample_id: 'sample-over-limit',
+    }, 'agent-reasoning-over-limit'));
+
+    expect(state.reasoningTruncated).toBe(true);
+    expect(new TextEncoder().encode(state.reasoningText)).toHaveLength(524_288);
+    expect(state.reasoningText.endsWith('思考内容过长，已截断')).toBe(true);
+  });
+
+  it('caps Agent reasoning at a valid UTF-8 boundary and adds one marker', () => {
+    const state = applyTaskEvent(createInitialTaskEventState(), event('agent.reasoning_delta', {
+      delta: '你'.repeat(174_763), ordinal: 0, sample_id: 'sample-large',
+    }, 'agent-reasoning-large'));
+
+    expect(state.reasoningTruncated).toBe(true);
+    expect(state.answerReasoningText).not.toContain('�');
+    expect(new TextEncoder().encode(state.reasoningText).length).toBeLessThanOrEqual(524_288);
+    expect(state.reasoningText.match(/思考内容过长，已截断/g)).toHaveLength(1);
   });
 
   it('tracks multiple Agent waits by interrupt and node until each is resumed', () => {
