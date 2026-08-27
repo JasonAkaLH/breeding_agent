@@ -55,6 +55,7 @@
 - `superpowers/specs/2026-08-27-four-role-llm-message-contract-implementation-plan.md`：上述四角色合同的`complete`实施账本；Agent/config、PromptEnvelope/LLM/provider边界、fixture/当前合同、完整回归和默认模型真实Task均已闭合，未纳入模型探测、异步流告警及其他目标。
 - `superpowers/specs/2026-08-27-thinking-state-reasoning-effort-configuration-design.md`：用户已批准且已实现的thinking状态感知reasoning effort设计；公共选项目录和enabled/disabled独立支持集合/默认值已闭合后端、前端、API、脱敏矩阵与本地UI/API验收，`prod`/外部部署未更新。
 - `superpowers/specs/2026-08-27-thinking-state-reasoning-effort-configuration-implementation-plan.md`：上述设计的`complete`实施账本；Checkpoint A～D对应`4e3962f`、`093b2bf`、`9bc9e81`、`7658a67`，Final Gate lint收口为`e2917b8`；真实矩阵52/52 matched、本地UI/API与完整回归闭合，Git-ignored敏感`config.yaml`仅本地迁移未提交。
+- `superpowers/specs/2026-08-27-agent-reasoning-stream-and-seedpilot-identity-design.md`：用户已批准、待书面复核的统一Agent reasoning实时展示与SeedPilot身份恢复设计；reasoning仅经当前Task transient SSE进入前端、不持久化或进入历史，实际stable rules复用既有SeedPilot合同，Conversation Memory边界保持不变。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。
