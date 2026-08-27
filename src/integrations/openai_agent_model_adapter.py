@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +33,15 @@ class _CallBuffer:
     arguments: str = ""
 
 
+@dataclass(slots=True)
+class _ReasoningAttemptState:
+    published: bool = False
+    delivery_enabled: bool = True
+
+
+_LOGGER = logging.getLogger(__name__)
+
+
 class OpenAIAgentModelAdapter:
     def __init__(
         self,
@@ -54,16 +64,35 @@ class OpenAIAgentModelAdapter:
         last_violation: AgentProtocolViolation | None = None
         for attempt in range(1, self._retry_policy.max_attempts + 1):
             self._raise_if_cancelled(request)
+            reasoning_state = _ReasoningAttemptState()
             try:
                 if self._stream:
-                    return await self._sample_stream(request, attempt=attempt)
-                return await self._sample_non_stream(request, attempt=attempt)
+                    return await self._sample_stream(
+                        request,
+                        attempt=attempt,
+                        reasoning_state=reasoning_state,
+                    )
+                return await self._sample_non_stream(
+                    request,
+                    attempt=attempt,
+                    reasoning_state=reasoning_state,
+                )
             except AgentProtocolViolation as exc:
+                await self._reset_reasoning(request, reasoning_state)
                 last_violation = exc
+            except Exception:
+                await self._reset_reasoning(request, reasoning_state)
+                raise
         assert last_violation is not None
         raise AgentProtocolFailure(last_violation.code, attempts=self._retry_policy.max_attempts)
 
-    async def _sample_stream(self, request: AgentModelRequest, *, attempt: int) -> AgentSample:
+    async def _sample_stream(
+        self,
+        request: AgentModelRequest,
+        *,
+        attempt: int,
+        reasoning_state: _ReasoningAttemptState,
+    ) -> AgentSample:
         stream = await self._completions.create(**self._request_payload(request, stream=True))
         text_parts: list[str] = []
         buffers: dict[int, _CallBuffer] = {}
@@ -83,6 +112,8 @@ class OpenAIAgentModelAdapter:
                 delta = _field(choice, "delta")
                 if delta is None:
                     continue
+                reasoning = _field(delta, "reasoning_content")
+                await self._publish_reasoning(request, reasoning_state, reasoning)
                 content = _field(delta, "content")
                 if content:
                     text_parts.append(str(content))
@@ -100,7 +131,7 @@ class OpenAIAgentModelAdapter:
                     if function is not None:
                         buffer.name += str(_field(function, "name") or "")
                         buffer.arguments += str(_field(function, "arguments") or "")
-        except (AgentSamplingCancelled, AgentProtocolViolation):
+        except Exception:
             await _close_stream(stream)
             raise
         if finish_reason is None:
@@ -115,7 +146,13 @@ class OpenAIAgentModelAdapter:
             finish_reason=finish_reason,
         )
 
-    async def _sample_non_stream(self, request: AgentModelRequest, *, attempt: int) -> AgentSample:
+    async def _sample_non_stream(
+        self,
+        request: AgentModelRequest,
+        *,
+        attempt: int,
+        reasoning_state: _ReasoningAttemptState,
+    ) -> AgentSample:
         response = await self._completions.create(**self._request_payload(request, stream=False))
         self._raise_if_cancelled(request)
         choices = _field(response, "choices") or []
@@ -134,7 +171,7 @@ class OpenAIAgentModelAdapter:
                     arguments=str(_field(function, "arguments") or ""),
                 )
             )
-        return self._close_sample(
+        sample = self._close_sample(
             request,
             attempt=attempt,
             sample_id=str(_field(response, "id") or f"{request.request_id}:{attempt}"),
@@ -143,6 +180,56 @@ class OpenAIAgentModelAdapter:
             usage=_field(response, "usage"),
             finish_reason=str(_field(choice, "finish_reason") or "stop"),
         )
+        await self._publish_reasoning(
+            request,
+            reasoning_state,
+            _field(message, "reasoning_content"),
+        )
+        return sample
+
+    async def _publish_reasoning(
+        self,
+        request: AgentModelRequest,
+        state: _ReasoningAttemptState,
+        value: Any,
+    ) -> None:
+        sink = request.reasoning_delta_sink
+        if (
+            not request.binding.thinking_enabled
+            or sink is None
+            or not state.delivery_enabled
+            or value is None
+        ):
+            return
+        text = str(value)
+        if not text.strip():
+            return
+        try:
+            await sink(text)
+        except Exception as exc:
+            state.delivery_enabled = False
+            _LOGGER.warning(
+                "agent_reasoning_delta_delivery_failed",
+                extra={"phase": "delta", "error_type": type(exc).__name__},
+            )
+            return
+        state.published = True
+
+    async def _reset_reasoning(
+        self,
+        request: AgentModelRequest,
+        state: _ReasoningAttemptState,
+    ) -> None:
+        sink = request.reasoning_reset_sink
+        if not state.published or sink is None:
+            return
+        try:
+            await sink()
+        except Exception as exc:
+            _LOGGER.warning(
+                "agent_reasoning_reset_delivery_failed",
+                extra={"phase": "reset", "error_type": type(exc).__name__},
+            )
 
     def _close_sample(
         self,

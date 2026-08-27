@@ -226,6 +226,11 @@ class AgentModelRequest:
         compare=False,
         repr=False,
     )
+    reasoning_reset_sink: Callable[[], Awaitable[None]] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not self.request_id.strip():

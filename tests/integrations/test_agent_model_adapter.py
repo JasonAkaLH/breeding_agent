@@ -26,10 +26,27 @@ def _delta_call(index: int, *, call_id: str | None = None, name: str | None = No
     return _ns(index=index, id=call_id, function=_ns(name=name, arguments=arguments))
 
 
-def _chunk(*, text: str | None = None, calls: list[object] | None = None, finish: str | None = None, usage=None, response_id="sample-1"):
+def _chunk(
+    *,
+    text: str | None = None,
+    reasoning: str | None = None,
+    calls: list[object] | None = None,
+    finish: str | None = None,
+    usage=None,
+    response_id="sample-1",
+):
     return _ns(
         id=response_id,
-        choices=[_ns(delta=_ns(content=text, tool_calls=calls or []), finish_reason=finish)],
+        choices=[
+            _ns(
+                delta=_ns(
+                    content=text,
+                    reasoning_content=reasoning,
+                    tool_calls=calls or [],
+                ),
+                finish_reason=finish,
+            )
+        ],
         usage=usage,
     )
 
@@ -69,8 +86,13 @@ class _Completions:
         return next(self._responses)
 
 
-def _binding() -> AgentModelBinding:
-    return AgentModelBinding("edition-a", reasoning_effort="high", thinking_enabled=True, option_digests={"policy": "abc"})
+def _binding(*, thinking_enabled: bool = True) -> AgentModelBinding:
+    return AgentModelBinding(
+        "edition-a",
+        reasoning_effort="high",
+        thinking_enabled=thinking_enabled,
+        option_digests={"policy": "abc"},
+    )
 
 
 def _tool(capability_id="skill.weather", safe_name="weather_0123456789ab") -> AgentToolDescriptor:
@@ -82,10 +104,18 @@ def _tool(capability_id="skill.weather", safe_name="weather_0123456789ab") -> Ag
     )
 
 
-def _request(*, choice=None, cancellation=None, tools=None) -> AgentModelRequest:
+def _request(
+    *,
+    choice=None,
+    cancellation=None,
+    tools=None,
+    thinking_enabled: bool = True,
+    reasoning_delta_sink=None,
+    reasoning_reset_sink=None,
+) -> AgentModelRequest:
     return AgentModelRequest(
         request_id="req-1",
-        binding=_binding(),
+        binding=_binding(thinking_enabled=thinking_enabled),
         messages=(
             AgentMessage("system", "rules"),
             AgentMessage("assistant", "prior"),
@@ -95,10 +125,144 @@ def _request(*, choice=None, cancellation=None, tools=None) -> AgentModelRequest
         tools=tuple(tools or (_tool(),)),
         tool_choice=choice or AgentToolChoice("auto"),
         cancellation=cancellation,
+        reasoning_delta_sink=reasoning_delta_sink,
+        reasoning_reset_sink=reasoning_reset_sink,
     )
 
 
 class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_streams_reasoning_without_losing_answer_or_tool_calls(self) -> None:
+        reasoning: list[str] = []
+
+        async def record_reasoning(delta: str) -> None:
+            reasoning.append(delta)
+
+        sample = await OpenAIAgentModelAdapter(
+            completions=_Completions(
+                [
+                    _Stream(
+                        [
+                            _chunk(reasoning="先分析"),
+                            _chunk(
+                                reasoning="再调用工具",
+                                text="处理中",
+                                calls=[
+                                    _delta_call(
+                                        0,
+                                        call_id="c1",
+                                        name="weather_0123456789ab",
+                                        arguments='{"city":"北京"}',
+                                    )
+                                ],
+                                finish="tool_calls",
+                            ),
+                        ]
+                    )
+                ]
+            ),
+            model="edition-a",
+            retry_policy=AgentProtocolRetryPolicy(0),
+        ).sample_agent(_request(reasoning_delta_sink=record_reasoning))
+
+        self.assertEqual(reasoning, ["先分析", "再调用工具"])
+        self.assertEqual(sample.visible_text, "处理中")
+        self.assertEqual(sample.tool_calls[0].arguments_json, '{"city":"北京"}')
+
+    async def test_failed_attempt_resets_reasoning_before_retry(self) -> None:
+        events: list[str] = []
+
+        async def record_reasoning(delta: str) -> None:
+            events.append(delta)
+
+        async def reset_reasoning() -> None:
+            events.append("<reset>")
+
+        invalid = _Stream([_chunk(reasoning="失败分析", text="partial")])
+        valid = _Stream([_chunk(reasoning="成功分析", text="answer", finish="stop")])
+        sample = await OpenAIAgentModelAdapter(
+            completions=_Completions([invalid, valid]),
+            model="edition-a",
+        ).sample_agent(
+            _request(
+                reasoning_delta_sink=record_reasoning,
+                reasoning_reset_sink=reset_reasoning,
+            )
+        )
+
+        self.assertEqual(events, ["失败分析", "<reset>", "成功分析"])
+        self.assertEqual(sample.visible_text, "answer")
+
+    async def test_reasoning_sink_failure_does_not_fail_sample(self) -> None:
+        calls = 0
+
+        async def fail_reasoning(_delta: str) -> None:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("sink unavailable")
+
+        sample = await OpenAIAgentModelAdapter(
+            completions=_Completions(
+                [_Stream([_chunk(reasoning="first"), _chunk(reasoning="second", text="answer", finish="stop")])]
+            ),
+            model="edition-a",
+            retry_policy=AgentProtocolRetryPolicy(0),
+        ).sample_agent(_request(reasoning_delta_sink=fail_reasoning))
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(sample.visible_text, "answer")
+
+    async def test_thinking_disabled_and_blank_reasoning_do_not_publish(self) -> None:
+        reasoning: list[str] = []
+
+        async def record_reasoning(delta: str) -> None:
+            reasoning.append(delta)
+
+        for thinking_enabled, value in ((False, "hidden"), (True, " \n ")):
+            sample = await OpenAIAgentModelAdapter(
+                completions=_Completions(
+                    [_Stream([_chunk(reasoning=value, text="answer", finish="stop")])]
+                ),
+                model="edition-a",
+                retry_policy=AgentProtocolRetryPolicy(0),
+            ).sample_agent(
+                _request(
+                    thinking_enabled=thinking_enabled,
+                    reasoning_delta_sink=record_reasoning,
+                )
+            )
+            self.assertEqual(sample.visible_text, "answer")
+        self.assertEqual(reasoning, [])
+
+    async def test_non_stream_reasoning_publishes_only_after_valid_sample(self) -> None:
+        reasoning: list[str] = []
+
+        async def record_reasoning(delta: str) -> None:
+            reasoning.append(delta)
+
+        response = _ns(
+            id="sample-non-stream",
+            choices=[
+                _ns(
+                    finish_reason="stop",
+                    message=_ns(
+                        content="answer",
+                        reasoning_content="完整分析",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+            usage=None,
+        )
+        sample = await OpenAIAgentModelAdapter(
+            completions=_Completions([response]),
+            model="edition-a",
+            retry_policy=AgentProtocolRetryPolicy(0),
+            stream=False,
+        ).sample_agent(_request(reasoning_delta_sink=record_reasoning))
+
+        self.assertEqual(reasoning, ["完整分析"])
+        self.assertEqual(sample.visible_text, "answer")
+
     async def test_agent_message_rejects_developer_role(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported Agent message role"):
             AgentMessage("developer", "legacy contract")
@@ -257,11 +421,75 @@ class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancellation_closes_stream_and_emits_no_partial_sample(self) -> None:
         token = AgentCancellationToken()
-        stream = _Stream([_chunk(text="partial"), _chunk(text="ignored", finish="stop")], cancel=token, cancel_after=1)
+        events: list[str] = []
+
+        async def record_reasoning(delta: str) -> None:
+            events.append(delta)
+
+        async def reset_reasoning() -> None:
+            events.append("<reset>")
+
+        stream = _Stream(
+            [
+                _chunk(reasoning="partial reasoning", text="partial"),
+                _chunk(text="ignored", finish="stop"),
+            ],
+            cancel=token,
+            cancel_after=2,
+        )
         adapter = OpenAIAgentModelAdapter(completions=_Completions([stream]), model="edition-a")
         with self.assertRaises(AgentSamplingCancelled):
-            await adapter.sample_agent(_request(cancellation=token))
+            await adapter.sample_agent(
+                _request(
+                    cancellation=token,
+                    reasoning_delta_sink=record_reasoning,
+                    reasoning_reset_sink=reset_reasoning,
+                )
+            )
         self.assertTrue(stream.closed)
+        self.assertEqual(events, ["partial reasoning", "<reset>"])
+
+    async def test_transport_failure_after_reasoning_resets_and_preserves_error(self) -> None:
+        events: list[str] = []
+
+        async def record_reasoning(delta: str) -> None:
+            events.append(delta)
+
+        async def reset_reasoning() -> None:
+            events.append("<reset>")
+
+        class FailingStream:
+            def __init__(self) -> None:
+                self.index = 0
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self.index += 1
+                if self.index == 1:
+                    return _chunk(reasoning="partial reasoning")
+                raise ConnectionError("stream disconnected")
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        stream = FailingStream()
+        adapter = OpenAIAgentModelAdapter(
+            completions=_Completions([stream]),
+            model="edition-a",
+        )
+        with self.assertRaisesRegex(ConnectionError, "stream disconnected"):
+            await adapter.sample_agent(
+                _request(
+                    reasoning_delta_sink=record_reasoning,
+                    reasoning_reset_sink=reset_reasoning,
+                )
+            )
+
+        self.assertTrue(stream.closed)
+        self.assertEqual(events, ["partial reasoning", "<reset>"])
 
     async def test_wire_uses_native_roles_tools_and_named_required_choice_without_fallback(self) -> None:
         completions = _Completions([_Stream([_chunk(calls=[_delta_call(0, call_id="c1", name="weather_0123456789ab", arguments="{}")], finish="tool_calls")])])
