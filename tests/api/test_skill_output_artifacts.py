@@ -20,11 +20,13 @@ class SkillOutputArtifactsAPITest(APITestCase):
                         "value": "test-model",
                         "label": "Test Model",
                         "reasoning_efforts": {
-                            "default": "minimal",
-                            "disabled_default": "minimal",
                             "options": [
-                                {"value": "minimal", "label": "Minimal", "allow_when_thinking_disabled": True},
+                                {"value": "minimal", "label": "Minimal"},
                             ],
+                            "thinking": {
+                                "enabled": {"default": "minimal", "supported": ["minimal"]},
+                                "disabled": {"default": "minimal", "supported": ["minimal"]},
+                            },
                         },
                         "agent_capabilities": {
                             "supports_messages": True,

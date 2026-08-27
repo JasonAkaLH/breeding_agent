@@ -1002,16 +1002,23 @@ class ApiRuntime(
                     "label": option.label,
                     "reasoning_efforts": (
                         {
-                            "default": option.reasoning_efforts.default,
-                            "disabled_default": option.reasoning_efforts.disabled_default,
                             "options": [
                                 {
                                     "value": effort.value,
                                     "label": effort.label,
-                                    "allow_when_thinking_disabled": effort.allow_when_thinking_disabled,
                                 }
                                 for effort in option.reasoning_efforts.options
                             ],
+                            "thinking": {
+                                "enabled": {
+                                    "default": option.reasoning_efforts.thinking.enabled.default,
+                                    "supported": list(option.reasoning_efforts.thinking.enabled.supported),
+                                },
+                                "disabled": {
+                                    "default": option.reasoning_efforts.thinking.disabled.default,
+                                    "supported": list(option.reasoning_efforts.thinking.disabled.supported),
+                                },
+                            },
                         }
                         if option.reasoning_efforts is not None
                         else None
@@ -14926,7 +14933,6 @@ def build_api_runtime(
     ) -> AgentModelBinding:
         options = resolve_llm_request_options(
             request.metadata,
-            fallback_reasoning_effort=main_agent_reasoning_effort,
             model_reasoning_configs=model_reasoning_effort_configs(
                 resolved_model_edition_config
             ),

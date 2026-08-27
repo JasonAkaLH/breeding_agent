@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.api.dto import SubmitMessageRequest
-from src.api.runtime import build_api_runtime
+from src.api.dto import SubmitMessageRequest  # noqa: E402
+from src.api.runtime import build_api_runtime  # noqa: E402
 
 
 def _json_default(value: Any) -> str:
@@ -39,6 +39,19 @@ async def _wait_for_terminal_task(runtime, task_id: str, *, timeout: float) -> A
         await asyncio.sleep(0.05)
 
 
+def _build_submit_request(args: argparse.Namespace) -> SubmitMessageRequest:
+    metadata: dict[str, Any] = {"deep_thinking": args.thinking == "enabled"}
+    if args.reasoning_effort:
+        metadata["main_agent_reasoning_effort"] = args.reasoning_effort
+    return SubmitMessageRequest(
+        conversation_id=args.conversation_id,
+        content=args.message,
+        capability_id=None,
+        model_edition=args.model_edition,
+        metadata=metadata,
+    )
+
+
 async def _run(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     if not config_path.exists():
@@ -52,20 +65,14 @@ async def _run(args: argparse.Namespace) -> int:
             database_path=database_path,
             audit_log_path=audit_log_path,
             main_agent_llm_config_path=config_path,
-            main_agent_reasoning_effort=args.reasoning_effort,
             enable_llm_planner=False,
             skill_roots=[],
         )
         try:
             _message, task = await runtime.submit_message(
                 args.conversation_id,
-                SubmitMessageRequest(
-                    conversation_id=args.conversation_id,
-                    account_id=args.account_id,
-                    content=args.message,
-                    capability_id=None,
-                    metadata={},
-                ),
+                _build_submit_request(args),
+                authenticated_username=args.account_id,
             )
             terminal_task = await _wait_for_terminal_task(runtime, task.task_id, timeout=args.timeout)
             events = await runtime.storage.list_events_for_task(task.task_id)
@@ -105,7 +112,9 @@ def main() -> int:
     parser.add_argument("--message", default="你好，请用一句话确认主代理真实 LLM 已接通。")
     parser.add_argument("--conversation-id", default="smoke-main-agent-llm")
     parser.add_argument("--account-id", default="smoke-account")
-    parser.add_argument("--reasoning-effort", default="minimal", choices=["minimal", "low", "medium", "high"])
+    parser.add_argument("--model-edition", default=None)
+    parser.add_argument("--thinking", choices=["enabled", "disabled"], default="disabled")
+    parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--database-path", default=None, help="Optional SQLite path. Defaults to a temporary file.")
     parser.add_argument("--audit-log-path", default=None, help="Optional audit JSONL path. Defaults to a temporary file.")

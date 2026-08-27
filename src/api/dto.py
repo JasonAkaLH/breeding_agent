@@ -152,13 +152,21 @@ class SubmitMessageRequest(StrictRequestModel):
 class ReasoningEffortOptionResponse(BaseModel):
     value: str
     label: str
-    allow_when_thinking_disabled: bool
+
+
+class ReasoningEffortStatePolicyResponse(BaseModel):
+    default: str | None
+    supported: list[str]
+
+
+class ReasoningEffortThinkingPolicyResponse(BaseModel):
+    enabled: ReasoningEffortStatePolicyResponse
+    disabled: ReasoningEffortStatePolicyResponse
 
 
 class ReasoningEffortConfigResponse(BaseModel):
-    default: str
-    disabled_default: str | None = None
     options: list[ReasoningEffortOptionResponse]
+    thinking: ReasoningEffortThinkingPolicyResponse
 
 
 class ModelEditionOptionResponse(BaseModel):

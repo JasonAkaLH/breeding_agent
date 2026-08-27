@@ -62,24 +62,19 @@ def resolve_llm_reasoning_effort(
             return fallback
         raise ValueError("No model reasoning_efforts config is available")
 
-    if thinking_enabled:
-        candidate = explicit or fallback or cfg.default
-        if not candidate or not cfg.has_value(candidate):
-            raise ValueError(
-                f"Unsupported reasoning_effort for model {model_edition or '<default>'}: {candidate}"
-            )
-        return candidate
-
-    if not cfg.disabled_safe_values():
-        raise ValueError(f"Model {model_edition or '<default>'} does not support disabling deep thinking")
-    candidate = explicit or cfg.disabled_default
+    state_name = "enabled" if thinking_enabled else "disabled"
+    policy = cfg.policy_for(thinking_enabled)
+    if not policy.supported:
+        raise ValueError(f"Model {model_edition or '<default>'} does not support thinking={state_name}")
+    candidate = explicit or policy.default
     if not candidate:
-        raise ValueError(f"Model {model_edition or '<default>'} is missing disabled_default")
-    if not cfg.has_value(candidate):
-        raise ValueError(f"Unsupported reasoning_effort for model {model_edition or '<default>'}: {candidate}")
-    if not cfg.allows_when_thinking_disabled(candidate):
+        raise ValueError(f"Model {model_edition or '<default>'} is missing thinking={state_name} default")
+    if candidate not in cfg.option_values():
+        raise ValueError(f"Unknown reasoning_effort for model {model_edition or '<default>'}: {candidate}")
+    if not cfg.supports(candidate, thinking_enabled=thinking_enabled):
         raise ValueError(
-            f"Model {model_edition or '<default>'} does not allow reasoning_effort={candidate} when deep thinking is disabled"
+            f"Model {model_edition or '<default>'} does not support "
+            f"reasoning_effort={candidate} when thinking={state_name}"
         )
     return candidate
 

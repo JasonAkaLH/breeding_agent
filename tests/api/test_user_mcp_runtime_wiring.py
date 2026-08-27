@@ -703,15 +703,16 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                                 "value": "test",
                                 "label": "Test",
                                 "reasoning_efforts": {
-                                    "default": "minimal",
-                                    "disabled_default": "minimal",
                                     "options": [
                                         {
                                             "value": "minimal",
                                             "label": "Minimal",
-                                            "allow_when_thinking_disabled": True,
                                         }
                                     ],
+                                    "thinking": {
+                                        "enabled": {"default": "minimal", "supported": ["minimal"]},
+                                        "disabled": {"default": "minimal", "supported": ["minimal"]},
+                                    },
                                 },
                                 "agent_capabilities": {
                                     "supports_messages": True,
@@ -902,15 +903,16 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                                 "value": "test",
                                 "label": "Test",
                                 "reasoning_efforts": {
-                                    "default": "minimal",
-                                    "disabled_default": "minimal",
                                     "options": [
                                         {
                                             "value": "minimal",
                                             "label": "Minimal",
-                                            "allow_when_thinking_disabled": True,
                                         }
                                     ],
+                                    "thinking": {
+                                        "enabled": {"default": "minimal", "supported": ["minimal"]},
+                                        "disabled": {"default": "minimal", "supported": ["minimal"]},
+                                    },
                                 },
                                 "agent_capabilities": {
                                     "supports_messages": True,

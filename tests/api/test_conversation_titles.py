@@ -5,12 +5,14 @@ from tests.api.support import APITestCase
 
 def _test_reasoning_efforts() -> dict:
     return {
-        "default": "minimal",
-        "disabled_default": "minimal",
         "options": [
-            {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
-            {"value": "max", "label": "最高", "allow_when_thinking_disabled": False},
+            {"value": "minimal", "label": "最低"},
+            {"value": "max", "label": "最高"},
         ],
+        "thinking": {
+            "enabled": {"default": "minimal", "supported": ["minimal", "max"]},
+            "disabled": {"default": "minimal", "supported": ["minimal"]},
+        },
     }
 
 

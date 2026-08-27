@@ -30,20 +30,20 @@ def test_llm_config() -> dict[str, object]:
                     "value": "api-test",
                     "label": "API Test",
                     "reasoning_efforts": {
-                        "default": "minimal",
-                        "disabled_default": "minimal",
                         "options": [
                             {
                                 "value": "minimal",
                                 "label": "Minimal",
-                                "allow_when_thinking_disabled": True,
                             },
                             {
                                 "value": "max",
                                 "label": "Max",
-                                "allow_when_thinking_disabled": False,
                             },
                         ],
+                        "thinking": {
+                            "enabled": {"default": "minimal", "supported": ["minimal", "max"]},
+                            "disabled": {"default": "minimal", "supported": ["minimal"]},
+                        },
                     },
                     "agent_capabilities": {
                         "supports_messages": True,

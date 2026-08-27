@@ -12,9 +12,11 @@ from src.integrations.agent_model_gate import (
 
 def _reasoning():
     return {
-        "default": "minimal",
-        "disabled_default": "minimal",
-        "options": [{"value": "minimal", "label": "minimal", "allow_when_thinking_disabled": True}],
+        "options": [{"value": "minimal", "label": "minimal"}],
+        "thinking": {
+            "enabled": {"default": "minimal", "supported": ["minimal"]},
+            "disabled": {"default": "minimal", "supported": ["minimal"]},
+        },
     }
 
 

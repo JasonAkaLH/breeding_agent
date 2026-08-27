@@ -12,26 +12,39 @@ from src.orchestration.agent_loop.models import MODEL_MESSAGE_ROLES
 class ReasoningEffortOption:
     value: str
     label: str
-    allow_when_thinking_disabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningEffortStatePolicy:
+    default: str | None
+    supported: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningEffortThinkingPolicy:
+    enabled: ReasoningEffortStatePolicy
+    disabled: ReasoningEffortStatePolicy
 
 
 @dataclass(frozen=True, slots=True)
 class ReasoningEffortConfig:
-    default: str
-    disabled_default: str | None
     options: tuple[ReasoningEffortOption, ...]
+    thinking: ReasoningEffortThinkingPolicy
 
     def option_values(self) -> tuple[str, ...]:
         return tuple(option.value for option in self.options)
 
-    def disabled_safe_values(self) -> tuple[str, ...]:
-        return tuple(option.value for option in self.options if option.allow_when_thinking_disabled)
+    def policy_for(self, thinking_enabled: bool) -> ReasoningEffortStatePolicy:
+        return self.thinking.enabled if thinking_enabled else self.thinking.disabled
 
-    def has_value(self, value: str) -> bool:
-        return value in self.option_values()
+    def supported_values(self, thinking_enabled: bool) -> tuple[str, ...]:
+        return self.policy_for(thinking_enabled).supported
 
-    def allows_when_thinking_disabled(self, value: str) -> bool:
-        return value in self.disabled_safe_values()
+    def supports(self, value: str, *, thinking_enabled: bool) -> bool:
+        return value in self.supported_values(thinking_enabled)
+
+    def default_for(self, thinking_enabled: bool) -> str | None:
+        return self.policy_for(thinking_enabled).default
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,19 +178,40 @@ def validate_model_reasoning_effort_configs(config: Mapping[str, Any] | None = N
             continue
         if len(set(values)) != len(values):
             errors.append(f"{option.value}: duplicate reasoning_efforts option value")
-        if not cfg.default or cfg.default not in values:
-            errors.append(f"{option.value}: reasoning_efforts.default must reference an option")
-        disabled_safe = set(cfg.disabled_safe_values())
-        if disabled_safe:
-            if not cfg.disabled_default or cfg.disabled_default not in disabled_safe:
-                errors.append(
-                    f"{option.value}: reasoning_efforts.disabled_default must reference a disabled-safe option"
-                )
-        elif cfg.disabled_default:
-            errors.append(f"{option.value}: disabled_default is only allowed when a disabled-safe option exists")
         for effort in cfg.options:
             if not effort.value:
                 errors.append(f"{option.value}: reasoning_efforts option value must not be empty")
+        catalog_values = set(values)
+        referenced_values: set[str] = set()
+        for state_name, policy in (
+            ("enabled", cfg.thinking.enabled),
+            ("disabled", cfg.thinking.disabled),
+        ):
+            supported = policy.supported
+            if len(set(supported)) != len(supported):
+                errors.append(f"{option.value}: duplicate {state_name}.supported value")
+            if any(not effort for effort in supported):
+                errors.append(f"{option.value}: {state_name}.supported value must not be empty")
+            unknown = sorted(set(supported) - catalog_values)
+            if unknown:
+                errors.append(
+                    f"{option.value}: {state_name}.supported must reference options: {','.join(unknown)}"
+                )
+            referenced_values.update(supported)
+            if state_name == "enabled" and not supported:
+                errors.append(f"{option.value}: enabled.supported must not be empty")
+            if supported:
+                if not policy.default or policy.default not in supported:
+                    errors.append(
+                        f"{option.value}: {state_name}.default must reference {state_name}.supported"
+                    )
+            elif policy.default:
+                errors.append(
+                    f"{option.value}: {state_name}.default must be null when {state_name}.supported is empty"
+                )
+        orphaned = sorted(catalog_values - referenced_values)
+        if orphaned:
+            errors.append(f"{option.value}: orphan reasoning_efforts option: {','.join(orphaned)}")
     if errors:
         raise ValueError("Invalid model reasoning_efforts config: " + "; ".join(errors))
 
@@ -290,7 +324,10 @@ def _parse_option(value: Any) -> ModelEditionOption | None:
             or value.get("context_window_tokens")
             or value.get("max_context_tokens")
         )
-        reasoning_efforts = _parse_reasoning_efforts(value.get("reasoning_efforts"))
+        reasoning_efforts = _parse_reasoning_efforts(
+            value.get("reasoning_efforts"),
+            model_edition=option_value,
+        )
         agent_capabilities = _parse_agent_capabilities(value.get("agent_capabilities"))
         return ModelEditionOption(
             value=option_value,
@@ -305,18 +342,76 @@ def _parse_option(value: Any) -> ModelEditionOption | None:
     return ModelEditionOption(value=option_value, label=option_value)
 
 
-def _parse_reasoning_efforts(value: Any) -> ReasoningEffortConfig | None:
+def _parse_reasoning_efforts(
+    value: Any,
+    *,
+    model_edition: str,
+) -> ReasoningEffortConfig | None:
     if not isinstance(value, Mapping):
         return None
+    legacy_fields: list[str] = []
+    for field in ("default", "disabled_default"):
+        if field in value:
+            legacy_fields.append(field)
+    raw_options = value.get("options")
+    if isinstance(raw_options, Sequence) and not isinstance(raw_options, str | bytes | bytearray):
+        if any(
+            isinstance(candidate, Mapping) and "allow_when_thinking_disabled" in candidate
+            for candidate in raw_options
+        ):
+            legacy_fields.append("options[].allow_when_thinking_disabled")
+    if legacy_fields:
+        raise ValueError(
+            "Invalid model reasoning_efforts config: "
+            f"{model_edition}: legacy reasoning_efforts fields: {','.join(legacy_fields)}"
+        )
     options = _parse_reasoning_effort_options(value.get("options"))
-    default = _clean_text(value.get("default"))
-    disabled_default = _clean_text(value.get("disabled_default"))
-    if default is None and not options:
-        return None
+    raw_thinking = value.get("thinking")
+    if not isinstance(raw_thinking, Mapping):
+        raise ValueError(
+            f"Invalid model reasoning_efforts config: {model_edition}: missing reasoning_efforts.thinking"
+        )
+    policies: dict[str, ReasoningEffortStatePolicy] = {}
+    for state_name in ("enabled", "disabled"):
+        if state_name not in raw_thinking:
+            raise ValueError(
+                "Invalid model reasoning_efforts config: "
+                f"{model_edition}: missing reasoning_efforts.thinking.{state_name}"
+            )
+        policies[state_name] = _parse_reasoning_effort_state_policy(
+            raw_thinking.get(state_name),
+            model_edition=model_edition,
+            state_name=state_name,
+        )
     return ReasoningEffortConfig(
-        default=default or "",
-        disabled_default=disabled_default,
         options=options,
+        thinking=ReasoningEffortThinkingPolicy(
+            enabled=policies["enabled"],
+            disabled=policies["disabled"],
+        ),
+    )
+
+
+def _parse_reasoning_effort_state_policy(
+    value: Any,
+    *,
+    model_edition: str,
+    state_name: str,
+) -> ReasoningEffortStatePolicy:
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "Invalid model reasoning_efforts config: "
+            f"{model_edition}: reasoning_efforts.thinking.{state_name} must be a mapping"
+        )
+    raw_supported = value.get("supported")
+    if not isinstance(raw_supported, Sequence) or isinstance(raw_supported, str | bytes | bytearray):
+        raise ValueError(
+            "Invalid model reasoning_efforts config: "
+            f"{model_edition}: reasoning_efforts.thinking.{state_name}.supported must be a sequence"
+        )
+    return ReasoningEffortStatePolicy(
+        default=_clean_text(value.get("default")),
+        supported=tuple(str(candidate).strip() for candidate in raw_supported),
     )
 
 
@@ -358,18 +453,12 @@ def _parse_reasoning_effort_options(value: Any) -> tuple[ReasoningEffortOption, 
 def _parse_reasoning_effort_option(value: Any) -> ReasoningEffortOption | None:
     if isinstance(value, Mapping):
         option_value = _clean_text(value.get("value") or value.get("id"))
-        if not option_value:
-            return None
-        label = _clean_text(value.get("label") or value.get("name")) or option_value
-        return ReasoningEffortOption(
-            value=option_value,
-            label=label,
-            allow_when_thinking_disabled=coerce_truthy(value.get("allow_when_thinking_disabled", False)),
-        )
+        normalized_value = option_value or ""
+        label = _clean_text(value.get("label") or value.get("name")) or normalized_value
+        return ReasoningEffortOption(value=normalized_value, label=label)
     option_value = _clean_text(value)
-    if not option_value:
-        return None
-    return ReasoningEffortOption(value=option_value, label=option_value)
+    normalized_value = option_value or ""
+    return ReasoningEffortOption(value=normalized_value, label=normalized_value)
 
 
 def _container_default(value: Any) -> str | None:

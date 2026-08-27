@@ -5,15 +5,18 @@ model_editions:
     - value: clean-archive-test
       label: Clean Archive Test
       reasoning_efforts:
-        default: minimal
-        disabled_default: minimal
         options:
           - value: minimal
             label: Minimal
-            allow_when_thinking_disabled: true
           - value: max
             label: Max
-            allow_when_thinking_disabled: false
+        thinking:
+          enabled:
+            default: minimal
+            supported: [minimal, max]
+          disabled:
+            default: minimal
+            supported: [minimal]
       agent_capabilities:
         supports_messages: true
         roles: [system, user, assistant, tool]

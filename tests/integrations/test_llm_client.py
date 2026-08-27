@@ -69,13 +69,15 @@ def _assert_single_user_prompt_message(testcase: unittest.TestCase, call: dict, 
 
 def _reasoning_efforts() -> dict:
     return {
-        "default": "minimal",
-        "disabled_default": "minimal",
         "options": [
-            {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
-            {"value": "high", "label": "高", "allow_when_thinking_disabled": False},
-            {"value": "max", "label": "最高", "allow_when_thinking_disabled": False},
+            {"value": "minimal", "label": "最低"},
+            {"value": "high", "label": "高"},
+            {"value": "max", "label": "最高"},
         ],
+        "thinking": {
+            "enabled": {"default": "minimal", "supported": ["minimal", "high", "max"]},
+            "disabled": {"default": "minimal", "supported": ["minimal", "high", "max"]},
+        },
     }
 
 
