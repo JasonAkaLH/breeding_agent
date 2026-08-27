@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 首次空白对话`high`思考强度默认rollout已`complete`：`8f05818`只将`App.tsx`的React `reasoningEffort`初始值从`minimal`改为`high`，并锁定首次`false+high`提交与新建对话继承；`131e1e6`收敛一条已多余的旧测试选择操作。Frontend 24 files/331 tests、typecheck、build和diff-check通过，仅保留既有2条React act警告和>500 kB chunk警告。`config.yaml` digest前后一致，API仍返回5模型/2豆包；只重建建frontend，backend/Sidecar ID不变。浏览器确认首次“关+高”，改为“开+最高”后新建对话继承，豆包Pro/Turbo仍可见。`config.yaml`、`docker_cmd.md`仍ignored/untracked，`prod`未更新。License Requirement：无新增依赖、第三方代码或许可变化。
+
 - 首次空白对话`high`思考强度默认实施计划已成文：计划以一处`App.tsx` React state初始值和定向App回归闭合冷启动`false+high`，明确新建对话继承、模型合法回退、豆包fixture与直接API默认不变；完整Frontend测试/typecheck/build后只重建frontend，不重建backend，并以浏览器验证首次高强度和后续继承。`config.yaml`以前后digest一致作为不变证据，`prod`未变更。当前仅计划，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变化。
 
 - 首次空白对话`high`思考强度默认的替代设计已获用户批准：最终范围只把全新App mount的React `reasoningEffort`初始值从`minimal`改为`high`，`deepThinking=false`和后续“新建对话”沿用当前thinking/effort的行为不变。用户取消豆包模型移除；模型列表、`config.yaml`、backend、数据库/Rust/Provider和`prod`均不修改。当前仅设计，尚未实施。License Requirement：仅文档变更，无新增依赖或许可变化。

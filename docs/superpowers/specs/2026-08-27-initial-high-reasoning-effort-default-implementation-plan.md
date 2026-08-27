@@ -2,7 +2,7 @@
 
 依据：`2026-08-27-initial-high-reasoning-effort-default-design.md`
 设计提交：`846045d`
-状态：`ready_for_implementation`
+状态：`complete`
 目标分支：`main`
 
 ## 1. 完成声明
@@ -135,4 +135,37 @@ Final commit：`docs: close initial high reasoning effort rollout`
 1. 回退 Checkpoint A commit，把 React 初始 effort 恢复为 `minimal`；
 2. 重建/重建立 frontend 容器；
 3. 重跑定向 App 测试、typecheck 和 build；
-4. backend、数卷、模型配置与历史 Task 无需回滚。
+4. backend、数据卷、模型配置与历史 Task 无需回滚。
+
+## 7. 完成证据（2026-08-27）
+
+提交：
+
+- `8f05818` `fix(frontend): default initial reasoning effort to high`：唯一产品行为修改与两个核心回归；
+- `131e1e6` `test(frontend): adapt supported high default regression`：删除旧用例中已多余的“再选一次高”操作，
+  直接验证 thinking 切换前后合法 `high` 被保留。
+
+自动门禁：
+
+- 红测在旧代码上精确显示首次普通提交与首次开启 thinking 仍为 `minimal`；
+- 修复后6项定向App用例和typecheck通过；
+- Frontend 24 files / 331 tests 通过：其他23 files / 200 tests，`App.test.tsx` 131 tests；
+- `App.test.tsx` 全量用时约200秒，保留2条既有React `act(...)` 测试警告；
+- TypeScript typecheck、production build、`git diff --check` 通过；build仅保留既有 >500 kB chunk
+  warning。
+
+范围证据：
+
+- `frontend/src/App.tsx` 从计划基线到实施终态只有 `reasoningEffort` React 初始值
+  `minimal -> high` 一行变更；
+- `resetConversationWorkspace`、`handleNewConversation`、模型 policy、API client 与 backend 零变更；
+- `config.yaml` 实施前后digest完全一致；配置 API 仍返回5个模型，其中2个豆包 edition；
+- `config.yaml`、`docker_cmd.md` 仍 Git-ignored/untracked，`prod` 未变更。
+
+本地真实验收：
+
+- 只重建并重建立 frontend，新 hashed asset 为 `index-B9blpfoD.js`，frontend healthy；
+- backend 与 Runtime Sidecar 容器 ID 与验收前完全一致，未重建或重启；
+- 浏览器全新App mount显示 `deepThinking=false` 和“高”；
+- 浏览器改为 `deepThinking=true` 与“最高”后点击“新建对话”，两个值均保持；
+- 浏览器模型下拉仍可见豆包 Seed 2.1 Pro 与 Turbo；未提交真实Provider Task。
