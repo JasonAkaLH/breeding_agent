@@ -40,6 +40,7 @@ Codex 0.149.1 会在 function/tool output 进入 model-visible history 时施加
 14. 继续保留单个 AgentItem 和 prepared execution 各自独立的 131,072-byte 硬上限；不提供“无上限”配置，也不把 Artifact 正文复制回控制面。
 15. 本期只实现单次 Capability outcome 的投影和溢出处理；不新增跨并行 Tool 的聚合预算，也不新增让模型任意读取 Artifact 正文的通用 Tool。
 16. 后端 catalog、admission 和执行层可以读取 pinned revision 的 `SKILL.md`；但 soft binding 首轮采样只能接收字段级 PublicSkillProfile，不得收到未经筛选的 Skill 指令正文。只有模型实际调用 `delegated_main_agent` 后，下一轮采样才可通过 durable Tool result 接收该 pinned revision 的有界 Skill 指令正文。
+17. 所有新 submission 统一生成 `maf.submission.prepared_execution.v2`；v1 只用于读取部署前已经持久化的旧 prepared record，不原地改义、不转换重写，也不继续产生新的 v1。
 
 第 7 项的“必要恢复”只指恢复原本就以 `force_capability` 创建的 Task；任何原始 `routing_mode=hint` Task 在普通、waiting 或 startup recovery 中都必须继续保持 auto Tool choice，禁止恢复时升级为 force。
 
@@ -81,6 +82,7 @@ Codex 0.149.1 会在 function/tool output 进入 model-visible history 时施加
 | `PublicSkillProfile` | 扩展现有脱敏 builder：后端从 pinned contract 和 input schema 构建字段级公开摘要；允许解析 `SKILL.md`，但不把 raw body 注入 soft binding 首轮上下文 |
 | Skill bundle revision | 继续固定提交时 revision，并进入 profile authority |
 | `skill_activation` AgentItem | 泛化为“公开 Skill profile 已激活到当前 Agent 上下文”，不表示业务执行完成 |
+| prepared execution | 新 writer 统一生成 v2；Python、SQLite facade 与 Rust Sidecar 在兼容窗口内精确双读 v1/v2，数据库和 protobuf 继续承载 opaque canonical JSON bytes |
 | Agent Tool catalog | 继续暴露所有当前可见 public Skill Tool |
 | Agent Loop | 继续由同一模型直接回答或发起 Tool call |
 | SkillExecutor | 执行意图成立后原样复用 |
@@ -140,6 +142,27 @@ Skill hint 必须在 Message、Task、附件绑定、AgentRun 和 audit 副作�
 
 prepared handoff 只是 Task 初始化前的 crash-safe 交接 authority，不进入公共 Message metadata、Conversation history 或 memory。AgentRun 初始化完成后，`skill_activation` item 是模型上下文和恢复的业务 authority。
 
+新 writer 必须统一生成 `maf.submission.prepared_execution.v2`，digest 为 `sha256("maf.submission.prepared_execution.v2\0" || canonical_prepared_json)`。v2 在原 v1 exact keys 基础上新增两个 exact top-level fields：
+
+```json
+{
+  "routing_mode": "auto|hint|force_capability",
+  "skill_activation": null
+}
+```
+
+当且仅当 `routing_mode=hint` 时，`skill_activation` 必须是 exact two-key object：`payload` 为第 7.2 节定义的完整 canonical activation payload，`payload_sha256` 为其无前缀 SHA-256。空 Profile、Profile 摘要、缺字段 Profile 和额外 wrapper fields 均非法。
+
+`payload` 的 canonical bytes 必须与后续 `skill_activation` AgentItem 的 `payload_json` 逐字节相同，`payload_sha256` 必须与 AgentItem 的 `payload_sha256` 相同。v2 关系校验必须闭合：
+
+- `hint`：requested capability 必须是同一 public `skill.*`，activation 必填，profile capability/revision/digest 必须一致，`initial_required_tool_name=null`；
+- `force_capability`：activation 必须为 null，requested capability 必填，initial required Tool 必须由该 capability 确定性派生；
+- `auto`：activation 必须为 null，`initial_required_tool_name=null`；
+- MCP binding 继续只允许现有 `force_capability + mcp.dispatch` 组合，activation 必须为 null；
+- 任一 prepared kind 都必须保留同一 routing/activation authority；`interrupt` 或 `no_server_intent` 不得改写其值。
+
+Python recovery loader、SQLite facade/repository 与 Rust Sidecar 必须先读取 canonical JSON 的 schema，再选择对应 exact keys 与 digest domain：v1 只接受原 v1 keys/domain，v2 只接受 v2 keys/domain，未知版本 fail closed。禁止先按某个固定 domain 验 digest再猜版本，也禁止把 v1 记录补字段后保存为 v2。
+
 HTTP 202 只能在 AgentRun 已完成 durable initialization 后返回。旧前端/新后端与新前端/旧后端不得混合发布；旧后端会把 `hint` 错当成 required Tool。
 
 ## 7. AgentRun 持久化设计
@@ -154,6 +177,8 @@ sequence 2: skill_activation(binding_mode=hint)
 ```
 
 无 hint 时保持现状，只提交 `user_message`。SQLite、PostgreSQL 与 Runtime Sidecar Agent repository 必须提供相同的 all-or-zero、CAS、revision、sequence 和 exact replay 语义。实现应扩展现有初始化 atomic writer 合同，不能先提交 user item、再以无恢复边界的独立写入追加 profile。
+
+初始化只能消费 v2 `skill_activation.payload` 的 canonical bytes，不能从当前 catalog 重建 Profile。若 prepared handoff 先进入文件选择或 Sheet 选择 Interrupt，原 v2 prepared snapshot 仍是该 Task 的 activation authority；Interrupt 回答后初始化 AgentRun 时必须重新加载并复验同一 prepared payload/digest，再原子提交 user + activation。不得依赖进程内 resume metadata、前端再次选择 Skill或活动 bundle。非 hint v2 与旧 v1 继续只初始化 user item。
 
 ### 7.2 Profile item
 
@@ -342,6 +367,8 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 
 - durable initialization 前的恢复使用 immutable prepared handoff 中的 canonical profile 和 digest。
 - durable initialization 后只从 Agent items 恢复，不读取当前活动 Skill 版本替换 profile。
+- 所有新 prepared record 使用 v2；部署前旧 v1 按原 schema/domain 精确恢复，不升级、不补写 activation。v1/v2 decoder 对未知 schema、错误 domain 或 cross-version keys fail closed。
+- pre-Agent 文件/Sheet Interrupt 回答后的初始化必须从原 v2 prepared record 恢复 routing mode 和 activation，不依赖进程内缓存；startup recovery 与普通 resume 得到逐字节相同的 activation item。
 - startup recovery、waiting resume 与普通入口使用相同 routing-mode-to-tool-choice helper。
 - fixed revision 在 Task 终态前保持 pinned，终态后按现有生命周期释放。
 - completed Tool 只从 durable model projection 和 owner-bound Artifact refs 恢复；不得重新执行 Capability 或用当前代码重新投影改变历史 bytes。
@@ -374,6 +401,9 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - alias canonicalization 与 pinned revision 正确。
 - 用户伪造 profile/revision/digest/internal binding 被拒绝或剥离。
 - prepared handoff 与 Agent item canonical bytes/digest 精确一致。
+- 所有新 auto、hint、force、MCP、Interrupt 与 no-server submission 都写 v2；仅预置的历史 fixture 可以写 v1。
+- v1/v2 分别只接受自己的 exact keys 与 digest domain；cross-version digest、未知版本、v1 携带 v2 字段或 v2 缺新增字段全部拒绝。
+- v2 hint 必须携带 activation 且 initial required Tool 为空；v2 auto/force/MCP 必须拒绝 activation，auto 的 initial required Tool 为空，force/MCP 的 required Tool 精确派生。
 - 新旧前后端不兼容组合由发布门禁阻止，不做静默兼容。
 
 ### 11.3 Agent storage 与 recovery
@@ -383,6 +413,7 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - 完整 `skill_activation` payload 131071/131072 bytes 接受、131073 bytes 拒绝；测试数据必须计入 binding/revision/digest 外壳，不能只测 profile body。
 - 完整 prepared execution envelope 131071/131072 bytes 接受、131073 bytes 拒绝；profile 只是其中一个字段。
 - crash before/after initialization、startup recovery、waiting resume 保持 hint 为 auto choice。
+- pre-Agent 文件选择/Sheet 选择 Interrupt 在进程重启后仍从原 v2 prepared record 原子初始化同一 user + hint activation；不依赖内存 resume metadata。
 - bundle refresh 后仍使用 pinned profile；revision 缺失 fail closed。
 - delegated Skill hint 后执行只保留一个 activation item。
 
@@ -440,6 +471,7 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 
 - `frontend/src/domain/slashCommands.ts`、`frontend/src/api/client.ts`、`frontend/src/App.tsx`及对应测试；
 - `src/api/dto.py`、`src/api/runtime.py`、submission prepared handoff 投影及对应测试；
+- `src/api/submission_admission.py`、`src/storage/runtime_sidecar_facade.py`、`src/storage/sqlite/repositories.py` 与 `native/crates/maf_runtime_sidecar/src/lib.rs` 的 v1/v2 schema/domain decoder、v2-only writer及对应 Python/Rust 测试；
 - `src/orchestration/agent_loop/orchestrator.py`、`context.py`、`skill_activation.py`、初始化/recovery helper及测试；
 - `src/orchestration/agent_loop/capability_invoker.py`、新增的单一结果 projector、Skill managed result Artifact staging/cleanup及测试；
 - SQLite/PostgreSQL/Runtime Sidecar Agent repository 的初始化原子提交合同及测试；
@@ -451,8 +483,8 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 
 - 只在 `main` 本地开发环境实施与验收；`prod` 不变。
 - 前后端必须成对构建、发布和回滚。新前端向旧后端发送 `hint` 会被旧后端错误地强制执行。
-- 发布前停止新提交并等待在途 Task 收敛，再替换 backend/frontend。
-- 回滚前同样停止新提交并等待所有 `routing_mode=hint` Task 终态；不得让旧后端恢复在途 hint Task。
+- 发布前停止新提交并等待正在写 prepared handoff 的 submission 收敛，再成对替换 backend/frontend/Runtime Sidecar；新版本上线后可继续精确恢复部署前的 v1 record。
+- 回滚前停止新提交，并等待所有由新 writer 创建的 v2 submission、pre-Agent Interrupt 与 Task 全部终态；旧后端只理解 v1，不得读取或恢复任何在途 v2 record。
 - 本设计不修改数据库物理 schema，回滚不删除 Task、AgentRun、AgentItem、Message、Artifact 或 audit。
 - 回滚结果 projector 时只能进入“小型结果 inline、超大结果 typed failure”的 safe mode；禁止恢复 `dict(output_payload)` 无界直通，也禁止重新公开 raw MCP Result。
 - 已完成的 hint Task 历史回答保持普通对话历史；其 private activation item 不进入公共历史。
@@ -464,17 +496,18 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 1. Skill picker 与 Slash 都使用单消息 `hint`。
 2. `hint` 在所有普通与恢复入口保持 auto Tool choice。
 3. 选中 Skill 的安全 profile 在首次采样前 durable、pinned、可恢复。
-4. informational 消息零 Skill 执行并成功回答。
-5. execution 消息可调用同一选中 Skill，且现有执行/Interrupt/final 路径不回归。
-6. 所有 Capability outcome 在 repository 前经过唯一 result projector，`safe_result` 不再是 raw `output_payload` 的浅拷贝。
-7. 超大 strict-JSON 结果无损进入 owner-bound managed Artifact，`model_view` 不超过 20,000 code points、完整 `safe_result` 不超过 80,000 UTF-8 bytes，完整 AgentItem 不超过 131,072 bytes。
-8. invalid/spill/projection 故障提交 typed failed outcome，不产生 `execution_crash` 或 reserved-result 残留。
-9. delegated Skill 不重复 activation。
-10. contract-v2 PublicSkillProfile 足以回答公开参数、输入格式、默认值、约束和输出格式；soft-binding 首轮不含 raw `SKILL.md`，delegated Skill 被实际调用后才获得 pinned bounded instruction body。
-11. MCP 显式绑定语义完全不变，现有 MCP agent/user/raw projection 分层不回归。
-12. 前后端和相关后端/Rust门禁通过，实际本地 smoke 通过。
-13. 文档、索引、CHANGELOG 与实现状态一致。
-14. `prod` 未修改或部署。
+4. 所有新 submission 使用 prepared execution v2；旧 v1 仅兼容读取，v2 routing/activation authority 在普通、Interrupt 与 startup recovery 中保持一致。
+5. informational 消息零 Skill 执行并成功回答。
+6. execution 消息可调用同一选中 Skill，且现有执行/Interrupt/final 路径不回归。
+7. 所有 Capability outcome 在 repository 前经过唯一 result projector，`safe_result` 不再是 raw `output_payload` 的浅拷贝。
+8. 超大 strict-JSON 结果无损进入 owner-bound managed Artifact，`model_view` 不超过 20,000 code points、完整 `safe_result` 不超过 80,000 UTF-8 bytes，完整 AgentItem 不超过 131,072 bytes。
+9. invalid/spill/projection 故障提交 typed failed outcome，不产生 `execution_crash` 或 reserved-result 残留。
+10. delegated Skill 不重复 activation。
+11. contract-v2 PublicSkillProfile 足以回答公开参数、输入格式、默认值、约束和输出格式；soft-binding 首轮不含 raw `SKILL.md`，delegated Skill 被实际调用后才获得 pinned bounded instruction body。
+12. MCP 显式绑定语义完全不变，现有 MCP agent/user/raw projection 分层不回归。
+13. 前后端和相关后端/Rust门禁通过，实际本地 smoke 通过。
+14. 文档、索引、CHANGELOG 与实现状态一致。
+15. `prod` 未修改或部署。
 
 License Requirement：复用现有 Python、Rust/Runtime Sidecar、FastAPI/Pydantic、React/TypeScript、Agent Loop、PublicSkillProfile、MCP projection budget、managed Artifact store 与 Skill runtime 能力；不新增第三方依赖或许可类型。
 
