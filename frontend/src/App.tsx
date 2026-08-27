@@ -176,21 +176,41 @@ const TERMINAL_PROJECTION_EVENT_TYPES = new Set([
 ]);
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 function validReasoningConfig(option: ModelEditionOption | null | undefined): option is ModelEditionOption {
-  return Boolean(
-    option?.reasoning_efforts
-    && Array.isArray(option.reasoning_efforts.options)
-    && option.reasoning_efforts.options.length > 0
-    && option.reasoning_efforts.options.some((effort) => effort.value === option.reasoning_efforts.default),
-  );
+  const config = option?.reasoning_efforts;
+  if (!config || !Array.isArray(config.options) || config.options.length === 0 || !config.thinking) return false;
+  const values = config.options.map((effort) => effort.value);
+  const catalog = new Set(values);
+  if (catalog.size !== values.length || values.some((value) => !value)) return false;
+  const policies = [config.thinking.enabled, config.thinking.disabled];
+  if (policies.some((policy) => !policy || !Array.isArray(policy.supported))) return false;
+  const [enabled, disabled] = policies;
+  if (enabled.supported.length === 0) return false;
+  for (const policy of policies) {
+    const supported = new Set(policy.supported);
+    if (supported.size !== policy.supported.length) return false;
+    if (policy.supported.some((value) => !catalog.has(value))) return false;
+    if (policy.supported.length > 0 && (!policy.default || !supported.has(policy.default))) return false;
+    if (policy.supported.length === 0 && policy.default !== null) return false;
+  }
+  const referenced = new Set([...enabled.supported, ...disabled.supported]);
+  return values.every((value) => referenced.has(value));
 }
 
-function disabledSafeReasoningEfforts(option: ModelEditionOption | null | undefined) {
+function reasoningPolicyFor(option: ModelEditionOption, thinkingEnabled: boolean) {
+  return thinkingEnabled ? option.reasoning_efforts.thinking.enabled : option.reasoning_efforts.thinking.disabled;
+}
+
+function supportedReasoningEfforts(
+  option: ModelEditionOption | null | undefined,
+  thinkingEnabled: boolean,
+) {
   if (!validReasoningConfig(option)) return [];
-  return option.reasoning_efforts.options.filter((effort) => effort.allow_when_thinking_disabled);
+  const supported = new Set(reasoningPolicyFor(option, thinkingEnabled).supported);
+  return option.reasoning_efforts.options.filter((effort) => supported.has(effort.value));
 }
 
 function forceDeepThinking(option: ModelEditionOption | null | undefined): boolean {
-  return validReasoningConfig(option) && disabledSafeReasoningEfforts(option).length === 0;
+  return validReasoningConfig(option) && reasoningPolicyFor(option, false).supported.length === 0;
 }
 
 function resolveEffectiveReasoningEffort(
@@ -199,14 +219,8 @@ function resolveEffectiveReasoningEffort(
   thinkingEnabled: boolean,
 ): ReasoningEffort {
   if (!validReasoningConfig(option)) return current;
-  const values = new Set(option.reasoning_efforts.options.map((effort) => effort.value));
-  if (thinkingEnabled) {
-    return values.has(current) ? current : option.reasoning_efforts.default;
-  }
-  const disabledSafe = disabledSafeReasoningEfforts(option);
-  const disabledValues = new Set(disabledSafe.map((effort) => effort.value));
-  if (disabledValues.has(current)) return current;
-  return option.reasoning_efforts.disabled_default ?? disabledSafe[0]?.value ?? option.reasoning_efforts.default;
+  const policy = reasoningPolicyFor(option, thinkingEnabled);
+  return policy.supported.includes(current) ? current : (policy.default ?? current);
 }
 const AGRICULTURE_THEME: ThemeConfig = {
   algorithm: theme.defaultAlgorithm,
@@ -271,9 +285,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     reasoningEffort,
     effectiveDeepThinking,
   );
-  const reasoningEffortOptions = validReasoningConfig(selectedModelEdition)
-    ? selectedModelEdition.reasoning_efforts.options.map((option) => ({ label: option.label, value: option.value }))
-    : [];
+  const reasoningEffortOptions = supportedReasoningEfforts(selectedModelEdition, effectiveDeepThinking)
+    .map((option) => ({ label: option.label, value: option.value }));
   const [input, setInput] = useState('');
   const composerPlaceholder = useMemo(() => pickComposerPlaceholder(), [conversationId]);
   const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([]);
@@ -2297,7 +2310,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           value={effectiveReasoningEffort}
           options={reasoningEffortOptions}
           onChange={setReasoningEffort}
-          disabled={interactionLocked || !effectiveDeepThinking || reasoningEffortOptions.length === 0}
+          disabled={interactionLocked || !selectedModelReasoningConfigValid || reasoningEffortOptions.length === 0}
           size="small"
           style={{ width: 104 }}
         />
@@ -2312,9 +2325,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             checked={effectiveDeepThinking}
             onChange={(checked) => {
               setDeepThinking(checked);
-              if (!checked) {
-                setReasoningEffort(resolveEffectiveReasoningEffort(selectedModelEdition, reasoningEffort, false));
-              }
+              setReasoningEffort(resolveEffectiveReasoningEffort(selectedModelEdition, reasoningEffort, checked));
             }}
             checkedChildren="开"
             unCheckedChildren="关"

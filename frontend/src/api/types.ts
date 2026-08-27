@@ -21,13 +21,21 @@ export interface LogoutResponse {
 export interface ReasoningEffortOption {
   value: ReasoningEffort;
   label: string;
-  allow_when_thinking_disabled: boolean;
+}
+
+export interface ReasoningEffortStatePolicy {
+  default: ReasoningEffort | null;
+  supported: ReasoningEffort[];
+}
+
+export interface ReasoningEffortThinkingPolicy {
+  enabled: ReasoningEffortStatePolicy;
+  disabled: ReasoningEffortStatePolicy;
 }
 
 export interface ReasoningEffortConfig {
-  default: ReasoningEffort;
-  disabled_default: ReasoningEffort | null;
   options: ReasoningEffortOption[];
+  thinking: ReasoningEffortThinkingPolicy;
 }
 
 export interface ModelEditionOption {

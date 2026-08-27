@@ -27,32 +27,41 @@ vi.mock('./components/MathFormula', () => ({
 }));
 
 const deepseekReasoningEfforts = {
-  default: 'minimal',
-  disabled_default: 'minimal',
   options: [
-    { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
-    { value: 'high', label: '高', allow_when_thinking_disabled: false },
-    { value: 'max', label: '最高', allow_when_thinking_disabled: false },
+    { value: 'minimal', label: '最低' },
+    { value: 'low', label: '低' },
+    { value: 'medium', label: '中' },
+    { value: 'high', label: '高' },
+    { value: 'xhigh', label: '更高' },
+    { value: 'max', label: '最高' },
   ],
+  thinking: {
+    enabled: { default: 'high', supported: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+    disabled: { default: 'minimal', supported: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  },
 };
 
 const doubaoReasoningEfforts = {
-  default: 'minimal',
-  disabled_default: 'minimal',
   options: [
-    { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
-    { value: 'low', label: '低', allow_when_thinking_disabled: false },
-    { value: 'medium', label: '中', allow_when_thinking_disabled: false },
-    { value: 'high', label: '高', allow_when_thinking_disabled: false },
+    { value: 'minimal', label: '最低' },
+    { value: 'low', label: '低' },
+    { value: 'medium', label: '中' },
+    { value: 'high', label: '高' },
   ],
+  thinking: {
+    enabled: { default: 'high', supported: ['minimal', 'low', 'medium', 'high'] },
+    disabled: { default: 'minimal', supported: ['minimal'] },
+  },
 };
 
 const forceThinkingReasoningEfforts = {
-  default: 'high',
-  disabled_default: null,
   options: [
-    { value: 'high', label: '高', allow_when_thinking_disabled: false },
+    { value: 'high', label: '高' },
   ],
+  thinking: {
+    enabled: { default: 'high', supported: ['high'] },
+    disabled: { default: null, supported: [] },
+  },
 };
 
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -2562,21 +2571,44 @@ describe('App', () => {
   });
 
 
-  it('disables reasoning effort selection while deep thinking is off', async () => {
+  it('allows reasoning effort selection while deep thinking is off', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
     const effortSelect = screen.getAllByLabelText('思考强度')[0];
-    expect(effortSelect).toHaveClass('ant-select-disabled');
+    expect(effortSelect).not.toHaveClass('ant-select-disabled');
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('最高'));
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '普通回答' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       deepThinking: false,
-      reasoningEffort: 'minimal',
+      reasoningEffort: 'max',
+    })));
+  });
+
+  it('keeps a supported effort when deep thinking is turned off', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    const thinkingSwitch = await screen.findByLabelText('深度思考');
+    fireEvent.click(thinkingSwitch);
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('高'));
+    fireEvent.click(thinkingSwitch);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '关闭思考但保留高强度' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      deepThinking: false,
+      reasoningEffort: 'high',
     })));
   });
 
@@ -2601,6 +2633,66 @@ describe('App', () => {
     expect(screen.queryByText('最高')).not.toBeInTheDocument();
   });
 
+  it('falls back to the Doubao disabled default and keeps the select enabled', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'doubao-seed-2-1-pro-260628',
+        options: [
+          { value: 'doubao-seed-2-1-pro-260628', label: '豆包Seed 2.1 Pro', reasoning_efforts: doubaoReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    const thinkingSwitch = await screen.findByLabelText('深度思考');
+    fireEvent.click(thinkingSwitch);
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('高'));
+    fireEvent.click(thinkingSwitch);
+
+    expect(effortSelect).not.toHaveClass('ant-select-disabled');
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '豆包关闭思考' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      deepThinking: false,
+      reasoningEffort: 'minimal',
+    })));
+  });
+
+  it('falls back when switching to a model that does not support the current disabled effort', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'deepseek-v4-flash-260425',
+        options: [
+          { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
+          { value: 'doubao-seed-2-1-pro-260628', label: '豆包Seed 2.1 Pro', reasoning_efforts: doubaoReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('最高'));
+
+    const modelSelect = screen.getAllByLabelText('模型版本')[0];
+    fireEvent.mouseDown((modelSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('豆包Seed 2.1 Pro'));
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '切换模型' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      modelEdition: 'doubao-seed-2-1-pro-260628',
+      deepThinking: false,
+      reasoningEffort: 'minimal',
+    })));
+  });
+
   it('forces deep thinking when the selected model has no disabled-safe effort', async () => {
     const api = makeApi({
       getModelEditions: vi.fn(async () => ({
@@ -2621,6 +2713,35 @@ describe('App', () => {
       deepThinking: true,
       reasoningEffort: 'high',
     })));
+  });
+
+  it('blocks submission when the model reasoning config is invalid', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'invalid-model',
+        options: [
+          {
+            value: 'invalid-model',
+            label: 'Invalid Model',
+            reasoning_efforts: {
+              options: [],
+              thinking: {
+                enabled: { default: 'high', supported: ['high'] },
+                disabled: { default: null, supported: [] },
+              },
+            },
+          },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect(await screen.findByText('模型 reasoning_efforts 配置缺失或非法，请刷新或联系管理员。')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '不应提交' } });
+
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    expect(api.submitMessage).not.toHaveBeenCalled();
   });
 
   it('shows a reasoning box placeholder when deep thinking is enabled but no reasoning content arrives', async () => {

@@ -93,26 +93,30 @@ describe('createApiClient', () => {
           value: 'deepseek-v4-flash-260425',
           label: 'DeepSeek V4 Flash',
           reasoning_efforts: {
-            default: 'minimal',
-            disabled_default: 'minimal',
             options: [
-              { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
-              { value: 'high', label: '高', allow_when_thinking_disabled: false },
-              { value: 'max', label: '最高', allow_when_thinking_disabled: false },
+              { value: 'minimal', label: '最低' },
+              { value: 'high', label: '高' },
+              { value: 'max', label: '最高' },
             ],
+            thinking: {
+              enabled: { default: 'high', supported: ['minimal', 'high', 'max'] },
+              disabled: { default: 'minimal', supported: ['minimal', 'high', 'max'] },
+            },
           },
         },
         {
           value: 'deepseek-v4-pro-260425',
           label: 'DeepSeek V4 Pro',
           reasoning_efforts: {
-            default: 'minimal',
-            disabled_default: 'minimal',
             options: [
-              { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
-              { value: 'high', label: '高', allow_when_thinking_disabled: false },
-              { value: 'max', label: '最高', allow_when_thinking_disabled: false },
+              { value: 'minimal', label: '最低' },
+              { value: 'high', label: '高' },
+              { value: 'max', label: '最高' },
             ],
+            thinking: {
+              enabled: { default: 'high', supported: ['minimal', 'high', 'max'] },
+              disabled: { default: 'minimal', supported: ['minimal', 'high', 'max'] },
+            },
           },
         },
       ],
@@ -210,7 +214,7 @@ describe('createApiClient', () => {
     });
   });
 
-  it('submits selected reasoning effort only when deep thinking is enabled', async () => {
+  it('passes App-provided reasoning effort when deep thinking is enabled', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
