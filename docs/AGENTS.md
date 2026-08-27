@@ -53,6 +53,7 @@
 - `superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-implementation-plan.md`：上述批准规格的A1～A7自主实施计划；A1～A5已逐检查点闭合，下一步仅做delete coordination、离线migration cutover和最终fault/full proof；production-mode接线仍须在A6全部delete/v2 evidence闭合后执行。
 - `superpowers/specs/2026-08-27-four-role-llm-message-contract-design.md`：用户已批准、第二轮`100/100 Pass`且已完成仓库实现/本地真实冒烟的四角色模型消息合同；系统仅保留`system/assistant/user/tool`，现有developer逐条一对一改为system，不按模型启用developer，也不增加运行时外部探测。
 - `superpowers/specs/2026-08-27-four-role-llm-message-contract-implementation-plan.md`：上述四角色合同的`complete`实施账本；Agent/config、PromptEnvelope/LLM/provider边界、fixture/当前合同、完整回归和默认模型真实Task均已闭合，未纳入模型探测、异步流告警及其他目标。
+- `superpowers/specs/2026-08-27-thinking-state-reasoning-effort-configuration-design.md`：用户已批准、implementation pending 的 thinking 状态感知 reasoning effort 配置设计；以公共选项目录和 enabled/disabled 独立支持集合/默认值取代旧布尔 schema，允许前端在关闭 thinking 时继续选择合法强度，并以五模型52组合真实脱敏 smoke 作为首版配置证据。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。

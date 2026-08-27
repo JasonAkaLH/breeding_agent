@@ -1,6 +1,6 @@
 # Per-Model Reasoning Effort Configuration Design
 
-状态：perfectized design; implementation pending
+状态：历史基线设计；基础 per-model reasoning effort 能力已实现，其中 schema、关闭 thinking 时的前端选择行为及对应验证口径已由 `2026-08-27-thinking-state-reasoning-effort-configuration-design.md` 取代
 日期：2026-06-25
 
 ## 背景

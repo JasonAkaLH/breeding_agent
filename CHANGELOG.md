@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- thinking 状态感知的模型 reasoning effort 配置设计已获用户批准：后续以公共 effort 目录加 `thinking.enabled/disabled` 独立 `supported/default` 策略取代旧 `default/disabled_default/allow_when_thinking_disabled` schema，关闭 thinking 后前端继续允许选择当前模型合法强度，切换状态或模型时合法值保留、非法值才回退；后端继续在provider调用前fail closed。2026-08-27已对五模型完成enabled/disabled共52组合真实脱敏smoke：DeepSeek V4 Flash/Pro GA与GLM-5.2两种状态均接受六档，豆包Seed 2.1 Pro/Turbo enabled接受四档而disabled仅接受minimal；接口接受不等同效果评测。当前仅设计、索引与变更记录，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变更。
+
 - 四角色LLM消息合同实施已`complete`：AgentMessage、LLMMessage、PromptSegment、Agent Context、模型能力配置与provider payload固定只支持`system/assistant/user/tool`，四个developer生产点逐条一对一改为system且不改消息数量、顺序或正文；五模型配置/fixture闭合extra-role拒绝，active/waiting Run由既有AgentItem按新规则恢复。定向84项、受影响API 50项、Orchestration 125项、Integrations 734项（2项既有平台skip）和API 590项通过，compileall、修改文件Ruff与diff-check通过；本地backend重建后真实Task`task-de61bb288177`完成并生成唯一complete assistant消息，日志无developer role 400。未增加模型探测、请求重试或异步流修复，未修改数据库、Sidecar/proto、Frontend或部署合同。License Requirement：复用既有Python/OpenAI-compatible/PromptEnvelope/Agent模型合同，无新增依赖或许可变更。
 
 - 四角色LLM消息合同设计已按首轮信心审查获批修订，并在第二轮以`100/100 Pass`通过：系统固定只支持`system/assistant/user/tool`，现有developer逐条一对一改为system且保持消息数量、顺序、正文与关联；补齐Agent/LLMMessage/PromptEnvelope/config/provider四层闭合、active/waiting恢复、五模型fake payload矩阵、默认模型真实冒烟、无新增I/O的NFR和精确追踪。仍不增加模型探测、请求级兜底、数据库/Sidecar/Frontend或部署修改；当前仅文档、索引与变更记录，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变更。
