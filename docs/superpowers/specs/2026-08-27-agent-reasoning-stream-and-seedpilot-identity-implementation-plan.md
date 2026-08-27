@@ -4,7 +4,7 @@
 
 设计提交：`361430d`；两轮 perfectization 提交：`2cd4b02`
 
-状态：`checkpoint_d_validation`
+状态：`complete`
 目标分支：`main`
 
 ## 1. 完成声明
@@ -200,3 +200,45 @@ Final Gate 全部通过后：
 - 最终提交：`docs: close reasoning stream and SeedPilot identity rollout`。
 
 任何 Final Gate 失败或未运行时不得标记 complete。
+
+## 9. 完成证据（2026-08-27）
+
+检查点提交：
+
+- Checkpoint A：`8573630` `feat(agent): stream transient reasoning from provider`；
+- Checkpoint B：`610afa9` `feat(agent): reset bounded transient reasoning`；
+- Checkpoint C：`9251379` `feat(frontend): reset bounded reasoning display`；
+- Checkpoint D：`2b0f1b6` `docs: document transient reasoning reset contract`。
+
+自动门禁：
+
+- Adapter/LLM 定向 58 项、Runner/API/Memory 定向 46 项、Frontend reducer/SSE 56 项和
+  ReasoningBox 页面定向 3 项通过；
+- Integrations 761 项通过，跳过 2 项既有 macOS 平台缺口：
+  `test_linux_worker_enforces_512_mib_and_parses_64_mib_boundary`（Linux RLIMIT gate）与
+  `test_linux_malicious_schema_regex_is_terminated_by_wall_timeout`（Linux terminable regex gate）；
+- Orchestration 127 项、API 593 项、E2E 7 项全部通过；
+- Frontend 24 files / 330 tests 全部通过；`App.test.tsx` 130 项用时约 195 秒，默认 reporter
+  在单文件结束前不输出，非死锁；
+- compileall、修改 Python 文件精确 Ruff、TypeScript typecheck、Vite production build、
+  `git diff --check`、旧身份与持久化 reasoning 泄漏扫描通过。Build 仅保留既有
+  frontend >500 kB chunk warning。
+
+本地真实验收：
+
+- 重建并重启 backend/frontend，两者健康；`/api-doc`、`/seedpilot/`和鉴权模型配置 API
+  可用，前端新 hashed asset 为 `index-BrTBPTLi.js`；
+- DeepSeek V4 Pro thinking/high Task `task-f3b4eb8b7d90` 收到 551 个非空
+  `agent.reasoning_delta`，首个 reasoning event index 3，terminal index 554，最终
+  `agent.run.completed`；本次无失败 attempt，因此 reset 为 0；
+- 该 conversation 完成后 SQLite 有2条 Message，其中1条complete assistant；Message、AgentItem、
+  EventRecord、Conversation Memory与MCP audit的reasoning/reset命中全为0，durable
+  `agent.reasoning_delta|reset` EventRecord为0；
+- 身份 Task `task-938d1c4bcd97` 回答命中“SeedPilot/育种助手”，不含“统一同模型Agent”或
+  内部“统一 Agent”身份；
+- 同 conversation 追问 Task `task-35dd0290049c` 在4条历史消息上准确承接上轮，同时命中
+  “回交”与“标记辅助选择”，同会话上下文未回归；
+- reset/截断继续以deterministic自动化验收，未篡改真实Provider请求人为制造异常；
+- 当前 Docker Desktop 无法访问宿主机外部Project Skill bundle mount，验收沿用临时空named
+  volume override；该缺口与本reasoning/身份路径无关，不作为Skill能力验收证据；
+- `config.yaml`、`docker_cmd.md` 仍存在且Git-ignored/untracked，仓库工作树干净；`prod`未更新。
