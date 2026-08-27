@@ -60,6 +60,7 @@
 - `superpowers/specs/2026-08-27-main-doubao-removal-and-initial-high-default-design.md`：已放弃的旧范围；用户后续确认不移除豆包模型，不作为实施依据。
 - `superpowers/specs/2026-08-27-initial-high-reasoning-effort-default-design.md`：已完成实施的最小设计；只将全新App实例的首次空白对话初始为关闭深度思考+`high`，后续新建对话继续沿用当前设置；模型列表、backend、`config.yaml`与`prod`不变。
 - `superpowers/specs/2026-08-27-initial-high-reasoning-effort-default-implementation-plan.md`：上述设计的`complete`实施账本；记录一处React state初始值、331项Frontend测试、typecheck/build、配置不变、frontend-only重建和浏览器首次默认/后续继承/豆包保留验收。
+- `superpowers/specs/2026-08-27-unified-agent-loop-skill-soft-binding-design.md`：已获用户批准、尚未实施的统一Agent Loop Skill soft binding回归设计；picker与`/skill-name`提交单消息`hint`，在首次采样前持久化pinned PublicSkillProfile并由同一Agent自行回答或调用Skill，不恢复旧DAG/Replanner；MCP显式绑定、Skill输出容量、`prod`均不在范围。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。
@@ -89,6 +90,7 @@
 | `superpowers/specs/2026-08-26-p0-checkpoint-a-sidecar-submission-admission-implementation-plan.md` | A1～A5已完成：Core/9-RPC、Sidecar authority、SQL投影、durable prepared+Agent handoff recovery及全局Message/Interrupt identity均green；A5真实PostgreSQL双连接、API/Storage/Integrations全量通过 | 从A6继续逐检查点红测、最小实现、focused green和独立commit；最终以Backend/Rust/真实PostgreSQL全量证明闭合。 |
 | `superpowers/specs/2026-08-27-four-role-llm-message-contract-design.md` | `complete`；设计`100/100 Pass`，仓库实现与本地真实冒烟闭合 | 后续仅在四角色集合或消息优先级发生明确产品变更时另立目标；不得沿本计划加入模型探测或其他错误修复。 |
 | `superpowers/specs/2026-08-27-four-role-llm-message-contract-implementation-plan.md` | `complete`；定向/三全量回归及默认模型真实Task通过 | 保持四角色静态合同；历史失败Task不复活，用户新提交走已验证路径。 |
+| `superpowers/specs/2026-08-27-unified-agent-loop-skill-soft-binding-design.md` | 方案A已获用户批准；仅设计成文，业务实现尚未开始 | 用户审阅书面规格后生成详细实施计划；只恢复Skill单消息soft binding，不修改MCP显式绑定、Skill输出容量或`prod`。 |
 | `prd/backend/unified-agent-loop/README.md`（来源：统一Agent Loop架构与PRD decomposition design） | `complete`；当前任务编排authority | r3/r4备份继续保留到用户明确结束rollback窗口；后续变更须维持单Agent控制面与Agent-only schema。 |
 | `个人桌面长任务Agent总体设计总纲.md` | 总纲已确认；实现尚未开始 | 基于该总纲生成分阶段实施计划；个人版以 Rust daemon 为唯一可信控制 runtime，必须支持受控子 Agent spawn 以及主 Agent 决策、Runtime 仲裁的权限/上下文/交接边界，一次性替换服务端架构，旧历史只读导入。 |
 | `prd/backend/capability-missing-fallback/README.md`（父入口：`prd/backend/23-能力缺失LLMFallback披露PRD.md`） | Phase 0 至 Phase 4 代码实现已落地 | 后续仅在新增 fallback reason、artifact 政策或能力注册语义时同步更新 PRD、sanitizer、前端 notice 与测试矩阵。 |
