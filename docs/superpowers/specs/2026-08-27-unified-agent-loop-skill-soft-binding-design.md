@@ -39,6 +39,7 @@ Codex 0.149.1 会在 function/tool output 进入 model-visible history 时施加
 13. 超过模型投影预算的完整 strict-JSON 结果必须无损保存为 owner-bound managed Artifact；AgentItem 只保存小型模型视图、投影状态和 Artifact 引用，不静默丢失完整结果。
 14. 继续保留单个 AgentItem 和 prepared execution 各自独立的 131,072-byte 硬上限；不提供“无上限”配置，也不把 Artifact 正文复制回控制面。
 15. 本期只实现单次 Capability outcome 的投影和溢出处理；不新增跨并行 Tool 的聚合预算，也不新增让模型任意读取 Artifact 正文的通用 Tool。
+16. 后端 catalog、admission 和执行层可以读取 pinned revision 的 `SKILL.md`；但 soft binding 首轮采样只能接收字段级 PublicSkillProfile，不得收到未经筛选的 Skill 指令正文。只有模型实际调用 `delegated_main_agent` 后，下一轮采样才可通过 durable Tool result 接收该 pinned revision 的有界 Skill 指令正文。
 
 第 7 项的“必要恢复”只指恢复原本就以 `force_capability` 创建的 Task；任何原始 `routing_mode=hint` Task 在普通、waiting 或 startup recovery 中都必须继续保持 auto Tool choice，禁止恢复时升级为 force。
 
@@ -62,7 +63,7 @@ Codex 0.149.1 会在 function/tool output 进入 model-visible history 时施加
 - 不重写 `bioinfo-daily` 或其他 Skill 的业务逻辑、检索策略、输出 schema 和报告质量；只在统一结果边界处理重复/超大输出。
 - 不以静默截断替代完整结果保存，也不允许存储层猜测结构化 JSON 中哪些业务字段可以删除。
 - 不新增通用 Artifact 读取 Tool；需要模型消费完整大结果的工作流另行设计受控、分块、owner-bound 读取能力。
-- 不持久化原始 `SKILL.md` 正文、脚本、handler、runtime 配置、凭据或内部路径。
+- 不把 `SKILL.md` 正文写入 hint `skill_activation`、Conversation history、memory candidate 或 summary；`delegated_main_agent` 被实际调用后的 bounded durable Tool result 是唯一例外。脚本、handler、runtime 配置、凭据和内部路径仍不得进入 PublicSkillProfile。
 - 不把 soft binding 变成 conversation 级长期设置。
 - 不新增 Skill 执行按钮、强制执行开关或新的命令语法。
 - 不修改数据库物理 schema；复用现有 `agent_item.kind=skill_activation`。
@@ -77,7 +78,7 @@ Codex 0.149.1 会在 function/tool output 进入 model-visible history 时施加
 | `RoutingMode.HINT` | 复用现有 Core enum 和 Task 字段，补齐真实行为 |
 | Skill picker 与 Slash parser | 保留交互、候选、冲突和一次性 badge，只改提交 intent |
 | Capability Registry | 继续作为 public/enabled Skill authority |
-| `PublicSkillProfile` | 直接复用现有脱敏 builder；不读取 raw body |
+| `PublicSkillProfile` | 扩展现有脱敏 builder：后端从 pinned contract 和 input schema 构建字段级公开摘要；允许解析 `SKILL.md`，但不把 raw body 注入 soft binding 首轮上下文 |
 | Skill bundle revision | 继续固定提交时 revision，并进入 profile authority |
 | `skill_activation` AgentItem | 泛化为“公开 Skill profile 已激活到当前 Agent 上下文”，不表示业务执行完成 |
 | Agent Tool catalog | 继续暴露所有当前可见 public Skill Tool |
@@ -131,8 +132,8 @@ Skill hint 必须在 Message、Task、附件绑定、AgentRun 和 audit 副作�
 1. 解析 `routing_mode` 与 canonical capability ID。
 2. 从 public Capability Registry 验证目标。
 3. 固定当前 Skill bundle revision。
-4. 从固定 revision 的 catalog 解析 Skill manifest 与 descriptor。
-5. 调用现有 `build_public_skill_profile` 构建安全 profile。
+4. 从固定 revision 的 catalog 解析 Skill manifest、descriptor、contract 与其引用的 input schema。
+5. 扩展现有 `build_public_skill_profile`，从这些固定 revision authority 构建字段级安全 profile；不得从当前活动 bundle、未声明文件或用户 metadata 补字段。
 6. 组装完整 `skill_activation` payload，再使用 Agent canonical payload codec 验证严格 JSON、UTF-8、SHA-256 与 131,072-byte 上限；不得用“profile 自身可占满 128 KiB”替代组合后校验。
 7. 将 canonical activation、revision 和 digest 放入 server-private immutable prepared Agent handoff，并对完整 prepared execution envelope 单独执行其 131,072-byte 合同校验。
 8. 将通过两层组合校验的 immutable handoff 交给 durable initialization。
@@ -165,21 +166,54 @@ sequence 2: skill_activation(binding_mode=hint)
   "profile": {
     "capability_id": "skill.bioinfo_daily",
     "name": "bioinfo-daily",
-    "display_name": "...",
-    "description": "...",
+    "display_name": "Bioinfo Daily 育种文献简报",
+    "description": "使用 PubMed API 检索指定日期范围内的农业基因组学与作物育种新文献，并生成中文专业简报。",
     "triggers": [],
     "parameters": [],
     "inputs": {},
-    "outputs": {},
+    "outputs": {
+      "output_contracts": [
+        {
+          "output_id": "literature_search_output",
+          "required_fields": ["answer", "articles", "search_summary"],
+          "artifacts": [
+            {"extensions": [".json"], "mime_types": ["application/json"]}
+          ]
+        }
+      ]
+    },
     "resource_index": [],
-    "schema_summaries": [],
+    "schema_summaries": [
+      {
+        "schema_id": "literature_search",
+        "title": "PubMed 农业与育种文献检索",
+        "description": "检索指定日期范围内的作物育种、植物遗传学、基因组选择、表型组学、农业基因组学与农业人工智能文献。",
+        "aliases": [],
+        "fields": [
+          {
+            "name": "max_results",
+            "title": "最大返回文献数",
+            "type": "integer",
+            "required": false,
+            "default": 30,
+            "question": "可选。请提供最多返回多少篇文献，默认 30，最大 100。",
+            "validation": {"min": 1, "max": 100}
+          }
+        ],
+        "constraints": []
+      }
+    ],
     "routing_examples": []
   },
   "profile_digest": "sha256-without-prefix"
 }
 ```
 
-Profile 继续经过现有 allowlist/sanitizer。`resource_index` 只保留公开 ID、标题、描述和 audience；不得写资源正文。item ID 继续由 run ID、capability ID 和 pinned revision 确定性派生，同一 Run 的 exact replay 返回同一 item。
+Profile 继续经过现有 allowlist/sanitizer。contract-v2 的 `parameters` 保留为空仅用于旧字段兼容，模型所需的参数 authority 是 `schema_summaries[].fields`，不得再复制一份扁平 parameters。每个 `expose=true` 的 input field 只允许投影：`name`、`title`、`description`、`type`、`required`、安全的 `required_when`、`aliases`、strict-JSON `default`/`enum`/`const`、用户可见 `question`、`clarification.examples`、`validation.min/max/min_length/max_length/file_extensions` 与现有 file-selection 摘要。schema 级 constraints 只允许规范化的 `any_of`、`one_of`、`mutually_exclusive` 和字段依赖关系；`expose=false` 字段必须完全省略。
+
+`outputs.output_contracts` 必须按 output ID 输出确定性摘要，至少包含 `output_id`、`required_fields`，以及 Artifact 的公开 `extensions`/`mime_types`；不得复制 handler 返回样例或内部 storage 信息。字段和默认值继续经过敏感 key/text sanitizer。input source policy、解析 regex/pattern、entrypoint、source path、脚本、handler、runtime、配置、凭据和未声明 schema 字段不得进入 Profile。`resource_index` 只保留公开 ID、标题、描述和 audience，不写资源正文。
+
+任一 contract/input schema 无法从 pinned revision 解析、Profile 含禁止字段，或完整 activation 超过 131,072 bytes 时，hint admission 必须 fail closed；不得退回空参数 Profile 后继续接受。item ID 继续由 run ID、capability ID 和 pinned revision 确定性派生，同一 Run 的 exact replay 返回同一 item。
 
 `skill_activation` 在这里表示“Skill 的公开 profile 已激活到 Agent 上下文”，不表示 Skill 脚本、平台服务或 MCP 已经执行。
 
@@ -189,7 +223,11 @@ Profile 继续经过现有 allowlist/sanitizer。`resource_index` 只保留公�
 
 - Invocation boundary 读取现有 items；
 - capability ID、revision 与 profile digest 完全一致时复用既有 activation；
-- Tool outcome 只提交安全 activation result，不再追加第二个 profile item；
+- Tool outcome 不再追加第二个 profile item，而是提交 `maf.agent.delegated_skill_activation.v1` safe result；其中包含 activation identity、pinned revision、profile digest、`instruction_body` 与 `instruction_sha256`；
+- `instruction_body` 只能取自 pinned manifest 已解析的 `SKILL.md` 正文，不含 frontmatter，不读取当前活动 bundle；它作为低于平台 system/safety rules 的 Skill 指令上下文，不能覆盖 soft-binding、安全、权限或数据边界；
+- `instruction_body` 必须完整且不超过 20,000 Unicode code points，组合后的 safe result 不超过 80,000 UTF-8 bytes，完整 Tool result AgentItem 不超过 131,072 bytes；不得截断指令后继续执行；
+- 超限、正文缺失、digest 不一致或 pinned revision 不可用时提交 typed failed outcome `delegated_skill_instruction_invalid`，不激活不完整指令；
+- committed Tool result 是下一轮采样和 crash recovery 的唯一 instruction authority；恢复不得重新读取当前文件改变已提交 bytes；该正文不得进入 Conversation history、memory candidate、summary 或公共 Artifact；
 - 任一 identity 或 digest 不一致时 fail closed，不以活动 bundle 重建或覆盖。
 
 其他 runtime mode 不改变：`python_subprocess` 运行脚本，`platform_service` 调受控 handler，`delegated_main_agent` 把控制权交回同一主 Agent。
@@ -222,7 +260,7 @@ Profile 继续经过现有 allowlist/sanitizer。`resource_index` 只保留公�
 |---|---|
 | `mcp.dispatch` | 复用已经生成的 `agent_projection`/`text` 和小型状态字段；`user_view`、raw result 与重复 `structured_content` 不进入 `safe_result` |
 | 普通 Skill | 小结果经敏感 key/text sanitizer 后 inline；大结果保留 `answer`、`response_text`、`summary`、`search_summary`、状态、缺参/错误和安全文件描述等优先字段，bulk arrays/mappings 只进入 managed Artifact |
-| `delegated_main_agent` | 只保留现有 activation identity、状态和安全摘要；不复制 profile 正文或第二份 activation |
+| `delegated_main_agent` | soft-binding 首轮只见 PublicSkillProfile；被模型实际调用后，safe result 保存 bounded pinned `instruction_body`、activation identity、状态和 digest，不复制第二份 profile 或 activation |
 
 普通 Skill 的完整原始结果超过模型预算时，无论 Skill 是否已经生成其他输出文件，平台都必须用 call item ID 与 raw SHA 派生确定性的 `skill_result.json` managed Artifact，保证被省略的 JSON 字段有完整权威副本。已有 Skill output file Artifact 保持不变；新的 result Artifact 只补足完整结构化结果，不取代业务文件。
 
@@ -271,6 +309,7 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 ## 9. Conversation Memory 边界
 
 - Hint profile 不进入 Conversation memory candidate、summary 或普通 history Message。
+- delegated Tool result 中的 `instruction_body` 只存在于当前 AgentRun durable context；Conversation memory/history 投影必须删除该字段，只允许保留 capability ID、revision、profile/instruction digest 与安全状态摘要。
 - soft binding 只作用当前 AgentRun。
 - 最终自然语言回答正常进入 conversation history，因此下一轮可以理解普通追问。
 - 下一轮没有新的 hint 时，主 Agent 不能把上一轮 profile 当作新的执行绑定。
@@ -291,6 +330,7 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 | hint item exact replay | 返回既有 item，不增加 sequence/revision |
 | hint item identity/digest 冲突 | fail closed，不覆盖 |
 | delegated 激活重复 | 复用既有 profile，不重复写 |
+| delegated 指令正文缺失、超限或 digest 不一致 | committed typed failure `delegated_skill_instruction_invalid`，不截断、不读取活动 bundle补齐 |
 | 模型直接回答 | 正常 final candidate；零 Skill Node/调用 |
 | 模型决定执行且结果 inline | 提交 bounded `safe_result`，走现有 final output |
 | 模型决定执行且结果超过投影预算 | 完整 raw JSON 进入 managed Artifact，提交 bounded `artifact_backed` result 后继续 final output |
@@ -351,12 +391,15 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - `force_capability` 首轮 required；`hint` 与 `auto` 首轮 auto。
 - hint profile 渲染在当前 user message 前，普通 delegated activation 不前移。
 - profile 不包含 runtime、path、script、handler、配置、secret 或 raw resource body。
+- contract-v2 Profile 为每个 `expose=true` input field 提供字段名、类型、必填性、默认值、公开约束和示例；`expose=false`、source policy、pattern 与内部入口不出现。
+- output contract 摘要包含 required fields 与公开 Artifact 格式，不包含 storage 或 handler 信息。
 - informational sample 无 Tool call时直接完成。
 - execution sample 调用 Tool 后走现有 outcome/final 流程。
 - 小型 Skill 结果形成 `inline` safe result；原始对象不会绕过 projector。
 - 超大 Skill 结果形成确定性 result Artifact 和不超过 80,000 UTF-8 bytes 的 `artifact_backed` safe result。
 - MCP safe result 只含 agent projection，不重复 user view/raw `structured_content`。
 - Artifact staging、Agent repository CAS 或最终 envelope 校验故障均提交 typed failed outcome，不遗留 reserved item。
+- delegated Skill 在首轮 hint 上下文中不含 `SKILL.md` 正文；实际 Tool call 后下一轮收到 pinned、完整且有界的 instruction body，exact replay bytes 一致，memory/history 中不出现正文。
 - 没有额外 decision LLM 调用、Replanner 或 DAG shape。
 
 ### 11.5 核心业务验收
@@ -368,6 +411,7 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 - PubMed 网络调用数为 0；
 - Skill TaskNode 数为 0；
 - 回答包含用途、输入和边界的公开事实。
+- 回答中的日期默认值、最大文献数等参数事实可逐项追溯到 pinned input schema 的字段级公开摘要，而不是模型常识或 `SKILL.md` raw body。
 
 选择 `bioinfo-daily` 后发送“检索最近七天的育种文献”：
 
@@ -426,10 +470,11 @@ Hint 不从 catalog 删除其他 public Tool。主 Agent 应优先围绕被选�
 7. 超大 strict-JSON 结果无损进入 owner-bound managed Artifact，`model_view` 不超过 20,000 code points、完整 `safe_result` 不超过 80,000 UTF-8 bytes，完整 AgentItem 不超过 131,072 bytes。
 8. invalid/spill/projection 故障提交 typed failed outcome，不产生 `execution_crash` 或 reserved-result 残留。
 9. delegated Skill 不重复 activation。
-10. MCP 显式绑定语义完全不变，现有 MCP agent/user/raw projection 分层不回归。
-11. 前后端和相关后端/Rust门禁通过，实际本地 smoke 通过。
-12. 文档、索引、CHANGELOG 与实现状态一致。
-13. `prod` 未修改或部署。
+10. contract-v2 PublicSkillProfile 足以回答公开参数、输入格式、默认值、约束和输出格式；soft-binding 首轮不含 raw `SKILL.md`，delegated Skill 被实际调用后才获得 pinned bounded instruction body。
+11. MCP 显式绑定语义完全不变，现有 MCP agent/user/raw projection 分层不回归。
+12. 前后端和相关后端/Rust门禁通过，实际本地 smoke 通过。
+13. 文档、索引、CHANGELOG 与实现状态一致。
+14. `prod` 未修改或部署。
 
 License Requirement：复用现有 Python、Rust/Runtime Sidecar、FastAPI/Pydantic、React/TypeScript、Agent Loop、PublicSkillProfile、MCP projection budget、managed Artifact store 与 Skill runtime 能力；不新增第三方依赖或许可类型。
 
