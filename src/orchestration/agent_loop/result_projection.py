@@ -167,7 +167,11 @@ class AgentCallResultProjector:
             or raw_value["model_view"].get("schema")
             != "maf.agent.delegated_skill_activation.v1"
         ):
-            return _rejected("agent_result_invalid")
+            return _rejected(
+                "agent_result_invalid",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         try:
             _validate_model_result(raw_value)
             _preflight_tool_result(
@@ -178,7 +182,11 @@ class AgentCallResultProjector:
                 artifact_ids=artifact_ids,
             )
         except (AgentPayloadError, ValueError):
-            return _rejected("agent_result_projection_too_large")
+            return _rejected(
+                "agent_result_projection_too_large",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         return AgentCallResultProjection(
             safe_result_payload=raw_value,
             canonical_raw_bytes=canonical_raw,
@@ -225,7 +233,11 @@ class AgentCallResultProjector:
             shrink_text_keys=("text", "agent_projection"),
         )
         if safe_result is None:
-            return _rejected("agent_result_projection_too_large")
+            return _rejected(
+                "agent_result_projection_too_large",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         try:
             _preflight_tool_result(
                 call_item_id=call_item_id,
@@ -235,7 +247,11 @@ class AgentCallResultProjector:
                 artifact_ids=artifact_ids,
             )
         except AgentPayloadError:
-            return _rejected("agent_result_projection_too_large")
+            return _rejected(
+                "agent_result_projection_too_large",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         return AgentCallResultProjection(
             safe_result_payload=safe_result,
             canonical_raw_bytes=canonical_raw,
@@ -270,7 +286,11 @@ class AgentCallResultProjector:
                     continuation_locator
                 )
             except (TypeError, ValueError):
-                return _rejected("agent_result_invalid")
+                return _rejected(
+                    "agent_result_invalid",
+                    canonical_raw=canonical_raw,
+                    raw_sha256=raw_sha256,
+                )
         safe_result = _fit_inline_model_result(
             projection_revision=SKILL_RESULT_PROJECTION_REVISION,
             model_view=model_view,
@@ -302,7 +322,11 @@ class AgentCallResultProjector:
                 spill_artifact_id=None,
             )
         if _contains_forbidden_raw_value(raw_value):
-            return _rejected("agent_result_invalid")
+            return _rejected(
+                "agent_result_invalid",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         spill_artifact_id = skill_result_artifact_id(
             call_item_id=call_item_id,
             raw_sha256=raw_sha256,
@@ -322,7 +346,11 @@ class AgentCallResultProjector:
             projection_mode="artifact_backed",
         )
         if safe_result is None:
-            return _rejected("agent_result_projection_too_large")
+            return _rejected(
+                "agent_result_projection_too_large",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         try:
             _preflight_tool_result(
                 call_item_id=call_item_id,
@@ -332,7 +360,11 @@ class AgentCallResultProjector:
                 artifact_ids=(*artifact_ids, spill_artifact_id),
             )
         except AgentPayloadError:
-            return _rejected("agent_result_projection_too_large")
+            return _rejected(
+                "agent_result_projection_too_large",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         return AgentCallResultProjection(
             safe_result_payload=safe_result,
             canonical_raw_bytes=canonical_raw,
@@ -612,12 +644,17 @@ def _is_delegated_model_result(value: Mapping[str, Any]) -> bool:
     )
 
 
-def _rejected(error_code: str) -> AgentCallResultProjection:
+def _rejected(
+    error_code: str,
+    *,
+    canonical_raw: bytes | None = None,
+    raw_sha256: str | None = None,
+) -> AgentCallResultProjection:
     return AgentCallResultProjection(
         safe_result_payload=None,
         canonical_raw_bytes=None,
-        raw_sha256=None,
-        original_size_bytes=0,
+        raw_sha256=raw_sha256,
+        original_size_bytes=len(canonical_raw) if canonical_raw is not None else 0,
         projection_revision=None,
         projection_mode=None,
         projection_truncated=False,

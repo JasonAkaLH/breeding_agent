@@ -774,7 +774,6 @@ input_schemas:
         await self.wait_for_condition(lambda: self.runtime.list_interrupts(task_id))
         interrupt = (await self.runtime.list_interrupts(task_id))[0]
         collection_id = interrupt["required_fields"][SLOT_COLLECTION_REF_FIELD]["collection_id"]
-
         answer = await self.client.post(
             "/api/v1/conversations/chat-messages",
             json={
@@ -1778,7 +1777,6 @@ input_schemas:
         await self.wait_for_condition(lambda: self.runtime.list_interrupts(task_id))
         interrupt = (await self.runtime.list_interrupts(task_id))[0]
         collection_id = interrupt["required_fields"][SLOT_COLLECTION_REF_FIELD]["collection_id"]
-
         answer = await self.client.post(
             "/api/v1/conversations/chat-messages",
             json={
@@ -1860,7 +1858,6 @@ input_schemas:
         await self.wait_for_condition(lambda: self.runtime.list_interrupts(task_id))
         interrupt = (await self.runtime.list_interrupts(task_id))[0]
         collection_id = interrupt["required_fields"][SLOT_COLLECTION_REF_FIELD]["collection_id"]
-
         answer = await self.client.post(
             "/api/v1/conversations/chat-messages",
             json={

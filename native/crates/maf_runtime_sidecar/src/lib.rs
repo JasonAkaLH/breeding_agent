@@ -5432,10 +5432,10 @@ fn validate_prepared_v2_relations(
             if !object["skill_activation"].is_null() {
                 return Err(write_failed("prepared v2 auto activation is invalid"));
             }
-            if let Some(capability_id) = capability_id {
-                if object["pending_context"]["capability_id"].as_str() != Some(capability_id) {
-                    return Err(write_failed("prepared v2 auto capability is invalid"));
-                }
+            if let Some(capability_id) = capability_id
+                && object["pending_context"]["capability_id"].as_str() != Some(capability_id)
+            {
+                return Err(write_failed("prepared v2 auto capability is invalid"));
             }
         }
         _ => return Err(write_failed("prepared v2 routing mode is invalid")),

@@ -21,6 +21,7 @@ EXPECTED_METRICS = {
     "agent_lease_remaining_seconds",
     "agent_lease_renew_total",
     "agent_resume_total",
+    "agent_result_projections_total",
     "agent_run_samples",
     "agent_run_tool_calls",
     "agent_runs_active",
@@ -49,6 +50,30 @@ class AgentMetricsTest(unittest.TestCase):
                 self.assertTrue(recorder.record(name, 1, **labels))
 
         self.assertEqual({sample.name for sample in sink.samples}, EXPECTED_METRICS)
+
+    def test_result_projection_metric_has_only_closed_outcomes(self) -> None:
+        sink = InMemoryAgentMetricSink()
+        recorder = AgentMetricsRecorder(sink)
+        outcomes = {
+            "inline",
+            "artifact_backed",
+            "invalid",
+            "artifact_persist_failed",
+            "projection_too_large",
+        }
+
+        for outcome in outcomes:
+            self.assertTrue(
+                recorder.record(
+                    "agent_result_projections_total",
+                    projection_mode=outcome,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "label_invalid"):
+            recorder.record(
+                "agent_result_projections_total",
+                projection_mode="skill.secret",
+            )
 
     def test_high_cardinality_unknown_and_secret_labels_are_rejected(self) -> None:
         for labels in (

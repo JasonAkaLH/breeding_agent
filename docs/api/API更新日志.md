@@ -8,6 +8,30 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-28 增量：Skill 单消息 Soft Binding 与大结果 Artifact
+
+聊天页 Skill picker 与 `/skill-name` 现在显式提交 `routing_mode=hint` 和当前公开的
+`capability_id=skill.*`；普通聊天、Interrupt answer 与无选择 follow-up 提交 `auto + null`。
+`hint` 只把固定 bundle revision 的脱敏 PublicSkillProfile 加入本条消息的统一 Agent 上下文，
+`tool_choice` 仍为 `auto`，因此询问用途可以直接回答，并不保证执行 Skill。普通 UI 不提供
+Skill force 开关，也不再提交名称含 `forced` 的 Skill metadata；内部 API/自动化仍可按既有合同使用
+`force_capability`。MCP `$Server` 不变，仍要求
+`force_capability + mcp.dispatch + metadata.mcp_server_binding`。
+
+`routing_mode` 只接受 `auto | hint | force_capability`。`auto` 不接受 capability ID，`hint` 与
+`force_capability` 必须携带 capability ID，非法 shape 在任何 submission 副作用前返回 422；hint 目标
+不存在、非公开、disabled 或不属于 `skill.*` 时统一返回 409
+`{"code":"skill_hint_unavailable"}`。HTTP 202 只在 prepared v2 与 Agent/Interrupt/no-server 之一形成
+closed durable handoff 后返回。新 writer 只写 `maf.submission.prepared_execution.v2`；旧 v1 仅在锁步
+发布兼容窗口内按原 schema/digest 精确读取。Frontend、backend 与 Runtime Sidecar 必须成对发布和回滚。
+
+Capability 原始结果在进入 Agent repository 前统一投影：模型视图最多 20,000 Unicode code points，
+完整 safe result canonical JSON 最多 80,000 UTF-8 bytes，完整 Tool result envelope 最多 131,072 bytes。
+超预算但合法的 Skill strict-JSON 完整结果只保存为 owner-bound `skill_result.json` Artifact；Task artifact
+列表返回空 `storage_ref` 与平台 `download_url`，下载时再次验证 owner、managed storage key、regular file、
+size 与 SHA-256。该通道不是 MCP raw result 公共旁路；`artifact_type=mcp_result` 仍不可直接下载。
+`skill_result` 在 Agent outcome CAS 发布 metadata 前不可列出或下载。
+
 ## 2026-08-27 增量：Agent reasoning 真正流式展示与 SeedPilot 身份恢复
 
 thinking 开启时，Provider `reasoning_content` 现在按原始顺序转换为当前 Task 的
@@ -20,7 +44,7 @@ Conversation Memory、Artifact、audit 或最终回答，刷新和历史恢复�
 524,288 UTF-8 bytes，超限只展示一次“思考内容过长，已截断”。用户可见助手身份回复为
 “育种助手（SeedPilot）”；“统一 Agent”仅是内部执行机制名称。HTTP endpoint 与持久化 schema 无变化。
 
-## 2026-08-23 增量：统一Agent Loop clean cutover
+## 2026-08-23 历史增量：统一Agent Loop clean cutover（Skill force已被2026-08-28 hint替代）
 
 `POST /api/v1/conversations/chat-messages`点名公开Skill时，客户端直接提交`routing_mode=force_capability`和当前`capability_id=skill.*`；不再提交`main_agent.respond`或`metadata.soft_skill_binding`。点名`mcp.dispatch`仍必须使用已验证的`metadata.mcp_server_binding`，Server authority由后端固定，模型不可改写。
 

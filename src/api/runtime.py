@@ -361,6 +361,10 @@ from src.orchestration.agent_loop.capability_invoker import (
     AgentCapabilityInvoker,
     AgentInvocationContextStore,
 )
+from src.orchestration.agent_loop.observability import (
+    AgentResultProjectionObservation,
+    build_agent_result_projected_event,
+)
 from src.orchestration.agent_loop.task_projection import (
     AgentTaskInvocationCommitPort,
 )
@@ -7900,7 +7904,10 @@ class ApiRuntime(
         saved_interrupt = replace(
             interrupt,
             question=active.last_question or interrupt.question,
-            required_fields=slot_collection_required_fields_ref(active),
+            required_fields=self._slot_collection_required_fields_for_interrupt(
+                active,
+                interrupt,
+            ),
             status=InterruptStatus.OPEN,
         )
         await self.storage.save_interrupt(saved_interrupt)
@@ -8028,7 +8035,10 @@ class ApiRuntime(
         saved_interrupt = replace(
             interrupt,
             question=active.last_question or interrupt.question,
-            required_fields=slot_collection_required_fields_ref(active),
+            required_fields=self._slot_collection_required_fields_for_interrupt(
+                active,
+                interrupt,
+            ),
             status=InterruptStatus.OPEN,
         )
         await self.storage.save_interrupt(saved_interrupt)
@@ -8198,6 +8208,17 @@ class ApiRuntime(
             ),
             await_durable_start=True,
         )
+
+    @staticmethod
+    def _slot_collection_required_fields_for_interrupt(
+        collection: SlotCollection,
+        interrupt: Interrupt,
+    ) -> dict[str, object]:
+        fields = slot_collection_required_fields_ref(collection)
+        locator = interrupt.required_fields.get("_agent_continuation")
+        if isinstance(locator, Mapping):
+            fields["_agent_continuation"] = dict(locator)
+        return fields
 
     async def _understand_v2_interrupt_turn(
         self,
@@ -15005,6 +15026,20 @@ def build_api_runtime(
             return None
         return await runtime._mcp_invocation_shadow_hook(**values)
 
+    async def observe_agent_result_projection(
+        *,
+        run: AgentRun,
+        call_item: Any,
+        observation: AgentResultProjectionObservation,
+    ) -> None:
+        await record_initialization_event_exact(
+            build_agent_result_projected_event(
+                run=run,
+                call_item=call_item,
+                observation=observation,
+            )
+        )
+
     async def activate_delegated_skill(
         run,
         capability_id: str,
@@ -15167,6 +15202,7 @@ def build_api_runtime(
         continuation_loader=invocation_commit_port.continuation_locator_for_call,
         delegated_skill_activator=activate_delegated_skill,
         result_artifact_stager=agent_skill_result_stager.stage,
+        result_projection_observer=observe_agent_result_projection,
         invocation_hook=agent_invocation_hook,
     )
     lease_controller = AgentLeaseController(agent_repository, ttl_seconds=30)

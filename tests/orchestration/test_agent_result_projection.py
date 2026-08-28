@@ -237,3 +237,5 @@ class AgentCallResultProjectorTest(unittest.TestCase):
             projected.error_code,
             "agent_result_projection_too_large",
         )
+        self.assertGreater(projected.original_size_bytes, 0)
+        self.assertRegex(projected.raw_sha256 or "", r"^[0-9a-f]{64}$")

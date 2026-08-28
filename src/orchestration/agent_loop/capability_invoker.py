@@ -23,7 +23,11 @@ from .models import (
     AgentToolCall,
 )
 from .repository import AgentRunRepository
-from .result_projection import AgentCallResultProjector
+from .observability import (
+    AgentMetricsRecorder,
+    AgentResultProjectionObservation,
+)
+from .result_projection import AgentCallResultProjection, AgentCallResultProjector
 from .runner import AgentCallExecution
 
 
@@ -83,6 +87,8 @@ class AgentCapabilityInvoker:
         | None = None,
         result_projector: AgentCallResultProjector | None = None,
         result_artifact_stager: Callable[..., Any] | None = None,
+        result_projection_observer: Callable[..., Any] | None = None,
+        metrics_recorder: AgentMetricsRecorder | None = None,
         invocation_hook: Callable[..., Any] | None = None,
     ) -> None:
         self._invocation = invocation_service
@@ -95,6 +101,8 @@ class AgentCapabilityInvoker:
         self._activate_delegated_skill = delegated_skill_activator
         self._result_projector = result_projector or AgentCallResultProjector()
         self._stage_result_artifact = result_artifact_stager
+        self._observe_result_projection = result_projection_observer
+        self._metrics = metrics_recorder
         self._invocation_hook = invocation_hook
 
     async def resume(
@@ -201,14 +209,29 @@ class AgentCapabilityInvoker:
                     safe_error_code=activated.safe_error_code,
                 )
                 if not projected.accepted:
+                    await self._record_result_projection(
+                        run=run,
+                        call_item=call_item,
+                        capability_id=capability_id,
+                        projection=projected,
+                        artifact_count=0,
+                    )
                     return AgentCallExecution(
                         AgentCallOutcomeStatus.FAILED,
                         safe_error_code=projected.error_code,
                     )
-                return replace(
+                projected_execution = replace(
                     activated,
                     safe_result_payload=projected.safe_result_payload,
                 )
+                await self._record_result_projection(
+                    run=run,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                    projection=projected,
+                    artifact_count=len(projected_execution.staged_artifacts),
+                )
+                return projected_execution
         user_input = self._load_user_input(run)
         if hasattr(user_input, "__await__"):
             user_input = await user_input
@@ -346,12 +369,27 @@ class AgentCapabilityInvoker:
             continuation_locator=continuation_locator,
         )
         if not projection.accepted:
+            await self._record_result_projection(
+                run=run,
+                call_item=call_item,
+                capability_id=capability_id,
+                projection=projection,
+                artifact_count=0,
+            )
             return AgentCallExecution(
                 AgentCallOutcomeStatus.FAILED,
                 safe_error_code=projection.error_code,
             )
         if projection.spill_required:
             if self._stage_result_artifact is None:
+                await self._record_result_projection(
+                    run=run,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                    projection=projection,
+                    artifact_count=len(artifacts),
+                    error_code="agent_result_artifact_persist_failed",
+                )
                 return AgentCallExecution(
                     AgentCallOutcomeStatus.FAILED,
                     safe_error_code="agent_result_artifact_persist_failed",
@@ -369,6 +407,14 @@ class AgentCapabilityInvoker:
                 if hasattr(staged, "__await__"):
                     staged = await staged
             except Exception:
+                await self._record_result_projection(
+                    run=run,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                    projection=projection,
+                    artifact_count=len(artifacts),
+                    error_code="agent_result_artifact_persist_failed",
+                )
                 return AgentCallExecution(
                     AgentCallOutcomeStatus.FAILED,
                     safe_error_code="agent_result_artifact_persist_failed",
@@ -377,11 +423,26 @@ class AgentCapabilityInvoker:
                 not isinstance(staged, AgentStagedArtifact)
                 or staged.artifact_id != projection.spill_artifact_id
             ):
+                await self._record_result_projection(
+                    run=run,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                    projection=projection,
+                    artifact_count=len(artifacts),
+                    error_code="agent_result_artifact_persist_failed",
+                )
                 return AgentCallExecution(
                     AgentCallOutcomeStatus.FAILED,
                     safe_error_code="agent_result_artifact_persist_failed",
                 )
             artifacts = (*artifacts, staged)
+        await self._record_result_projection(
+            run=run,
+            call_item=call_item,
+            capability_id=capability_id,
+            projection=projection,
+            artifact_count=len(artifacts),
+        )
         return AgentCallExecution(
             status,
             safe_result_payload=projection.safe_result_payload,
@@ -390,6 +451,69 @@ class AgentCapabilityInvoker:
                 execution.error.code if execution.error is not None else None
             ),
         )
+
+    async def _record_result_projection(
+        self,
+        *,
+        run: AgentRun,
+        call_item: Any,
+        capability_id: str,
+        projection: AgentCallResultProjection,
+        artifact_count: int,
+        error_code: str | None = None,
+    ) -> None:
+        try:
+            effective_error = error_code or projection.error_code
+            if effective_error == "agent_result_invalid":
+                projection_mode = "invalid"
+            elif effective_error == "agent_result_artifact_persist_failed":
+                projection_mode = "artifact_persist_failed"
+            elif effective_error == "agent_result_projection_too_large":
+                projection_mode = "projection_too_large"
+            else:
+                projection_mode = str(projection.projection_mode or "")
+            safe_result = projection.safe_result_payload
+            projected_size = (
+                safe_result.get("projected_size_bytes", 0)
+                if isinstance(safe_result, Mapping)
+                else 0
+            )
+            observation = AgentResultProjectionObservation(
+                capability_id=capability_id,
+                projection_mode=projection_mode,
+                original_size_bytes=projection.original_size_bytes,
+                projected_size_bytes=(
+                    projected_size
+                    if isinstance(projected_size, int)
+                    and not isinstance(projected_size, bool)
+                    else 0
+                ),
+                raw_sha256=projection.raw_sha256,
+                artifact_count=artifact_count,
+                error_code=effective_error,
+            )
+        except Exception:
+            return
+        if self._metrics is not None:
+            try:
+                self._metrics.record(
+                    "agent_result_projections_total",
+                    projection_mode=observation.projection_mode,
+                )
+            except Exception:
+                pass
+        if self._observe_result_projection is None:
+            return
+        try:
+            observed = self._observe_result_projection(
+                run=run,
+                call_item=call_item,
+                observation=observation,
+            )
+            if hasattr(observed, "__await__"):
+                await observed
+        except Exception:
+            pass
 
 
 def _node_id(call_item) -> str:

@@ -27,6 +27,26 @@ from tests.api.support import APITestCase
 
 
 class SkillOutputArtifactsAPITest(APITestCase):
+    async def _result_projection_event(self, task_id: str):
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        projected = [
+            event for event in events if event.event_type == "agent.result_projected"
+        ]
+        self.assertEqual(len(projected), 1)
+        self.assertEqual(
+            set(projected[0].payload),
+            {
+                "artifact_count",
+                "capability_id",
+                "error_code",
+                "original_size_bytes",
+                "projected_size_bytes",
+                "projection_mode",
+                "raw_sha256",
+            },
+        )
+        return projected[0]
+
     @staticmethod
     def _main_agent_llm_config() -> dict:
         return {
@@ -167,6 +187,9 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/layout.html
         self.assertEqual(download.headers["x-content-type-options"], "nosniff")
         self.assertIn("attachment", download.headers["content-disposition"])
         self.assertEqual(download.text, "<h1>layout</h1>")
+        projected = await self._result_projection_event(task_id)
+        self.assertEqual(projected.payload["projection_mode"], "inline")
+        self.assertIsNone(projected.payload["error_code"])
 
     async def test_skill_result_is_invisible_before_metadata_and_download_verifies_content(self) -> None:
         now = self.runtime._utcnow_naive()  # noqa: SLF001
@@ -336,6 +359,19 @@ print(json.dumps({
             ),
             1,
         )
+        projected = await self._result_projection_event(task_id)
+        self.assertEqual(projected.payload["capability_id"], self.active_skill_id)
+        self.assertEqual(projected.payload["projection_mode"], "artifact_backed")
+        self.assertEqual(projected.payload["artifact_count"], len(result_payload["artifact_refs"]))
+        self.assertEqual(projected.payload["raw_sha256"], safe_result["raw_sha256"])
+        self.assertEqual(projected.payload["original_size_bytes"], safe_result["original_size_bytes"])
+        self.assertEqual(projected.payload["projected_size_bytes"], safe_result["projected_size_bytes"])
+        self.assertIsNone(projected.payload["error_code"])
+        audit_log = (self.workspace / "audit.jsonl").read_text(encoding="utf-8")
+        self.assertIn("agent.result_projected", audit_log)
+        self.assertNotIn("article-0", audit_log)
+        self.assertNotIn("storage_ref", json.dumps(projected.payload))
+        self.assertNotIn("download_url", json.dumps(projected.payload))
 
     async def test_invalid_raw_result_commits_typed_failed_node_without_stage(self) -> None:
         await self._use_skill("""print('{\"answer\": NaN}')\n""")
@@ -374,6 +410,13 @@ print(json.dumps({
                 if artifact.storage_ref.startswith("{")
             )
         )
+        projected = await self._result_projection_event(task_id)
+        self.assertEqual(projected.payload["projection_mode"], "invalid")
+        self.assertEqual(projected.payload["original_size_bytes"], 0)
+        self.assertEqual(projected.payload["projected_size_bytes"], 0)
+        self.assertIsNone(projected.payload["raw_sha256"])
+        self.assertEqual(projected.payload["artifact_count"], 0)
+        self.assertEqual(projected.payload["error_code"], "agent_result_invalid")
 
     async def test_large_result_stage_failure_commits_typed_failed_node(self) -> None:
         await self._use_skill(
@@ -415,6 +458,19 @@ print(json.dumps({'rows': ['x' * 10000 for _ in range(20)]}))
             node for node in nodes if node.capability_id == self.active_skill_id
         )
         self.assertEqual(str(skill_node.status), "failed")
+        projected = await self._result_projection_event(task_id)
+        self.assertEqual(
+            projected.payload["projection_mode"],
+            "artifact_persist_failed",
+        )
+        self.assertGreater(projected.payload["original_size_bytes"], 0)
+        self.assertGreater(projected.payload["projected_size_bytes"], 0)
+        self.assertRegex(projected.payload["raw_sha256"] or "", r"^[0-9a-f]{64}$")
+        self.assertEqual(projected.payload["artifact_count"], 0)
+        self.assertEqual(
+            projected.payload["error_code"],
+            "agent_result_artifact_persist_failed",
+        )
 
     async def test_new_output_replaces_old_output_in_same_conversation(self) -> None:
         await self._use_skill(

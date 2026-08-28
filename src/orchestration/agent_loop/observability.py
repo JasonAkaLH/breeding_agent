@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
+
+from src.core.enums import EventVisibility
+from src.core.models import EventRecord
+
+from .models import AgentItem, AgentRun
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +59,22 @@ _REASON_KINDS = frozenset(
 _PHASES = frozenset(
     {"capability_wave", "compaction", "final_publish", "model_sample", "recovery"}
 )
+_RESULT_PROJECTION_MODES = frozenset(
+    {
+        "artifact_backed",
+        "artifact_persist_failed",
+        "inline",
+        "invalid",
+        "projection_too_large",
+    }
+)
+_RESULT_PROJECTION_ERRORS = {
+    "artifact_backed": None,
+    "artifact_persist_failed": "agent_result_artifact_persist_failed",
+    "inline": None,
+    "invalid": "agent_result_invalid",
+    "projection_too_large": "agent_result_projection_too_large",
+}
 
 
 AGENT_METRIC_SPECS = {
@@ -73,6 +96,9 @@ AGENT_METRIC_SPECS = {
         "counter", {"reason_kind": _REASON_KINDS}
     ),
     "agent_resume_total": AgentMetricSpec("counter", {"outcome": _OUTCOMES}),
+    "agent_result_projections_total": AgentMetricSpec(
+        "counter", {"projection_mode": _RESULT_PROJECTION_MODES}
+    ),
     "agent_lease_acquire_total": AgentMetricSpec(
         "counter", {"outcome": _OUTCOMES}
     ),
@@ -86,6 +112,81 @@ AGENT_METRIC_SPECS = {
     ),
     "agent_final_publish_delay_seconds": AgentMetricSpec("histogram", {}),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentResultProjectionObservation:
+    capability_id: str
+    projection_mode: str
+    original_size_bytes: int
+    projected_size_bytes: int
+    raw_sha256: str | None
+    artifact_count: int
+    error_code: str | None
+
+    def __post_init__(self) -> None:
+        if not self.capability_id.strip():
+            raise ValueError("agent_result_projection_capability_invalid")
+        if (
+            self.projection_mode not in _RESULT_PROJECTION_MODES
+            or self.error_code != _RESULT_PROJECTION_ERRORS[self.projection_mode]
+        ):
+            raise ValueError("agent_result_projection_outcome_invalid")
+        for value in (
+            self.original_size_bytes,
+            self.projected_size_bytes,
+            self.artifact_count,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("agent_result_projection_size_invalid")
+        if self.raw_sha256 is not None and (
+            len(self.raw_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.raw_sha256)
+        ):
+            raise ValueError("agent_result_projection_digest_invalid")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "capability_id": self.capability_id,
+            "projection_mode": self.projection_mode,
+            "original_size_bytes": self.original_size_bytes,
+            "projected_size_bytes": self.projected_size_bytes,
+            "raw_sha256": self.raw_sha256,
+            "artifact_count": self.artifact_count,
+            "error_code": self.error_code,
+        }
+
+
+def build_agent_result_projected_event(
+    *,
+    run: AgentRun,
+    call_item: AgentItem,
+    observation: AgentResultProjectionObservation,
+) -> EventRecord:
+    payload = observation.to_payload()
+    payload_bytes = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    identity = hashlib.sha256(
+        b"maf.agent.result_projected.v1\0"
+        + call_item.item_id.encode("utf-8")
+        + b"\0"
+        + payload_bytes
+    ).hexdigest()
+    call_payload = json.loads(call_item.payload_json)
+    return EventRecord(
+        event_id=f"agent-result-projected:v1:{identity}",
+        conversation_id=run.conversation_id,
+        task_id=run.task_id,
+        node_id=str(call_payload.get("node_id") or "") or None,
+        event_type="agent.result_projected",
+        payload=payload,
+        visibility=EventVisibility.AUDIT_ONLY,
+    )
 
 
 class AgentMetricSink(Protocol):
@@ -159,6 +260,8 @@ __all__ = [
     "AGENT_METRIC_SPECS",
     "AgentMetricSample",
     "AgentMetricsRecorder",
+    "AgentResultProjectionObservation",
     "InMemoryAgentMetricSink",
+    "build_agent_result_projected_event",
     "validate_agent_metric",
 ]
