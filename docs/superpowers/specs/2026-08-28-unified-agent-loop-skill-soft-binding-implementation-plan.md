@@ -6,7 +6,7 @@
 
 计划日期：2026-08-28
 
-状态：`in_progress`（Checkpoint A～G 已完成；Checkpoint H、镜像重建与部署尚未完成）
+状态：`complete_local`（Checkpoint A～G 与 H 的仓库实现、文档和本地自动门禁已完成；H6 发布级成对 UI/API、真实租户 MCP 与 Linux wheel smoke 作为已知 gap 保留，未构建、推送或部署镜像，`prod` 未变）
 
 目标分支：`main`
 
@@ -910,6 +910,10 @@ docs(agent): close skill soft binding rollout evidence
 ```
 
 最终状态只在上述证据齐全后改为 `complete`；不要提前把 plan/design/CHANGELOG 写成已实施。
+
+完成证据：Checkpoint H 实现提交为 `07de2f14`。新增确定性、低敏 `agent.result_projected` audit 与五值 projection metric；补齐 API 文档、result audit/API 回归和固定 28 篇 `bioinfo-daily` E2E。Backend 全量 Core 54、Storage 548（13项环境skip）、Lifecycle 46、Integrations 761（2项平台skip）、Orchestration 152、Capabilities 35、API 610、E2E 8、Observability 40 全部通过；Frontend 24 files / 334 tests、typecheck/build通过；统一 Rust gate 退出码0并含nextest 198项、audit/deny/coverage/fuzz/provenance/SBOM与macOS wheel。真实隔离PostgreSQL C-D 15项、F 5项零skip；外部 `bioinfo-daily` 自测6项并直连返回1篇、9,226 bytes、SHA-256 `38ce2ae0f4404f21551fba1dbe2d1d952212b77c0aaccb4968f0278074ad8ad2`。稳定证据见同目录 `2026-08-28-unified-agent-loop-skill-soft-binding-implementation-evidence.md`。
+
+在本次明确“不部署、不修改 `prod`”的授权边界内，仓库实施记为 `complete_local`。H6要求的成对 UI/API真实Task、租户 `germplasm-mcp` 与Ubuntu 22.04 / `manylinux_2_35` smoke未执行，故`release_acceptance`保持`not_claimed`，不能把自动回归写成真实发布验收。
 
 ## 15. 设计完成条件追踪
 

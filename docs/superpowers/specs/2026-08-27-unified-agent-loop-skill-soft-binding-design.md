@@ -2,7 +2,7 @@
 
 日期：2026-08-27
 
-状态：方案已获用户批准并进入实施；Checkpoint A～G 的soft binding authority、有界projector、`skill_result` staging/Agent CAS/terminal recovery/janitor与Frontend单消息hint切换已完成，Checkpoint H、镜像重建和部署尚未完成
+状态：`complete_local`；Checkpoint A～G 与 H 的仓库实现、审计、文档、全量自动门禁和外部 `bioinfo-daily` 直连 smoke 已完成。发布级成对 UI/API、真实租户 `germplasm-mcp` 与 Linux wheel smoke 未执行，因此按第14节不宣称完整发布验收；未构建、推送或部署镜像，`prod` 未变
 
 适用范围：`main` 分支、聊天页 Skill picker、`/skill-name` 命令、提交 API、统一 Agent Loop、Capability 结果投影、Artifact、Agent 持久化与恢复
 
