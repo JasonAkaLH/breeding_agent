@@ -24,8 +24,14 @@ class AgentContextRules:
 
 
 class AgentContextBuilder:
-    def __init__(self, rules: AgentContextRules) -> None:
+    def __init__(
+        self,
+        rules: AgentContextRules,
+        *,
+        transient_result_resolver: Any | None = None,
+    ) -> None:
         self._rules = rules
+        self._transient_result_resolver = transient_result_resolver
 
     def build(
         self,
@@ -50,6 +56,26 @@ class AgentContextBuilder:
                     content=summary_item.payload_json.rstrip("\n"),
                 )
             )
+        reinserted_initial_user: str | None = None
+        if run.compacted_through_sequence >= 1:
+            initial_user = next(
+                (
+                    item
+                    for item in ordered_items
+                    if item.sequence == 1
+                    and item.kind is AgentItemKind.USER_MESSAGE
+                ),
+                None,
+            )
+            initial_payload = (
+                _payload(initial_user) if initial_user is not None else {}
+            )
+            if "context_budget" in initial_payload:
+                reinserted_initial_user = str(
+                    initial_payload.get("text") or ""
+                )
+                if not reinserted_initial_user.strip():
+                    raise ValueError("agent_context_initial_user_message_empty")
         visible_items = tuple(
             item
             for item in ordered_items
@@ -64,11 +90,21 @@ class AgentContextBuilder:
         if len(hint_activations) > 1:
             raise ValueError("agent_context_hint_activation_duplicate")
         hint_activation = hint_activations[0] if hint_activations else None
-        if hint_activation is not None and not any(
-            item.kind is AgentItemKind.USER_MESSAGE and item.sequence == 1
-            for item in visible_items
+        if (
+            hint_activation is not None
+            and reinserted_initial_user is None
+            and not any(
+                item.kind is AgentItemKind.USER_MESSAGE and item.sequence == 1
+                for item in visible_items
+            )
         ):
             raise ValueError("agent_context_hint_user_message_missing")
+        if reinserted_initial_user is not None:
+            if hint_activation is not None:
+                messages.append(_hint_activation_message(hint_activation))
+            messages.append(
+                AgentMessage(role="user", content=reinserted_initial_user)
+            )
         for item in visible_items:
             if item is hint_activation:
                 continue
@@ -78,7 +114,12 @@ class AgentContextBuilder:
                 and item.sequence == 1
             ):
                 messages.append(_hint_activation_message(hint_activation))
-            message = _message_from_item(item, all_items=visible_items)
+            message = _message_from_item(
+                item,
+                run=run,
+                all_items=visible_items,
+                transient_result_resolver=self._transient_result_resolver,
+            )
             if message is not None:
                 messages.append(message)
         if trusted_facts:
@@ -93,7 +134,10 @@ class AgentContextBuilder:
                     ),
                 )
             )
-        if current_user_input is not None:
+        if (
+            current_user_input is not None
+            and current_user_input != reinserted_initial_user
+        ):
             if not current_user_input.strip():
                 raise ValueError("agent_current_user_input_empty")
             messages.append(AgentMessage(role="user", content=current_user_input))
@@ -110,7 +154,9 @@ class AgentContextBuilder:
 def _message_from_item(
     item: AgentItem,
     *,
+    run: AgentRun,
     all_items: tuple[AgentItem, ...],
+    transient_result_resolver: Any | None,
 ) -> AgentMessage | None:
     payload = _payload(item)
     if item.kind is AgentItemKind.USER_MESSAGE:
@@ -151,16 +197,26 @@ def _message_from_item(
         provider_call_id = str(_payload(source_call).get("call_id") or "")
         if not provider_call_id:
             raise ValueError("agent_context_provider_call_id_missing")
+        tool_payload: dict[str, Any] = {
+            "outcome": payload.get("outcome"),
+            "safe_error_code": payload.get("safe_error_code"),
+            "safe_result": payload.get("safe_result"),
+            "artifact_refs": payload.get("artifact_refs", []),
+        }
+        if _contains_transient_receipt_marker(payload.get("safe_result")):
+            if transient_result_resolver is None:
+                raise ValueError("agent_transient_skill_result_unavailable")
+            tool_payload = transient_result_resolver.resolve_tool_result(
+                run=run,
+                call_item=source_call,
+                result_item=item,
+                durable_payload=payload,
+            )
         return AgentMessage(
             role="tool",
             tool_call_id=provider_call_id,
             content=json.dumps(
-                {
-                    "outcome": payload.get("outcome"),
-                    "safe_error_code": payload.get("safe_error_code"),
-                    "safe_result": payload.get("safe_result"),
-                    "artifact_refs": payload.get("artifact_refs", []),
-                },
+                tool_payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -171,6 +227,25 @@ def _message_from_item(
     if item.kind is AgentItemKind.CONTINUATION:
         return AgentMessage(role="user", content=item.payload_json.rstrip("\n"))
     return None
+
+
+def _contains_transient_receipt_marker(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    model_view = value.get("model_view")
+    return bool(
+        value.get("projection_revision") == "skill-result-v2"
+        or value.get("projection_mode") == "transient_staged"
+        or (
+            isinstance(model_view, dict)
+            and (
+                model_view.get("schema")
+                == "maf.agent.transient_skill_result_receipt.v1"
+                or "stage_ref" in model_view
+                or "complete_result_pending_context_injection" in model_view
+            )
+        )
+    )
 
 
 def _hint_activation_message(item: AgentItem) -> AgentMessage:

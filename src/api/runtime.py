@@ -351,6 +351,7 @@ from src.orchestration.agent_loop import (
     AgentSkillResultArtifactStager,
     AgentSkillResultArtifactJanitor,
     AgentTransientSkillResultStore,
+    AgentTransientSkillResultResolver,
     CapabilityInvocationService,
     CapabilityVisibilityContext,
     DelegatedSkillActivationService,
@@ -15281,7 +15282,10 @@ def build_api_runtime(
                     "只能调用本轮catalog中的Tool；不得伪造Tool结果、凭据、隐藏路径或内部状态。"
                 ),
                 final_guard="最终回答必须面向用户，且不得包含隐藏推理或原始敏感结果。",
-            )
+            ),
+            transient_result_resolver=AgentTransientSkillResultResolver(
+                agent_transient_skill_result_store
+            ),
         ),
         catalog_builder=AgentToolCatalogBuilder(capability_registry),
         visibility_context=CapabilityVisibilityContext("runtime-default"),

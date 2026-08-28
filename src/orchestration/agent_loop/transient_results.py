@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
-from src.storage.artifact_files import LocalArtifactFileStore
+from src.storage.agent_payload import canonicalize_agent_payload
+from src.storage.artifact_files import (
+    LocalArtifactFileStore,
+    sanitize_storage_component,
+)
 
 from .models import AgentItem, AgentItemKind, AgentRun
 
@@ -65,6 +69,37 @@ class AgentTransientSkillResultStore:
     def manifest_path(self, stage_ref: str) -> Path:
         digest = _stage_ref_digest(stage_ref)
         return self._manifest_root / f"{digest}.json"
+
+    def load_manifest(self, stage_ref: str) -> dict[str, object]:
+        try:
+            return _load_manifest(self.manifest_path(stage_ref))
+        except (OSError, TypeError, ValueError):
+            raise ValueError(
+                "agent_transient_skill_result_unavailable"
+            ) from None
+
+    def read_raw(
+        self,
+        stage_ref: str,
+        *,
+        expected_size_bytes: int,
+        expected_sha256: str,
+    ) -> bytes:
+        try:
+            _stage_ref_digest(stage_ref)
+            storage_key = (
+                f"{sanitize_storage_component(stage_ref)}/{_RAW_FILENAME}"
+            )
+            text = self._raw_store.read_utf8(
+                storage_key,
+                expected_size_bytes=expected_size_bytes,
+                expected_sha256=expected_sha256,
+            )
+            return text.encode("utf-8")
+        except (OSError, TypeError, ValueError):
+            raise ValueError(
+                "agent_transient_skill_result_unavailable"
+            ) from None
 
     def stage(
         self,
@@ -250,6 +285,164 @@ class AgentTransientSkillResultStore:
             os.close(root_descriptor)
 
 
+class AgentTransientSkillResultResolver:
+    def __init__(self, store: AgentTransientSkillResultStore) -> None:
+        self._store = store
+
+    def resolve_tool_result(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        result_item: AgentItem,
+        durable_payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        try:
+            return self._resolve_tool_result(
+                run=run,
+                call_item=call_item,
+                result_item=result_item,
+                durable_payload=durable_payload,
+            )
+        except (OSError, TypeError, ValueError):
+            raise ValueError(
+                "agent_transient_skill_result_unavailable"
+            ) from None
+
+    def _resolve_tool_result(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        result_item: AgentItem,
+        durable_payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        safe_result = durable_payload.get("safe_result")
+        if not isinstance(safe_result, Mapping):
+            raise ValueError("receipt_invalid")
+        receipt_keys = {
+            "schema",
+            "projection_revision",
+            "projection_mode",
+            "model_view",
+            "original_size_bytes",
+            "projected_size_bytes",
+            "raw_sha256",
+            "projection_truncated",
+        }
+        model_view = safe_result.get("model_view")
+        if (
+            set(safe_result) != receipt_keys
+            or safe_result.get("schema") != "maf.agent.model_result.v1"
+            or safe_result.get("projection_revision")
+            != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+            or safe_result.get("projection_mode") != "transient_staged"
+            or safe_result.get("projection_truncated") is not True
+            or not isinstance(model_view, Mapping)
+            or set(model_view)
+            != {
+                "complete_result_pending_context_injection",
+                "schema",
+                "stage_ref",
+            }
+            or model_view.get("complete_result_pending_context_injection")
+            is not True
+            or model_view.get("schema")
+            != "maf.agent.transient_skill_result_receipt.v1"
+            or not isinstance(model_view.get("stage_ref"), str)
+            or durable_payload.get("outcome") != "completed"
+            or durable_payload.get("safe_error_code") is not None
+            or durable_payload.get("artifact_refs") != []
+            or durable_payload.get("call_item_id") != call_item.item_id
+            or result_item.kind is not AgentItemKind.TOOL_RESULT
+            or result_item.source_call_item_id != call_item.item_id
+            or result_item.run_id != run.run_id
+            or result_item.task_id != run.task_id
+        ):
+            raise ValueError("receipt_invalid")
+        original_size = safe_result.get("original_size_bytes")
+        projected_size = safe_result.get("projected_size_bytes")
+        raw_sha256 = safe_result.get("raw_sha256")
+        stage_ref = str(model_view["stage_ref"])
+        if (
+            isinstance(original_size, bool)
+            or not isinstance(original_size, int)
+            or original_size <= 0
+            or isinstance(projected_size, bool)
+            or not isinstance(projected_size, int)
+            or projected_size <= 0
+            or not _is_sha256(raw_sha256)
+            or transient_skill_result_stage_ref(
+                call_item_id=call_item.item_id,
+                raw_sha256=str(raw_sha256),
+                projection_revision=(
+                    AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+                ),
+            )
+            != stage_ref
+            or canonicalize_agent_payload(dict(safe_result)).size_bytes
+            != projected_size
+        ):
+            raise ValueError("receipt_invalid")
+        call_payload = json.loads(call_item.payload_json)
+        if not isinstance(call_payload, Mapping):
+            raise ValueError("call_invalid")
+        capability_id = call_payload.get("capability_id")
+        node_id = call_payload.get("node_id")
+        manifest = self._store.load_manifest(stage_ref)
+        expected_manifest = {
+            "schema": AGENT_TRANSIENT_SKILL_RESULT_MANIFEST_SCHEMA,
+            "source_kind": AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND,
+            "stage_ref": stage_ref,
+            "run_id": run.run_id,
+            "task_id": run.task_id,
+            "conversation_id": run.conversation_id,
+            "node_id": node_id,
+            "call_item_id": call_item.item_id,
+            "result_item_id": result_item.item_id,
+            "capability_id": capability_id,
+            "raw_size_bytes": original_size,
+            "raw_sha256": raw_sha256,
+            "projection_revision": (
+                AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+            ),
+        }
+        if any(
+            manifest.get(key) != value
+            for key, value in expected_manifest.items()
+        ):
+            raise ValueError("manifest_conflict")
+        raw_bytes = self._store.read_raw(
+            stage_ref,
+            expected_size_bytes=original_size,
+            expected_sha256=str(raw_sha256),
+        )
+        raw_value = json.loads(raw_bytes.decode("utf-8"))
+        if (
+            not isinstance(raw_value, dict)
+            or (
+                json.dumps(
+                    raw_value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            != raw_bytes
+        ):
+            raise ValueError("raw_invalid")
+        return {
+            "artifact_refs": [],
+            "outcome": "completed",
+            "safe_error_code": None,
+            "safe_result": {
+                "schema": "maf.agent.skill_result_full.v1",
+                "result": raw_value,
+            },
+        }
+
 def transient_skill_result_stage_ref(
     *,
     call_item_id: str,
@@ -280,6 +473,59 @@ def _load_exact_manifest(
     *,
     stable_manifest: Mapping[str, object],
 ) -> dict[str, object]:
+    value = _read_private_json(path)
+    if (
+        set(value) != {*stable_manifest, "staged_at"}
+        or any(value.get(key) != expected for key, expected in stable_manifest.items())
+        or not isinstance(value.get("staged_at"), str)
+        or not value["staged_at"]
+    ):
+        raise ValueError("agent_transient_skill_result_stage_conflict")
+    return value
+
+
+def _load_manifest(path: Path) -> dict[str, object]:
+    value = _read_private_json(path)
+    exact_keys = {
+        "schema",
+        "source_kind",
+        "stage_ref",
+        "run_id",
+        "task_id",
+        "conversation_id",
+        "node_id",
+        "call_item_id",
+        "result_item_id",
+        "capability_id",
+        "raw_size_bytes",
+        "raw_sha256",
+        "projection_revision",
+        "staged_at",
+    }
+    string_keys = exact_keys - {"raw_size_bytes"}
+    if (
+        set(value) != exact_keys
+        or value.get("schema")
+        != AGENT_TRANSIENT_SKILL_RESULT_MANIFEST_SCHEMA
+        or value.get("source_kind")
+        != AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND
+        or value.get("projection_revision")
+        != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+        or any(
+            not isinstance(value.get(key), str) or not value[key]
+            for key in string_keys
+        )
+        or isinstance(value.get("raw_size_bytes"), bool)
+        or not isinstance(value.get("raw_size_bytes"), int)
+        or int(value["raw_size_bytes"]) <= 0
+        or not _is_sha256(value.get("raw_sha256"))
+    ):
+        raise ValueError("agent_transient_skill_result_stage_invalid")
+    _stage_ref_digest(str(value["stage_ref"]))
+    return value
+
+
+def _read_private_json(path: Path) -> dict[str, object]:
     before = path.stat(follow_symlinks=False)
     descriptor = os.open(
         path,
@@ -314,14 +560,8 @@ def _load_exact_manifest(
     ):
         raise ValueError("agent_transient_skill_result_stage_invalid")
     value = json.loads(body.decode("utf-8"))
-    if (
-        not isinstance(value, dict)
-        or set(value) != {*stable_manifest, "staged_at"}
-        or any(value.get(key) != expected for key, expected in stable_manifest.items())
-        or not isinstance(value.get("staged_at"), str)
-        or not value["staged_at"]
-    ):
-        raise ValueError("agent_transient_skill_result_stage_conflict")
+    if not isinstance(value, dict):
+        raise ValueError("agent_transient_skill_result_stage_invalid")
     return value
 
 

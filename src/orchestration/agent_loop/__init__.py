@@ -42,6 +42,7 @@ from .transient_results import (
     AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION,
     AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND,
     AgentTransientSkillResultStage,
+    AgentTransientSkillResultResolver,
     AgentTransientSkillResultStore,
     transient_skill_result_stage_ref,
 )
@@ -51,6 +52,12 @@ from .context_budget import (
     AGENT_CONTEXT_BUDGET_POLICY_REVISION,
     AGENT_CONTEXT_COMPACT_THRESHOLD_PERCENT,
     AgentContextBudget,
+)
+from .context_preflight import (
+    AgentContextCandidate,
+    AgentContextCandidateBuilder,
+    AgentContextPreflightDecision,
+    AgentContextPreflightResult,
 )
 from .runner import (
     AgentCallExecution,
@@ -172,6 +179,7 @@ __all__ = [
     "AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION",
     "AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND",
     "AgentTransientSkillResultStage",
+    "AgentTransientSkillResultResolver",
     "AgentTransientSkillResultStore",
     "transient_skill_result_stage_ref",
     "build_agent_terminal_event",
@@ -180,6 +188,10 @@ __all__ = [
     "AgentContextBudget",
     "AGENT_CONTEXT_BUDGET_POLICY_REVISION",
     "AGENT_CONTEXT_COMPACT_THRESHOLD_PERCENT",
+    "AgentContextCandidate",
+    "AgentContextCandidateBuilder",
+    "AgentContextPreflightDecision",
+    "AgentContextPreflightResult",
     "AgentCallExecution",
     "AgentCallInvoker",
     "AgentLoopRunResult",

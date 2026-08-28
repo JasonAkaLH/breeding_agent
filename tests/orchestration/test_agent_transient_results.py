@@ -20,8 +20,12 @@ from src.orchestration.agent_loop.transient_results import (
     AGENT_TRANSIENT_SKILL_RESULT_MANIFEST_SCHEMA,
     AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND,
     AgentTransientSkillResultStage,
+    AgentTransientSkillResultResolver,
     AgentTransientSkillResultStore,
     transient_skill_result_stage_ref,
+)
+from src.orchestration.agent_loop.result_projection import (
+    build_model_result_envelope,
 )
 
 
@@ -44,7 +48,9 @@ class AgentTransientSkillResultStoreTest(unittest.TestCase):
             sequence=2,
             kind=AgentItemKind.TOOL_CALL,
             state=AgentItemState.COMMITTED,
-            payload_json="{}\n",
+            payload_json=(
+                '{"capability_id":"skill.lookup","node_id":"node-1"}\n'
+            ),
             payload_sha256="a" * 64,
         )
         self.raw = b'{"records":[1,2,3]}\n'
@@ -162,3 +168,94 @@ class AgentTransientSkillResultStoreTest(unittest.TestCase):
 
         self.assertNotIn(str(target), str(captured.exception))
         self.assertNotIn(str(manifest_path), str(captured.exception))
+
+    def test_resolver_replaces_exact_receipt_with_complete_raw(self) -> None:
+        self.stage()
+        receipt = build_model_result_envelope(
+            projection_revision="skill-result-v2",
+            projection_mode="transient_staged",
+            model_view={
+                "complete_result_pending_context_injection": True,
+                "schema": "maf.agent.transient_skill_result_receipt.v1",
+                "stage_ref": self.stage_ref,
+            },
+            original_size_bytes=len(self.raw),
+            raw_sha256=self.raw_sha256,
+            projection_truncated=True,
+        )
+        durable_payload = {
+            "artifact_refs": [],
+            "call_item_id": self.call.item_id,
+            "outcome": "completed",
+            "safe_error_code": None,
+            "safe_result": receipt,
+        }
+        result = AgentItem(
+            item_id="result-1",
+            run_id=self.run.run_id,
+            task_id=self.run.task_id,
+            sequence=3,
+            kind=AgentItemKind.TOOL_RESULT,
+            state=AgentItemState.COMMITTED,
+            payload_json=json.dumps(durable_payload) + "\n",
+            payload_sha256="b" * 64,
+            source_call_item_id=self.call.item_id,
+        )
+        resolver = AgentTransientSkillResultResolver(self.store)
+
+        first = resolver.resolve_tool_result(
+            run=self.run,
+            call_item=self.call,
+            result_item=result,
+            durable_payload=durable_payload,
+        )
+        replay = resolver.resolve_tool_result(
+            run=self.run,
+            call_item=self.call,
+            result_item=result,
+            durable_payload=durable_payload,
+        )
+
+        self.assertEqual(first, replay)
+        self.assertEqual(
+            first,
+            {
+                "artifact_refs": [],
+                "outcome": "completed",
+                "safe_error_code": None,
+                "safe_result": {
+                    "schema": "maf.agent.skill_result_full.v1",
+                    "result": {"records": [1, 2, 3]},
+                },
+            },
+        )
+        serialized = json.dumps(first, sort_keys=True)
+        self.assertNotIn("stage_ref", serialized)
+        self.assertNotIn("pending_context_injection", serialized)
+
+        unavailable = {
+            **durable_payload,
+            "safe_result": {**receipt, "raw_sha256": "c" * 64},
+        }
+        with self.assertRaisesRegex(
+            ValueError, "agent_transient_skill_result_unavailable"
+        ):
+            resolver.resolve_tool_result(
+                run=self.run,
+                call_item=self.call,
+                result_item=result,
+                durable_payload=unavailable,
+            )
+
+        next(
+            path for path in self.store.raw_root.rglob("*") if path.is_file()
+        ).unlink()
+        with self.assertRaisesRegex(
+            ValueError, "agent_transient_skill_result_unavailable"
+        ):
+            resolver.resolve_tool_result(
+                run=self.run,
+                call_item=self.call,
+                result_item=result,
+                durable_payload=durable_payload,
+            )
