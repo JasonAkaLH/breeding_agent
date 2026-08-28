@@ -22,6 +22,7 @@ import type {
   ModelEdition,
   ModelEditionsResponse,
   ReasoningEffort,
+  RoutingMode,
   PatchMCPServerRequest,
   SubmitMessageRequest,
   TaskArtifactsResponse,
@@ -41,6 +42,7 @@ export interface SubmitMessageInput {
   conversationId: string;
   content: string;
   mode: ChatMode;
+  routingMode: RoutingMode;
   modelEdition?: ModelEdition;
   deepThinking?: boolean;
   reasoningEffort?: ReasoningEffort;
@@ -178,13 +180,13 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       }
       return (await response.json()) as UploadFileResponse;
     },
-    submitMessage: (input) => {
+    submitMessage: async (input) => {
       const mode = UI_MODES.find((candidate) => candidate.key === input.mode);
       if (!mode) {
         throw new ApiError(0, null, '当前对话模式不可用，请刷新后重试。');
       }
-      const explicitCapabilityId = input.capabilityId ?? null;
-      const capabilityId = explicitCapabilityId || mode.capabilityId;
+      const capabilityId = input.capabilityId ?? null;
+      validateSubmitRouting(input.routingMode, capabilityId, input.metadata);
       const deepThinking = input.deepThinking ?? false;
       const metadata: Record<string, unknown> = {
         ...(input.metadata ?? {}),
@@ -196,7 +198,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       const body: SubmitMessageRequest = {
         conversation_id: input.conversationId,
         content: input.content,
-        routing_mode: capabilityId ? 'force_capability' : 'auto',
+        routing_mode: input.routingMode,
         capability_id: capabilityId,
         client_message_id: input.clientMessageId ?? null,
         ...(input.modelEdition ? { model_edition: input.modelEdition } : {}),
@@ -292,6 +294,33 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     },
     getTaskGraph: (taskId) => request<TaskGraphResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/graph`),
   };
+}
+
+function validateSubmitRouting(
+  routingMode: RoutingMode,
+  capabilityId: string | null,
+  metadata: Record<string, unknown> | undefined,
+): void {
+  const mcpBinding = metadata?.mcp_server_binding;
+  const hasMCPBinding = mcpBinding !== undefined;
+  const validMCPBinding = isRecord(mcpBinding)
+    && Object.keys(mcpBinding).length === 1
+    && typeof mcpBinding.server_id === 'string'
+    && mcpBinding.server_id.trim().length > 0;
+  const valid = routingMode === 'auto'
+    ? capabilityId === null && !hasMCPBinding
+    : routingMode === 'hint'
+      ? Boolean(capabilityId?.startsWith('skill.')) && !hasMCPBinding
+      : routingMode === 'force_capability'
+        && capabilityId !== null
+        && (capabilityId === 'mcp.dispatch' ? validMCPBinding : !hasMCPBinding);
+  if (!valid) {
+    throw new ApiError(0, null, '提交路由参数组合无效，请刷新后重试。');
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 async function toApiError(response: Response): Promise<ApiError> {

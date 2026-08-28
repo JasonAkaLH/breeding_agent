@@ -1,4 +1,5 @@
 export type ChatMode = 'chat';
+export type RoutingMode = 'auto' | 'hint' | 'force_capability';
 export type ReasoningEffort = string;
 export type ModelEdition = string;
 
@@ -52,7 +53,7 @@ export interface ModelEditionsResponse {
 export interface SubmitMessageRequest {
   conversation_id: string;
   content: string;
-  routing_mode: 'auto' | string;
+  routing_mode: RoutingMode;
   capability_id: string | null;
   client_message_id?: string | null;
   model_edition?: ModelEdition | null;

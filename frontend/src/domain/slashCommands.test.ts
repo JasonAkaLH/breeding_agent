@@ -75,7 +75,7 @@ describe('slashCommands', () => {
     expect(slashMenuCandidates('/SKILL.md', commands)).toEqual([]);
   });
 
-  it('parses exact slash command input into a direct required Skill call', () => {
+  it('parses exact slash command input into a soft Skill hint', () => {
     const commands = deriveSlashCommands(capabilities);
 
     expect(parseDirectSlashCommand('/data-lookup 查询龙粳33', commands)).toEqual({
@@ -88,10 +88,7 @@ describe('slashCommands', () => {
       content: '查询龙粳33',
       command: expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup' }),
       capabilityId: 'skill.data_lookup',
-      metadata: {
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-      },
+      routingMode: 'hint',
     });
   });
 
@@ -103,10 +100,7 @@ describe('slashCommands', () => {
       content: '',
       command: expect.objectContaining({ command: '/data-lookup' }),
       capabilityId: 'skill.data_lookup',
-      metadata: {
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-      },
+      routingMode: 'hint',
     });
     expect(slashSubmitIntent('/unknown args', commands, null)).toEqual({ kind: 'blocked', reason: 'not_found', command: '/unknown' });
   });
@@ -120,10 +114,7 @@ describe('slashCommands', () => {
       content: '/data-lookup 查询龙粳33',
       command: expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd' }),
       capabilityId: 'skill.mini_breedstat_rcbd',
-      metadata: {
-        forced_by_slash_command: true,
-        slash_command: '/mini-breedstat-rcbd',
-      },
+      routingMode: 'hint',
     });
   });
 });

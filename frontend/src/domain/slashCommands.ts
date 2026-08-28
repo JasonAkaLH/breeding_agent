@@ -21,10 +21,7 @@ export type SlashSubmitIntent =
       command: SlashCommand;
       content: string;
       capabilityId: string;
-      metadata: {
-        forced_by_slash_command: true;
-        slash_command: string;
-      };
+      routingMode: 'hint';
     }
   | { kind: 'blocked'; reason: 'not_found' | 'conflict'; command: string }
   | { kind: 'auto'; content: string };
@@ -103,10 +100,7 @@ function readyIntent(command: SlashCommand, content: string): SlashSubmitIntent 
     content,
     command,
     capabilityId: command.capabilityId,
-    metadata: {
-      forced_by_slash_command: true,
-      slash_command: command.command,
-    },
+    routingMode: 'hint',
   };
 }
 

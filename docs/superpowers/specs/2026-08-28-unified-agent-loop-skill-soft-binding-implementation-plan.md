@@ -6,7 +6,7 @@
 
 计划日期：2026-08-28
 
-状态：`in_progress`（Checkpoint A～F 已完成；Checkpoint G～H、镜像重建与部署尚未完成）
+状态：`in_progress`（Checkpoint A～G 已完成；Checkpoint H、镜像重建与部署尚未完成）
 
 目标分支：`main`
 
@@ -792,6 +792,8 @@ npm test -- --run src/domain/slashCommands.test.ts src/api/client.test.ts src/Ap
 npm run typecheck
 npm run build
 ```
+
+完成证据：`SubmitMessageInput.routingMode`已闭合为必填`auto | hint | force_capability`，client按调用方intent原样发送并在HTTP前拒绝非法routing/capability/MCP binding组合；普通chat、MCP approval、Interrupt answer和无选择follow-up显式提交`auto + null`，picker与直接Slash统一提交`hint + skill.*`且不再携带任何forced Skill metadata，MCP `$Server`保持`force_capability + mcp.dispatch + mcp_server_binding`。Skill badge文案改为“已选择 · 优先使用”，实际submit成功或失败后清除，submit前附件上传失败补偿语义不变；键盘、冲突阻止、互斥、busy与Interrupt gate保持原行为。Frontend focused 172项、typecheck与production build通过；Checkpoint H仍未完成。
 
 检查点提交建议：
 

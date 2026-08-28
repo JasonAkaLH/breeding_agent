@@ -1002,6 +1002,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         conversationId: targetConversationId,
         content: decision === 'deny' ? '拒绝本次 MCP 工具调用' : decision === 'always_allow' ? '始终允许此 MCP 工具' : '仅允许本次 MCP 工具调用',
         mode,
+        routingMode: 'auto',
+        capabilityId: null,
         clientMessageId: makeClientId('mcp-approval'),
         metadata: {
           interrupt_id: approval.interruptId,
@@ -1351,9 +1353,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const commandKind = mcpIntent.kind === 'ready' ? 'mcp' : slashIntent.kind === 'ready' ? 'skill' : null;
     const activeIntent = mcpIntent.kind === 'ready' ? mcpIntent : slashIntent;
     const content = activeIntent.content;
-    const forcedCommand = activeIntent.kind === 'ready' ? activeIntent.command : null;
-    const forcedCapabilityId = activeIntent.kind === 'ready' ? activeIntent.capabilityId : null;
-    const forcedMetadata = activeIntent.kind === 'ready' ? activeIntent.metadata : {};
+    const selectedCommand = activeIntent.kind === 'ready' ? activeIntent.command : null;
+    const capabilityId = activeIntent.kind === 'ready' ? activeIntent.capabilityId : null;
+    const routingMode = activeIntent.kind === 'ready' ? activeIntent.routingMode : 'auto';
+    const commandMetadata = mcpIntent.kind === 'ready' ? mcpIntent.metadata : {};
     const targetConversationId = authUser ? (conversationId || loadOrCreateConversationId(authUser.username)) : '';
     if (!authUser || !targetConversationId || active) return;
     if (!conversationId) {
@@ -1393,12 +1396,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const generation = beginRestoreGeneration();
     initializedWorkspaceConversationIdRef.current = targetConversationId;
     setRestoredWorkspaceConversationId(targetConversationId);
-    const displayContent = content || (commandKind === 'mcp' ? '处理附加文件' : forcedCommand?.command ?? content);
-    const optimisticMCPBadge: MCPServerBadge | undefined = commandKind === 'mcp' && forcedCommand && 'serverId' in forcedCommand
+    const displayContent = content || (commandKind === 'mcp' ? '处理附加文件' : selectedCommand?.command ?? content);
+    const optimisticMCPBadge: MCPServerBadge | undefined = commandKind === 'mcp' && selectedCommand && 'serverId' in selectedCommand
       ? {
-          server_id: forcedCommand.serverId,
-          display_name: forcedCommand.displayName,
-          command: forcedCommand.command,
+          server_id: selectedCommand.serverId,
+          display_name: selectedCommand.displayName,
+          command: selectedCommand.command,
           binding_mode: 'explicit_command',
         }
       : undefined;
@@ -1429,33 +1432,34 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         conversationId: targetConversationId,
         content,
         mode,
+        routingMode,
         modelEdition: modelEdition ?? undefined,
         deepThinking: effectiveDeepThinking,
         reasoningEffort: effectiveReasoningEffort,
-        capabilityId: forcedCapabilityId,
+        capabilityId,
         metadata: {
           ...(uploadedDrafts.length > 0 ? { upload_ids: uploadedDrafts.map((item) => item.upload.upload_id) } : {}),
-          ...forcedMetadata,
+          ...commandMetadata,
         },
       });
       if (commandKind === 'mcp') {
         setSelectedMCPServerCommand(null);
         setMCPServerMenuOpen(false);
       }
+      setSelectedSkillCommand(null);
+      setSlashMenuOpen(false);
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(accepted.task_id, mode);
       updateAssistantMessage(assistantMessage.id, { taskId: accepted.task_id });
       updateCurrentTaskId(accepted.task_id);
       markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
-      setSelectedSkillCommand(null);
-      setSlashMenuOpen(false);
       subscribeToTask(accepted.task_id, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
       localTaskRuntimeActiveRef.current = false;
       const message = friendlyError(error);
       const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
       resetDraftAttachmentStatus(draftSnapshot);
-      if (forcedCommand) {
+      if (selectedCommand) {
         if (commandKind === 'mcp') {
           setSelectedMCPServerCommand(null);
           setMCPServerMenuOpen(false);
@@ -1470,7 +1474,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       setTaskState((state) => markTaskFailed(state, message));
       const rollbackMessage = rollbackFailed ? ' 部分文件已保存到当前对话，可在文件面板删除。' : '';
-      showTransientNotice(forcedCommand
+      showTransientNotice(selectedCommand
         ? `${message}${rollbackMessage} ${commandKind === 'mcp' ? 'MCP Server' : 'Skill'}列表可能已更新，请重新选择。`
         : `${message}${rollbackMessage}`);
     }
@@ -1686,6 +1690,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         conversationId: targetConversationId,
         content,
         mode: interrupt.mode,
+        routingMode: 'auto',
+        capabilityId: null,
         modelEdition: modelEdition ?? undefined,
         deepThinking: effectiveDeepThinking,
         reasoningEffort: effectiveReasoningEffort,
@@ -2451,7 +2457,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                 <Space direction="vertical" size="small" className="composer-space">
                   {selectedSkillCommand ? (
                     <div className="selected-skill-command" role="status" aria-label="已选择 Skill">
-                      <span>将使用 <strong>{selectedSkillCommand.command}</strong> {selectedSkillCommand.displayName}</span>
+                      <span>已选择 · 优先使用 <strong>{selectedSkillCommand.command}</strong> {selectedSkillCommand.displayName}</span>
                       <Button
                         type="link"
                         size="small"

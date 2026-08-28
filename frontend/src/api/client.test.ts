@@ -132,11 +132,12 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat', routingMode: 'auto' });
 
     expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/chat-messages', expect.objectContaining({ method: 'POST' }));
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.conversation_id).toBe('conv-1');
+    expect(body.routing_mode).toBe('auto');
     expect(body.capability_id).toBeNull();
     expect(body).not.toHaveProperty('model_edition');
   });
@@ -149,6 +150,7 @@ describe('createApiClient', () => {
       conversationId: 'conv-1',
       content: '用 pro 模型回答',
       mode: 'chat',
+      routingMode: 'auto',
       modelEdition: 'deepseek-v4-pro-260425',
     });
 
@@ -158,7 +160,7 @@ describe('createApiClient', () => {
   });
 
 
-  it('submits a slash-selected Skill as the required capability', async () => {
+  it('submits a slash-selected Skill as a soft hint without forced metadata', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
@@ -166,33 +168,77 @@ describe('createApiClient', () => {
       conversationId: 'conv-1',
       content: '查询龙粳33',
       mode: 'chat',
+      routingMode: 'hint',
       capabilityId: 'skill.data_lookup',
       metadata: {
         upload_ids: ['upl-1'],
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
       },
     });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body).toMatchObject({
-      routing_mode: 'force_capability',
+      routing_mode: 'hint',
       capability_id: 'skill.data_lookup',
       metadata: {
         upload_ids: ['upl-1'],
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
         deep_thinking: false,
       },
     });
     expect(body.metadata).not.toHaveProperty('main_agent_reasoning_effort');
+    expect(JSON.stringify(body.metadata)).not.toContain('forced');
+  });
+
+  it('preserves the explicit MCP force routing contract', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
+    const api = createApiClient({ fetcher });
+
+    await api.submitMessage({
+      conversationId: 'conv-1',
+      content: '查询材料',
+      mode: 'chat',
+      routingMode: 'force_capability',
+      capabilityId: 'mcp.dispatch',
+      metadata: { mcp_server_binding: { server_id: 'mcp-data' } },
+    });
+
+    const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
+    expect(body).toMatchObject({
+      routing_mode: 'force_capability',
+      capability_id: 'mcp.dispatch',
+      metadata: { mcp_server_binding: { server_id: 'mcp-data' } },
+    });
+  });
+
+  it('rejects invalid routing and capability combinations before HTTP', async () => {
+    const fetcher = vi.fn();
+    const api = createApiClient({ fetcher });
+    const invalidInputs = [
+      { routingMode: 'auto' as const, capabilityId: 'skill.data_lookup' },
+      { routingMode: 'hint' as const, capabilityId: null },
+      { routingMode: 'hint' as const, capabilityId: 'mcp.dispatch' },
+      { routingMode: 'force_capability' as const, capabilityId: null },
+      { routingMode: 'force_capability' as const, capabilityId: 'mcp.dispatch' },
+    ];
+
+    for (const invalid of invalidInputs) {
+      await expect(api.submitMessage({
+        conversationId: 'conv-1',
+        content: 'invalid',
+        mode: 'chat',
+        ...invalid,
+      })).rejects.toMatchObject({
+        status: 0,
+        userMessage: '提交路由参数组合无效，请刷新后重试。',
+      });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('omits reasoning effort when App does not provide one', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '深入分析', mode: 'chat', deepThinking: true });
+    await api.submitMessage({ conversationId: 'conv-1', content: '深入分析', mode: 'chat', routingMode: 'auto', deepThinking: true });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
@@ -205,7 +251,7 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', reasoningEffort: 'max' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', routingMode: 'auto', reasoningEffort: 'max' });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
@@ -218,7 +264,7 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', deepThinking: true, reasoningEffort: 'max' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', routingMode: 'auto', deepThinking: true, reasoningEffort: 'max' });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
@@ -232,7 +278,7 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ detail: 'Conversation is busy' }), { status: 409 }));
     const api = createApiClient({ fetcher });
 
-    await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' })).rejects.toMatchObject({
+    await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat', routingMode: 'auto' })).rejects.toMatchObject({
       userMessage: expect.stringContaining('当前会话已有任务'),
     });
   });
@@ -244,7 +290,7 @@ describe('createApiClient', () => {
     ] as const) {
       const fetcher = vi.fn(async () => new Response(JSON.stringify({ detail: { code } }), { status }));
       const api = createApiClient({ fetcher });
-      await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' })).rejects.toMatchObject({
+      await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat', routingMode: 'auto' })).rejects.toMatchObject({
         userMessage: expect.stringContaining(expected),
       });
     }

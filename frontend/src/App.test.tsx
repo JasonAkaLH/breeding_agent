@@ -1160,6 +1160,8 @@ describe('App', () => {
       conversationId: 'conv-history',
       content: '水稻',
       mode: 'chat',
+      routingMode: 'auto',
+      capabilityId: null,
       clientMessageId: expect.stringMatching(/^user-/),
       metadata: { interrupt_id: 'interrupt-1' },
     })));
@@ -1360,6 +1362,8 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       conversationId: 'conv-history',
       content: '继续问一个问题',
+      routingMode: 'auto',
+      capabilityId: null,
     })));
   });
 
@@ -1684,6 +1688,8 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'chat',
+      routingMode: 'auto',
+      capabilityId: null,
       deepThinking: false,
       reasoningEffort: 'high',
     })));
@@ -2029,7 +2035,7 @@ describe('App', () => {
     })));
   });
 
-  it('opens the slash Skill picker and submits a required Skill call from the badge', async () => {
+  it('opens the slash Skill picker and submits a soft Skill hint from the badge', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -2044,17 +2050,37 @@ describe('App', () => {
 
     expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/data-lookup');
     expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('数据查询');
+    expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('优先使用');
     fireEvent.change(input, { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
+      routingMode: 'hint',
       capabilityId: 'skill.data_lookup',
-      metadata: expect.objectContaining({
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-      }),
+      metadata: {},
     })));
+    await waitFor(() => expect(screen.queryByRole('status', { name: '已选择 Skill' })).not.toBeInTheDocument());
+  });
+
+  it('clears the one-shot Skill hint after submit failure', async () => {
+    const api = makeApi({
+      submitMessage: vi.fn(async () => { throw new Error('submit failed'); }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: '/data' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
+    expect(await screen.findByRole('status', { name: '已选择 Skill' })).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      routingMode: 'hint',
+      capabilityId: 'skill.data_lookup',
+    })));
+    await waitFor(() => expect(screen.queryByRole('status', { name: '已选择 Skill' })).not.toBeInTheDocument());
   });
 
   it('removes the selected slash Skill badge and returns to auto routing', async () => {
@@ -2072,6 +2098,7 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '普通问题',
+      routingMode: 'auto',
       capabilityId: null,
     })));
   });
@@ -2093,7 +2120,7 @@ describe('App', () => {
     expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('试验设计');
   });
 
-  it('submits direct slash command input as a required Skill call with cleaned content', async () => {
+  it('submits direct slash command input as a soft Skill hint with cleaned content', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -2103,11 +2130,9 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
+      routingMode: 'hint',
       capabilityId: 'skill.data_lookup',
-      metadata: expect.objectContaining({
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-      }),
+      metadata: {},
     })));
   });
 
@@ -2121,11 +2146,9 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '',
+      routingMode: 'hint',
       capabilityId: 'skill.data_lookup',
-      metadata: expect.objectContaining({
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-      }),
+      metadata: {},
     })));
   });
 
@@ -2142,7 +2165,7 @@ describe('App', () => {
     expect(await screen.findByText('未找到 Skill')).toBeInTheDocument();
   });
 
-  it('submits uploaded files and required Skill metadata together', async () => {
+  it('submits uploaded files and a soft Skill hint together', async () => {
     const api = makeApi({
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-test',
@@ -2181,11 +2204,10 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '用这个文件做3个区组RCBD',
+      routingMode: 'hint',
       capabilityId: 'skill.mini_breedstat_rcbd',
       metadata: expect.objectContaining({
         upload_ids: ['upl-1'],
-        forced_by_slash_command: true,
-        slash_command: '/mini-breedstat-rcbd',
       }),
     })));
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
@@ -4989,6 +5011,7 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '识别这份材料',
+      routingMode: 'force_capability',
       capabilityId: 'mcp.dispatch',
       metadata: { mcp_server_binding: { server_id: 'mcp-ocr' } },
     })));
@@ -5041,6 +5064,7 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '',
+      routingMode: 'force_capability',
       capabilityId: 'mcp.dispatch',
       metadata: {
         upload_ids: ['upl-1'],
