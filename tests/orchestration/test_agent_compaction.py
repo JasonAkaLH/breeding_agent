@@ -6,6 +6,12 @@ from pathlib import Path
 
 from src.orchestration.agent_loop.compaction import AgentCompactionService
 from src.orchestration.agent_loop.context import AgentContextBuilder, AgentContextRules
+from src.orchestration.agent_loop.context_preflight import (
+    AgentContextCandidate,
+    AgentContextCandidateBuilder,
+    AgentContextPreflightDecision,
+    AgentContextPreflightResult,
+)
 from src.orchestration.agent_loop.lease import AgentLeaseController
 from src.orchestration.agent_loop.models import (
     AgentFinishMetadata,
@@ -17,11 +23,7 @@ from src.orchestration.agent_loop.models import (
     AgentSampleCommit,
     AgentUsage,
 )
-from src.orchestration.agent_loop.tool_catalog import (
-    AgentToolCatalog,
-    CatalogPreflightDecision,
-    CatalogPreflightResult,
-)
+from src.orchestration.agent_loop.tool_catalog import AgentToolCatalog
 from src.storage.sqlite import (
     SQLiteAgentRepository,
     bootstrap_sqlite_database,
@@ -31,8 +33,36 @@ from src.storage.sqlite import (
 from src.storage.sqlite.models import TaskRow
 
 
-def _preflight(decision: CatalogPreflightDecision) -> CatalogPreflightResult:
-    return CatalogPreflightResult(decision, 0, 0, 10, 100, 110, 50)
+def _candidate(
+    decision: AgentContextPreflightDecision,
+    *,
+    limit: int = 500,
+) -> AgentContextCandidate:
+    return AgentContextCandidate(
+        request=AgentContextBuilder(
+            AgentContextRules("stable", "tool rules", "final guard")
+        ).build(
+            run=AgentRun(
+                "candidate-run",
+                "candidate-task",
+                "candidate-conversation",
+                AgentRunStatus.RUNNING,
+                AgentModelBinding("edition-a"),
+            ),
+            items=(),
+            catalog=AgentToolCatalog((), {}),
+        ),
+        preflight=AgentContextPreflightResult(
+            decision=decision,
+            required_tokens=10,
+            history_tokens=100,
+            transient_tokens=0,
+            tool_tokens=0,
+            total_tokens=110,
+            total_context_limit_tokens=limit,
+            eligible_closed_history=True,
+        ),
+    )
 
 
 class _SummaryModel:
@@ -75,6 +105,12 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.leases = AgentLeaseController(self.repository, ttl_seconds=30)
         self.handle = await self.leases.acquire("run-1", owner_id="worker")
+        self.candidate_builder = AgentContextCandidateBuilder(
+            context_builder=AgentContextBuilder(
+                AgentContextRules("stable", "tool rules", "final guard")
+            ),
+            token_counter=lambda fragments, _binding: len(fragments),
+        )
         for index in range(5):
             run = await self.repository.get_run("run-1")
             await self.repository.commit_agent_sample(
@@ -105,6 +141,7 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
             writer=self.repository,
             model=model,
             lease_controller=self.leases,
+            candidate_builder=self.candidate_builder,
             minimum_suffix_items=2,
         )
         calls = 0
@@ -112,12 +149,14 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
         def repreflight(_run, _items):
             nonlocal calls
             calls += 1
-            return _preflight(CatalogPreflightDecision.FITS)
+            return _candidate(AgentContextPreflightDecision.FITS)
 
         outcome = await service.compact_until_fit(
             run_id="run-1",
             handle=self.handle,
-            preflight=_preflight(CatalogPreflightDecision.HISTORY_COMPACTION_REQUIRED),
+            candidate=_candidate(
+                AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED
+            ),
             repreflight=repreflight,
         )
 
@@ -138,6 +177,52 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("safe-0", rendered)
         self.assertIn("safe-3", rendered)
 
+    async def test_compaction_shrinks_only_at_closed_boundaries_until_request_fits(
+        self,
+    ) -> None:
+        model = _SummaryModel(self.binding)
+
+        counter_calls = 0
+
+        def bounded_counter(_fragments, _binding):
+            nonlocal counter_calls
+            counter_calls += 1
+            return 1_000 if counter_calls == 1 else 300
+
+        candidate_builder = AgentContextCandidateBuilder(
+            context_builder=AgentContextBuilder(
+                AgentContextRules("stable", "tool rules", "final guard")
+            ),
+            token_counter=bounded_counter,
+        )
+        service = AgentCompactionService(
+            runs=self.repository,
+            writer=self.repository,
+            model=model,
+            lease_controller=self.leases,
+            candidate_builder=candidate_builder,
+            minimum_suffix_items=2,
+        )
+
+        outcome = await service.compact_until_fit(
+            run_id="run-1",
+            handle=self.handle,
+            candidate=_candidate(
+                AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED,
+                limit=650,
+            ),
+            repreflight=lambda _run, _items: _candidate(
+                AgentContextPreflightDecision.FITS,
+                limit=650,
+            ),
+        )
+
+        self.assertLess(outcome.run.compacted_through_sequence, 3)
+        self.assertLessEqual(
+            await candidate_builder.count_request(model.requests[0]),
+            650,
+        )
+
     async def test_required_segments_fatal_after_repreflight_converges_without_retry(self) -> None:
         model = _SummaryModel(self.binding)
         service = AgentCompactionService(
@@ -145,14 +230,19 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
             writer=self.repository,
             model=model,
             lease_controller=self.leases,
+            candidate_builder=self.candidate_builder,
         )
-        with self.assertRaisesRegex(RuntimeError, "agent_tool_catalog_too_large"):
+        with self.assertRaisesRegex(
+            RuntimeError, "agent_context_required_segments_too_large"
+        ):
             await service.compact_until_fit(
                 run_id="run-1",
                 handle=self.handle,
-                preflight=_preflight(CatalogPreflightDecision.HISTORY_COMPACTION_REQUIRED),
-                repreflight=lambda _run, _items: _preflight(
-                    CatalogPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE
+                candidate=_candidate(
+                    AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED
+                ),
+                repreflight=lambda _run, _items: _candidate(
+                    AgentContextPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE
                 ),
             )
         self.assertEqual(len(model.requests), 1)
@@ -181,15 +271,20 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
             writer=self.repository,
             model=model,
             lease_controller=self.leases,
+            candidate_builder=self.candidate_builder,
             minimum_suffix_items=5,
         )
-        with self.assertRaisesRegex(RuntimeError, "no_eligible_range"):
+        with self.assertRaisesRegex(
+            RuntimeError, "agent_context_required_segments_too_large"
+        ):
             await service.compact_until_fit(
                 run_id="run-1",
                 handle=self.handle,
-                preflight=_preflight(CatalogPreflightDecision.HISTORY_COMPACTION_REQUIRED),
-                repreflight=lambda _run, _items: _preflight(
-                    CatalogPreflightDecision.FITS
+                candidate=_candidate(
+                    AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED
+                ),
+                repreflight=lambda _run, _items: _candidate(
+                    AgentContextPreflightDecision.FITS
                 ),
             )
         self.assertEqual(model.requests, [])

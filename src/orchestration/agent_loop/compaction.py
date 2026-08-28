@@ -3,28 +3,34 @@ from __future__ import annotations
 import json
 import inspect
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Any
 
 from src.storage.agent_payload import agent_compaction_source_digest
 
 from .lease import AgentLeaseController, AgentLeaseHandle
 from .model_port import AgentModelPort
+from .context_preflight import (
+    AgentContextCandidate,
+    AgentContextCandidateBuilder,
+    AgentContextPreflightDecision,
+    compaction_prefix_is_closed,
+    eligible_compaction_prefix,
+)
 from .models import (
     AgentCompactionCommit,
     AgentItem,
-    AgentItemState,
+    AgentItemKind,
     AgentMessage,
     AgentModelRequest,
     AgentRun,
     AgentToolChoice,
 )
 from .repository import AgentAtomicWriter, AgentRunRepository
-from .tool_catalog import CatalogPreflightDecision, CatalogPreflightResult
 
 
 Repreflight = Callable[
     [AgentRun, tuple[AgentItem, ...]],
-    CatalogPreflightResult | Awaitable[CatalogPreflightResult],
+    AgentContextCandidate | Awaitable[AgentContextCandidate],
 ]
 
 
@@ -32,7 +38,11 @@ Repreflight = Callable[
 class AgentCompactionOutcome:
     run: AgentRun
     items: tuple[AgentItem, ...]
-    preflight: CatalogPreflightResult
+    candidate: AgentContextCandidate
+
+    @property
+    def preflight(self):
+        return self.candidate.preflight
 
 
 class AgentCompactionService:
@@ -43,6 +53,8 @@ class AgentCompactionService:
         writer: AgentAtomicWriter,
         model: AgentModelPort,
         lease_controller: AgentLeaseController,
+        candidate_builder: AgentContextCandidateBuilder,
+        transient_result_resolver: Any | None = None,
         minimum_suffix_items: int = 2,
     ) -> None:
         if minimum_suffix_items < 1:
@@ -51,6 +63,8 @@ class AgentCompactionService:
         self._writer = writer
         self._model = model
         self._leases = lease_controller
+        self._candidate_builder = candidate_builder
+        self._transient_result_resolver = transient_result_resolver
         self._minimum_suffix_items = minimum_suffix_items
 
     async def compact_until_fit(
@@ -58,52 +72,42 @@ class AgentCompactionService:
         *,
         run_id: str,
         handle: AgentLeaseHandle,
-        preflight: CatalogPreflightResult,
+        candidate: AgentContextCandidate,
         repreflight: Repreflight,
+        force: bool = False,
     ) -> AgentCompactionOutcome:
-        current = preflight
+        current = candidate
         prior_range: tuple[int, int] | None = None
-        while current.decision is CatalogPreflightDecision.HISTORY_COMPACTION_REQUIRED:
+        force_next = force
+        while (
+            force_next
+            or current.preflight.decision
+            is AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED
+        ):
             run = await self._require_run(run_id)
             items = await self._runs.list_items(run_id)
-            covered = _eligible_prefix(
+            covered = eligible_compaction_prefix(
                 run,
                 items,
                 minimum_suffix_items=self._minimum_suffix_items,
             )
             if not covered:
-                raise RuntimeError("agent_compaction_no_eligible_range")
+                raise RuntimeError("agent_context_required_segments_too_large")
+            request, covered = await self._largest_fitting_request(
+                run=run,
+                all_items=items,
+                covered=covered,
+                token_limit=current.preflight.total_context_limit_tokens,
+            )
             covered_range = (covered[0].sequence, covered[-1].sequence)
             if covered_range == prior_range:
                 raise RuntimeError("agent_compaction_no_progress")
             prior_range = covered_range
             digest = agent_compaction_source_digest(covered)
-            prompt = _compaction_prompt(covered, source_digest=digest)
             sample = await self._leases.run_active_phase(
                 "compaction",
                 handle,
-                lambda _handle: self._model.sample_agent(
-                    AgentModelRequest(
-                        request_id=(
-                            f"agent-compaction:{run.run_id}:"
-                            f"{covered_range[0]}-{covered_range[1]}:{digest[:12]}"
-                        ),
-                        binding=run.binding,
-                        messages=(
-                            AgentMessage(
-                                role="system",
-                                content=(
-                                    "Summarize only the supplied durable Agent items. Preserve "
-                                    "facts, decisions, errors and unresolved obligations. Return "
-                                    "plain summary text and do not call tools."
-                                ),
-                            ),
-                            AgentMessage(role="user", content=prompt),
-                        ),
-                        tools=(),
-                        tool_choice=AgentToolChoice("none"),
-                    )
-                ),
+                lambda _handle: self._model.sample_agent(request),
             )
             if sample.binding != run.binding or sample.tool_calls or not sample.visible_text.strip():
                 raise RuntimeError("agent_compaction_model_output_invalid")
@@ -124,15 +128,64 @@ class AgentCompactionService:
             if inspect.isawaitable(next_result):
                 next_result = await next_result
             current = next_result
-            if current.decision is CatalogPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE:
-                raise RuntimeError("agent_tool_catalog_too_large")
-        if current.decision is not CatalogPreflightDecision.FITS:
+            force_next = False
+            if (
+                current.preflight.decision
+                is AgentContextPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE
+            ):
+                raise RuntimeError("agent_context_required_segments_too_large")
+        if current.preflight.decision is not AgentContextPreflightDecision.FITS:
             raise RuntimeError("agent_compaction_preflight_invalid")
         return AgentCompactionOutcome(
             run=await self._require_run(run_id),
             items=await self._runs.list_items(run_id),
-            preflight=current,
+            candidate=current,
         )
+
+    async def _largest_fitting_request(
+        self,
+        *,
+        run: AgentRun,
+        all_items: tuple[AgentItem, ...],
+        covered: tuple[AgentItem, ...],
+        token_limit: int,
+    ) -> tuple[AgentModelRequest, tuple[AgentItem, ...]]:
+        current = covered
+        while current:
+            source_digest = agent_compaction_source_digest(current)
+            prompt = _compaction_prompt(
+                run,
+                current,
+                source_digest=source_digest,
+                transient_result_resolver=self._transient_result_resolver,
+            )
+            if prompt is not None:
+                request = AgentModelRequest(
+                    request_id=(
+                        f"agent-compaction:{run.run_id}:"
+                        f"{current[0].sequence}-{current[-1].sequence}:"
+                        f"{source_digest[:12]}"
+                    ),
+                    binding=run.binding,
+                    messages=(
+                        AgentMessage(
+                            role="system",
+                            content=(
+                                "Summarize only the supplied durable Agent items. "
+                                "Preserve facts, decisions, errors and unresolved "
+                                "obligations. Return plain summary text and do not "
+                                "call tools."
+                            ),
+                        ),
+                        AgentMessage(role="user", content=prompt),
+                    ),
+                    tools=(),
+                    tool_choice=AgentToolChoice("none"),
+                )
+                if await self._candidate_builder.count_request(request) <= token_limit:
+                    return request, current
+            current = _previous_closed_prefix(current, all_items)
+        raise RuntimeError("agent_context_required_segments_too_large")
 
     async def _require_run(self, run_id: str) -> AgentRun:
         run = await self._runs.get_run(run_id)
@@ -141,69 +194,55 @@ class AgentCompactionService:
         return run
 
 
-def _eligible_prefix(
+def _compaction_prompt(
     run: AgentRun,
     items: tuple[AgentItem, ...],
     *,
-    minimum_suffix_items: int,
-) -> tuple[AgentItem, ...]:
-    uncovered = tuple(
-        item for item in items if item.sequence > run.compacted_through_sequence
-    )
-    if len(uncovered) <= minimum_suffix_items:
-        return ()
-    candidates = list(uncovered[:-minimum_suffix_items])
-    expected = run.compacted_through_sequence + 1
-    contiguous: list[AgentItem] = []
-    for item in candidates:
-        if item.sequence != expected or item.state is not AgentItemState.COMMITTED:
-            break
-        contiguous.append(item)
-        expected += 1
-    while contiguous and not _prefix_is_closed(tuple(contiguous), uncovered):
-        contiguous.pop()
-    return tuple(contiguous)
-
-
-def _prefix_is_closed(
-    prefix: tuple[AgentItem, ...],
-    uncovered: tuple[AgentItem, ...],
-) -> bool:
-    covered_ids = {item.item_id for item in prefix}
-    for item in prefix:
-        if item.kind.value == "assistant_message":
-            if any(
-                candidate.parent_item_id == item.item_id
-                and candidate.item_id not in covered_ids
-                for candidate in uncovered
-            ):
-                return False
-        if item.kind.value == "tool_call":
-            if any(
-                candidate.source_call_item_id == item.item_id
-                and candidate.item_id not in covered_ids
-                for candidate in uncovered
-            ):
-                return False
-    return True
-
-
-def _compaction_prompt(
-    items: tuple[AgentItem, ...],
-    *,
     source_digest: str,
-) -> str:
+    transient_result_resolver: Any | None,
+) -> str | None:
+    source_items = []
+    calls = {
+        item.item_id: item
+        for item in items
+        if item.kind is AgentItemKind.TOOL_CALL
+    }
+    for item in items:
+        item_payload = json.loads(item.payload_json)
+        if (
+            item.sequence == 1
+            and item.kind is AgentItemKind.USER_MESSAGE
+            and isinstance(item_payload, dict)
+            and "context_budget" in item_payload
+        ):
+            continue
+        if (
+            item.kind is AgentItemKind.TOOL_RESULT
+            and isinstance(item_payload, dict)
+            and _is_transient_result_payload(item_payload)
+        ):
+            call = calls.get(str(item.source_call_item_id))
+            if call is None or transient_result_resolver is None:
+                raise RuntimeError("agent_transient_skill_result_unavailable")
+            item_payload = transient_result_resolver.resolve_tool_result(
+                run=run,
+                call_item=call,
+                result_item=item,
+                durable_payload=item_payload,
+            )
+        source_items.append(
+            {
+                "kind": item.kind.value,
+                "payload": item_payload,
+                "sequence": item.sequence,
+            }
+        )
+    if not source_items:
+        return None
     payload = {
         "covered_end_sequence": items[-1].sequence,
         "covered_start_sequence": items[0].sequence,
-        "items": [
-            {
-                "kind": item.kind.value,
-                "payload": json.loads(item.payload_json),
-                "sequence": item.sequence,
-            }
-            for item in items
-        ],
+        "items": source_items,
         "source_digest": source_digest,
     }
     return json.dumps(
@@ -211,4 +250,23 @@ def _compaction_prompt(
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def _previous_closed_prefix(
+    current: tuple[AgentItem, ...],
+    all_items: tuple[AgentItem, ...],
+) -> tuple[AgentItem, ...]:
+    candidate = current[:-1]
+    while candidate and not compaction_prefix_is_closed(candidate, all_items):
+        candidate = candidate[:-1]
+    return candidate
+
+
+def _is_transient_result_payload(payload: dict[str, Any]) -> bool:
+    safe_result = payload.get("safe_result")
+    return bool(
+        isinstance(safe_result, dict)
+        and safe_result.get("projection_revision") == "skill-result-v2"
+        and safe_result.get("projection_mode") == "transient_staged"
     )

@@ -7,6 +7,7 @@ from src.integrations.openai_agent_model_adapter import OpenAIAgentModelAdapter
 from src.orchestration.agent_loop.models import (
     AgentCancellationToken,
     AgentMessage,
+    AgentModelContextLengthError,
     AgentModelBinding,
     AgentModelRequest,
     AgentProtocolErrorCode,
@@ -86,6 +87,14 @@ class _Completions:
         return next(self._responses)
 
 
+class _FailingCompletions:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    async def create(self, **_kwargs):
+        raise self.error
+
+
 def _binding(*, thinking_enabled: bool = True) -> AgentModelBinding:
     return AgentModelBinding(
         "edition-a",
@@ -131,6 +140,40 @@ def _request(
 
 
 class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_closed_provider_context_error_maps_to_typed_error(self) -> None:
+        error = RuntimeError("free text must not drive classification")
+        error.status_code = 400
+        error.code = "context_length_exceeded"
+        error.type = "invalid_request_error"
+        adapter = OpenAIAgentModelAdapter(
+            completions=_FailingCompletions(error),
+            model="edition-a",
+        )
+
+        with self.assertRaises(AgentModelContextLengthError):
+            await adapter.sample_agent(_request())
+
+    async def test_other_provider_failures_never_map_from_free_text(self) -> None:
+        cases = (
+            (401, "context_length_exceeded", "invalid_request_error"),
+            (429, "rate_limit_exceeded", "context_length_exceeded"),
+            (500, "context_length_exceeded", "invalid_request_error"),
+            (400, "invalid_api_key", "invalid_request_error"),
+        )
+        for status, code, error_type in cases:
+            with self.subTest(status=status, code=code, error_type=error_type):
+                error = RuntimeError("context length exceeded")
+                error.status_code = status
+                error.code = code
+                error.type = error_type
+                adapter = OpenAIAgentModelAdapter(
+                    completions=_FailingCompletions(error),
+                    model="edition-a",
+                )
+                with self.assertRaises(RuntimeError) as captured:
+                    await adapter.sample_agent(_request())
+                self.assertIs(captured.exception, error)
+
     async def test_streams_reasoning_without_losing_answer_or_tool_calls(self) -> None:
         reasoning: list[str] = []
 

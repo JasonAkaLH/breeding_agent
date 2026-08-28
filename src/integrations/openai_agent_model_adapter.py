@@ -10,6 +10,7 @@ from typing import Any
 from src.orchestration.agent_loop.models import (
     AgentFinishMetadata,
     AgentMessage,
+    AgentModelContextLengthError,
     AgentModelRequest,
     AgentProtocolErrorCode,
     AgentProtocolFailure,
@@ -80,8 +81,12 @@ class OpenAIAgentModelAdapter:
             except AgentProtocolViolation as exc:
                 await self._reset_reasoning(request, reasoning_state)
                 last_violation = exc
-            except Exception:
+            except Exception as exc:
                 await self._reset_reasoning(request, reasoning_state)
+                if _is_provider_context_length_error(exc):
+                    raise AgentModelContextLengthError(
+                        "agent_model_context_length_exceeded"
+                    ) from exc
                 raise
         assert last_violation is not None
         raise AgentProtocolFailure(last_violation.code, attempts=self._retry_policy.max_attempts)
@@ -373,3 +378,39 @@ async def _close_stream(stream: Any) -> None:
         result = close()
         if inspect.isawaitable(result):
             await result
+
+
+def _is_provider_context_length_error(exc: BaseException) -> bool:
+    response = _field(exc, "response")
+    status = _field(exc, "status_code") or _field(response, "status_code")
+    body = _field(exc, "body")
+    error = body.get("error") if isinstance(body, Mapping) else None
+    sources = tuple(
+        value
+        for value in (exc, body, error)
+        if isinstance(value, Mapping) or value is exc
+    )
+    codes = {
+        str(_field(source, "code") or "").strip().lower()
+        for source in sources
+    }
+    types = {
+        str(_field(source, "type") or "").strip().lower()
+        for source in sources
+    }
+    return bool(
+        status in {400, 413}
+        and (
+            codes
+            & {
+                "context_length_exceeded",
+                "context_window_exceeded",
+                "maximum_context_length_exceeded",
+            }
+            or types
+            & {
+                "context_length_exceeded",
+                "context_window_exceeded",
+            }
+        )
+    )

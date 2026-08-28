@@ -6,6 +6,12 @@ from dataclasses import dataclass, replace
 from typing import Any, Mapping, Protocol
 
 from .context import AgentContextBuilder
+from .context_preflight import (
+    AgentContextCandidateBuilder,
+    AgentContextPreflightDecision,
+    agent_run_context_budget,
+)
+from .compaction import AgentCompactionService
 from .invocation import deterministic_invocation_waves
 from .lease import AgentLeaseController, AgentLeaseHandle
 from .model_port import AgentModelPort
@@ -16,6 +22,7 @@ from .models import (
     AgentItem,
     AgentItemKind,
     AgentItemState,
+    AgentModelContextLengthError,
     AgentRun,
     AgentRunStatus,
     AgentSampleCommit,
@@ -90,6 +97,8 @@ class AgentLoopRunner:
         reasoning_delta_sink=None,
         reasoning_reset_sink=None,
         terminal_event_recorder=None,
+        context_candidate_builder: AgentContextCandidateBuilder | None = None,
+        compaction_service: AgentCompactionService | None = None,
     ) -> None:
         self._runs = runs
         self._writer = writer
@@ -103,6 +112,8 @@ class AgentLoopRunner:
         self._reasoning_delta_sink = reasoning_delta_sink
         self._reasoning_reset_sink = reasoning_reset_sink
         self._terminal_event_recorder = terminal_event_recorder
+        self._context_candidate_builder = context_candidate_builder
+        self._compaction_service = compaction_service
 
     async def run(
         self,
@@ -179,14 +190,68 @@ class AgentLoopRunner:
                 if required_tool_name is not None
                 else AgentToolChoice()
             )
-            model_request = self._context_builder.build(
-                run=run,
-                items=items,
-                catalog=catalog,
-                trusted_facts=trusted_facts,
-                current_user_input=current_user_input,
-                tool_choice=choice,
+            candidate_builder = self._context_candidate_builder
+            try:
+                run_context_budget = agent_run_context_budget(items)
+            except ValueError:
+                return await self._fail_context_run(run_id, handle)
+            use_total_preflight = bool(
+                candidate_builder is not None
+                and run_context_budget is not None
             )
+            candidate = None
+            if use_total_preflight:
+                assert candidate_builder is not None
+
+                async def build_candidate(
+                    candidate_run: AgentRun,
+                    candidate_items: tuple[AgentItem, ...],
+                ):
+                    return await candidate_builder.build(
+                        run=candidate_run,
+                        items=candidate_items,
+                        catalog=catalog,
+                        trusted_facts=trusted_facts,
+                        current_user_input=current_user_input,
+                        tool_choice=choice,
+                    )
+
+                candidate = await build_candidate(run, items)
+                if (
+                    candidate.preflight.decision
+                    is AgentContextPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE
+                ):
+                    return await self._fail_context_run(run_id, handle)
+                if (
+                    candidate.preflight.decision
+                    is AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED
+                ):
+                    if self._compaction_service is None:
+                        return await self._fail_context_run(run_id, handle)
+                    try:
+                        compacted = await self._compaction_service.compact_until_fit(
+                            run_id=run_id,
+                            handle=handle,
+                            candidate=candidate,
+                            repreflight=build_candidate,
+                        )
+                    except RuntimeError as exc:
+                        if str(exc) == "agent_context_required_segments_too_large":
+                            return await self._fail_context_run(run_id, handle)
+                        raise
+                    run = compacted.run
+                    items = compacted.items
+                    candidate = compacted.candidate
+                model_request = candidate.request
+            else:
+                model_request = self._context_builder.build(
+                    run=run,
+                    items=items,
+                    catalog=catalog,
+                    trusted_facts=trusted_facts,
+                    current_user_input=current_user_input,
+                    tool_choice=choice,
+                )
             model_request = replace(model_request, cancellation=cancellation)
             if self._reasoning_delta_sink is not None:
                 reasoning_ordinal = 0
@@ -247,11 +312,51 @@ class AgentLoopRunner:
                     reasoning_delta_sink=publish_reasoning,
                     reasoning_reset_sink=reset_reasoning,
                 )
-            sample = await self._leases.run_active_phase(
-                "model_sample",
-                handle,
-                lambda _handle: self._model.sample_agent(model_request),
-            )
+            try:
+                sample = await self._leases.run_active_phase(
+                    "model_sample",
+                    handle,
+                    lambda _handle: self._model.sample_agent(model_request),
+                )
+            except AgentModelContextLengthError:
+                if not use_total_preflight:
+                    raise
+                if (
+                    candidate_builder is None
+                    or self._compaction_service is None
+                ):
+                    return await self._fail_context_run(run_id, handle)
+                latest = await self._require_active_run(run_id)
+                latest_items = await self._runs.list_items(run_id)
+                retry_candidate = await build_candidate(latest, latest_items)
+                if not retry_candidate.preflight.eligible_closed_history:
+                    return await self._fail_context_run(run_id, handle)
+                try:
+                    compacted = await self._compaction_service.compact_until_fit(
+                        run_id=run_id,
+                        handle=handle,
+                        candidate=retry_candidate,
+                        repreflight=build_candidate,
+                        force=True,
+                    )
+                except RuntimeError as exc:
+                    if str(exc) == "agent_context_required_segments_too_large":
+                        return await self._fail_context_run(run_id, handle)
+                    raise
+                retry_request = replace(
+                    compacted.candidate.request,
+                    cancellation=cancellation,
+                    reasoning_delta_sink=model_request.reasoning_delta_sink,
+                    reasoning_reset_sink=model_request.reasoning_reset_sink,
+                )
+                try:
+                    sample = await self._leases.run_active_phase(
+                        "model_sample",
+                        handle,
+                        lambda _handle: self._model.sample_agent(retry_request),
+                    )
+                except AgentModelContextLengthError:
+                    return await self._fail_context_run(run_id, handle)
             self._check_cancel(cancellation)
             latest = await self._require_active_run(run_id)
             committed = await self._writer.commit_agent_sample(
@@ -274,6 +379,24 @@ class AgentLoopRunner:
                     final_candidate=committed.assistant_item,
                 )
             required_tool_name = None
+
+    async def _fail_context_run(
+        self,
+        run_id: str,
+        handle: AgentLeaseHandle,
+    ) -> AgentLoopRunResult:
+        latest = await self._require_active_run(run_id)
+        failed = await self._writer.fail_agent_run(
+            run_id,
+            expected_revision=latest.revision,
+            expected_claim_token=handle.current.token,
+            safe_error_code="agent_context_required_segments_too_large",
+        )
+        return AgentLoopRunResult(
+            run=failed,
+            state="failed",
+            lease_handle=handle,
+        )
 
     async def _execute_records(
         self,

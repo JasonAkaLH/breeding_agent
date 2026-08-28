@@ -29,6 +29,7 @@ EXPECTED_AGENT_LOOP_EXPORTS = [
     "AgentItemState",
     "AgentLeaseLost",
     "AgentMessage",
+    "AgentModelContextLengthError",
     "AgentModelBinding",
     "AgentModelPort",
     "AgentModelRequest",

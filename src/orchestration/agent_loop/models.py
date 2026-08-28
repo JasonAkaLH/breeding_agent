@@ -72,6 +72,10 @@ class AgentSamplingCancelled(Exception):
     """Raised when Agent sampling is cancelled before a closed sample exists."""
 
 
+class AgentModelContextLengthError(RuntimeError):
+    """Closed provider evidence that the submitted model context was too large."""
+
+
 @dataclass(slots=True)
 class AgentCancellationToken:
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)

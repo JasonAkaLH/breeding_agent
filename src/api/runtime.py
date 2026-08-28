@@ -157,6 +157,7 @@ from src.integrations.model_editions import (
     trim_max_tokens_for_model_edition,
     validate_model_reasoning_effort_configs,
 )
+from src.integrations.token_counter import get_num_of_tokens_from_messages_async
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
 from src.integrations.mcp.credentials import (
     MCPAuditReferenceSigner,
@@ -333,11 +334,13 @@ from src.orchestration.backpressure import DEFAULT_MAX_ACTIVE_TASKS, Backpressur
 from src.orchestration.agent_loop import (
     AgentCallExecution,
     AgentContextBudget,
+    AgentContextCandidateBuilder,
     AgentContextBuilder,
     AgentContextRules,
     AgentCancellationToken,
     AgentCallOutcomeStatus,
     AgentContinuationLocatorService,
+    AgentCompactionService,
     AgentExecutionRequest,
     AgentFinalOutputPublisher,
     AgentLoopOrchestrator,
@@ -15263,30 +15266,54 @@ def build_api_runtime(
         invocation_hook=agent_invocation_hook,
     )
     lease_controller = AgentLeaseController(agent_repository, ttl_seconds=30)
+    agent_transient_result_resolver = AgentTransientSkillResultResolver(
+        agent_transient_skill_result_store
+    )
+    agent_context_builder = AgentContextBuilder(
+        AgentContextRules(
+            stable_rules=(
+                "\n".join(
+                    (
+                        *MAIN_AGENT_SYSTEM_CONTRACT_LINES,
+                        "根据当前公开Tool catalog选择Tool，观察结果并继续；"
+                        "不需要Tool时直接给出最终回答。",
+                    )
+                )
+            ),
+            safe_tool_rules=(
+                "只能调用本轮catalog中的Tool；不得伪造Tool结果、凭据、隐藏路径或内部状态。"
+            ),
+            final_guard="最终回答必须面向用户，且不得包含隐藏推理或原始敏感结果。",
+        ),
+        transient_result_resolver=agent_transient_result_resolver,
+    )
+
+    async def count_agent_context_tokens(fragments, binding):
+        return await get_num_of_tokens_from_messages_async(
+            fragments,
+            config=config_for_model_edition(
+                resolved_model_edition_config,
+                binding.model_edition,
+            ),
+        )
+
+    agent_context_candidate_builder = AgentContextCandidateBuilder(
+        context_builder=agent_context_builder,
+        token_counter=count_agent_context_tokens,
+    )
+    agent_compaction_service = AgentCompactionService(
+        runs=agent_repository,
+        writer=agent_repository,
+        model=agent_model_port,
+        lease_controller=lease_controller,
+        candidate_builder=agent_context_candidate_builder,
+        transient_result_resolver=agent_transient_result_resolver,
+    )
     agent_runner = AgentLoopRunner(
         runs=agent_repository,
         writer=agent_repository,
         model=agent_model_port,
-        context_builder=AgentContextBuilder(
-            AgentContextRules(
-                stable_rules=(
-                    "\n".join(
-                        (
-                            *MAIN_AGENT_SYSTEM_CONTRACT_LINES,
-                            "根据当前公开Tool catalog选择Tool，观察结果并继续；"
-                            "不需要Tool时直接给出最终回答。",
-                        )
-                    )
-                ),
-                safe_tool_rules=(
-                    "只能调用本轮catalog中的Tool；不得伪造Tool结果、凭据、隐藏路径或内部状态。"
-                ),
-                final_guard="最终回答必须面向用户，且不得包含隐藏推理或原始敏感结果。",
-            ),
-            transient_result_resolver=AgentTransientSkillResultResolver(
-                agent_transient_skill_result_store
-            ),
-        ),
+        context_builder=agent_context_builder,
         catalog_builder=AgentToolCatalogBuilder(capability_registry),
         visibility_context=CapabilityVisibilityContext("runtime-default"),
         lease_controller=lease_controller,
@@ -15295,6 +15322,8 @@ def build_api_runtime(
         reasoning_delta_sink=publish_agent_reasoning,
         reasoning_reset_sink=publish_agent_reasoning_reset,
         terminal_event_recorder=record_initialization_event_exact,
+        context_candidate_builder=agent_context_candidate_builder,
+        compaction_service=agent_compaction_service,
     )
     final_output_publisher = AgentFinalOutputPublisher(
         runs=agent_repository,

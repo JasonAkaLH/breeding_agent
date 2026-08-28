@@ -6,16 +6,21 @@ import unittest
 from pathlib import Path
 
 from src.orchestration.agent_loop.context import AgentContextBuilder, AgentContextRules
+from src.orchestration.agent_loop.context_budget import AgentContextBudget
+from src.orchestration.agent_loop.context_preflight import AgentContextCandidateBuilder
+from src.orchestration.agent_loop.compaction import AgentCompactionService
 from src.orchestration.agent_loop.lease import AgentLeaseController
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeStatus,
     AgentFinishMetadata,
     AgentModelBinding,
+    AgentModelContextLengthError,
     AgentRun,
     AgentRunStatus,
     AgentSample,
     AgentToolCall,
     AgentUsage,
+    AgentUserMessageCommit,
 )
 from src.orchestration.agent_loop.runner import (
     AGENT_REASONING_TRUNCATED_MARKER,
@@ -98,6 +103,40 @@ class _ReasoningModel:
             usage=AgentUsage(status="usage_unavailable"),
             finish=AgentFinishMetadata("stop", 1),
         )
+
+
+class _ContextAwareQueuedModel(_QueuedModel):
+    def __init__(
+        self,
+        binding,
+        outputs,
+        *,
+        context_error_on_main_calls: frozenset[int] = frozenset(),
+    ) -> None:
+        super().__init__(binding, outputs)
+        self.context_error_on_main_calls = context_error_on_main_calls
+        self.compaction_requests = []
+        self.main_calls = 0
+
+    async def sample_agent(self, request):
+        if request.request_id.startswith("agent-compaction:"):
+            self.requests.append(request)
+            self.compaction_requests.append(request)
+            return AgentSample(
+                sample_id=f"summary-{len(self.compaction_requests)}",
+                binding=self.binding,
+                visible_text="compacted history facts",
+                tool_calls=(),
+                usage=AgentUsage(status="usage_unavailable"),
+                finish=AgentFinishMetadata("stop", 1),
+            )
+        self.main_calls += 1
+        if self.main_calls in self.context_error_on_main_calls:
+            self.requests.append(request)
+            raise AgentModelContextLengthError(
+                "agent_model_context_length_exceeded"
+            )
+        return await super().sample_agent(request)
 
 
 class _RecordingInvoker:
@@ -218,23 +257,245 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         reasoning_delta_sink=None,
         reasoning_reset_sink=None,
         terminal_event_recorder=None,
+        enable_preflight: bool = False,
+        token_counter=None,
     ):
         repository = repository or self.repository
+        context_builder = AgentContextBuilder(
+            AgentContextRules("stable", "tool rules", "final guard")
+        )
+        candidate_builder = (
+            AgentContextCandidateBuilder(
+                context_builder=context_builder,
+                token_counter=token_counter,
+            )
+            if enable_preflight
+            else None
+        )
+        lease_controller = AgentLeaseController(repository, ttl_seconds=30)
+        compaction_service = (
+            AgentCompactionService(
+                runs=repository,
+                writer=repository,
+                model=model,
+                lease_controller=lease_controller,
+                candidate_builder=candidate_builder,
+            )
+            if candidate_builder is not None
+            else None
+        )
         return AgentLoopRunner(
             runs=repository,
             writer=repository,
             model=model,
-            context_builder=AgentContextBuilder(
-                AgentContextRules("stable", "tool rules", "final guard")
-            ),
+            context_builder=context_builder,
             catalog_builder=self.catalog_builder,
             visibility_context=self.visibility,
-            lease_controller=AgentLeaseController(repository, ttl_seconds=30),
+            lease_controller=lease_controller,
             invoker=invoker,
             owner_id="worker-1",
             reasoning_delta_sink=reasoning_delta_sink,
             reasoning_reset_sink=reasoning_reset_sink,
             terminal_event_recorder=terminal_event_recorder,
+            context_candidate_builder=candidate_builder,
+            compaction_service=compaction_service,
+        )
+
+    async def _initialize_budgeted_run(self, window: int) -> None:
+        run = await self.repository.get_run("run-1")
+        await self.repository.commit_agent_user_message(
+            AgentUserMessageCommit(
+                run_id=run.run_id,
+                expected_revision=run.revision,
+                expected_claim_token=None,
+                text="current question",
+                context_budget=AgentContextBudget.from_model_context_window(
+                    window
+                ),
+            )
+        )
+
+    async def _run_two_wave_context_error_case(
+        self,
+        error_calls: frozenset[int],
+    ):
+        await self._initialize_budgeted_run(1_000_000)
+        first_call = AgentToolCall(
+            "first", self.names["skill.safe_one"], "{}", 0
+        )
+        second_call = AgentToolCall(
+            "second", self.names["skill.safe_two"], "{}", 0
+        )
+        model = _ContextAwareQueuedModel(
+            self.binding,
+            [("", (first_call,)), ("", (second_call,)), ("final", ())],
+            context_error_on_main_calls=error_calls,
+        )
+        invoker = _RecordingInvoker()
+        result = await self._runner(
+            model,
+            invoker,
+            enable_preflight=True,
+            token_counter=lambda fragments, _binding: sum(
+                len(fragment) for fragment in fragments
+            ),
+        ).run("run-1")
+        return result, model, invoker
+
+    async def test_total_preflight_fits_without_compaction_model_call(self) -> None:
+        await self._initialize_budgeted_run(100_000)
+        model = _ContextAwareQueuedModel(
+            self.binding,
+            [("final answer", ())],
+        )
+
+        result = await self._runner(
+            model,
+            _RecordingInvoker(),
+            enable_preflight=True,
+            token_counter=lambda fragments, _binding: sum(
+                len(fragment) for fragment in fragments
+            ),
+        ).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(model.compaction_requests, [])
+
+    async def test_provider_context_error_compacts_once_without_skill_replay(
+        self,
+    ) -> None:
+        result, model, invoker = await self._run_two_wave_context_error_case(
+            frozenset({3})
+        )
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(model.main_calls, 4)
+        self.assertEqual(len(model.compaction_requests), 1)
+        self.assertNotIn(
+            "current question",
+            model.compaction_requests[0].messages[1].content or "",
+        )
+        self.assertEqual(invoker.events.count("start:first"), 1)
+        self.assertEqual(invoker.events.count("start:second"), 1)
+
+    async def test_provider_context_error_without_history_fails_once(self) -> None:
+        await self._initialize_budgeted_run(100_000)
+        model = _ContextAwareQueuedModel(
+            self.binding,
+            [("unused", ())],
+            context_error_on_main_calls=frozenset({1}),
+        )
+        invoker = _RecordingInvoker()
+
+        result = await self._runner(
+            model,
+            invoker,
+            enable_preflight=True,
+            token_counter=lambda fragments, _binding: sum(
+                len(fragment) for fragment in fragments
+            ),
+        ).run("run-1")
+
+        self.assertEqual(result.state, "failed")
+        self.assertEqual(model.main_calls, 1)
+        self.assertEqual(model.compaction_requests, [])
+        self.assertEqual(invoker.events, [])
+
+    async def test_second_provider_context_error_fails_without_more_compaction(
+        self,
+    ) -> None:
+        result, model, invoker = await self._run_two_wave_context_error_case(
+            frozenset({3, 4})
+        )
+
+        self.assertEqual(result.state, "failed")
+        self.assertEqual(
+            result.run.terminal_reason_code,
+            "agent_context_required_segments_too_large",
+        )
+        self.assertEqual(len(model.compaction_requests), 1)
+        self.assertEqual(invoker.events.count("start:first"), 1)
+        self.assertEqual(invoker.events.count("start:second"), 1)
+
+    async def test_required_context_over_limit_fails_before_provider_or_skill(
+        self,
+    ) -> None:
+        await self._initialize_budgeted_run(100)
+        model = _ContextAwareQueuedModel(
+            self.binding,
+            [("must not run", ())],
+        )
+        invoker = _RecordingInvoker()
+
+        result = await self._runner(
+            model,
+            invoker,
+            enable_preflight=True,
+            token_counter=lambda fragments, _binding: (
+                1_000 if fragments else 0
+            ),
+        ).run("run-1")
+
+        self.assertEqual(result.state, "failed")
+        self.assertEqual(
+            result.run.terminal_reason_code,
+            "agent_context_required_segments_too_large",
+        )
+        self.assertEqual(model.requests, [])
+        self.assertEqual(invoker.events, [])
+
+    async def test_total_over_limit_compacts_closed_history_not_latest_result(
+        self,
+    ) -> None:
+        await self._initialize_budgeted_run(35_000)
+        first_call = AgentToolCall(
+            "first", self.names["skill.safe_one"], "{}", 0
+        )
+        second_call = AgentToolCall(
+            "second", self.names["skill.safe_two"], "{}", 0
+        )
+        model = _ContextAwareQueuedModel(
+            self.binding,
+            [("", (first_call,)), ("", (second_call,)), ("final", ())],
+        )
+        invoker = _RecordingInvoker(
+            {
+                "first": AgentCallExecution(
+                    AgentCallOutcomeStatus.COMPLETED,
+                    safe_result_payload={"blob": "a" * 18_000},
+                ),
+                "second": AgentCallExecution(
+                    AgentCallOutcomeStatus.COMPLETED,
+                    safe_result_payload={"blob": "b" * 18_000},
+                ),
+            }
+        )
+
+        result = await self._runner(
+            model,
+            invoker,
+            enable_preflight=True,
+            token_counter=lambda fragments, _binding: sum(
+                len(fragment) for fragment in fragments
+            ),
+        ).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(len(model.compaction_requests), 1)
+        self.assertEqual(invoker.events.count("start:first"), 1)
+        self.assertEqual(invoker.events.count("start:second"), 1)
+        run = await self.repository.get_run("run-1")
+        self.assertGreater(run.compacted_through_sequence, 1)
+        items = await self.repository.list_items("run-1")
+        second_result = next(
+            item
+            for item in items
+            if item.kind.value == "tool_result"
+            and "b" * 100 in item.payload_json
+        )
+        self.assertGreater(
+            second_result.sequence, run.compacted_through_sequence
         )
 
     async def test_reasoning_reset_keeps_ordinal_monotonic_and_budget_consumed(self) -> None:

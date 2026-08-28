@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from .compaction import _eligible_prefix
 from .context import AgentContextBuilder
 from .context_budget import AgentContextBudget
 from .models import (
@@ -113,7 +112,7 @@ class AgentContextCandidateBuilder:
             tool_fragments, request.binding
         )
         total_tokens = required_tokens + history_tokens + tool_tokens
-        eligible_prefix = _eligible_prefix(
+        eligible_prefix = eligible_compaction_prefix(
             run,
             items,
             minimum_suffix_items=2,
@@ -148,6 +147,15 @@ class AgentContextCandidateBuilder:
             ),
         )
 
+    async def count_request(self, request: AgentModelRequest) -> int:
+        fragments = [
+            _framing_fragment(),
+            *(_message_fragment(message) for message in request.messages),
+            *(_tool_fragment(tool) for tool in request.tools),
+            _tool_choice_fragment(request.tool_choice),
+        ]
+        return await self._count_fragments(fragments, request.binding)
+
     async def _count_fragments(
         self,
         fragments: Sequence[str],
@@ -180,7 +188,9 @@ async def _count_with_bound_model(
     )
 
 
-def _run_context_budget(items: tuple[AgentItem, ...]) -> AgentContextBudget:
+def agent_run_context_budget(
+    items: tuple[AgentItem, ...],
+) -> AgentContextBudget | None:
     user = next(
         (
             item
@@ -192,11 +202,20 @@ def _run_context_budget(items: tuple[AgentItem, ...]) -> AgentContextBudget:
         None,
     )
     if user is None:
-        raise ValueError("agent_context_budget_missing")
+        return None
     payload = json.loads(user.payload_json)
-    if not isinstance(payload, Mapping) or "context_budget" not in payload:
-        raise ValueError("agent_context_budget_missing")
+    if not isinstance(payload, Mapping):
+        raise ValueError("agent_context_budget_invalid")
+    if "context_budget" not in payload:
+        return None
     return AgentContextBudget.from_payload(payload["context_budget"])
+
+
+def _run_context_budget(items: tuple[AgentItem, ...]) -> AgentContextBudget:
+    budget = agent_run_context_budget(items)
+    if budget is None:
+        raise ValueError("agent_context_budget_missing")
+    return budget
 
 
 def _unconsumed_transient_provider_call_ids(
@@ -332,3 +351,50 @@ def _canonical_fragment(value: Mapping[str, Any]) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def eligible_compaction_prefix(
+    run: AgentRun,
+    items: tuple[AgentItem, ...],
+    *,
+    minimum_suffix_items: int,
+) -> tuple[AgentItem, ...]:
+    uncovered = tuple(
+        item for item in items if item.sequence > run.compacted_through_sequence
+    )
+    if len(uncovered) <= minimum_suffix_items:
+        return ()
+    candidates = list(uncovered[:-minimum_suffix_items])
+    expected = run.compacted_through_sequence + 1
+    contiguous: list[AgentItem] = []
+    for item in candidates:
+        if item.sequence != expected or item.state is not AgentItemState.COMMITTED:
+            break
+        contiguous.append(item)
+        expected += 1
+    while contiguous and not compaction_prefix_is_closed(
+        tuple(contiguous), uncovered
+    ):
+        contiguous.pop()
+    return tuple(contiguous)
+
+
+def compaction_prefix_is_closed(
+    prefix: tuple[AgentItem, ...],
+    uncovered: tuple[AgentItem, ...],
+) -> bool:
+    covered_ids = {item.item_id for item in prefix}
+    for item in prefix:
+        if item.kind is AgentItemKind.ASSISTANT_MESSAGE and any(
+            candidate.parent_item_id == item.item_id
+            and candidate.item_id not in covered_ids
+            for candidate in uncovered
+        ):
+            return False
+        if item.kind is AgentItemKind.TOOL_CALL and any(
+            candidate.source_call_item_id == item.item_id
+            and candidate.item_id not in covered_ids
+            for candidate in uncovered
+        ):
+            return False
+    return True
