@@ -2,7 +2,7 @@
 
 日期：2026-08-28
 
-状态：设计已逐节获用户批准，经一次获批修订、第二轮document-perfectization复审以100/100通过；实施计划已生成，业务代码尚未实施
+状态：设计已逐节获用户批准，经两次获批修订；最新范围与实施计划第二轮document-perfectization复审以100/100通过，业务代码尚未实施
 
 关联基线：`main@c4c9fc57`
 
@@ -21,21 +21,21 @@
 ## 2. 已确认产品决策
 
 1. 128 KiB继续作为单个durable AgentItem的硬上限，不修改SQLite、PostgreSQL或Runtime Sidecar physical schema/protobuf。
-2. 普通可执行Skill的模型可见结果不再受固定20,000 code points / 80,000 bytes限制；能放进128 KiB AgentItem的完整结果继续inline。
-3. 放不进AgentItem的完整raw写入私有、crash-safe transient stage；不创建Artifact数据库记录、下载卡片或公共storage ref。
+2. 能放进128 KiB AgentItem的普通可执行Skill完整结果不再受固定20,000 code points / 80,000 bytes限制并继续inline；超限结果再按是否存在普通业务Artifact分流。
+3. 放不进AgentItem且本次`execution.artifacts`为空的完整raw写入私有、crash-safe transient stage；不创建Artifact数据库记录、下载卡片或公共storage ref。带普通业务Artifact的超限结果继续走现有v1 `artifact_backed`路径，不进入v2。
 4. transient stage只保留到final、terminal failure/cancel或覆盖它的全局compaction成功提交；随后删除。
 5. 每次主模型采样前组装实际完整候选请求，只有所有模型输入上下文总量超过当前Run预算时才compact。
 6. compact是全局Agent上下文压缩，不是Skill result专用摘要；尚未被主模型消费的最新完整result属于required suffix，不能压缩或截断。
 7. total-context compact阈值为AgentRun固定模型窗口的90%，预留10%给输出、reasoning与估算安全余量。
 8. 超限时反复compact已闭合历史前缀并重新预检；若required context本身仍超过90%，typed failure，不静默裁剪、不重跑Skill。
-9. 只修改普通可执行Skill大结果。MCP、delegated Skill、waiting/Interrupt、失败结果和final publisher保持现有合同。
+9. 只修改普通可执行Skill中可完整inline，或超限且没有普通业务Artifact的completed结果。MCP、delegated Skill、waiting/Interrupt、失败结果、带业务Artifact的超限结果和final publisher保持现有合同。
 10. 旧`artifact_backed` AgentItem与已发布`skill_result`继续可读和下载；不迁移、不删除历史Artifact。
 
 ## 3. 目标与非目标
 
 ### 3.1 目标
 
-- 让主Agent在配置模型窗口允许时，逐字节消费普通Skill的完整strict-JSON结果并优先生成答案。
+- 让主Agent在配置模型窗口允许时，逐字节消费可完整inline，或超限且没有普通业务Artifact的普通Skill strict-JSON结果并优先生成答案。
 - 让context preflight和compaction真正接入生产Agent Runner，以全模型输入为唯一超限判断依据。
 - 在不持久化大raw AgentItem或公共Artifact metadata的前提下保持crash recovery、no-replay和exact identity。
 - 消除“模型为了重新查看同一结果而重复调用Skill”的当前诱因。
@@ -48,6 +48,7 @@
 - 不修改delegated Skill instruction边界、MCP `$Server`语义、Tool approval或continuation locator。
 - 不修改外部`bioinfo-daily`等Skill脚本、schema、检索策略或业务质量。
 - 不新增通用Artifact读取Tool、分块Artifact浏览器、向量检索或跨Task结果缓存。
+- 不为带普通业务Artifact的超限Skill结果新增可恢复Artifact描述sidecar；它们继续使用legacy `artifact_backed`。
 - 不增加固定Agent轮次上限或对不同参数调用做猜测性去重。
 - 不修改Frontend提交DTO、数据库表/列、protobuf、部署或`prod`。
 
@@ -70,7 +71,9 @@ strict/canonical result validation
         |
         +-- full result fits durable AgentItem --> inline full Tool result
         |
-        +-- does not fit --> private transient stage + bounded receipt
+        +-- does not fit and has business Artifact --> legacy artifact_backed
+        |
+        +-- does not fit and no business Artifact --> private transient stage + bounded receipt
                                       |
                                       v
                          build exact next model input
@@ -131,6 +134,7 @@ total_context_limit_tokens = floor(model_context_window_tokens * 0.90)
 - active/recoverable Run始终使用初始化时持久化的window和threshold。
 - 新配置只影响新Run；不得让waiting/startup recovery在中途改变budget。
 - 缺失、非正整数、超过平台允许最大值或与90%关系不一致时，Run初始化在模型调用前fail closed。
+- Run row已创建但尚无任何AgentItem时属于未完成初始化，不是legacy Run。startup必须从prepared authority恢复并提交同一user+budget后才能进入Runner；无法恢复时fail closed。
 - 旧Run没有`context_budget`时继续使用当前legacy fixed projection/reader，不用新路径猜测恢复。
 
 ## 7. 普通Skill结果分类
@@ -152,14 +156,15 @@ invalid结果继续提交typed failed outcome，不stage、不进入模型。
 不再先用20,000/80,000固定预算判断普通Skill完整结果。Projector直接构建包含完整raw model view的Tool result envelope，并以128 KiB canonical AgentItem预检为唯一durable inline门槛：
 
 - envelope可完整放入：`projection_mode=inline`、`projection_truncated=false`；
-- envelope放不入：进入transient stage；
+- envelope放不入且`execution.artifacts`为空：进入transient stage；
+- envelope放不入且存在普通业务Artifact：保持现有v1 `artifact_backed`；
 - 不允许为通过inline预检而删字段、截数组或缩短文本。
 
-20,000/80,000限制继续保留给MCP、delegated Skill和legacy reader，不作为本设计新Skill路径的模型可见上限。
+20,000/80,000限制继续保留给MCP、delegated Skill、legacy reader/writer和带业务Artifact的超限fallback，不作为v2 transient路径的模型可见上限。
 
 ### 7.3 Transient staged
 
-大结果使用新revision：
+只有completed ordinary Skill、完整Tool result envelope超过128 KiB且`execution.artifacts`为空时，才使用新revision：
 
 ```text
 projection_revision = skill-result-v2
@@ -169,7 +174,7 @@ projection_truncated = true
 
 `projection_truncated`只描述durable `model_view`：receipt没有持久化完整raw，因此必须为`true`；它不表示下一次provider request仍然缺少结果。resolver只有在size/SHA校验通过并逐字节替换完整raw后才算`injected`，该事实由低敏消费事件和candidate测试证明，不回写或改写durable projection字段。
 
-raw文件和manifest只复用现有stager的底层文件安全机制，但使用独立source kind与根目录，避免被`skill_result` Artifact janitor误处理。transient stage不是`AgentStagedArtifact`，不得进入`AgentCallOutcomeCommit.staged_artifacts`；该字段继续只承载需要创建Artifact记录的staged result。stage identity由call item ID、raw SHA和projection revision确定，不含用户文本或路径。
+raw文件和manifest只复用现有stager的底层文件安全机制，但使用独立source kind与根目录，避免被`skill_result` Artifact janitor误处理。transient stage不是`AgentStagedArtifact`；v2 admission已保证没有普通业务Artifact，因此对应`AgentCallOutcomeCommit.staged_artifacts`必须为空。stage identity由call item ID、raw SHA和projection revision确定，不含用户文本或路径。
 
 Tool result AgentItem只保存有界receipt：
 
@@ -284,7 +289,7 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 
 1. executor完成，取得raw strict JSON；
 2. private transient stager写临时文件与manifest，fsync且no-clobber，返回closed `stage_ref`而不是`AgentStagedArtifact`；
-3. outcome CAS不把该transient stage加入`staged_artifacts`，只原子提交bounded Tool result receipt、terminal Node与Run revision；
+3. outcome CAS以空`staged_artifacts`原子提交bounded Tool result receipt、terminal Node与Run revision；
 4. 重建完整candidate，按90%执行preflight/compact；
 5. 主模型sample与final按现有CAS提交；
 6. final durable后删除stage与manifest。
@@ -311,7 +316,7 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 - terminal failed/cancelled：删除stages；不删除已有历史Artifact。
 - covered by committed compaction boundary：删除对应stage。
 - orphan满24小时后，只有Run不可恢复且Task终态/不存在时才删除。
-- 任一查询失败、identity不一致或owner不明时fail-safe保留并低敏告警。
+- 任一查询失败、identity不一致、owner不明或raw没有manifest时fail-safe保留并低敏告警；不得只凭文件年龄、名称或权限自动删除无manifest raw。
 
 ## 12. Provider context-length error
 
@@ -360,7 +365,7 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 
 - legacy `skill-result-v1 inline`继续正常渲染。
 - legacy `artifact_backed`及其`skill_result` Artifact继续列出、下载和按原janitor规则维护。
-- 新writer只为普通可执行Skill大结果写`skill-result-v2 transient_staged`。
+- 新writer只为completed ordinary Skill中超出128 KiB且`execution.artifacts`为空的结果写`skill-result-v2 transient_staged`；带业务Artifact的超限结果继续写现有v1 `artifact_backed`。
 - 旧reader遇到v2必须fail closed，不能把receipt当最终模型内容；新reader schema-first支持v1/v2。
 - 不对历史Task补投、转换或删除Artifact。
 
@@ -383,7 +388,8 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 ### 16.1 Pure / repository
 
 - 90% threshold整数边界、非法window和Run内配置漂移。
-- 完整result恰好fit/超过128 KiB envelope的inline/stage边界。
+- Run row创建后、首条user+budget提交前崩溃时，startup必须恢复初始化或fail closed，不能把零Item Run当legacy采样。
+- 完整result恰好fit/超过128 KiB envelope的inline/stage边界；超限且无业务Artifact写v2，超限且有业务Artifact保持v1 legacy。
 - receipt exact keys、size/SHA、禁止路径/正文泄漏。
 - SQLite、PostgreSQL、Runtime Sidecar user+budget初始化和outcome receipt exact replay；transient stage不进入`AgentStagedArtifact`或`commit.staged_artifacts`。
 - stage no-clobber、response loss、CAS loser、regular file、size/SHA和owner验证。
@@ -402,20 +408,21 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 
 - stage后每个写点fault、startup恢复、waiting保留、final/failed/cancelled清理。
 - compaction覆盖raw后summary commit与stage删除的response-loss matrix。
-- 24小时janitor保留recoverable/reserved/nonterminal/identity drift。
+- 24小时janitor保留recoverable/reserved/nonterminal/identity drift和无manifest raw。
 - legacy v1 Artifact与new v2 transient互不清理。
 
 ### 16.4 核心业务
 
 固定28条large Skill fixture：
 
-1. 确定性fixture只执行一次Skill并写一份private stage，不得为了重新读取同一结果而再次执行；此项只验证完整结果可见性，不建立通用调用次数上限或语义去重要求。
+1. 确定性fixture的`execution.artifacts`为空，只执行一次Skill并写一份private stage，不得为了重新读取同一结果而再次执行；此项只验证完整结果可见性，不建立通用调用次数上限或语义去重要求。
 2. 下一模型请求包含28条完整记录，末条唯一sentinel可被final answer准确引用。
 3. total未超90%时compaction=0；人为扩大历史超过90%时发生全局compaction，raw仍完整。
 4. final completed后stage和manifest均不存在。
 5. Task Artifact列表不出现新`skill_result`，只保留正常final output。
 6. informational hint仍为zero Skill call。
 7. MCP/delegated/waiting/failure回归逐项不变。
+8. 同尺寸但带普通业务Artifact的fixture继续生成legacy `artifact_backed`，不写v2 stage。
 
 真实`bioinfo-daily` smoke记录实际result count、raw bytes、估算tokens、threshold、compact次数、Tool call次数和final状态；不得把fixture 28伪称实时数量。
 
@@ -423,9 +430,9 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 
 只有同时满足以下条件才可宣称本设计实现完成：
 
-1. 普通Skill完整结果不再被20k/80KB固定模型视图提前截断。
+1. 可放入128 KiB的普通Skill完整结果不再被20k/80KB提前截断；超限且无普通业务Artifact的结果写v2 transient，超限且有业务Artifact的结果保持v1 legacy。
 2. 128 KiB durable AgentItem合同及三repository验证继续成立。
-3. 大结果只有private transient stage和bounded receipt，不进入`AgentStagedArtifact`/`commit.staged_artifacts`，无新Artifact metadata/卡片。
+3. v2大结果只有private transient stage和bounded receipt，对应`commit.staged_artifacts`为空，无新Artifact metadata/卡片。
 4. 下一次主Agent采样在总上下文不超过90%时看到完整raw。
 5. 只有完整候选模型输入超过固定Run预算时才compact。
 6. Compaction覆盖全局eligible history，不压缩尚未消费的latest result。
@@ -452,6 +459,6 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 
 ### 18.4 采用方案
 
-采用“128 KiB durable receipt + private transient raw + 90% total-context preflight + global history compaction + final/covered cleanup”。该方案最小化持久化与安全变更，同时让模型窗口允许的完整Skill结果真正进入主Agent。
+采用“128 KiB durable receipt + artifact-free private transient raw + 90% total-context preflight + global history compaction + final/covered cleanup”。该方案不新增可恢复Artifact描述sidecar；带普通业务Artifact的超限结果保持legacy，以最小化持久化与安全变更，同时让当前目标中的完整Skill结果真正进入主Agent。
 
 License Requirement：复用现有Python、SQLAlchemy、SQLite/PostgreSQL、Rust/Runtime Sidecar opaque AgentItem、Agent result projector/stager、Context Builder、ModelEdition resolver、Catalog preflight、CompactionService与Artifact store兼容reader；不新增第三方依赖或许可类型。

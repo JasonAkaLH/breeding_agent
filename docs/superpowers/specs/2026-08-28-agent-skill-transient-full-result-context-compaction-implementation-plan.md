@@ -4,21 +4,23 @@
 
 设计复审基线：`main@a01a32a2`
 
+计划审查基线：`main@1dce6f4e`
+
 计划日期：2026-08-28
 
-状态：`ready_for_implementation`（仅计划完成，业务代码尚未实施）
+状态：`ready_for_implementation`（经一次获批修订、第二轮document-perfectization复审以100/100通过；业务代码尚未实施）
 
 目标分支：`main`
 
 ## 1. 完成声明
 
-本计划只落实已批准设计中的一条闭合链路：普通可执行Skill完成后，完整strict-JSON结果若能放入128 KiB AgentItem则完整inline；否则写入private transient stage，以bounded receipt完成outcome CAS，并在下一次主Agent采样前按Run固定模型窗口90%的total-context预算加载完整raw。只有实际候选请求超限时才compact全局closed history。
+本计划只落实已批准设计中的一条闭合链路：普通可执行Skill完成后，完整strict-JSON结果若能放入128 KiB AgentItem则完整inline；若超限且`execution.artifacts`为空，则写入private transient stage，以bounded receipt完成outcome CAS，并在下一次主Agent采样前按Run固定模型窗口90%的total-context预算加载完整raw。带普通业务Artifact的超限结果保持legacy `artifact_backed`。只有实际候选请求超限时才compact全局closed history。
 
 只有以下事实同时成立，才可把实施状态改为`complete_local`：
 
 - 新AgentRun按固定`model_edition`解析窗口，并在首条user AgentItem内持久化不可漂移的90% `context_budget` authority。
-- 普通可执行Skill不再受20,000 code points / 80,000 bytes模型视图上限；128 KiB仍是单个durable AgentItem硬上限。
-- 大结果写`skill-result-v2 transient_staged` receipt和private stage；transient raw不进入`AgentStagedArtifact`、`commit.staged_artifacts`或Artifact表/API。
+- 可放入128 KiB的普通可执行Skill完整结果不再受20,000 code points / 80,000 bytes模型视图上限；128 KiB仍是单个durable AgentItem硬上限。
+- 超限且`execution.artifacts`为空的大结果写`skill-result-v2 transient_staged` receipt和private stage；对应`commit.staged_artifacts`为空，transient raw不进入Artifact表/API。带业务Artifact的超限结果保持legacy。
 - 下一次主Agent请求在模型窗口允许时包含完整raw；receipt marker不进入provider request，raw不写回Message、Memory、Event、Artifact metadata或其他AgentItem。
 - 每次主模型采样前按实际messages、tools、tool choice、history、current user、continuation和完整raw统一估算total tokens；不超90%时compaction模型调用为0。
 - 超限时只compact连续、committed、closed且eligible的历史；尚未被主模型采样消费的最新transient result保持逐字节完整。
@@ -46,6 +48,7 @@
 - 不增加固定Agent轮次上限、参数语义去重或猜测性重复调用拦截。
 - 不改Skill manifest、input/output schema、检索策略、外部Skill仓或Frontend wire/UI。
 - 不重构旧`skill_output`、MCP result和legacy `skill_result` Artifact生命周期。
+- 不为带普通业务Artifact的超限结果新增可恢复outcome sidecar；它们保持现有v1 `artifact_backed`。
 - 不新增第三方依赖，不构建/推送发布镜像，不修改`prod`。
 
 ## 3. 当前HEAD证据与精确改造缝
@@ -56,9 +59,9 @@
 |---|---|---|
 | `AgentLoopOrchestrator.initialize_run` | 固定model binding后创建Run，再提交只含`text`的首条user item | 在模型调用前生成90% budget，并与`text`同一user item提交；旧Run缺budget走legacy |
 | 三条Agent repository `commit_agent_user_message` | exact replay user text和可选hint activation | exact replay `text + context_budget`；不改表、列、proto |
-| `AgentCallResultProjector._skill` | 先受20k/80k约束，超限生成v1 `artifact_backed` preview | completed ordinary Skill先做完整安全校验；128 KiB内完整inline，否则v2 receipt |
+| `AgentCallResultProjector._skill` | 先受20k/80k约束，超限生成v1 `artifact_backed` preview | completed ordinary Skill先做完整安全校验；128 KiB内完整inline，超限且无业务Artifact写v2，其余保持legacy |
 | `AgentSkillResultArtifactStager` | 生成可进入`AgentStagedArtifact`并最终发布Artifact的raw | 只保留legacy兼容；新增独立private transient store，绝不返回`AgentStagedArtifact` |
-| `AgentCapabilityInvoker` | spill后把result Artifact追加到`staged_artifacts` | transient store只返回closed `stage_ref`；现有业务Artifact仍走原字段，transient raw不追加 |
+| `AgentCapabilityInvoker` | 只有一个result Artifact stager，spill后把result Artifact追加到`staged_artifacts` | 保留legacy Artifact stager并新增独立transient stager；按budget和`execution.artifacts`闭合分流，不混用返回类型 |
 | `AgentContextBuilder` | committed Tool result直接把durable `safe_result`渲染给模型 | schema-first识别v2 receipt，经resolver完整替换；失败则provider调用为0 |
 | `AgentCatalogPreflight` | 只估算catalog/rules/user/minimum suffix，未接生产Runner | 新total preflight按完整`AgentModelRequest`计数；旧catalog helper只保留兼容测试 |
 | `AgentCompactionService` | 可compact closed prefix，但prompt一次装入整个prefix且未接Runner | 选择能在90%内完整进入compaction请求的最大closed prefix，commit后repreflight |
@@ -127,7 +130,7 @@ conda run -n multi_agent python -m unittest \
 
 ### 0.3 后续checkpoint必须先出现的红断言
 
-- 约280 KiB ordinary Skill结果当前得到`artifact_backed` preview，新断言要求`transient_staged` receipt且Task Artifact无新`skill_result`。
+- 约280 KiB、`execution.artifacts=()`的ordinary Skill结果当前得到`artifact_backed` preview，新断言要求`transient_staged` receipt且Task Artifact无新`skill_result`；同尺寸且带业务Artifact的fixture继续走legacy。
 - 当前首条user item没有`context_budget`，新断言要求精确90%整数authority。
 - 当前Runner不会调用preflight/compaction，新断言要求低于阈值preflight=1、compaction=0。
 - 当前Context Builder把receipt直接当Tool内容，新断言要求完整第28条sentinel进入provider request且receipt marker缺席。
@@ -166,7 +169,8 @@ Checkpoint 0不修改业务代码；若当前HEAD已与上述事实不符，先�
 - user text、budget和可选hint activation保持原事务/all-or-zero顺序；不新增Item kind、表、列或proto字段。
 - exact replay逐字段验证同一budget；同Run不同window/limit/revision一律`AgentStorageConflict`。
 - 新Run配置非法在第一次模型调用前失败；user item已提交后，配置刷新不得改变该Run budget。
-- 旧Run首条user payload无budget时保持当前legacy projection/无新transient writer；不能按当前配置猜测补写。
+- Run row存在但AgentItem为空时属于未完成初始化，不得按legacy进入Runner。startup必须从prepared authority重建同一`AgentExecutionRequest`并调用唯一初始化路径提交user+budget；prepared缺失或identity漂移时fail closed。
+- 只有已经提交首条user item但payload无budget的旧Run保持当前legacy projection/无新transient writer；不能按当前配置猜测补写。
 
 ### A3. 三repository与恢复测试
 
@@ -178,7 +182,7 @@ Checkpoint 0不修改业务代码；若当前HEAD已与上述事实不符，先�
 - `tests/orchestration/test_agent_loop.py`
 - `tests/api/test_submission_admission_runtime_startup.py`
 
-覆盖128 KiB整包边界、user/activation/budget fault rollback、response loss replay、配置漂移、旧Run legacy和Runtime Sidecar opaque payload等价。Rust kernel/proto只跑合同回归，不修改源码。
+覆盖128 KiB整包边界、user/activation/budget fault rollback、response loss replay、配置漂移、旧Run legacy和Runtime Sidecar opaque payload等价。新增`create_run`成功后、首条user commit前崩溃的startup fault：prepared完整时恢复同一user+budget，prepared缺失/漂移时provider调用为0。Rust kernel/proto只跑合同回归，不修改源码。
 
 ### A4. Green门禁
 
@@ -205,12 +209,12 @@ feat(agent): pin total context budget per run
 
 修改`src/orchestration/agent_loop/result_projection.py`和`tests/orchestration/test_agent_result_projection.py`：
 
-- 仅`completed`、非delegated、ordinary `skill.*`进入新分支；MCP、delegated、waiting和failed继续当前adapter。
+- 仅`completed`、非delegated、ordinary `skill.*`且`execution.artifacts`为空的超限结果进入v2分支；MCP、delegated、waiting、failed和带业务Artifact的超限结果继续当前adapter。
 - strict JSON、depth 64、node 200,000、Unicode/non-finite和禁止authority扫描在inline/stage分类前一次完成；禁止字段使整个结果typed invalid，不做删字段后宣称完整。
 - ordinary Skill完整`model_view`先构建完整Tool result envelope，并只以`canonicalize_agent_payload`的128 KiB整包预检决定inline。
-- projector的纯输入增加closed `transient_full_result_enabled`策略位，只能由Invoker在复验当前Run首条user item存在合法`context_budget`后设置；旧Run或缺失budget时固定走现有v1 inline/`artifact_backed` legacy路径。该值不来自用户metadata或Tool参数。
-- fit：继续`skill-result-v1 inline`、`projection_truncated=false`，不再检查20k/80k。
-- 不fit：构建`skill-result-v2 transient_staged` bounded receipt，durable `projection_truncated=true`，`model_view`只含exact receipt schema和closed `stage_ref`。
+- projector的纯输入增加closed三态策略：旧Run/缺失budget为`legacy`；合法budget且存在业务Artifact为`full_inline_then_legacy`；合法budget且`execution.artifacts`为空为`full_inline_then_transient`。策略只能由Invoker从durable Run authority和execution result计算，不来自用户metadata或Tool参数。
+- 两个`full_inline_*`策略都先构建完整envelope；fit时继续`skill-result-v1 inline`、`projection_truncated=false`，不检查20k/80k。
+- 不fit时，`full_inline_then_transient`构建`skill-result-v2 transient_staged` bounded receipt，durable `projection_truncated=true`，`model_view`只含exact receipt schema和closed `stage_ref`；`full_inline_then_legacy`和`legacy`调用现有v1 `artifact_backed` projector。
 - `stage_ref`由domain、call item ID、raw SHA和revision确定；不是路径、storage key、URL或Artifact ID。
 - 保留`skill_result_artifact_id`、legacy `artifact_backed` reader和下载合同，但新ordinary writer不再生成它。
 
@@ -224,7 +228,7 @@ feat(agent): pin total context budget per run
 实现`AgentTransientSkillResultStore`，固定独立根目录和source kind：
 
 - 根目录0700，raw/manifest 0600；O_NOFOLLOW、regular-file、owner UID、link count、realpath containment、fsync和no-clobber沿用现有安全模式。
-- manifest只保存schema、stage ref、Run/Task/Conversation/Node/call/result identity、capability ID、raw size/SHA、projection revision、安全Artifact ID列表和`staged_at`；不保存正文、Tool参数、路径、storage key、URL或preview。
+- manifest只保存schema、stage ref、Run/Task/Conversation/Node/call/result identity、capability ID、raw size/SHA、projection revision和`staged_at`；v2 admission保证不存在普通业务Artifact，因此manifest不保存Artifact ID或描述，也不保存正文、Tool参数、路径、storage key、URL或preview。
 - stable identity相同则逐字段、size和SHA复验后exact replay；identity冲突fail closed。
 - store返回独立`AgentTransientSkillResultStage`，绝不构造或返回`AgentStagedArtifact`。
 - 缺失、symlink、non-regular、越界、size/SHA/owner drift使用closed内部错误，不把路径写入错误正文。
@@ -241,9 +245,10 @@ feat(agent): pin total context budget per run
 规则：
 
 - Invoker在projector返回transient decision后先stage canonical raw，复验返回`stage_ref`，再返回bounded safe result。
-- Invoker从durable首条user item解析一次Run budget来选择new/legacy projector策略；配置刷新或请求metadata不得中途启用v2。
-- transient stage不追加到`AgentCallExecution.staged_artifacts`；原执行产生的正常业务Artifact继续原路径。
-- repository outcome CAS只看到receipt和原业务Artifact；transient raw不会触发`validate_skill_result_staged_artifact`或Artifact row创建。
+- Invoker保留两个名称和返回类型不同的注入端口：现有`legacy_result_artifact_stager`返回`AgentStagedArtifact`，新增`transient_result_stager`返回`AgentTransientSkillResultStage`。Runtime同时接线，禁止用一个union stager混合两种生命周期。
+- Invoker从durable首条user item解析一次Run budget，并结合`execution.artifacts`是否为空选择三态projector策略；只有`full_inline_then_transient`的超限decision调用transient stager，`full_inline_then_legacy`超限调用legacy stager。配置刷新或请求metadata不得中途改变策略。
+- v2 transient stage不追加到`AgentCallExecution.staged_artifacts`，该tuple必须为空；存在正常业务Artifact时整条超限结果走legacy，继续原Artifact路径。
+- v2 repository outcome CAS只看到receipt和空`staged_artifacts`；transient raw不会触发`validate_skill_result_staged_artifact`或Artifact row创建。
 - stage失败提交`agent_transient_skill_result_stage_failed` typed outcome；不得回退preview、公共Artifact或重跑Skill。
 - outcome CAS response loss继续exact reread；同一receipt bytes、stage ref和raw SHA必须一致。
 
@@ -409,8 +414,7 @@ feat(agent): compact total context before sampling
 
 在现有reserved-result unknown/no-replay分支前增加窄transient recovery callback：
 
-- matching manifest+raw完整时，复验call/result/Run/capability、raw size/SHA和v2 identity，重建同一bounded receipt并提交outcome CAS；不调用Skill executor。
-- manifest记录的普通业务Artifact ID只有在其独立durable authority仍存在且owner/node匹配时才可重新关联；不能从raw猜测或发明Artifact ref。transient raw本身永不进入`staged_artifacts`。
+- matching manifest+raw完整时，复验call/result/Run/capability、raw size/SHA、v2 identity和manifest无Artifact字段，重建同一bounded receipt并以空`staged_artifacts`提交outcome CAS；不调用Skill executor。
 - stage完成但outcome CAS response丢失时，exact reread winner；payload drift fail closed。
 - partial/missing/drift stage使用`agent_transient_skill_result_unavailable`或`agent_transient_skill_result_stage_failed`收敛，禁止重跑Skill。
 - 没有可信transient manifest的reserved result继续当前`side_effect_unknown_no_replay`，不改变MCP/waiting恢复。
@@ -446,7 +450,7 @@ submission/MCP recovery
   -> background services
 ```
 
-janitor只删除满足以下条件的stage：已被committed compaction覆盖、Run已final/failed/cancelled，或满24小时且Task终态/不存在、Run不可恢复。query失败、owner drift、reserved/nonterminal均保留。无manifest的raw orphan只在满24小时且文件名/权限/根目录验证通过后删除。
+janitor只删除满足以下条件的有manifest stage：已被committed compaction覆盖、Run已final/failed/cancelled，或满24小时且Task终态/不存在、Run不可恢复。query失败、owner drift、reserved/nonterminal均保留。无manifest raw无法证明Run/Task/owner authority，必须永久fail-safe保留并低敏告警，不得只凭年龄、文件名或权限自动删除。
 
 ### E4. Green门禁
 
@@ -501,6 +505,7 @@ feat(agent): recover and clean transient skill results
 
 - old v1 inline/`artifact_backed`历史仍可构建上下文、枚举和下载；不迁移、不删除。
 - 新v2 Task Artifact列表不出现raw `skill_result`；已有正常`skill_output`仍按原规则存在。
+- 同尺寸且带普通业务Artifact的结果继续生成legacy `artifact_backed`及原Artifact，不写v2 receipt/stage。
 - MCP result projection/raw安全、delegated instruction、waiting/Interrupt、failed result和informational hint zero-call合同不变。
 - Frontend DTO/组件零diff；不新增stage卡片、下载按钮或状态文案。
 
@@ -508,11 +513,12 @@ feat(agent): recover and clean transient skill results
 
 修改`tests/e2e/test_skill_soft_binding.py`，使用确定性large fixture：
 
-1. Skill executor只调用一次，写一份private stage。
+1. Fixture固定`execution.artifacts=()`；Skill executor只调用一次，写一份private stage。
 2. 下一次provider request包含28条完整记录和首尾sentinel，resolved `result`重新canonicalize后的digest与staged raw一致；receipt marker缺席。
 3. 模型final准确引用第28条唯一sentinel，不为了重读相同结果再次调用Skill。
 4. total低于90%时compaction=0；注入足够closed历史后发生全局compaction且latest raw不变。
 5. final后stage/manifest不存在，Task Artifact无新`skill_result`。
+6. 同尺寸但带普通业务Artifact的fixture保持legacy `artifact_backed`，现有Artifact stager/列表/下载不变。
 
 该fixture只验证完整结果可见性，不建立通用Tool调用次数上限或语义去重规则。
 
@@ -581,7 +587,7 @@ Rust门禁覆盖fmt、clippy、test/nextest、audit、deny、coverage/provenance
 - 记录实际result count、raw bytes/SHA、estimated required/history/transient/tool/total tokens、pinned window、90% limit、preflight decision和compaction次数。
 - 记录实际Tool call次数、每个call ID、Node ID和final状态；不预设实时结果一定为28。
 - 验证下一次主Agent确实引用结果末端信息，不只看到preview/receipt。
-- 验证Task Artifact列表没有新raw `skill_result`；正常业务Artifact与final output保持现有行为。
+- 验证目标`bioinfo-daily`调用的`execution.artifacts`为空且Task Artifact列表没有新raw `skill_result`；另用确定性fixture验证带业务Artifact的超限结果保持legacy，正常业务Artifact与final output行为不变。
 - 验证final后private stage和manifest清理；audit/log/Message/Memory/Frontend响应无raw、路径和stage ref泄漏。
 - 再构造一条超90%的受控本地fixture证明global compaction；真实外部Skill不为制造超限重复调用。
 
@@ -622,6 +628,7 @@ docs(agent): close transient result context rollout
 | 故障点 | 自动断言 |
 |---|---|
 | budget解析失败 | Run不进入模型采样；无猜测fallback |
+| Run row创建后、首条user+budget前崩溃 | prepared完整则经唯一初始化路径补交；缺失/漂移则provider调用=0 |
 | user/budget/activation事务中断 | 三repository all-or-zero；exact retry同一identity |
 | raw写入或manifest fsync失败 | typed stage failure；无receipt/Artifact；不重跑Skill |
 | stage完成、outcome CAS前崩溃 | startup复验stage并提交同一receipt；Skill call count不增加 |
@@ -632,6 +639,7 @@ docs(agent): close transient result context rollout
 | compaction commit、cleanup前崩溃 | summary/boundary权威；startup删除covered stage |
 | final commit、cleanup前崩溃 | final权威；startup删除stage；答案不回滚 |
 | cleanup I/O失败 | final/summary/terminal保持；janitor低敏重试 |
+| raw存在但manifest缺失 | owner未知，自动删除=0；永久保留并低敏告警 |
 | estimator低报且Provider context error | 一次受控global compact/retry；第二次typed failure |
 | auth/429/5xx/timeout | 不误分类context error；不compact、不重跑Skill |
 | no eligible history且required超限 | `agent_context_required_segments_too_large`；provider/Skill调用不增加 |
@@ -641,9 +649,9 @@ docs(agent): close transient result context rollout
 
 | Design完成条件 | 主责checkpoint |
 |---|---|
-| ordinary Skill移除20k/80k提前截断 | B |
+| 128 KiB内结果移除20k/80k提前截断；artifact-free超限结果写v2 | B |
 | 128 KiB与三repository合同保持 | A、B、G |
-| private stage + receipt，无新Artifact | B、F |
+| artifact-free private stage + receipt，无新Artifact | B、F |
 | 下一主Agent sample看到完整raw | C、F |
 | 只有total context超90%才compact | C、D |
 | global eligible history且latest raw受保护 | D |
