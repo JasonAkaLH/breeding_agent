@@ -27,6 +27,12 @@ from .skill_activation import (
     build_skill_activation_item,
 )
 from .mcp_binding import RunBoundMCPTextGenerator
+from .result_projection import (
+    AgentCallResultProjection,
+    AgentCallResultProjector,
+    build_model_result_envelope,
+    skill_result_artifact_id,
+)
 from .context import AgentContextBuilder, AgentContextRules
 from .runner import (
     AgentCallExecution,
@@ -138,6 +144,10 @@ __all__ = [
     "build_delegated_skill_instruction_result",
     "build_skill_activation_item",
     "RunBoundMCPTextGenerator",
+    "AgentCallResultProjection",
+    "AgentCallResultProjector",
+    "build_model_result_envelope",
+    "skill_result_artifact_id",
     "AgentContextBuilder",
     "AgentContextRules",
     "AgentCallExecution",

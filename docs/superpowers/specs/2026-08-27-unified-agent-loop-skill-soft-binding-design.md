@@ -2,7 +2,7 @@
 
 日期：2026-08-27
 
-状态：方案已获用户批准并进入实施；Checkpoint A～D 的 profile、prepared v2、hint durable initialization/admission、历史 pending exact transition 与 delegated instruction 已完成，Checkpoint E～H、镜像重建和部署尚未完成
+状态：方案已获用户批准并进入实施；Checkpoint A～E 的 profile、prepared v2、hint authority、pending transition、delegated instruction 与唯一有界结果 projector 已完成，Checkpoint F～H、镜像重建和部署尚未完成
 
 适用范围：`main` 分支、聊天页 Skill picker、`/skill-name` 命令、提交 API、统一 Agent Loop、Capability 结果投影、Artifact、Agent 持久化与恢复
 

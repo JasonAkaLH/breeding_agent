@@ -6,7 +6,7 @@
 
 计划日期：2026-08-28
 
-状态：`in_progress`（Checkpoint A～D 已完成；Checkpoint E～H、镜像重建与部署尚未完成）
+状态：`in_progress`（Checkpoint A～E 已完成；Checkpoint F～H、镜像重建与部署尚未完成）
 
 目标分支：`main`
 
@@ -591,6 +591,8 @@ git diff --check
 ```
 
 静态扫描在生产 `src/` 必须零命中；历史 design/test failure description 可保留。
+
+完成证据：新增纯`AgentCallResultProjector`统一strict canonical raw、Skill/MCP/delegated adapter、deterministic spill identity和20,000 code points / 80,000 UTF-8 bytes / 完整AgentItem 131,072-byte预检；普通Skill小结果inline、大结果只留优先摘要并输出spill facts，MCP只保留agent projection与safe metadata，delegated不套第二层wire。Invoker不再以`dict(result.output_payload)`构造safe result，invalid/oversize转closed typed error。projector/Invoker/Loop/MCP parser/dynamic delegated focused 41项、Ruff、静态零命中和diff-check通过；文件staging与CAS由Checkpoint F接续。
 
 检查点提交建议：
 

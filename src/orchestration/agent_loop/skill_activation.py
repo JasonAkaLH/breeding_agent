@@ -9,10 +9,13 @@ from src.integrations.agent_skills.public_profile import PublicSkillProfile
 from src.storage.agent_payload import CanonicalAgentPayload, canonicalize_agent_payload
 
 from .models import AgentItem, AgentItemKind, AgentItemState, AgentRun
+from .result_projection import (
+    MODEL_RESULT_MAX_BYTES as AGENT_MODEL_RESULT_MAX_BYTES,
+    build_model_result_envelope,
+)
 
 
 DELEGATED_SKILL_INSTRUCTION_MAX_CODE_POINTS = 20_000
-AGENT_MODEL_RESULT_MAX_BYTES = 80_000
 
 
 class SkillActivationCommitPort(Protocol):
@@ -116,26 +119,16 @@ def build_delegated_skill_instruction_result(
         "instruction_sha256": instruction_sha256,
     }
     canonical_model_view = canonicalize_agent_payload(model_view)
-    result: dict[str, Any] = {
-        "schema": "maf.agent.model_result.v1",
-        "projection_revision": "delegated-skill-instruction-v1",
-        "projection_mode": "inline",
-        "model_view": model_view,
-        "original_size_bytes": canonical_model_view.size_bytes,
-        "projected_size_bytes": 0,
-        "raw_sha256": canonical_model_view.sha256,
-        "projection_truncated": False,
-    }
-    for _ in range(3):
-        canonical_result = canonicalize_agent_payload(result)
-        if result["projected_size_bytes"] == canonical_result.size_bytes:
-            break
-        result["projected_size_bytes"] = canonical_result.size_bytes
+    result = build_model_result_envelope(
+        projection_revision="delegated-skill-instruction-v1",
+        projection_mode="inline",
+        model_view=model_view,
+        original_size_bytes=canonical_model_view.size_bytes,
+        raw_sha256=canonical_model_view.sha256,
+        projection_truncated=False,
+    )
     canonical_result = canonicalize_agent_payload(result)
-    if (
-        canonical_result.size_bytes > AGENT_MODEL_RESULT_MAX_BYTES
-        or result["projected_size_bytes"] != canonical_result.size_bytes
-    ):
+    if canonical_result.size_bytes > AGENT_MODEL_RESULT_MAX_BYTES:
         raise ValueError("delegated_skill_instruction_invalid")
     return result
 

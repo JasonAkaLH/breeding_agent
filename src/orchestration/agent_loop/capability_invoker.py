@@ -23,6 +23,7 @@ from .models import (
     AgentToolCall,
 )
 from .repository import AgentRunRepository
+from .result_projection import AgentCallResultProjector
 from .runner import AgentCallExecution
 
 
@@ -80,6 +81,8 @@ class AgentCapabilityInvoker:
             [AgentRun, str, Mapping[str, Any]], Any
         ]
         | None = None,
+        result_projector: AgentCallResultProjector | None = None,
+        result_artifact_stager: Callable[..., Any] | None = None,
         invocation_hook: Callable[..., Any] | None = None,
     ) -> None:
         self._invocation = invocation_service
@@ -90,6 +93,8 @@ class AgentCapabilityInvoker:
         self._load_user_input = current_user_input_loader
         self._load_continuation = continuation_loader
         self._activate_delegated_skill = delegated_skill_activator
+        self._result_projector = result_projector or AgentCallResultProjector()
+        self._stage_result_artifact = result_artifact_stager
         self._invocation_hook = invocation_hook
 
     async def resume(
@@ -183,7 +188,27 @@ class AgentCapabilityInvoker:
             if hasattr(activated, "__await__"):
                 activated = await activated
             if activated is not None:
-                return activated
+                if (
+                    activated.status is not AgentCallOutcomeStatus.COMPLETED
+                    or activated.safe_result_payload is None
+                ):
+                    return activated
+                projected = self._result_projector.project(
+                    capability_id=capability_id,
+                    output_payload=activated.safe_result_payload,
+                    call_item_id=call_item.item_id,
+                    outcome=activated.status.value,
+                    safe_error_code=activated.safe_error_code,
+                )
+                if not projected.accepted:
+                    return AgentCallExecution(
+                        AgentCallOutcomeStatus.FAILED,
+                        safe_error_code=projected.error_code,
+                    )
+                return replace(
+                    activated,
+                    safe_result_payload=projected.safe_result_payload,
+                )
         user_input = self._load_user_input(run)
         if hasattr(user_input, "__await__"):
             user_input = await user_input
@@ -297,7 +322,7 @@ class AgentCapabilityInvoker:
             status = AgentCallOutcomeStatus.ABORTED
         else:
             status = AgentCallOutcomeStatus.FAILED
-        safe_result_payload = dict(result.output_payload)
+        continuation_locator = None
         if status in {
             AgentCallOutcomeStatus.WAITING_FOR_INPUT,
             AgentCallOutcomeStatus.WAITING_FOR_DEPENDENCY,
@@ -308,10 +333,58 @@ class AgentCapabilityInvoker:
                     AgentCallOutcomeStatus.ABORTED,
                     safe_error_code="agent_continuation_locator_missing",
                 )
-            safe_result_payload["continuation_locator"] = dict(locator)
+            continuation_locator = dict(locator)
+        projection = self._result_projector.project(
+            capability_id=capability_id,
+            output_payload=result.output_payload,
+            call_item_id=call_item.item_id,
+            outcome=status.value,
+            safe_error_code=(
+                execution.error.code if execution.error is not None else None
+            ),
+            artifact_ids=tuple(artifact.artifact_id for artifact in artifacts),
+            continuation_locator=continuation_locator,
+        )
+        if not projection.accepted:
+            return AgentCallExecution(
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code=projection.error_code,
+            )
+        if projection.spill_required:
+            if self._stage_result_artifact is None:
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code="agent_result_artifact_persist_failed",
+                )
+            try:
+                staged = self._stage_result_artifact(
+                    run=run,
+                    call_item=call_item,
+                    node_id=node.node_id,
+                    canonical_raw_bytes=projection.canonical_raw_bytes,
+                    raw_sha256=projection.raw_sha256,
+                    projection_revision=projection.projection_revision,
+                    expected_artifact_id=projection.spill_artifact_id,
+                )
+                if hasattr(staged, "__await__"):
+                    staged = await staged
+            except Exception:
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code="agent_result_artifact_persist_failed",
+                )
+            if (
+                not isinstance(staged, AgentStagedArtifact)
+                or staged.artifact_id != projection.spill_artifact_id
+            ):
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code="agent_result_artifact_persist_failed",
+                )
+            artifacts = (*artifacts, staged)
         return AgentCallExecution(
             status,
-            safe_result_payload=safe_result_payload,
+            safe_result_payload=projection.safe_result_payload,
             staged_artifacts=artifacts,
             safe_error_code=(
                 execution.error.code if execution.error is not None else None

@@ -279,7 +279,11 @@ class CapabilityInvocationService:
                     now=now,
                     activity_payload=activity_payload,
                 )
-                return InvocationResult(waiting, dict(result.output_payload), result)
+                return InvocationResult(
+                    waiting,
+                    {key: value for key, value in result.output_payload.items()},
+                    result,
+                )
             if result.error is not None:
                 failed = await self._commit_port.commit_failed(
                     owned_request,
@@ -288,7 +292,11 @@ class CapabilityInvocationService:
                     now=now,
                     activity_payload=activity_payload,
                 )
-                return InvocationResult(failed, dict(result.output_payload), result)
+                return InvocationResult(
+                    failed,
+                    {key: value for key, value in result.output_payload.items()},
+                    result,
+                )
             if (
                 owned_request.capability_id == "mcp.dispatch"
                 and result.output_payload.get("mcp_status")
@@ -301,7 +309,11 @@ class CapabilityInvocationService:
                     now=now,
                     activity_payload=activity_payload,
                 )
-                return InvocationResult(waiting, dict(result.output_payload), result)
+                return InvocationResult(
+                    waiting,
+                    {key: value for key, value in result.output_payload.items()},
+                    result,
+                )
             completed = await self._commit_port.commit_completed(
                 owned_request,
                 latest_node,
@@ -309,7 +321,11 @@ class CapabilityInvocationService:
                 now=now,
                 activity_payload=activity_payload,
             )
-            return InvocationResult(completed, dict(result.output_payload), result)
+            return InvocationResult(
+                completed,
+                {key: value for key, value in result.output_payload.items()},
+                result,
+            )
 
         return await self._run_ownership_boundary(
             normalized_request,
