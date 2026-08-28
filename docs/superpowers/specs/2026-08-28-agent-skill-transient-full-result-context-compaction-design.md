@@ -164,10 +164,12 @@ invalid结果继续提交typed failed outcome，不stage、不进入模型。
 ```text
 projection_revision = skill-result-v2
 projection_mode = transient_staged
-projection_truncated = false
+projection_truncated = true
 ```
 
-raw文件和manifest复用现有安全文件拓扑，但使用独立source kind与根目录，避免被`skill_result` Artifact janitor误处理。stage identity由call item ID、raw SHA和projection revision确定，不含用户文本或路径。
+`projection_truncated`只描述durable `model_view`：receipt没有持久化完整raw，因此必须为`true`；它不表示下一次provider request仍然缺少结果。resolver只有在size/SHA校验通过并逐字节替换完整raw后才算`injected`，该事实由低敏消费事件和candidate测试证明，不回写或改写durable projection字段。
+
+raw文件和manifest只复用现有stager的底层文件安全机制，但使用独立source kind与根目录，避免被`skill_result` Artifact janitor误处理。transient stage不是`AgentStagedArtifact`，不得进入`AgentCallOutcomeCommit.staged_artifacts`；该字段继续只承载需要创建Artifact记录的staged result。stage identity由call item ID、raw SHA和projection revision确定，不含用户文本或路径。
 
 Tool result AgentItem只保存有界receipt：
 
@@ -181,7 +183,7 @@ Tool result AgentItem只保存有界receipt：
   "original_size_bytes": 280103,
   "projection_mode": "transient_staged",
   "projection_revision": "skill-result-v2",
-  "projection_truncated": false,
+  "projection_truncated": true,
   "raw_sha256": "<sha256>",
   "schema": "maf.agent.model_result.v1"
 }
@@ -281,8 +283,8 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 ### 11.1 正常提交顺序
 
 1. executor完成，取得raw strict JSON；
-2. deterministic stage写临时文件与manifest，fsync且no-clobber；
-3. outcome CAS原子提交bounded Tool result receipt、terminal Node与Run revision；
+2. private transient stager写临时文件与manifest，fsync且no-clobber，返回closed `stage_ref`而不是`AgentStagedArtifact`；
+3. outcome CAS不把该transient stage加入`staged_artifacts`，只原子提交bounded Tool result receipt、terminal Node与Run revision；
 4. 重建完整candidate，按90%执行preflight/compact；
 5. 主模型sample与final按现有CAS提交；
 6. final durable后删除stage与manifest。
@@ -383,7 +385,7 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 - 90% threshold整数边界、非法window和Run内配置漂移。
 - 完整result恰好fit/超过128 KiB envelope的inline/stage边界。
 - receipt exact keys、size/SHA、禁止路径/正文泄漏。
-- SQLite、PostgreSQL、Runtime Sidecar user+budget初始化和outcome receipt exact replay。
+- SQLite、PostgreSQL、Runtime Sidecar user+budget初始化和outcome receipt exact replay；transient stage不进入`AgentStagedArtifact`或`commit.staged_artifacts`。
 - stage no-clobber、response loss、CAS loser、regular file、size/SHA和owner验证。
 
 ### 16.2 Context / compaction
@@ -407,7 +409,7 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 
 固定28条large Skill fixture：
 
-1. 只执行一次Skill并写一份private stage。
+1. 确定性fixture只执行一次Skill并写一份private stage，不得为了重新读取同一结果而再次执行；此项只验证完整结果可见性，不建立通用调用次数上限或语义去重要求。
 2. 下一模型请求包含28条完整记录，末条唯一sentinel可被final answer准确引用。
 3. total未超90%时compaction=0；人为扩大历史超过90%时发生全局compaction，raw仍完整。
 4. final completed后stage和manifest均不存在。
@@ -423,7 +425,7 @@ transient resolver复验manifest、call identity、owner/Run、regular file、si
 
 1. 普通Skill完整结果不再被20k/80KB固定模型视图提前截断。
 2. 128 KiB durable AgentItem合同及三repository验证继续成立。
-3. 大结果只有private transient stage和bounded receipt，无新Artifact metadata/卡片。
+3. 大结果只有private transient stage和bounded receipt，不进入`AgentStagedArtifact`/`commit.staged_artifacts`，无新Artifact metadata/卡片。
 4. 下一次主Agent采样在总上下文不超过90%时看到完整raw。
 5. 只有完整候选模型输入超过固定Run预算时才compact。
 6. Compaction覆盖全局eligible history，不压缩尚未消费的latest result。
