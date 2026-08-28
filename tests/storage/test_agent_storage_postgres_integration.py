@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import delete, text
@@ -11,21 +13,36 @@ from sqlalchemy.exc import DBAPIError
 
 from src.orchestration.agent_loop.models import (
     AgentFinishMetadata,
+    AgentCallOutcomeCommit,
+    AgentCallOutcomeStatus,
     AgentModelBinding,
     AgentRun,
     AgentRunStatus,
     AgentSample,
     AgentSampleCommit,
     AgentStorageConflict,
+    AgentToolCall,
     AgentUsage,
 )
+from src.orchestration.agent_loop.result_artifacts import (
+    AgentSkillResultArtifactStager,
+)
+from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
+from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.postgres import (
     PostgreSQLAgentRepository,
     create_postgres_engine,
     create_postgres_session_factory,
 )
 from src.storage.sqlite.base import SQLiteBase
-from src.storage.sqlite.models import AgentFinalReceiptRow, AgentItemRow, AgentRunRow, TaskNodeRow, TaskRow
+from src.storage.sqlite.models import (
+    AgentFinalReceiptRow,
+    AgentItemRow,
+    AgentRunRow,
+    ArtifactRow,
+    TaskNodeRow,
+    TaskRow,
+)
 from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 
 
@@ -83,6 +100,7 @@ class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
             session.execute(delete(AgentItemRow).where(AgentItemRow.run_id == self.run_id))
             session.execute(delete(AgentRunRow).where(AgentRunRow.run_id == self.run_id))
             session.execute(delete(TaskNodeRow).where(TaskNodeRow.task_id == self.task_id))
+            session.execute(delete(ArtifactRow).where(ArtifactRow.task_id == self.task_id))
             session.execute(delete(TaskRow).where(TaskRow.task_id == self.task_id))
             session.commit()
         await super().asyncTearDown()
@@ -145,6 +163,74 @@ class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(await self.repository.list_items(self.run_id), ())
         self.assertEqual((await self.repository.get_run(self.run_id)).revision, 0)
+
+    async def test_postgres_skill_result_artifact_and_node_share_outcome_cas(self) -> None:
+        binding = AgentModelBinding("edition-pg")
+        run = await self.repository.create_run(
+            AgentRun(
+                self.run_id,
+                self.task_id,
+                self.conversation_id,
+                AgentRunStatus.RUNNING,
+                binding,
+            )
+        )
+        sampled = await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                self.run_id,
+                run.revision,
+                None,
+                AgentSample(
+                    "sample-pg-result",
+                    binding,
+                    "",
+                    (AgentToolCall("call-pg-result", "tool_large", "{}", 0),),
+                    AgentUsage(),
+                    AgentFinishMetadata("tool_calls", 1),
+                ),
+                {"tool_large": "skill.large"},
+            )
+        )
+        call = sampled.call_items[0]
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.large",
+            output_payload={"rows": ["x" * 10_000 for _ in range(20)]},
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            staged = AgentSkillResultArtifactStager(
+                file_store=LocalArtifactFileStore(root / "artifacts"),
+                manifest_root=root / "manifests",
+            ).stage(
+                run=sampled.run,
+                call_item=call,
+                node_id=sampled.node_ids[0],
+                canonical_raw_bytes=projection.canonical_raw_bytes,
+                raw_sha256=projection.raw_sha256,
+                projection_revision=projection.projection_revision,
+                expected_artifact_id=projection.spill_artifact_id,
+            )
+            commit = AgentCallOutcomeCommit(
+                self.run_id,
+                sampled.run.revision,
+                None,
+                call.item_id,
+                projection.safe_result_payload,
+                AgentCallOutcomeStatus.COMPLETED,
+                (staged,),
+            )
+            first = await self.repository.commit_agent_call_outcome(commit)
+            replay = await self.repository.commit_agent_call_outcome(commit)
+
+        self.assertEqual(replay, first)
+        with self.session_factory() as session:
+            node = session.get(TaskNodeRow, sampled.node_ids[0])
+            artifact = session.get(ArtifactRow, staged.artifact_id)
+            self.assertEqual(node.status, "completed")
+            self.assertEqual(artifact.storage_ref, staged.storage_ref)
 
     async def test_minimum_agent_role_can_write_agent_tables_but_not_sensitive_authority(self) -> None:
         suffix = uuid4().hex[:12]

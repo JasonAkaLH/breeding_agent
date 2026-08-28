@@ -141,6 +141,8 @@ class AgentTaskInvocationCommitPort:
         activity_payload: dict[str, Any],
     ) -> TaskNode:
         await self._persist_events(result)
+        if request.run_id is not None:
+            return replace(node, status=NodeStatus.COMPLETED, finished_at=now)
         completed = await self._storage.save_task_node(
             replace(node, status=NodeStatus.COMPLETED, finished_at=now)
         )
@@ -157,6 +159,8 @@ class AgentTaskInvocationCommitPort:
         activity_payload: dict[str, Any],
     ) -> TaskNode:
         await self._persist_events(result)
+        if request.run_id is not None:
+            return replace(node, status=NodeStatus.FAILED, finished_at=now)
         failed = await self._storage.save_task_node(
             replace(node, status=NodeStatus.FAILED, finished_at=now)
         )
@@ -387,6 +391,8 @@ class AgentTaskInvocationCommitPort:
         now: datetime,
         activity_payload: dict[str, Any],
     ) -> TaskNode:
+        if request.run_id is not None:
+            return replace(node, status=NodeStatus.FAILED, finished_at=now)
         failed = await self._storage.compare_and_set_task_node(
             replace(node, status=NodeStatus.FAILED, finished_at=now),
             expected_from_status=node.status,

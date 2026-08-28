@@ -30,6 +30,7 @@ from .tool_catalog import (
     CapabilityInvocationPolicy,
     CapabilityVisibilityContext,
 )
+from .terminal_events import build_agent_terminal_event
 
 
 MAX_AGENT_REASONING_BYTES = 524_288
@@ -88,6 +89,7 @@ class AgentLoopRunner:
         owner_id: str,
         reasoning_delta_sink=None,
         reasoning_reset_sink=None,
+        terminal_event_recorder=None,
     ) -> None:
         self._runs = runs
         self._writer = writer
@@ -100,6 +102,7 @@ class AgentLoopRunner:
         self._owner_id = owner_id
         self._reasoning_delta_sink = reasoning_delta_sink
         self._reasoning_reset_sink = reasoning_reset_sink
+        self._terminal_event_recorder = terminal_event_recorder
 
     async def run(
         self,
@@ -304,19 +307,34 @@ class AgentLoopRunner:
             )
             for (_, call_item, _), outcome in zip(wave, wave_results, strict=True):
                 latest = await self._require_active_run(run.run_id)
-                await self._writer.commit_agent_call_outcome(
-                    AgentCallOutcomeCommit(
-                        run_id=run.run_id,
-                        expected_revision=latest.revision,
-                        expected_claim_token=handle.current.token,
-                        call_item_id=call_item.item_id,
-                        safe_result_payload=outcome.safe_result_payload,
-                        status=outcome.status,
-                        staged_artifacts=outcome.staged_artifacts,
-                        safe_error_code=outcome.safe_error_code,
-                        skill_activation_item=outcome.skill_activation_item,
-                    )
+                commit = AgentCallOutcomeCommit(
+                    run_id=run.run_id,
+                    expected_revision=latest.revision,
+                    expected_claim_token=handle.current.token,
+                    call_item_id=call_item.item_id,
+                    safe_result_payload=outcome.safe_result_payload,
+                    status=outcome.status,
+                    staged_artifacts=outcome.staged_artifacts,
+                    safe_error_code=outcome.safe_error_code,
+                    skill_activation_item=outcome.skill_activation_item,
                 )
+                try:
+                    committed_result = (
+                        await self._writer.commit_agent_call_outcome(commit)
+                    )
+                except Exception:
+                    committed_result = (
+                        await self._writer.commit_agent_call_outcome(commit)
+                    )
+                if outcome.status not in {
+                    AgentCallOutcomeStatus.WAITING_FOR_INPUT,
+                    AgentCallOutcomeStatus.WAITING_FOR_DEPENDENCY,
+                }:
+                    await self._record_terminal_event_best_effort(
+                        run=run,
+                        call_item=call_item,
+                        result_item=committed_result,
+                    )
             latest = await self._runs.get_run(run.run_id)
             if latest is None:
                 raise AgentStorageConflict("agent_run_missing")
@@ -373,6 +391,27 @@ class AgentLoopRunner:
             )
 
         return tuple(await asyncio.gather(*(execute(record) for record in wave)))
+
+    async def _record_terminal_event_best_effort(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        result_item: AgentItem,
+    ) -> None:
+        if self._terminal_event_recorder is None:
+            return
+        event = build_agent_terminal_event(
+            run=run,
+            call_item=call_item,
+            result_item=result_item,
+        )
+        try:
+            recorded = self._terminal_event_recorder(event)
+            if hasattr(recorded, "__await__"):
+                await recorded
+        except Exception:
+            return
 
     async def _require_active_run(self, run_id: str) -> AgentRun:
         run = await self._runs.get_run(run_id)

@@ -25,6 +25,11 @@ from src.orchestration.agent_loop.models import (
     AgentUsage,
     AgentUserMessageCommit,
 )
+from src.orchestration.agent_loop.result_artifacts import (
+    AgentSkillResultArtifactStager,
+)
+from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
+from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.runtime_sidecar_agent_repository import RuntimeSidecarAgentRepository
 from src.storage.agent_payload import agent_compaction_source_digest
 from tests.integrations.test_runtime_sidecar_grpc_client import (
@@ -327,3 +332,74 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             self.client.get_task(task_id=cancelled_run.task_id)["task"]["status"],
             "running",
         )
+
+    async def test_skill_result_artifact_outcome_replays_exactly_in_sidecar_cas(self) -> None:
+        binding = AgentModelBinding("edition-a")
+        run = await self.repository.create_run(
+            AgentRun(
+                "run-agent-skill-result",
+                self.task["task_id"],
+                self.task["conversation_id"],
+                AgentRunStatus.RUNNING,
+                binding,
+            )
+        )
+        sampled = await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                run.run_id,
+                run.revision,
+                None,
+                AgentSample(
+                    "sample-skill-result",
+                    binding,
+                    "",
+                    (AgentToolCall("call-large", "tool_large", "{}", 0),),
+                    AgentUsage(status="usage_unavailable"),
+                    AgentFinishMetadata("tool_calls", 1),
+                ),
+                {"tool_large": "skill.large"},
+            )
+        )
+        call = sampled.call_items[0]
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.large",
+            output_payload={"rows": ["x" * 10_000 for _ in range(20)]},
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+        )
+        staged = AgentSkillResultArtifactStager(
+            file_store=LocalArtifactFileStore(
+                Path(self._temp_dir.name) / "artifacts"
+            ),
+            manifest_root=Path(self._temp_dir.name) / "manifests",
+        ).stage(
+            run=sampled.run,
+            call_item=call,
+            node_id=sampled.node_ids[0],
+            canonical_raw_bytes=projection.canonical_raw_bytes,
+            raw_sha256=projection.raw_sha256,
+            projection_revision=projection.projection_revision,
+            expected_artifact_id=projection.spill_artifact_id,
+        )
+        commit = AgentCallOutcomeCommit(
+            run.run_id,
+            sampled.run.revision,
+            None,
+            call.item_id,
+            projection.safe_result_payload,
+            AgentCallOutcomeStatus.COMPLETED,
+            (staged,),
+        )
+
+        first = await self.repository.commit_agent_call_outcome(commit)
+        replay = await self.repository.commit_agent_call_outcome(commit)
+
+        self.assertEqual(replay, first)
+        artifact = self.client.get_artifact(artifact_id=staged.artifact_id)[
+            "artifact"
+        ]
+        self.assertIsNotNone(artifact)
+        self.assertEqual(artifact["storage_ref"], staged.storage_ref)
+        node = self.client.get_task_node(node_id=sampled.node_ids[0])["node"]
+        self.assertEqual(node["status"], "completed")

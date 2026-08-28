@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -31,6 +31,9 @@ from src.orchestration.agent_loop.models import (
     AgentTaskLease,
     AgentUserMessageCommit,
     AgentUserMessageCommitResult,
+)
+from src.orchestration.agent_loop.result_artifacts import (
+    validate_skill_result_staged_artifact,
 )
 from src.storage.agent_payload import (
     CanonicalAgentPayload,
@@ -479,7 +482,6 @@ class SQLiteAgentRepository:
 
     def _commit_outcome(self, session: Session, commit: AgentCallOutcomeCommit) -> AgentItem:
         run = self._locked_run(session, commit.run_id)
-        self._validate_cas(run, commit.expected_revision, commit.expected_claim_token)
         call = session.get(AgentItemRow, commit.call_item_id)
         if call is None or call.run_id != run.run_id or call.kind != AgentItemKind.TOOL_CALL.value:
             raise AgentStorageConflict("agent_call_item_missing")
@@ -488,8 +490,6 @@ class SQLiteAgentRepository:
         )
         if result is None:
             raise AgentStorageConflict("agent_result_reservation_missing")
-        if result.state != AgentItemState.RESERVED.value:
-            raise AgentStorageConflict("agent_call_already_terminal")
         call_payload = json.loads(call.payload_json)
         node_id = str(call_payload["node_id"])
         node = session.get(TaskNodeRow, node_id)
@@ -499,6 +499,23 @@ class SQLiteAgentRepository:
         artifact_ids = [artifact.artifact_id for artifact in commit.staged_artifacts]
         if len(artifact_ids) != len(set(artifact_ids)):
             raise AgentStorageConflict("agent_outcome_duplicate_artifact_id")
+        for artifact in commit.staged_artifacts:
+            try:
+                validate_skill_result_staged_artifact(
+                    artifact,
+                    run=_run_from_row(run),
+                    node_id=node_id,
+                    call_item_id=call.item_id,
+                    safe_result=(
+                        commit.safe_result_payload
+                        if isinstance(commit.safe_result_payload, Mapping)
+                        else None
+                    ),
+                )
+            except ValueError as exc:
+                raise AgentStorageConflict(
+                    "agent_skill_result_artifact_metadata_invalid"
+                ) from exc
         payload = canonicalize_agent_payload(
             {
                 "artifact_refs": artifact_ids,
@@ -507,6 +524,39 @@ class SQLiteAgentRepository:
                 "safe_result": commit.safe_result_payload,
                 "safe_error_code": commit.safe_error_code,
             }
+        )
+        if result.state != AgentItemState.RESERVED.value:
+            expected_node_status = (
+                "completed"
+                if commit.status is AgentCallOutcomeStatus.COMPLETED
+                else "failed"
+            )
+            artifacts_exact = all(
+                (
+                    existing := session.get(ArtifactRow, artifact.artifact_id)
+                )
+                is not None
+                and existing.task_id == run.task_id
+                and existing.producer_node_id == node_id
+                and existing.artifact_type == artifact.artifact_type
+                and existing.storage_ref == artifact.storage_ref
+                for artifact in commit.staged_artifacts
+            )
+            if (
+                result.state != AgentItemState.COMMITTED.value
+                or result.payload_json != payload.json_text
+                or result.payload_sha256 != payload.sha256
+                or node.status != expected_node_status
+                or list(node.output_refs or [])
+                != [*artifact_ids, result.item_id]
+                or not artifacts_exact
+            ):
+                raise AgentStorageConflict("agent_call_already_terminal")
+            return _item_from_row(result)
+        self._validate_cas(
+            run,
+            commit.expected_revision,
+            commit.expected_claim_token,
         )
         continuation = (
             canonicalize_agent_payload(commit.continuation_payload)
@@ -1198,9 +1248,15 @@ def _item_from_row(row: AgentItemRow) -> AgentItem:
         source_call_item_id=row.source_call_item_id,
         provider_sample_id=row.provider_sample_id,
         call_ordinal=None if row.call_ordinal is None else int(row.call_ordinal),
-        created_at=row.created_at,
-        committed_at=row.committed_at,
+        created_at=_as_utc_naive(row.created_at),
+        committed_at=_as_utc_naive(row.committed_at),
     )
+
+
+def _as_utc_naive(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _initial_activation_payload(

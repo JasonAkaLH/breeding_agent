@@ -69,7 +69,18 @@ EXPECTED_AGENT_LOOP_EXPORTS = [
     "DelegatedSkillActivation",
     "DelegatedSkillActivationService",
     "SkillActivationCommitPort",
+    "CanonicalSkillActivation",
+    "build_canonical_skill_activation",
+    "build_delegated_skill_instruction_result",
+    "build_skill_activation_item",
     "RunBoundMCPTextGenerator",
+    "AgentCallResultProjection",
+    "AgentCallResultProjector",
+    "build_model_result_envelope",
+    "skill_result_artifact_id",
+    "AgentSkillResultArtifactStager",
+    "AgentSkillResultArtifactJanitor",
+    "build_agent_terminal_event",
     "AgentContextBuilder",
     "AgentContextRules",
     "AgentCallExecution",
@@ -85,6 +96,7 @@ EXPECTED_AGENT_LOOP_EXPORTS = [
     "AgentExecutionRequest",
     "AgentLoopOrchestrator",
     "AgentOrchestrationResult",
+    "initial_required_tool_name",
 ]
 
 EXPECTED_PUBLIC_TYPE_MODULES = {

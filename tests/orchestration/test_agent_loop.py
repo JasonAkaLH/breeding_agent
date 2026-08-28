@@ -217,6 +217,7 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         repository=None,
         reasoning_delta_sink=None,
         reasoning_reset_sink=None,
+        terminal_event_recorder=None,
     ):
         repository = repository or self.repository
         return AgentLoopRunner(
@@ -233,6 +234,7 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
             owner_id="worker-1",
             reasoning_delta_sink=reasoning_delta_sink,
             reasoning_reset_sink=reasoning_reset_sink,
+            terminal_event_recorder=terminal_event_recorder,
         )
 
     async def test_reasoning_reset_keeps_ordinal_monotonic_and_budget_consumed(self) -> None:
@@ -351,6 +353,60 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         items = await self.repository.list_items("run-1")
         committed_results = [item for item in items if item.kind.value == "tool_result"]
         self.assertEqual([item.call_ordinal for item in committed_results], [0, 1, 2, 3])
+
+    async def test_outcome_response_loss_replays_exact_and_publishes_one_terminal_event(self) -> None:
+        call = AgentToolCall(
+            "response-lost",
+            self.names["skill.safe_one"],
+            "{}",
+            0,
+        )
+        model = _QueuedModel(
+            self.binding,
+            [("", (call,)), ("final answer", ())],
+        )
+        events = []
+
+        async def record_terminal(event) -> None:
+            events.append(event)
+
+        class ResponseLostRepository:
+            def __init__(self, repository) -> None:
+                self.repository = repository
+                self.lost = False
+
+            def __getattr__(self, name):
+                return getattr(self.repository, name)
+
+            async def commit_agent_call_outcome(self, commit):
+                result = await self.repository.commit_agent_call_outcome(commit)
+                if not self.lost:
+                    self.lost = True
+                    raise RuntimeError("response lost")
+                return result
+
+        repository = ResponseLostRepository(self.repository)
+        result = await self._runner(
+            model,
+            _RecordingInvoker(),
+            repository=repository,
+            terminal_event_recorder=record_terminal,
+        ).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        items = await self.repository.list_items("run-1")
+        committed_results = [
+            item
+            for item in items
+            if item.kind.value == "tool_result" and item.state.value == "committed"
+        ]
+        self.assertEqual(len(committed_results), 1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, "node.completed")
+        self.assertEqual(
+            events[0].payload["result_sha256"],
+            committed_results[0].payload_sha256,
+        )
 
     async def test_waiting_stops_before_another_model_sample_and_releases_lease(self) -> None:
         waiting_call = AgentToolCall(

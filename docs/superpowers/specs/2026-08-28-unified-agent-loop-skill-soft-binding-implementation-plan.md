@@ -6,7 +6,7 @@
 
 计划日期：2026-08-28
 
-状态：`in_progress`（Checkpoint A～E 已完成；Checkpoint F～H、镜像重建与部署尚未完成）
+状态：`in_progress`（Checkpoint A～F 已完成；Checkpoint G～H、镜像重建与部署尚未完成）
 
 目标分支：`main`
 
@@ -746,6 +746,8 @@ conda run -n multi_agent python -m unittest \
 ```text
 feat(agent): publish large skill results with outcome cas
 ```
+
+完成证据：新增独立deterministic `skill_result.json` stager与private first-writer manifest，raw/manifest使用0700/0600、fsync、跨worker no-clobber和exact replay；Agent outcome CAS在SQLite/PostgreSQL/Runtime Sidecar中同事务提交bounded Tool result、terminal Node、Artifact metadata与Run revision，response-lost重读exact winner，pre-CAS/fault保留不可发现stage。terminal event按call/result digest确定性写入并由startup补齐；24小时janitor只清理closed orphan，registered只删manifest，reserved/recoverable/nonterminal/未到期全部保留。Artifact API在metadata发布后owner-only列出/下载`skill_result`并复验storage key、regular file、size与SHA，MCP和legacy `skill_output`边界不变。F focused 139项、隔离PostgreSQL Agent 5项、真实Sidecar进程、约300 KiB大结果HTTP回归、compileall/Ruff/diff通过；Checkpoint G～H仍未完成。
 
 ## 13. Checkpoint G：Frontend 单消息 hint 切换
 

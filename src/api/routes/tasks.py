@@ -15,6 +15,7 @@ from src.core.models import Artifact, EventRecord
 from src.lifecycle.mcp_presence import MCPPresenceConnection
 from src.integrations.mcp.gateway_models import MCPCancelStatus, MCPContinueStatus
 from src.storage.artifact_files import (
+    is_active_managed_output_file,
     is_active_skill_output_file,
     parse_file_storage_ref,
 )
@@ -427,7 +428,12 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     await require_task_owner(runtime, artifact.task_id, user)
     metadata = parse_file_storage_ref(artifact.storage_ref)
-    if not is_active_skill_output_file(metadata):
+    is_skill_result = bool(
+        metadata
+        and metadata.get("source_kind") == "skill_result"
+        and is_active_managed_output_file(metadata)
+    )
+    if not is_active_skill_output_file(metadata) and not is_skill_result:
         await runtime.storage.append_event(
             _artifact_event(
                 artifact=artifact,
@@ -438,8 +444,12 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     storage_key = str(metadata.get("storage_key"))
     try:
-        file_path = runtime.artifact_file_store.open_path(storage_key)
-    except ValueError as exc:
+        file_path = runtime.artifact_file_store.open_verified_path(
+            storage_key,
+            expected_size_bytes=int(metadata.get("size_bytes")),
+            expected_sha256=str(metadata.get("sha256")),
+        )
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
         await runtime.storage.append_event(
             _artifact_event(
                 artifact=artifact,
@@ -448,15 +458,6 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}") from exc
-    if not file_path.exists() or not file_path.is_file():
-        await runtime.storage.append_event(
-            _artifact_event(
-                artifact=artifact,
-                event_type="artifact.download_denied",
-                payload={"artifact_id": artifact.artifact_id, "reason": "file_missing"},
-            )
-        )
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     await runtime.storage.append_event(
         _artifact_event(
             artifact=artifact,

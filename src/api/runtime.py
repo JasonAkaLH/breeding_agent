@@ -346,11 +346,14 @@ from src.orchestration.agent_loop import (
     AgentStorageConflict,
     RunBoundMCPTextGenerator,
     AgentToolCatalogBuilder,
+    AgentSkillResultArtifactStager,
+    AgentSkillResultArtifactJanitor,
     CapabilityInvocationService,
     CapabilityVisibilityContext,
     DelegatedSkillActivationService,
     build_canonical_skill_activation,
     build_delegated_skill_instruction_result,
+    build_agent_terminal_event,
     default_agent_invocation_policy,
 )
 from src.orchestration.agent_loop.lease import AgentLeaseController
@@ -850,6 +853,7 @@ class ApiRuntime(
         self._mcp_cp7_maintenance_authorizer = mcp_cp7_maintenance_authorizer
         self._submission_admission_coordinator = submission_admission_coordinator
         self._prepared_agent_recovery_loader = prepared_agent_recovery_loader
+        self._agent_skill_result_janitor: AgentSkillResultArtifactJanitor | None = None
         self._submission_claim_owner = f"api-submission:{uuid4().hex}"
         self._submission_claim_ttl = timedelta(seconds=30)
         self._expected_submission_authority_receipt_sha256 = (
@@ -10185,6 +10189,11 @@ class ApiRuntime(
             raise
         try:
             await self._recover_agent_runs()
+            agent_skill_result_janitor = getattr(
+                self, "_agent_skill_result_janitor", None
+            )
+            if agent_skill_result_janitor is not None:
+                await agent_skill_result_janitor.run_once()
             if self._mcp_cp7_safety_facade is not None:
                 if self._mcp_cp7_open_boundary is None:
                     raise RuntimeError("mcp_cp7_open_boundary_missing")
@@ -10337,6 +10346,7 @@ class ApiRuntime(
         conversation = await self.storage.get_conversation(run.conversation_id)
         if conversation is None:
             raise RuntimeError("agent_startup_conversation_missing")
+        await self._reconcile_agent_terminal_events(run)
         root_message = await self.storage.get_message(task.root_message_id)
         prepared = None
         prepared_loader = getattr(self, "_prepared_agent_recovery_loader", None)
@@ -10452,6 +10462,7 @@ class ApiRuntime(
             ),
             cancellation=self._agent_cancellation_token(task.task_id),
         )
+        await self._reconcile_agent_terminal_events(recovery_result.run)
         if recovery_result.run.status in {
             AgentRunStatus.COMPLETED,
             AgentRunStatus.FAILED,
@@ -10463,6 +10474,46 @@ class ApiRuntime(
             )
             await self._release_task_skill_revision_if_terminal(task.task_id)
             await self._release_task_mcp_revision_if_terminal(task.task_id)
+
+    async def _reconcile_agent_terminal_events(self, run: AgentRun) -> None:
+        repository = getattr(self, "agent_run_repository", None)
+        list_items = getattr(repository, "list_items", None)
+        if not callable(list_items):
+            return
+        items = await list_items(run.run_id)
+        calls = {
+            item.item_id: item
+            for item in items
+            if item.kind.value == "tool_call"
+        }
+        for result in items:
+            if (
+                result.kind.value != "tool_result"
+                or result.state.value != "committed"
+                or result.source_call_item_id not in calls
+            ):
+                continue
+            call = calls[str(result.source_call_item_id)]
+            event = build_agent_terminal_event(
+                run=run,
+                call_item=call,
+                result_item=result,
+            )
+            node = (
+                await self.storage.get_task_node(event.node_id)
+                if event.node_id is not None
+                else None
+            )
+            expected_status = (
+                NodeStatus.COMPLETED
+                if event.event_type == "node.completed"
+                else NodeStatus.FAILED
+            )
+            if node is None or str(node.status) != str(expected_status):
+                raise RuntimeError("agent_terminal_event_node_conflict")
+            saved, duplicate = await self.storage.append_event_exact(event)
+            if not duplicate:
+                await self.event_broker.publish(saved)
 
     async def _prepared_agent_recovery_values(
         self,
@@ -14938,6 +14989,14 @@ def build_api_runtime(
     )
 
     delegated_skill_activation = DelegatedSkillActivationService(None)
+    agent_skill_result_manifest_root = (
+        Path(database_path).parent / "agent_skill_result_stage_manifests"
+    )
+    agent_skill_result_stager = AgentSkillResultArtifactStager(
+        file_store=artifact_file_store,
+        manifest_root=agent_skill_result_manifest_root,
+        now_fn=lambda: datetime.now(timezone.utc),
+    )
     runtime_holder: dict[str, ApiRuntime] = {}
 
     async def agent_invocation_hook(**values: Any):
@@ -15107,6 +15166,7 @@ def build_api_runtime(
         current_user_input_loader=invocation_contexts.current_user_input,
         continuation_loader=invocation_commit_port.continuation_locator_for_call,
         delegated_skill_activator=activate_delegated_skill,
+        result_artifact_stager=agent_skill_result_stager.stage,
         invocation_hook=agent_invocation_hook,
     )
     lease_controller = AgentLeaseController(agent_repository, ttl_seconds=30)
@@ -15138,6 +15198,7 @@ def build_api_runtime(
         owner_id=f"api-agent:{uuid4().hex}",
         reasoning_delta_sink=publish_agent_reasoning,
         reasoning_reset_sink=publish_agent_reasoning_reset,
+        terminal_event_recorder=record_initialization_event_exact,
     )
     final_output_publisher = AgentFinalOutputPublisher(
         runs=agent_repository,
@@ -15300,6 +15361,13 @@ def build_api_runtime(
         expected_submission_authority_receipt_sha256=(
             expected_submission_authority_receipt_sha256
         ),
+    )
+    runtime._agent_skill_result_janitor = AgentSkillResultArtifactJanitor(
+        file_store=artifact_file_store,
+        manifest_root=agent_skill_result_manifest_root,
+        storage=storage,
+        runs=agent_repository,
+        now_fn=lambda: datetime.now(timezone.utc),
     )
     async def wait_until_submission_claim_deadline(deadline: datetime) -> None:
         now = runtime._utcnow_naive()

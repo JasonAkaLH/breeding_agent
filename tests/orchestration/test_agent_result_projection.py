@@ -226,3 +226,14 @@ class AgentCallResultProjectorTest(unittest.TestCase):
             projected.safe_result_payload["model_view"]["continuation_locator"],
             locator,
         )
+
+    def test_full_tool_result_envelope_overflow_returns_typed_projection_failure(self) -> None:
+        projected = self.project(
+            "skill.lookup",
+            {"answer": "small"},
+            artifact_ids=tuple(f"artifact-{index}-" + "x" * 200 for index in range(700)),
+        )
+        self.assertEqual(
+            projected.error_code,
+            "agent_result_projection_too_large",
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -10,9 +11,19 @@ from unittest.mock import AsyncMock, Mock
 from src.api.runtime import ApiRuntime
 from src.api.submission_admission import PreparedAgentRecoveryContext
 from src.api.upload_errors import UploadValidationError
-from src.core.enums import MessageRole, TaskStatus
-from src.core.models import Conversation, ConversationFileResource, Message, Task, TaskInputAttachment
+from src.core.enums import MessageRole, NodeStatus, TaskStatus
+from src.core.models import (
+    Conversation,
+    ConversationFileResource,
+    Message,
+    Task,
+    TaskInputAttachment,
+    TaskNode,
+)
 from src.orchestration.agent_loop.models import (
+    AgentItem,
+    AgentItemKind,
+    AgentItemState,
     AgentModelBinding,
     AgentRun,
     AgentRunStatus,
@@ -26,6 +37,82 @@ class _StopStartup(RuntimeError):
 
 
 class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
+    def test_skill_result_janitor_runs_after_agent_recovery_before_background_services(self) -> None:
+        source = inspect.getsource(ApiRuntime.start)
+        self.assertLess(
+            source.index("await self._recover_agent_runs()"),
+            source.index("await agent_skill_result_janitor.run_once()"),
+        )
+        self.assertLess(
+            source.index("await agent_skill_result_janitor.run_once()"),
+            source.index("if self._mcp_cp7_safety_facade is not None"),
+        )
+
+    async def test_startup_terminal_event_reconciliation_is_exact(self) -> None:
+        run = AgentRun(
+            "run-terminal-event",
+            "task-terminal-event",
+            "conv-terminal-event",
+            AgentRunStatus.RUNNING,
+            AgentModelBinding("edition-a"),
+        )
+        call = AgentItem(
+            "call-terminal-event",
+            run.run_id,
+            run.task_id,
+            1,
+            AgentItemKind.TOOL_CALL,
+            AgentItemState.COMMITTED,
+            '{"capability_id":"skill.lookup","node_id":"node-terminal-event"}\n',
+            "a" * 64,
+        )
+        result = AgentItem(
+            "result-terminal-event",
+            run.run_id,
+            run.task_id,
+            2,
+            AgentItemKind.TOOL_RESULT,
+            AgentItemState.COMMITTED,
+            '{"outcome":"completed","safe_error_code":null}\n',
+            "b" * 64,
+            source_call_item_id=call.item_id,
+            committed_at=datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc),
+        )
+        events = {}
+
+        async def append_event_exact(event):
+            existing = events.get(event.event_id)
+            if existing is not None:
+                return existing, True
+            events[event.event_id] = event
+            return event, False
+
+        runtime = object.__new__(ApiRuntime)
+        runtime.agent_run_repository = SimpleNamespace(
+            list_items=AsyncMock(return_value=(call, result))
+        )
+        runtime.storage = SimpleNamespace(
+            get_task_node=AsyncMock(
+                return_value=TaskNode(
+                    "node-terminal-event",
+                    run.task_id,
+                    "skill.lookup",
+                    status=NodeStatus.COMPLETED,
+                )
+            ),
+            append_event_exact=append_event_exact,
+        )
+        runtime.event_broker = SimpleNamespace(publish=AsyncMock())
+
+        await runtime._reconcile_agent_terminal_events(run)
+        await runtime._reconcile_agent_terminal_events(run)
+
+        self.assertEqual(len(events), 1)
+        event = next(iter(events.values()))
+        self.assertEqual(event.event_type, "node.completed")
+        self.assertEqual(event.payload["result_sha256"], result.payload_sha256)
+        runtime.event_broker.publish.assert_awaited_once_with(event)
+
     @staticmethod
     def _startup_runtime(events: list[str], coordinator: object) -> ApiRuntime:
         runtime = object.__new__(ApiRuntime)

@@ -26,6 +26,9 @@ from src.orchestration.agent_loop.models import (
     AgentUserMessageCommit,
     AgentUserMessageCommitResult,
 )
+from src.orchestration.agent_loop.result_artifacts import (
+    validate_skill_result_staged_artifact,
+)
 from src.storage.agent_payload import (
     CanonicalAgentPayload,
     agent_compaction_source_digest,
@@ -289,9 +292,9 @@ class RuntimeSidecarAgentRepository:
         )
 
     async def commit_agent_call_outcome(self, commit: AgentCallOutcomeCommit) -> AgentItem:
-        run = await self._require_cas_run(
-            commit.run_id, commit.expected_revision, commit.expected_claim_token
-        )
+        run = await self.get_run(commit.run_id)
+        if run is None:
+            raise AgentStorageConflict("agent_run_missing")
         items = await self.list_items(run.run_id)
         call = next(
             (
@@ -314,6 +317,23 @@ class RuntimeSidecarAgentRepository:
         artifact_ids = [artifact.artifact_id for artifact in commit.staged_artifacts]
         if len(artifact_ids) != len(set(artifact_ids)):
             raise AgentStorageConflict("agent_outcome_duplicate_artifact_id")
+        for artifact in commit.staged_artifacts:
+            try:
+                validate_skill_result_staged_artifact(
+                    artifact,
+                    run=run,
+                    node_id=node_id,
+                    call_item_id=call.item_id,
+                    safe_result=(
+                        commit.safe_result_payload
+                        if isinstance(commit.safe_result_payload, Mapping)
+                        else None
+                    ),
+                )
+            except ValueError as exc:
+                raise AgentStorageConflict(
+                    "agent_skill_result_artifact_metadata_invalid"
+                ) from exc
         payload = canonicalize_agent_payload(
             {
                 "artifact_refs": artifact_ids,
@@ -322,6 +342,28 @@ class RuntimeSidecarAgentRepository:
                 "safe_result": commit.safe_result_payload,
                 "safe_error_code": commit.safe_error_code,
             }
+        )
+        if result.state is not AgentItemState.RESERVED:
+            node = dict(node_response["node"])
+            expected_node_status = (
+                "completed"
+                if commit.status is AgentCallOutcomeStatus.COMPLETED
+                else "failed"
+            )
+            if (
+                result.state is not AgentItemState.COMMITTED
+                or result.payload_json != payload.json_text
+                or result.payload_sha256 != payload.sha256
+                or node.get("status") != expected_node_status
+                or list(node.get("output_refs") or ())
+                != [*artifact_ids, result.item_id]
+            ):
+                raise AgentStorageConflict("agent_call_already_terminal")
+            return result
+        run = await self._require_cas_run(
+            commit.run_id,
+            commit.expected_revision,
+            commit.expected_claim_token,
         )
         continuation_payload = (
             canonicalize_agent_payload(commit.continuation_payload)

@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 from src.core.contracts import (
     CapabilityExecutionError,
@@ -29,6 +31,9 @@ from src.orchestration.agent_loop.models import (
     AgentRunStatus,
     AgentToolCall,
     AgentTaskLease,
+)
+from src.orchestration.agent_loop.task_projection import (
+    AgentTaskInvocationCommitPort,
 )
 from src.orchestration.models import ExecutionInstance, InstanceState
 from src.orchestration.registry import InstanceRegistry
@@ -162,6 +167,66 @@ class _AgentFixtureCommitPort(_RecordingCommitPort):
 
 
 class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_terminal_projection_is_candidate_only_until_outcome_cas(self) -> None:
+        storage = SimpleNamespace(
+            save_task_node=AsyncMock(),
+            compare_and_set_task_node=AsyncMock(),
+        )
+        record_event = AsyncMock()
+        port = AgentTaskInvocationCommitPort(
+            storage=storage,
+            runs=SimpleNamespace(),
+            make_event=lambda **values: values,
+            record_event=record_event,
+        )
+        request = InvocationRequest(
+            capability_id="skill.lookup",
+            conversation_id="conv-1",
+            task_id="task-1",
+            node_id="node-1",
+            run_id="run-1",
+            call_item_id="call-1",
+        )
+        node = TaskNode(
+            "node-1", "task-1", "skill.lookup", status=NodeStatus.RUNNING
+        )
+        result = CapabilityExecutionResult(
+            "skill.lookup", "task-1", "node-1", output_payload={"answer": 1}
+        )
+        now = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+
+        completed = await port.commit_completed(
+            request,
+            node,
+            result,
+            now=now,
+            activity_payload={"capability_id": "skill.lookup"},
+        )
+        failed = await port.commit_failed(
+            request,
+            node,
+            replace(
+                result,
+                error=CapabilityExecutionError("failed", "failed"),
+            ),
+            now=now,
+            activity_payload={"capability_id": "skill.lookup"},
+        )
+        rejected = await port.commit_route_rejected(
+            request,
+            node,
+            rejection_code="route_rejected",
+            now=now,
+            activity_payload={"capability_id": "skill.lookup"},
+        )
+
+        self.assertEqual(completed.status, NodeStatus.COMPLETED)
+        self.assertEqual(failed.status, NodeStatus.FAILED)
+        self.assertEqual(rejected.status, NodeStatus.FAILED)
+        storage.save_task_node.assert_not_awaited()
+        storage.compare_and_set_task_node.assert_not_awaited()
+        record_event.assert_not_awaited()
+
     async def test_agent_invocation_refreshes_lease_after_long_executor_call(self) -> None:
         instances = InstanceRegistry()
         instances.register(

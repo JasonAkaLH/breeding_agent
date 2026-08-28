@@ -28,6 +28,12 @@ from src.orchestration.agent_loop.models import (
 from src.orchestration.agent_loop.skill_activation import (
     build_canonical_skill_activation,
 )
+from src.orchestration.agent_loop.result_artifacts import (
+    AgentSkillResultArtifactStager,
+    parse_skill_result_storage_ref,
+)
+from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
+from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.sqlite import (
     SQLiteAgentRepository,
     bootstrap_sqlite_database,
@@ -346,6 +352,94 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    async def test_skill_result_artifact_and_terminal_node_commit_in_one_exact_cas(self) -> None:
+        committed = await self._commit_two_calls()
+        call_item = committed.call_items[0]
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.one",
+            output_payload={"articles": ["x" * 10_000 for _ in range(20)]},
+            call_item_id=call_item.item_id,
+            outcome="completed",
+            safe_error_code=None,
+        )
+        self.assertTrue(projection.spill_required)
+        file_store = LocalArtifactFileStore(Path(self._tmpdir.name) / "artifacts")
+        staged = AgentSkillResultArtifactStager(
+            file_store=file_store,
+            manifest_root=Path(self._tmpdir.name) / "manifests",
+        ).stage(
+            run=committed.run,
+            call_item=call_item,
+            node_id=committed.node_ids[0],
+            canonical_raw_bytes=projection.canonical_raw_bytes,
+            raw_sha256=projection.raw_sha256,
+            projection_revision=projection.projection_revision,
+            expected_artifact_id=projection.spill_artifact_id,
+        )
+        outcome = AgentCallOutcomeCommit(
+            "run-1",
+            committed.run.revision,
+            None,
+            call_item.item_id,
+            projection.safe_result_payload,
+            AgentCallOutcomeStatus.COMPLETED,
+            staged_artifacts=(staged,),
+        )
+
+        first = await self.repository.commit_agent_call_outcome(outcome)
+        replay = await self.repository.commit_agent_call_outcome(outcome)
+
+        self.assertEqual(replay, first)
+        with self.session_factory() as session:
+            node = session.get(TaskNodeRow, committed.node_ids[0])
+            artifact = session.get(ArtifactRow, staged.artifact_id)
+            self.assertEqual(node.status, "completed")
+            self.assertEqual(node.output_refs, [staged.artifact_id, first.item_id])
+            self.assertIsNotNone(artifact)
+            metadata = parse_skill_result_storage_ref(artifact.storage_ref)
+            self.assertEqual(metadata["call_item_id"], call_item.item_id)
+            self.assertEqual(metadata["raw_sha256"], projection.raw_sha256)
+
+        drifted = AgentStagedArtifact(
+            staged.artifact_id,
+            staged.artifact_type,
+            staged.storage_ref.replace(committed.node_ids[0], "drift-node"),
+            staged.summary,
+        )
+        with self.assertRaises(AgentStorageConflict):
+            await self.repository.commit_agent_call_outcome(
+                AgentCallOutcomeCommit(
+                    "run-1",
+                    committed.run.revision,
+                    None,
+                    call_item.item_id,
+                    projection.safe_result_payload,
+                    AgentCallOutcomeStatus.COMPLETED,
+                    staged_artifacts=(drifted,),
+                )
+            )
+
+    async def test_projection_failure_commits_failed_node_and_result_together(self) -> None:
+        committed = await self._commit_two_calls()
+        result = await self.repository.commit_agent_call_outcome(
+            AgentCallOutcomeCommit(
+                "run-1",
+                committed.run.revision,
+                None,
+                committed.call_items[0].item_id,
+                None,
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code="agent_result_invalid",
+            )
+        )
+
+        self.assertEqual(result.state, AgentItemState.COMMITTED)
+        with self.session_factory() as session:
+            node = session.get(TaskNodeRow, committed.node_ids[0])
+            self.assertEqual(node.status, "failed")
+            self.assertEqual(node.output_refs, [result.item_id])
+        self.assertIn("agent_result_invalid", result.payload_json)
+
     async def test_provider_call_id_can_repeat_in_a_later_sample_without_identity_collision(self) -> None:
         run = await self._create()
         first = await self.repository.commit_agent_sample(
@@ -464,6 +558,60 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             node = session.get(TaskNodeRow, committed.node_ids[0])
             self.assertEqual(node.status, "pending")
             self.assertEqual(session.scalar(select(func.count()).select_from(ArtifactRow)), 0)
+
+    async def test_skill_result_stage_remains_private_when_outcome_cas_rolls_back(self) -> None:
+        committed = await self._commit_two_calls()
+        call = committed.call_items[0]
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.one",
+            output_payload={"rows": ["x" * 10_000 for _ in range(20)]},
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+        )
+        file_store = LocalArtifactFileStore(Path(self._tmpdir.name) / "private-artifacts")
+        manifest_root = Path(self._tmpdir.name) / "private-manifests"
+        staged = AgentSkillResultArtifactStager(
+            file_store=file_store,
+            manifest_root=manifest_root,
+        ).stage(
+            run=committed.run,
+            call_item=call,
+            node_id=committed.node_ids[0],
+            canonical_raw_bytes=projection.canonical_raw_bytes,
+            raw_sha256=projection.raw_sha256,
+            projection_revision=projection.projection_revision,
+            expected_artifact_id=projection.spill_artifact_id,
+        )
+
+        def fail(stage: str) -> None:
+            if stage == "outcome_after_result":
+                raise RuntimeError("injected")
+
+        repository = SQLiteAgentRepository(
+            self.session_factory,
+            fault_injector=fail,
+        )
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            await repository.commit_agent_call_outcome(
+                AgentCallOutcomeCommit(
+                    "run-1",
+                    committed.run.revision,
+                    None,
+                    call.item_id,
+                    projection.safe_result_payload,
+                    AgentCallOutcomeStatus.COMPLETED,
+                    staged_artifacts=(staged,),
+                )
+            )
+
+        with self.session_factory() as session:
+            self.assertIsNone(session.get(ArtifactRow, staged.artifact_id))
+            node = session.get(TaskNodeRow, committed.node_ids[0])
+            self.assertEqual(node.status, "pending")
+        metadata = parse_skill_result_storage_ref(staged.storage_ref)
+        self.assertTrue(file_store.open_path(str(metadata["storage_key"])).exists())
+        self.assertEqual(len(list(manifest_root.iterdir())), 1)
 
     async def test_final_fault_rolls_back_every_projection_and_receipt(self) -> None:
         run = await self._create()

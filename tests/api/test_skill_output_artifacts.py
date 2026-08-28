@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import zipfile
 from pathlib import Path
 
+from src.core.enums import ArtifactType, TaskStatus
+from src.core.models import Artifact, Conversation, Task
+from src.orchestration.agent_loop.models import (
+    AgentItem,
+    AgentItemKind,
+    AgentItemState,
+    AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
+)
+from src.orchestration.agent_loop.result_artifacts import (
+    AgentSkillResultArtifactStager,
+)
+from src.orchestration.agent_loop.result_projection import (
+    SKILL_RESULT_PROJECTION_REVISION,
+    skill_result_artifact_id,
+)
 from tests.api.support import APITestCase
 
 
@@ -148,6 +167,254 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/layout.html
         self.assertEqual(download.headers["x-content-type-options"], "nosniff")
         self.assertIn("attachment", download.headers["content-disposition"])
         self.assertEqual(download.text, "<h1>layout</h1>")
+
+    async def test_skill_result_is_invisible_before_metadata_and_download_verifies_content(self) -> None:
+        now = self.runtime._utcnow_naive()  # noqa: SLF001
+        conversation_id = "conv-skill-result"
+        task_id = "task-skill-result"
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id, "acc-1", created_at=now, updated_at=now)
+        )
+        await self.runtime.storage.save_task(
+            Task(
+                task_id,
+                conversation_id,
+                "message-skill-result",
+                status=TaskStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        run = AgentRun(
+            "run-skill-result",
+            task_id,
+            conversation_id,
+            AgentRunStatus.COMPLETED,
+            AgentModelBinding("api-test"),
+        )
+        call = AgentItem(
+            "call-skill-result",
+            run.run_id,
+            task_id,
+            1,
+            AgentItemKind.TOOL_CALL,
+            AgentItemState.COMMITTED,
+            "{}\n",
+            "0" * 64,
+        )
+        raw = b'{"articles":[{"title":"complete"}]}\n'
+        raw_sha = hashlib.sha256(raw).hexdigest()
+        artifact_id = skill_result_artifact_id(
+            call_item_id=call.item_id,
+            raw_sha256=raw_sha,
+            projection_revision=SKILL_RESULT_PROJECTION_REVISION,
+        )
+        staged = AgentSkillResultArtifactStager(
+            file_store=self.runtime.artifact_file_store,
+            manifest_root=self.workspace / "manual-skill-result-manifests",
+        ).stage(
+            run=run,
+            call_item=call,
+            node_id="node-skill-result",
+            canonical_raw_bytes=raw,
+            raw_sha256=raw_sha,
+            projection_revision=SKILL_RESULT_PROJECTION_REVISION,
+            expected_artifact_id=artifact_id,
+        )
+
+        hidden = await self.client.get(
+            f"/api/v1/artifacts/{artifact_id}/download"
+        )
+        self.assertEqual(hidden.status_code, 404)
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                artifact_id=artifact_id,
+                task_id=task_id,
+                producer_node_id="node-skill-result",
+                artifact_type=ArtifactType.FILE,
+                storage_ref=staged.storage_ref,
+                summary=staged.summary,
+                is_complete=True,
+                created_at=now,
+            )
+        )
+        listed = await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")
+        listed.raise_for_status()
+        card = next(
+            item
+            for item in listed.json()["artifacts"]
+            if item["artifact_id"] == artifact_id
+        )
+        self.assertEqual(card["filename"], "skill_result.json")
+        self.assertEqual(card["storage_ref"], "")
+        download = await self.client.get(card["download_url"])
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.content, raw)
+
+        metadata = json.loads(staged.storage_ref)
+        raw_path = self.runtime.artifact_file_store.open_path(metadata["storage_key"])
+        raw_path.write_bytes(b'{"articles":[]}\n')
+        raw_path.chmod(0o600)
+        drifted = await self.client.get(card["download_url"])
+        self.assertEqual(drifted.status_code, 404)
+        raw_path.unlink()
+        external = self.workspace / "external-result.json"
+        external.write_bytes(raw)
+        raw_path.symlink_to(external)
+        non_regular = await self.client.get(card["download_url"])
+        self.assertEqual(non_regular.status_code, 404)
+
+    async def test_large_skill_json_completes_with_artifact_backed_agent_result(self) -> None:
+        await self._use_skill(
+            """import json
+articles = [
+    {
+        'title': f'article-{index}',
+        'abstract': 'breeding research ' * 700,
+        'url': f'https://example.test/articles/{index}',
+    }
+    for index in range(28)
+]
+print(json.dumps({
+    'answer': 'search complete',
+    'search_summary': 'found 28 articles',
+    'articles': articles,
+    'structured_content': {'articles': articles},
+}, ensure_ascii=False))
+"""
+        )
+        response = await self.submit_message(
+            conversation_id="conv-large-skill-result",
+            content="生成完整大结果",
+            capability_id=self.active_skill_id,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        result_item = next(
+            item
+            for item in items
+            if item.kind is AgentItemKind.TOOL_RESULT
+            and item.state is AgentItemState.COMMITTED
+        )
+        result_payload = json.loads(result_item.payload_json)
+        safe_result = result_payload["safe_result"]
+        self.assertEqual(safe_result["projection_mode"], "artifact_backed")
+        self.assertTrue(safe_result["projection_truncated"])
+        self.assertNotIn("article-0", json.dumps(safe_result))
+        self.assertGreaterEqual(len(result_payload["artifact_refs"]), 1)
+
+        listed = await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")
+        listed.raise_for_status()
+        result_card = next(
+            artifact
+            for artifact in listed.json()["artifacts"]
+            if artifact["filename"] == "skill_result.json"
+        )
+        self.assertIn(result_card["artifact_id"], result_payload["artifact_refs"])
+        download = await self.client.get(result_card["download_url"])
+        self.assertEqual(download.status_code, 200)
+        raw = json.loads(download.text)
+        self.assertEqual(len(raw["articles"]), 28)
+        self.assertEqual(raw["articles"], raw["structured_content"]["articles"])
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_node = next(
+            node for node in nodes if node.capability_id == self.active_skill_id
+        )
+        self.assertEqual(str(skill_node.status), "completed")
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertEqual(
+            sum(
+                event.event_type == "node.completed"
+                and event.node_id == skill_node.node_id
+                for event in events
+            ),
+            1,
+        )
+
+    async def test_invalid_raw_result_commits_typed_failed_node_without_stage(self) -> None:
+        await self._use_skill("""print('{\"answer\": NaN}')\n""")
+        response = await self.submit_message(
+            conversation_id="conv-invalid-skill-result",
+            content="生成非法结果",
+            capability_id=self.active_skill_id,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        result = next(
+            item
+            for item in items
+            if item.kind is AgentItemKind.TOOL_RESULT
+            and item.state is AgentItemState.COMMITTED
+        )
+        payload = json.loads(result.payload_json)
+        self.assertEqual(payload["outcome"], "failed")
+        self.assertEqual(payload["safe_error_code"], "agent_result_invalid")
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_node = next(
+            node for node in nodes if node.capability_id == self.active_skill_id
+        )
+        self.assertEqual(str(skill_node.status), "failed")
+        artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
+        self.assertFalse(
+            any(
+                json.loads(artifact.storage_ref).get("source_kind")
+                == "skill_result"
+                for artifact in artifacts
+                if artifact.storage_ref.startswith("{")
+            )
+        )
+
+    async def test_large_result_stage_failure_commits_typed_failed_node(self) -> None:
+        await self._use_skill(
+            """import json
+print(json.dumps({'rows': ['x' * 10000 for _ in range(20)]}))
+"""
+        )
+
+        def fail_stage(**_kwargs):
+            raise OSError("stage unavailable")
+
+        self.runtime._agent_capability_invoker._stage_result_artifact = fail_stage  # noqa: SLF001
+        response = await self.submit_message(
+            conversation_id="conv-stage-failed-result",
+            content="生成大结果",
+            capability_id=self.active_skill_id,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        result = next(
+            item
+            for item in items
+            if item.kind is AgentItemKind.TOOL_RESULT
+            and item.state is AgentItemState.COMMITTED
+        )
+        payload = json.loads(result.payload_json)
+        self.assertEqual(payload["outcome"], "failed")
+        self.assertEqual(
+            payload["safe_error_code"],
+            "agent_result_artifact_persist_failed",
+        )
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_node = next(
+            node for node in nodes if node.capability_id == self.active_skill_id
+        )
+        self.assertEqual(str(skill_node.status), "failed")
 
     async def test_new_output_replaces_old_output_in_same_conversation(self) -> None:
         await self._use_skill(

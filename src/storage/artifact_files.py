@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import re
@@ -89,6 +90,62 @@ class LocalArtifactFileStore:
             sha256=digest.hexdigest(),
         )
 
+    def save_bytes(
+        self,
+        *,
+        artifact_id: str,
+        filename: str,
+        content: bytes,
+    ) -> StoredArtifactFile:
+        if not isinstance(content, bytes):
+            raise TypeError("Artifact content must be bytes")
+        safe_filename = sanitize_download_filename(filename)
+        storage_key = normalize_storage_key(
+            f"{sanitize_storage_component(artifact_id)}/{safe_filename}"
+        )
+        artifact_dir = self._safe_artifact_dir(artifact_id)
+        target = artifact_dir / safe_filename
+        artifact_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(artifact_dir, 0o700, follow_symlinks=False)
+        _validate_private_directory(artifact_dir)
+        directory_descriptor = os.open(
+            artifact_dir,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            fcntl.flock(directory_descriptor, fcntl.LOCK_EX)
+            if target.exists():
+                return self._compare_existing_bytes(
+                    content=content,
+                    target=target,
+                    storage_key=storage_key,
+                    filename=safe_filename,
+                )
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(target, 0o600, follow_symlinks=False)
+            _fsync_directory(artifact_dir)
+            _fsync_directory(self._root_dir)
+        finally:
+            fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
+            os.close(directory_descriptor)
+        return StoredArtifactFile(
+            storage_key=storage_key,
+            filename=safe_filename,
+            size_bytes=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+
     @staticmethod
     def _compare_existing_file(
         *,
@@ -120,8 +177,59 @@ class LocalArtifactFileStore:
             sha256=target_sha256,
         )
 
+    @staticmethod
+    def _compare_existing_bytes(
+        *,
+        content: bytes,
+        target: Path,
+        storage_key: str,
+        filename: str,
+    ) -> StoredArtifactFile:
+        if not target.exists() or target.is_symlink():
+            raise FileExistsError("Artifact destination conflicts with existing state")
+        _validate_private_directory(target.parent)
+        siblings = tuple(target.parent.iterdir())
+        metadata = target.stat(follow_symlinks=False)
+        if (
+            siblings != (target,)
+            or not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise FileExistsError("Artifact destination conflicts with existing state")
+        target_size, target_sha256 = _hash_private_file(target)
+        if (
+            target_size != len(content)
+            or target_sha256 != hashlib.sha256(content).hexdigest()
+        ):
+            raise FileExistsError("Artifact destination conflicts with existing content")
+        return StoredArtifactFile(
+            storage_key=storage_key,
+            filename=filename,
+            size_bytes=target_size,
+            sha256=target_sha256,
+        )
+
     def open_path(self, storage_key: str) -> Path:
         return self._resolve_storage_key(storage_key)
+
+    def open_verified_path(
+        self,
+        storage_key: str,
+        *,
+        expected_size_bytes: int,
+        expected_sha256: str,
+    ) -> Path:
+        expected_digest = _validated_content_identity(
+            expected_size_bytes,
+            expected_sha256,
+        )
+        path = self._resolve_storage_key(storage_key)
+        _validate_private_directory(path.parent)
+        size_bytes, sha256 = _hash_private_file(path)
+        if (size_bytes, sha256) != (expected_size_bytes, expected_digest):
+            raise ValueError("Artifact content identity changed")
+        return path
 
     def read_utf8(
         self,
@@ -130,15 +238,10 @@ class LocalArtifactFileStore:
         expected_size_bytes: int,
         expected_sha256: str,
     ) -> str:
-        if (
-            isinstance(expected_size_bytes, bool)
-            or not isinstance(expected_size_bytes, int)
-            or expected_size_bytes < 0
-        ):
-            raise ValueError("Artifact expected size is invalid")
-        expected_digest = str(expected_sha256).removeprefix("sha256:")
-        if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
-            raise ValueError("Artifact expected digest is invalid")
+        expected_digest = _validated_content_identity(
+            expected_size_bytes,
+            expected_sha256,
+        )
         path = self._resolve_storage_key(storage_key)
         _validate_private_directory(path.parent)
         before = path.stat(follow_symlinks=False)
@@ -250,10 +353,27 @@ def is_active_skill_output_file(metadata: Mapping[str, Any] | None) -> bool:
 def is_active_managed_output_file(metadata: Mapping[str, Any] | None) -> bool:
     return bool(
         metadata
-        and metadata.get("source_kind") in {"skill_output", "mcp_result"}
+        and metadata.get("source_kind")
+        in {"skill_output", "skill_result", "mcp_result"}
         and metadata.get("retention_status") == "active"
         and isinstance(metadata.get("storage_key"), str)
     )
+
+
+def _validated_content_identity(
+    expected_size_bytes: int,
+    expected_sha256: str,
+) -> str:
+    if (
+        isinstance(expected_size_bytes, bool)
+        or not isinstance(expected_size_bytes, int)
+        or expected_size_bytes < 0
+    ):
+        raise ValueError("Artifact expected size is invalid")
+    expected_digest = str(expected_sha256).removeprefix("sha256:")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+        raise ValueError("Artifact expected digest is invalid")
+    return expected_digest
 
 
 def _hash_file(path: Path) -> tuple[int, str]:
