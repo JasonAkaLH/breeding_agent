@@ -63,6 +63,7 @@
 - `superpowers/specs/2026-08-27-unified-agent-loop-skill-soft-binding-design.md`：`complete_local`的统一Agent Loop Skill soft binding与结果投影设计；Checkpoint A～H仓库实现、审计、全量自动门禁、真实PostgreSQL/Sidecar和外部`bioinfo-daily`直连smoke已闭合，发布级成对UI/API、真实租户MCP与Linux wheel smoke保留为明确gap；不恢复旧DAG/Replanner，不修改MCP显式绑定语义、Skill业务脚本或`prod`。
 - `superpowers/specs/2026-08-28-unified-agent-loop-skill-soft-binding-implementation-plan.md`：上述设计的九检查点`complete_local`实施账本；记录A～H commits、Frontend显式hint、唯一projector、owner-bound`skill_result`、审计/指标和完整本地门禁；未执行镜像发布或`prod`部署。
 - `superpowers/specs/2026-08-28-unified-agent-loop-skill-soft-binding-implementation-evidence.md`：上述实施的唯一稳定脱敏证据索引；汇总branch/commits、测试计数、PostgreSQL/Rust/Frontend、fault matrix、真实Skill结果size/SHA、发布/回滚检查、已知gap与`prod_untouched=true`。
+- `superpowers/specs/2026-08-28-agent-skill-transient-full-result-context-compaction-design.md`：已逐节获用户批准、待书面复核的普通可执行Skill完整结果设计；保留128 KiB durable AgentItem，以private transient stage承接大raw，在AgentRun固定模型窗口90%的total-context阈值下完整注入主Agent，只有全部待发送上下文超限才compact closed history，final/covered后删除stage；MCP/delegated/waiting/failure/Frontend与`prod`不变。
 - `prd/backend/unified-agent-loop/`：当前任务执行/恢复唯一PRD authority；Phase 0～Phase 5 `proof_complete`，Phase 6 `cutover_complete`，Phase 7 `complete`。
 - `prd/backend/unified-agent-loop/cutover-readiness.md`：P6-A冻结的最后rollback authority；记录双仓commit/tree/archive digest、bundle digest、真实PG/Linux/Docker候选和篡改前置拒绝证据。
 - `prd/backend/unified-agent-loop/dag-runtime-deletion-report.md`：P6-C closed删除报告；记录cutover bundle、deleted runtime/wiring/config/events/tests、replacement tests、zero runtime reference、Phase 7 remaining physical inventory与rollback边界。
@@ -94,6 +95,7 @@
 | `superpowers/specs/2026-08-27-four-role-llm-message-contract-implementation-plan.md` | `complete`；定向/三全量回归及默认模型真实Task通过 | 保持四角色静态合同；历史失败Task不复活，用户新提交走已验证路径。 |
 | `superpowers/specs/2026-08-27-unified-agent-loop-skill-soft-binding-design.md` | `complete_local`；Checkpoint A～H仓库实现、全量自动门禁、真实PostgreSQL/Sidecar与外部`bioinfo-daily`直连smoke已闭合 | 获得独立发布授权和租户MCP环境后，补成对UI/API、真实`germplasm-mcp`与Linux wheel smoke；此前不得宣称`release_complete`。 |
 | `superpowers/specs/2026-08-28-unified-agent-loop-skill-soft-binding-implementation-plan.md` | `complete_local`；soft binding authority、projector、owner-bound`skill_result`、Frontend hint、审计文档和本地全量门禁已完成 | 仅保留证据文档列出的H6发布验收gap；不修改Skill业务脚本或`prod`。 |
+| `superpowers/specs/2026-08-28-agent-skill-transient-full-result-context-compaction-design.md` | 设计已逐节获用户批准，待书面复核；业务代码尚未实施 | 用户复核书面spec后生成实施计划；不得提前删除128 KiB合同、修改MCP/raw边界、外部Skill或`prod`。 |
 | `prd/backend/unified-agent-loop/README.md`（来源：统一Agent Loop架构与PRD decomposition design） | `complete`；当前任务编排authority | r3/r4备份继续保留到用户明确结束rollback窗口；后续变更须维持单Agent控制面与Agent-only schema。 |
 | `个人桌面长任务Agent总体设计总纲.md` | 总纲已确认；实现尚未开始 | 基于该总纲生成分阶段实施计划；个人版以 Rust daemon 为唯一可信控制 runtime，必须支持受控子 Agent spawn 以及主 Agent 决策、Runtime 仲裁的权限/上下文/交接边界，一次性替换服务端架构，旧历史只读导入。 |
 | `prd/backend/capability-missing-fallback/README.md`（父入口：`prd/backend/23-能力缺失LLMFallback披露PRD.md`） | Phase 0 至 Phase 4 代码实现已落地 | 后续仅在新增 fallback reason、artifact 政策或能力注册语义时同步更新 PRD、sanitizer、前端 notice 与测试矩阵。 |
