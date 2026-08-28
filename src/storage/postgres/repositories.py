@@ -14,6 +14,7 @@ from src.core.enums import ConversationStatus
 from src.core.models import (
     Conversation,
     ConversationMemorySummary,
+    EventRecord,
     Interrupt,
     InterruptAnswer,
     MCPApprovalDecisionResult,
@@ -47,6 +48,7 @@ from src.core.models import (
     MCPRolloutStageApproval,
     MCPRolloutMetricBucket,
     MCPShadowAuditSample,
+    PendingSkillContext,
     MCPTargetIntentArmResult,
     MCPTargetIntentResolveResult,
     Task,
@@ -227,21 +229,27 @@ class PostgreSQLStorage(SQLiteStorage):
             )
         )
 
-    async def materialize_submission_pending_skill_supersede_exact(
+    async def materialize_submission_pending_skill_transition_exact(
         self,
         *,
         username: str,
         conversation_id: str,
         task_id: str,
-        should_supersede: bool,
+        prepared_execution_sha256: str,
+        target_status: str,
+        reason: str,
+        pending_context: PendingSkillContext | None,
         occurred_at: datetime,
-    ) -> int:
+    ) -> tuple[EventRecord, bool]:
         return await self._run_submission_write_with_unique_retry(
-            lambda state: state.materialize_submission_pending_skill_supersede_exact(
+            lambda state: state.materialize_submission_pending_skill_transition_exact(
                 username=username,
                 conversation_id=conversation_id,
                 task_id=task_id,
-                should_supersede=should_supersede,
+                prepared_execution_sha256=prepared_execution_sha256,
+                target_status=target_status,
+                reason=reason,
+                pending_context=pending_context,
                 occurred_at=occurred_at,
             )
         )

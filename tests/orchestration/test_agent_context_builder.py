@@ -39,6 +39,46 @@ def _item(
 
 
 class AgentContextBuilderTest(unittest.TestCase):
+    def test_initial_hint_activation_renders_before_current_user_message(self) -> None:
+        run = AgentRun(
+            "run-1",
+            "task-1",
+            "conv-1",
+            AgentRunStatus.RUNNING,
+            AgentModelBinding("edition-a"),
+            next_item_sequence=3,
+            revision=1,
+        )
+        user = _item("user", 1, AgentItemKind.USER_MESSAGE, {"text": "what is this"})
+        activation = _item(
+            "activation",
+            2,
+            AgentItemKind.SKILL_ACTIVATION,
+            {
+                "binding_mode": "hint",
+                "pinned_bundle_revision": "revision-1",
+                "profile": {"capability_id": "skill.one", "description": "safe"},
+                "profile_digest": "a" * 64,
+            },
+        )
+
+        request = AgentContextBuilder(
+            AgentContextRules("stable", "tool rules", "final guard")
+        ).build(
+            run=run,
+            items=(user, activation),
+            catalog=AgentToolCatalog((), {}),
+        )
+
+        self.assertEqual([message.role for message in request.messages], ["system", "system", "system", "user", "system"])
+        hint = json.loads(request.messages[2].content or "{}")
+        self.assertIn("Selection does not mean execution", hint["instruction"])
+        self.assertEqual(
+            hint["skill_activation"]["profile"]["capability_id"],
+            "skill.one",
+        )
+        self.assertEqual(request.messages[3].content, "what is this")
+
     def test_recovered_summary_and_skill_activation_keep_order_and_become_system_messages(self) -> None:
         run = AgentRun(
             "run-1",

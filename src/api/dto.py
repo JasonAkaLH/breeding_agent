@@ -127,6 +127,17 @@ class SubmitMessageRequest(StrictRequestModel):
         return value.strip() or None
 
     @model_validator(mode="after")
+    def validate_routing_shape(self) -> "SubmitMessageRequest":
+        if self.routing_mode not in {"auto", "hint", "force_capability"}:
+            raise ValueError("routing_mode must be auto, hint, or force_capability")
+        has_capability = bool((self.capability_id or "").strip())
+        if self.routing_mode == "auto" and has_capability:
+            raise ValueError("routing_mode=auto does not accept capability_id")
+        if self.routing_mode in {"hint", "force_capability"} and not has_capability:
+            raise ValueError(f"routing_mode={self.routing_mode} requires capability_id")
+        return self
+
+    @model_validator(mode="after")
     def validate_mcp_server_binding(self) -> "SubmitMessageRequest":
         raw_binding = self.metadata.get(MCP_SERVER_BINDING_METADATA_KEY)
         forced_mcp_dispatch = (

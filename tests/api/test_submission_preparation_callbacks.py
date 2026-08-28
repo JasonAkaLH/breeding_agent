@@ -44,6 +44,7 @@ def _record(*, continuation: dict[str, object] | None = None) -> SubmissionRecov
         continuation=json.dumps(
             continuation or {}, sort_keys=True, separators=(",", ":")
         ).encode(),
+        prepared_execution_sha256="a" * 64,
         created_at=NOW,
     )
 
@@ -252,9 +253,7 @@ class SubmissionPreparationCallbacksTest(unittest.IsolatedAsyncioTestCase):
         )
         storage = _ExactEventStorage()
         storage.get_task = AsyncMock(return_value=accepted)
-        storage.materialize_submission_pending_skill_supersede_exact = AsyncMock(
-            return_value=0
-        )
+        storage.materialize_submission_pending_skill_transition_exact = AsyncMock()
         runtime = object.__new__(ApiRuntime)
         runtime.storage = storage
         runtime.event_broker = SimpleNamespace(publish=AsyncMock())
@@ -276,8 +275,9 @@ class SubmissionPreparationCallbacksTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(runtime.event_broker.publish.await_count, 2)
         runtime._record_mcp_route_assignment_metric.assert_awaited_once()
+        storage.materialize_submission_pending_skill_transition_exact.assert_not_awaited()
 
-    async def test_pending_supersede_event_recovers_after_event_append_gap(self) -> None:
+    async def test_pending_supersede_receipt_is_published_only_after_first_transition(self) -> None:
         continuation = {
             "routing_mode": str(RoutingMode.FORCE_CAPABILITY),
             "requested_capability_id": "skill.example",
@@ -313,10 +313,28 @@ class SubmissionPreparationCallbacksTest(unittest.IsolatedAsyncioTestCase):
         )
         storage = _ExactEventStorage()
         storage.get_task = AsyncMock(return_value=task)
-        storage.materialize_submission_pending_skill_supersede_exact = AsyncMock(
-            return_value=1
+        receipt = EventRecord(
+            event_id="pending-transition-1",
+            conversation_id="conversation-1",
+            task_id="task-1",
+            event_type="pending_skill_context.superseded",
+            payload={
+                "schema": "maf.pending_skill_context.transition_receipt.v1",
+                "task_id": "task-1",
+                "conversation_id": "conversation-1",
+                "prepared_execution_sha256": "a" * 64,
+                "context_ids_sha256": "b" * 64,
+                "target_status": "superseded",
+                "reason": "new_forced_capability",
+                "occurred_at": NOW.isoformat(),
+                "count": 1,
+            },
+            visibility=EventVisibility.AUDIT_ONLY,
+            created_at=NOW,
         )
-        storage.fail_event_type_once = "pending_skill_context.superseded"
+        storage.materialize_submission_pending_skill_transition_exact = AsyncMock(
+            side_effect=[(receipt, False), (receipt, True)]
+        )
         runtime = object.__new__(ApiRuntime)
         runtime.storage = storage
         runtime.event_broker = SimpleNamespace(publish=AsyncMock())
@@ -326,22 +344,14 @@ class SubmissionPreparationCallbacksTest(unittest.IsolatedAsyncioTestCase):
         runtime._record_mcp_route_assignment_metric = AsyncMock()
         record = _record(continuation=continuation)
 
-        with self.assertRaisesRegex(RuntimeError, "event append fault"):
-            await runtime.materialize_route_decision(record, b"{}")
+        await runtime.materialize_route_decision(record, b"{}")
         await runtime.materialize_route_decision(record, b"{}")
 
-        pending_events = [
-            event
-            for event in storage.events.values()
-            if event.event_type == "pending_skill_context.superseded"
-        ]
-        self.assertEqual(len(pending_events), 1)
+        self.assertEqual(len(storage.events), 2)
+        self.assertEqual(runtime.event_broker.publish.await_count, 3)
+        self.assertIn(receipt, [call.args[0] for call in runtime.event_broker.publish.await_args_list])
         self.assertEqual(
-            pending_events[0].payload,
-            {"count": 1, "reason": "new_forced_capability"},
-        )
-        self.assertEqual(
-            storage.materialize_submission_pending_skill_supersede_exact.await_count,
+            storage.materialize_submission_pending_skill_transition_exact.await_count,
             2,
         )
 

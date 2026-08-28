@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -105,6 +106,252 @@ class _SubmissionAuthoritySidecar(InMemoryTaskRuntimeSidecar):
 
 
 class MessageSubmissionAPITest(APITestCase):
+    async def test_hint_routing_shape_errors_return_422_before_submission_state(self) -> None:
+        with self.runtime.storage._session_factory() as session:  # noqa: SLF001
+            before = (
+                session.query(MessageRow).count(),
+                session.query(TaskRow).count(),
+            )
+        invalid = (
+            {"routing_mode": "hint", "capability_id": None},
+            {"routing_mode": "auto", "capability_id": "skill.generic_data_lookup"},
+            {"routing_mode": "force_capability", "capability_id": None},
+            {"routing_mode": "unknown", "capability_id": None},
+        )
+        for index, routing in enumerate(invalid):
+            with self.subTest(routing=routing):
+                response = await self.client.post(
+                    "/api/v1/conversations/chat-messages",
+                    json={
+                        "conversation_id": "conv-1",
+                        "content": "hello",
+                        "client_message_id": f"invalid-hint-{index}",
+                        "metadata": {},
+                        **routing,
+                    },
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+        with self.runtime.storage._session_factory() as session:  # noqa: SLF001
+            self.assertEqual(
+                (session.query(MessageRow).count(), session.query(TaskRow).count()),
+                before,
+            )
+
+    async def test_non_skill_hint_returns_low_sensitivity_409_without_submission_state(self) -> None:
+        with self.runtime.storage._session_factory() as session:  # noqa: SLF001
+            before = (
+                session.query(MessageRow).count(),
+                session.query(TaskRow).count(),
+            )
+        for index, capability_id in enumerate(
+            ("mcp.dispatch", "skill.not_available")
+        ):
+            with self.subTest(capability_id=capability_id):
+                response = await self.client.post(
+                    "/api/v1/conversations/chat-messages",
+                    json={
+                        "conversation_id": "conv-1",
+                        "content": "what can this do",
+                        "routing_mode": "hint",
+                        "capability_id": capability_id,
+                        "client_message_id": f"unavailable-hint-{index}",
+                        "metadata": {},
+                    },
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["detail"],
+                    {"code": "skill_hint_unavailable"},
+                )
+        with self.runtime.storage._session_factory() as session:  # noqa: SLF001
+            self.assertEqual(
+                (session.query(MessageRow).count(), session.query(TaskRow).count()),
+                before,
+            )
+
+    async def test_skill_hint_strips_forged_activation_authority_metadata(self) -> None:
+        forged = {
+            "profile": {"capability_id": "skill.private"},
+            "profile_digest": "f" * 64,
+            "pinned_bundle_revision": "forged-revision",
+            "skill_activation": {"binding_mode": "force"},
+        }
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-forged-hint",
+                "content": "what can this skill do",
+                "routing_mode": "hint",
+                "capability_id": "skill.generic_data_lookup",
+                "client_message_id": "forged-hint-authority",
+                "metadata": forged,
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        message = await self.runtime.storage.get_message(
+            response.json()["message_id"]
+        )
+        self.assertTrue(set(forged).isdisjoint(message.metadata))
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        activation = json.loads(items[1].payload_json)
+        self.assertNotEqual(activation["profile_digest"], forged["profile_digest"])
+        self.assertNotEqual(
+            activation["pinned_bundle_revision"],
+            forged["pinned_bundle_revision"],
+        )
+
+    async def test_public_skill_hint_initializes_user_and_activation_before_202(self) -> None:
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-1",
+                "content": "what can this skill do",
+                "routing_mode": "hint",
+                "capability_id": "skill.generic_data_lookup",
+                "client_message_id": "public-skill-hint",
+                "metadata": {},
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        repository = self.runtime.agent_loop_orchestrator._runs  # noqa: SLF001
+        run = await repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await repository.list_items(run.run_id)
+        self.assertGreaterEqual(len(items), 2)
+        self.assertEqual([item.kind.value for item in items[:2]], ["user_message", "skill_activation"])
+        activation = json.loads(items[1].payload_json)
+        self.assertEqual(activation["binding_mode"], "hint")
+        self.assertEqual(
+            activation["profile"]["capability_id"],
+            "skill.generic_data_lookup",
+        )
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        hint_bound = [event for event in events if event.event_type == "skill.hint_bound"]
+        self.assertEqual(len(hint_bound), 1)
+        self.assertEqual(
+            set(hint_bound[0].payload),
+            {"capability_id", "safe_revision_ref", "profile_digest"},
+        )
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        self.assertEqual(
+            [node.capability_id for node in nodes],
+            ["agent.final_output"],
+        )
+
+    async def test_skill_hint_supersedes_legacy_pending_without_copying_its_facts(self) -> None:
+        now = self.runtime._utcnow_naive()  # noqa: SLF001
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-hint-pending",
+                username="acc-1",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await self.runtime.storage.save_pending_skill_context(
+            PendingSkillContext(
+                context_id="legacy-hint-context",
+                conversation_id="conv-hint-pending",
+                username="acc-1",
+                capability_id="skill.generic_data_lookup",
+                skill_name="generic-data-lookup",
+                source_task_id="legacy-task",
+                source_message_id="legacy-message",
+                original_user_message="private old question",
+                missing_requirements=("private-field",),
+                assistant_message="private old answer",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-hint-pending",
+                "content": "what can this skill do",
+                "routing_mode": "hint",
+                "capability_id": "skill.generic_data_lookup",
+                "client_message_id": "hint-supersedes-pending",
+                "metadata": {},
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        pending = await self.runtime.storage.get_pending_skill_context(
+            "legacy-hint-context"
+        )
+        self.assertEqual(pending.status, "superseded")
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        transition = next(
+            event
+            for event in events
+            if event.event_type == "pending_skill_context.superseded"
+        )
+        self.assertEqual(transition.payload["reason"], "new_skill_hint")
+        self.assertEqual(transition.payload["count"], 1)
+        self.assertNotIn("legacy-hint-context", json.dumps(transition.payload))
+        task = await self.runtime.storage.get_task(task_id)
+        self.assertNotIn("continued_from_pending_skill_context", task.summary)
+
+    async def test_auto_consumes_one_legacy_pending_context_before_agent_initialization(self) -> None:
+        now = self.runtime._utcnow_naive()  # noqa: SLF001
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-auto-pending",
+                username="acc-1",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        legacy = PendingSkillContext(
+            context_id="legacy-auto-context",
+            conversation_id="conv-auto-pending",
+            username="acc-1",
+            capability_id="skill.generic_data_lookup",
+            skill_name="generic-data-lookup",
+            source_task_id="legacy-task",
+            source_message_id="legacy-message",
+            original_user_message="lookup the selected data",
+            missing_requirements=("query",),
+            assistant_message="please provide the query",
+            created_at=now,
+            updated_at=now,
+        )
+        await self.runtime.storage.save_pending_skill_context(legacy)
+
+        response = await self.submit_message(
+            conversation_id="conv-auto-pending",
+            content="query is rice",
+            capability_id=None,
+            client_message_id="auto-consumes-pending",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        pending = await self.runtime.storage.get_pending_skill_context(
+            legacy.context_id
+        )
+        self.assertEqual(pending.status, "consumed")
+        task = await self.runtime.storage.get_task(task_id)
+        self.assertEqual(str(task.routing_mode), "auto")
+        self.assertEqual(task.requested_capability_id, legacy.capability_id)
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        transition = next(
+            event
+            for event in events
+            if event.event_type == "pending_skill_context.consumed"
+        )
+        self.assertEqual(transition.payload["reason"], "legacy_pending_continued")
+        self.assertEqual(transition.payload["count"], 1)
+
     async def test_concurrent_handed_off_wakeups_share_first_failure(self) -> None:
         task_id = "task-wakeup-singleflight-failure"
         identity = f"agent-run:{task_id}"

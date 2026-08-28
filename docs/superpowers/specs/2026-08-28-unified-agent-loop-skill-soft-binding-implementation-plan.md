@@ -6,7 +6,7 @@
 
 计划日期：2026-08-28
 
-状态：`in_progress`（Checkpoint A～B 已完成；Checkpoint C～H、镜像重建与部署尚未完成）
+状态：`in_progress`（Checkpoint A～D 已完成；Checkpoint E～H、镜像重建与部署尚未完成）
 
 目标分支：`main`
 
@@ -386,6 +386,8 @@ conda run -n multi_agent python -m unittest \
 
 真实PostgreSQL测试skip不得记为green。Checkpoint C 的 green 只证明内部初始化、恢复、Context 与 Tool choice 合同，不宣称 public hint 已可用。
 
+完成证据：SQLite与Runtime Sidecar初始化writer已原子提交user + 可选hint activation并覆盖三处fault rollback与exact replay；prepared recovery逐字节传递activation，hint/auto统一保持auto Tool choice，hint profile在user前渲染。Agent storage、Context、Loop、prepared/startup recovery及真实PostgreSQL Agent repository定向门禁通过；本检查点与D共同形成不可拆分开发阶段，未单独发布。
+
 检查点提交建议：
 
 ```text
@@ -506,7 +508,9 @@ conda run -n multi_agent python -m unittest \
   tests.storage.test_submission_admission_postgres_integration
 ```
 
-真实PostgreSQL DSN未提供或测试skip不能记作通过；Checkpoint D保持未完成。
+真实PostgreSQL DSN未提供或测试skip不能记作通过；本次使用一次性隔离PostgreSQL 17数据库完成零skip门禁后才将D记为完成。
+
+完成证据：DTO 422与低敏409在submission副作用前闭合；合法hint在HTTP 202前已持久化prepared v2及user + activation，informational样例零Tool调用。历史pending transition用同一SQL事务写状态与Task/prepared/status/reason/time绑定的deterministic audit receipt，auto consumed一次，hint/force/MCP superseded且空集合也留receipt；delegated Skill复用hint activation，仅实际调用后提交有界pinned instruction model-result。C/D focused Python 216项、一次性隔离PostgreSQL三组15项、Runtime Sidecar Rust 90项及Ruff/diff/fmt通过；Checkpoint E～H仍未完成。
 
 检查点提交建议：
 

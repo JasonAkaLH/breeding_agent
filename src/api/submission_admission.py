@@ -200,6 +200,7 @@ def build_submission_admission_request(
     initial_no_server_eligible: bool,
     claim_owner: str,
     claim_expires_at: datetime,
+    skill_activation: Mapping[str, Any] | None = None,
 ) -> SubmissionAdmissionRequest:
     """Build one closed, canonical submission request without side effects."""
 
@@ -366,6 +367,9 @@ def build_submission_admission_request(
             "available_mcp_servers": normalized_servers,
             "pending_context": normalized_pending,
             "initial_no_server_eligible": initial_no_server_eligible,
+            "skill_activation": (
+                dict(skill_activation) if skill_activation is not None else None
+            ),
         }
     )
     continuation_sha256 = _domain_sha256(_CONTINUATION_DOMAIN, continuation)
@@ -1165,16 +1169,21 @@ class SubmissionAdmissionCoordinator:
             if prepared["planned_handoff_kind"] == "agent_run"
             else None
         )
+        materialization_record = replace(
+            record,
+            prepared_execution=prepared_bytes,
+            prepared_execution_sha256=_prepared_execution_digest(prepared_bytes),
+        )
         await keeper.renew_now()
         await self._callbacks.materialize_route_decision(
-            record, _required_component(receipt.route_decision)
+            materialization_record, _required_component(receipt.route_decision)
         )
         if prepared["prepared_kind"] != "no_server_intent":
             await self._callbacks.materialize_memory_context(
-                record, _required_component(receipt.memory_context)
+                materialization_record, _required_component(receipt.memory_context)
             )
             await self._callbacks.materialize_selector_decision(
-                record, _required_component(receipt.selector_decision)
+                materialization_record, _required_component(receipt.selector_decision)
             )
         handoff = await self._durable_handoff(record, prepared, agent_context)
         _validate_handoff(record, prepared, handoff)

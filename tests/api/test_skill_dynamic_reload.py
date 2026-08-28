@@ -49,7 +49,7 @@ entrypoints:
 
         def agent_generator(prompt: str, **_kwargs) -> str:
             prompts.append(prompt)
-            if '"activation":"completed"' in prompt:
+            if '"schema":"maf.agent.delegated_skill_activation.v1"' in prompt:
                 return "done"
             return json.dumps(
                 {
@@ -181,7 +181,7 @@ entrypoints:
 
         def agent_generator(prompt: str, **_kwargs) -> str:
             prompts.append(prompt)
-            if '"activation":"completed"' in prompt:
+            if '"schema":"maf.agent.delegated_skill_activation.v1"' in prompt:
                 return "done"
             return json.dumps(
                 {
@@ -212,6 +212,70 @@ entrypoints:
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
         self.assertGreaterEqual(len(prompts), 2)
+
+    async def test_hint_delegated_skill_reuses_activation_and_reveals_pinned_body_after_call(self) -> None:
+        project_skill_root = self.workspace / "skill"
+        self._write_skill(project_skill_root)
+        prompts: list[str] = []
+
+        def agent_generator(prompt: str, **_kwargs) -> str:
+            prompts.append(prompt)
+            if '"schema":"maf.agent.delegated_skill_activation.v1"' in prompt:
+                return "done"
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "capability_id": "skill.demo_hot_reload",
+                            "arguments": {},
+                        }
+                    ]
+                }
+            )
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=agent_generator,
+        )
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-delegated-hint",
+                "content": "please execute this skill",
+                "routing_mode": "hint",
+                "capability_id": "skill.demo_hot_reload",
+                "metadata": {},
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        self.assertNotIn("请使用动态加载 Skill。", prompts[0])
+        self.assertIn("请使用动态加载 Skill。", prompts[1])
+
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        activations = [
+            item for item in items if item.kind is AgentItemKind.SKILL_ACTIVATION
+        ]
+        self.assertEqual(len(activations), 1)
+        self.assertEqual(json.loads(activations[0].payload_json)["binding_mode"], "hint")
+        tool_result = next(
+            item for item in items if item.kind is AgentItemKind.TOOL_RESULT
+        )
+        safe_result = json.loads(tool_result.payload_json)["safe_result"]
+        self.assertEqual(safe_result["schema"], "maf.agent.model_result.v1")
+        self.assertEqual(
+            safe_result["projection_revision"],
+            "delegated-skill-instruction-v1",
+        )
+        self.assertEqual(
+            safe_result["model_view"]["schema"],
+            "maf.agent.delegated_skill_activation.v1",
+        )
 
     async def test_refresh_sync_failure_restores_previous_active_skill_bundle(self) -> None:
         project_skill_root = self.workspace / "skill"

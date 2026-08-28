@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from sqlalchemy import func, select
 
+from src.integrations.agent_skills.public_profile import PublicSkillProfile
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
@@ -25,6 +25,9 @@ from src.orchestration.agent_loop.models import (
     AgentUsage,
     AgentUserMessageCommit,
 )
+from src.orchestration.agent_loop.skill_activation import (
+    build_canonical_skill_activation,
+)
 from src.storage.sqlite import (
     SQLiteAgentRepository,
     bootstrap_sqlite_database,
@@ -33,7 +36,6 @@ from src.storage.sqlite import (
 )
 from src.storage.sqlite.models import (
     AgentFinalReceiptRow,
-    AgentItemRow,
     AgentRunRow,
     ArtifactRow,
     EventRecordRow,
@@ -162,6 +164,113 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             [AgentItemKind.USER_MESSAGE, AgentItemKind.ASSISTANT_MESSAGE],
         )
         self.assertEqual(committed.assistant_item.sequence, 2)
+
+    async def test_initial_user_and_hint_activation_commit_atomically_and_replay_exactly(self) -> None:
+        run = await self._create()
+        activation = build_canonical_skill_activation(
+            binding_mode="hint",
+            profile=PublicSkillProfile(
+                capability_id="skill.report",
+                name="report",
+                display_name="Report",
+                description="safe",
+                triggers=(),
+            ),
+            pinned_bundle_revision="revision-1",
+            resolved_bundle_revision="revision-1",
+        )
+        commit = AgentUserMessageCommit(
+            run.run_id,
+            run.revision,
+            None,
+            "用户问题",
+            activation.payload_json,
+            activation.payload_sha256,
+        )
+
+        initialized = await self.repository.commit_agent_user_message(commit)
+        replay = await self.repository.commit_agent_user_message(
+            AgentUserMessageCommit(
+                run.run_id,
+                initialized.run.revision,
+                None,
+                "用户问题",
+                activation.payload_json,
+                activation.payload_sha256,
+            )
+        )
+
+        assert initialized.activation_item is not None
+        self.assertEqual(replay, initialized)
+        self.assertEqual(initialized.run.next_item_sequence, 3)
+        self.assertEqual(initialized.item.committed_at, initialized.activation_item.committed_at)
+        self.assertEqual(
+            [item.kind for item in await self.repository.list_items(run.run_id)],
+            [AgentItemKind.USER_MESSAGE, AgentItemKind.SKILL_ACTIVATION],
+        )
+        with self.assertRaisesRegex(AgentStorageConflict, "presence_conflict"):
+            await self.repository.commit_agent_user_message(
+                AgentUserMessageCommit(
+                    run.run_id,
+                    initialized.run.revision,
+                    None,
+                    "用户问题",
+                )
+            )
+
+    async def test_initial_hint_faults_roll_back_user_activation_and_revision(self) -> None:
+        activation = build_canonical_skill_activation(
+            binding_mode="hint",
+            profile=PublicSkillProfile(
+                capability_id="skill.report",
+                name="report",
+                display_name="Report",
+                description="safe",
+                triggers=(),
+            ),
+            pinned_bundle_revision="revision-1",
+            resolved_bundle_revision="revision-1",
+        )
+        for index, stage in enumerate(
+            (
+                "user_initial_after_user",
+                "user_initial_after_activation",
+                "user_initial_after_run_update",
+            ),
+            start=2,
+        ):
+            with self.subTest(stage=stage):
+                task_id = f"task-{index}"
+                run_id = f"run-{index}"
+                self._seed_task(task_id, "conv-1")
+                run = await self.repository.create_run(
+                    self._run(run_id=run_id, task_id=task_id)
+                )
+
+                def fail(current: str) -> None:
+                    if current == stage:
+                        raise RuntimeError("injected")
+
+                repository = SQLiteAgentRepository(
+                    self.session_factory,
+                    fault_injector=fail,
+                )
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    await repository.commit_agent_user_message(
+                        AgentUserMessageCommit(
+                            run.run_id,
+                            run.revision,
+                            None,
+                            "用户问题",
+                            activation.payload_json,
+                            activation.payload_sha256,
+                        )
+                    )
+                stored = await self.repository.get_run(run_id)
+                assert stored is not None
+                self.assertEqual(stored.revision, 0)
+                self.assertEqual(stored.next_item_sequence, 1)
+                self.assertEqual(await self.repository.list_items(run_id), ())
 
     async def test_sample_atomically_persists_calls_result_slots_and_nodes_before_executor(self) -> None:
         executor_calls = 0

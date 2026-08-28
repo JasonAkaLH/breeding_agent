@@ -1330,15 +1330,18 @@ class ConversationTaskAdmissionPort(Protocol):
 
 @runtime_checkable
 class SubmissionPreparationReceiptStoragePort(Protocol):
-    async def materialize_submission_pending_skill_supersede_exact(
+    async def materialize_submission_pending_skill_transition_exact(
         self,
         *,
         username: str,
         conversation_id: str,
         task_id: str,
-        should_supersede: bool,
+        prepared_execution_sha256: str,
+        target_status: str,
+        reason: str,
+        pending_context: PendingSkillContext | None,
         occurred_at: datetime,
-    ) -> int: ...
+    ) -> tuple[EventRecord, bool]: ...
 
     async def settle_submission_route_decision_exact(
         self,

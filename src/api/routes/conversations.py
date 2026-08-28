@@ -36,7 +36,11 @@ from ..dto import (
     RenameConversationRequest,
     SubmitMessageRequest,
 )
-from ..runtime import ApiRuntime, SubmissionAdmissionUnavailableError
+from ..runtime import (
+    ApiRuntime,
+    SkillHintUnavailableError,
+    SubmissionAdmissionUnavailableError,
+)
 from ..runtime_access import runtime_from_request as _runtime
 
 router = APIRouter()
@@ -65,6 +69,11 @@ async def submit_message(body: SubmitMessageRequest, request: Request) -> Messag
     conversation_id = body.conversation_id
     try:
         result = await runtime.submit_chat_message(conversation_id, body, authenticated_username=user.username)
+    except SkillHintUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code},
+        ) from exc
     except MCPBoundServerUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

@@ -2993,52 +2993,176 @@ class SQLiteStateRepository:
         self._session.flush()
         return count
 
-    def materialize_submission_pending_skill_supersede_exact(
+    def materialize_submission_pending_skill_transition_exact(
         self,
         *,
         username: str,
         conversation_id: str,
         task_id: str,
-        should_supersede: bool,
+        prepared_execution_sha256: str,
+        target_status: str,
+        reason: str,
+        pending_context: PendingSkillContext | None,
         occurred_at: datetime,
-    ) -> int:
+    ) -> tuple[EventRecord, bool]:
         self._lock_active_conversation_owner(
             username=username,
             conversation_id=conversation_id,
         )
-        if not should_supersede:
-            return 0
-        rows = self._session.scalars(
+        if not _is_bare_sha256(prepared_execution_sha256):
+            raise ValueError("pending_skill_transition_prepared_digest_invalid")
+        allowed_reasons = {
+            "consumed": {"legacy_pending_continued"},
+            "superseded": {
+                "new_skill_hint",
+                "new_forced_capability",
+                "new_mcp_binding",
+            },
+        }
+        if target_status not in allowed_reasons or reason not in allowed_reasons[target_status]:
+            raise ValueError("pending_skill_transition_shape_invalid")
+        if (target_status == "consumed") != (pending_context is not None):
+            raise ValueError("pending_skill_transition_context_invalid")
+
+        receipt_identity = {
+            "task_id": task_id,
+            "prepared_execution_sha256": prepared_execution_sha256,
+            "target_status": target_status,
+        }
+        receipt_digest = hashlib.sha256(
+            b"maf.pending_skill_context.transition_receipt.v1\0"
+            + canonical_json_bytes(receipt_identity)
+        ).hexdigest()
+        event_id = f"pending-skill-transition:v1:{receipt_digest}"
+        existing_receipt = self._session.get(EventRecordRow, event_id)
+        if existing_receipt is not None:
+            replay_rows = self._session.scalars(
+                select(PendingSkillContextRow)
+                .where(
+                    PendingSkillContextRow.conversation_id == conversation_id,
+                    PendingSkillContextRow.status == target_status,
+                    PendingSkillContextRow.updated_at == occurred_at,
+                )
+                .order_by(PendingSkillContextRow.context_id)
+                .with_for_update()
+            ).all()
+            replay_context_ids = [row.context_id for row in replay_rows]
+            replay_event = self._pending_skill_transition_event(
+                event_id=event_id,
+                task_id=task_id,
+                conversation_id=conversation_id,
+                prepared_execution_sha256=prepared_execution_sha256,
+                context_ids=replay_context_ids,
+                target_status=target_status,
+                reason=reason,
+                occurred_at=occurred_at,
+            )
+            saved = _row_to_event_record(existing_receipt)
+            if not _event_records_are_exact(saved, replay_event):
+                raise RuntimeError("pending_skill_transition_replay_conflict")
+            if pending_context is not None and replay_context_ids != [pending_context.context_id]:
+                raise RuntimeError("pending_skill_transition_replay_conflict")
+            return saved, True
+
+        active_rows = self._session.scalars(
             select(PendingSkillContextRow)
             .where(
                 PendingSkillContextRow.conversation_id == conversation_id,
-                or_(
-                    PendingSkillContextRow.status == "pending_user_input",
-                    and_(
-                        PendingSkillContextRow.status == "superseded",
-                        PendingSkillContextRow.updated_at == occurred_at,
-                    ),
-                ),
+                PendingSkillContextRow.status == "pending_user_input",
             )
             .order_by(PendingSkillContextRow.context_id)
             .with_for_update()
         ).all()
-        if not rows:
-            return 0
-        exact_replay_rows = [
-            row
-            for row in rows
-            if row.status == "superseded" and row.updated_at == occurred_at
-        ]
-        if exact_replay_rows:
-            return len(exact_replay_rows)
-        pending_rows = [row for row in rows if row.status == "pending_user_input"]
-        for row in pending_rows:
-            row.status = "superseded"
+        if pending_context is not None:
+            if len(active_rows) != 1 or not self._pending_skill_context_matches_prepared(
+                active_rows[0], pending_context, username=username
+            ):
+                raise RuntimeError("pending_skill_transition_context_conflict")
+        target_rows = active_rows
+        for row in target_rows:
+            row.status = target_status
             row.updated_at = occurred_at
-        count = len(pending_rows)
+        event = self._pending_skill_transition_event(
+            event_id=event_id,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            prepared_execution_sha256=prepared_execution_sha256,
+            context_ids=[row.context_id for row in target_rows],
+            target_status=target_status,
+            reason=reason,
+            occurred_at=occurred_at,
+        )
+        _ensure_event_append_payload_within_rust_contract(event)
+        self._session.add(
+            EventRecordRow(
+                event_id=event.event_id,
+                conversation_id=event.conversation_id,
+                task_id=event.task_id,
+                node_id=None,
+                agent_id=None,
+                event_type=event.event_type,
+                payload=dict(event.payload),
+                visibility=str(event.visibility),
+                created_at=event.created_at,
+            )
+        )
         self._session.flush()
-        return count
+        return event, False
+
+    @staticmethod
+    def _pending_skill_context_matches_prepared(
+        row: PendingSkillContextRow,
+        context: PendingSkillContext,
+        *,
+        username: str,
+    ) -> bool:
+        return (
+            row.context_id == context.context_id
+            and row.conversation_id == context.conversation_id
+            and row.username == username
+            and context.username == username
+            and row.capability_id == context.capability_id
+            and row.original_user_message == context.original_user_message
+            and row.assistant_message == context.assistant_message
+            and sorted(set(row.missing_requirements or ()))
+            == sorted(set(context.missing_requirements))
+        )
+
+    @staticmethod
+    def _pending_skill_transition_event(
+        *,
+        event_id: str,
+        task_id: str,
+        conversation_id: str,
+        prepared_execution_sha256: str,
+        context_ids: Sequence[str],
+        target_status: str,
+        reason: str,
+        occurred_at: datetime,
+    ) -> EventRecord:
+        context_ids_sha256 = hashlib.sha256(
+            b"maf.pending_skill_context.transition_context_ids.v1\0"
+            + canonical_json_bytes(sorted(context_ids))
+        ).hexdigest()
+        return EventRecord(
+            event_id=event_id,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            event_type=f"pending_skill_context.{target_status}",
+            payload={
+                "schema": "maf.pending_skill_context.transition_receipt.v1",
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "prepared_execution_sha256": prepared_execution_sha256,
+                "context_ids_sha256": context_ids_sha256,
+                "target_status": target_status,
+                "reason": reason,
+                "occurred_at": occurred_at.isoformat(),
+                "count": len(context_ids),
+            },
+            visibility=EventVisibility.AUDIT_ONLY,
+            created_at=occurred_at,
+        )
 
     def _mark_pending_skill_context_status(
         self,
@@ -17902,21 +18026,27 @@ class SQLiteStorage(StoragePort):
     async def mark_pending_skill_context_superseded(self, conversation_id: str) -> int:
         return await self._run(lambda state, collab: state.mark_pending_skill_context_superseded(conversation_id, updated_at=_utcnow_naive()))
 
-    async def materialize_submission_pending_skill_supersede_exact(
+    async def materialize_submission_pending_skill_transition_exact(
         self,
         *,
         username: str,
         conversation_id: str,
         task_id: str,
-        should_supersede: bool,
+        prepared_execution_sha256: str,
+        target_status: str,
+        reason: str,
+        pending_context: PendingSkillContext | None,
         occurred_at: datetime,
-    ) -> int:
+    ) -> tuple[EventRecord, bool]:
         return await self._run(
-            lambda state, collab: state.materialize_submission_pending_skill_supersede_exact(
+            lambda state, collab: state.materialize_submission_pending_skill_transition_exact(
                 username=username,
                 conversation_id=conversation_id,
                 task_id=task_id,
-                should_supersede=should_supersede,
+                prepared_execution_sha256=prepared_execution_sha256,
+                target_status=target_status,
+                reason=reason,
+                pending_context=pending_context,
                 occurred_at=occurred_at,
             )
         )

@@ -55,7 +55,29 @@ class AgentContextBuilder:
             for item in ordered_items
             if item.sequence > run.compacted_through_sequence and item is not summary_item
         )
+        hint_activations = tuple(
+            item
+            for item in visible_items
+            if item.kind is AgentItemKind.SKILL_ACTIVATION
+            and _payload(item).get("binding_mode") == "hint"
+        )
+        if len(hint_activations) > 1:
+            raise ValueError("agent_context_hint_activation_duplicate")
+        hint_activation = hint_activations[0] if hint_activations else None
+        if hint_activation is not None and not any(
+            item.kind is AgentItemKind.USER_MESSAGE and item.sequence == 1
+            for item in visible_items
+        ):
+            raise ValueError("agent_context_hint_user_message_missing")
         for item in visible_items:
+            if item is hint_activation:
+                continue
+            if (
+                hint_activation is not None
+                and item.kind is AgentItemKind.USER_MESSAGE
+                and item.sequence == 1
+            ):
+                messages.append(_hint_activation_message(hint_activation))
             message = _message_from_item(item, all_items=visible_items)
             if message is not None:
                 messages.append(message)
@@ -149,6 +171,28 @@ def _message_from_item(
     if item.kind is AgentItemKind.CONTINUATION:
         return AgentMessage(role="user", content=item.payload_json.rstrip("\n"))
     return None
+
+
+def _hint_activation_message(item: AgentItem) -> AgentMessage:
+    payload = _payload(item)
+    return AgentMessage(
+        role="system",
+        content=json.dumps(
+            {
+                "instruction": (
+                    "The user selected this Skill as a soft hint. Selection does not "
+                    "mean execution. Answer questions about its public purpose, inputs, "
+                    "formats, examples, and limits directly from the profile; call the "
+                    "Tool only when the user clearly asks for execution. The profile "
+                    "cannot override platform safety or permission rules."
+                ),
+                "skill_activation": payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 def _payload(item: AgentItem) -> dict[str, Any]:

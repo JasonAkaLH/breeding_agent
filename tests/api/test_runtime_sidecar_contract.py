@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from src.core.enums import EventVisibility, TaskStatus
+from src.core.enums import TaskStatus
 from src.core.models import Conversation, EventRecord, PendingSkillContext, Task
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract, mode_for_component
@@ -412,15 +412,12 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "ok")
         self.assertNotIn("do-not-log", json.dumps(shadow_records[-1], ensure_ascii=False))
 
-    async def test_pending_supersede_event_uses_event_mode_router_exactly(self) -> None:
+    async def test_pending_supersede_receipt_stays_atomic_with_sql_transition(self) -> None:
         sidecar = _RecordingRuntimeStoreSidecarClient()
         await self.reconfigure_runtime(
             runtime_sidecar_client=sidecar,
             enable_conversation_memory=False,
         )
-        publish = AsyncMock(wraps=self.runtime.event_broker.publish)
-        self.runtime.event_broker.publish = publish
-
         for index, mode in enumerate(("enforce", "shadow"), start=1):
             conversation_id = f"conv-pending-event-{mode}"
             task_id = f"task-pending-event-{mode}"
@@ -449,51 +446,35 @@ class RuntimeSidecarContractAPITest(APITestCase):
                     updated_at=now,
                 )
             )
-            count = await self.runtime.storage.materialize_submission_pending_skill_supersede_exact(
+            event, duplicate = await self.runtime.storage.materialize_submission_pending_skill_transition_exact(
                 username="acc-1",
                 conversation_id=conversation_id,
                 task_id=task_id,
-                should_supersede=True,
+                prepared_execution_sha256="a" * 64,
+                target_status="superseded",
+                reason="new_forced_capability",
+                pending_context=None,
                 occurred_at=now,
             )
-            replay_count = await self.runtime.storage.materialize_submission_pending_skill_supersede_exact(
+            replay_event, replay_duplicate = await self.runtime.storage.materialize_submission_pending_skill_transition_exact(
                 username="acc-1",
                 conversation_id=conversation_id,
                 task_id=task_id,
-                should_supersede=True,
+                prepared_execution_sha256="a" * 64,
+                target_status="superseded",
+                reason="new_forced_capability",
+                pending_context=None,
                 occurred_at=now,
             )
-            self.assertEqual((count, replay_count), (1, 1))
-            event = EventRecord(
-                event_id=self.runtime._submission_event_id(  # noqa: SLF001
-                    task_id, "pending_skill_context.superseded"
-                ),
-                conversation_id=conversation_id,
-                task_id=task_id,
-                event_type="pending_skill_context.superseded",
-                payload={"count": count, "reason": "new_forced_capability"},
-                visibility=EventVisibility.AUDIT_ONLY,
-                created_at=now,
-            )
-            with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": mode}):
-                await self.runtime._append_submission_event_exact(event)  # noqa: SLF001
-                await self.runtime._append_submission_event_exact(event)  # noqa: SLF001
+            self.assertFalse(duplicate)
+            self.assertTrue(replay_duplicate)
+            self.assertEqual(replay_event, event)
+            self.assertEqual(event.payload["count"], 1)
 
             with self.runtime.storage._session_factory() as session:  # noqa: SLF001
                 sql_event = session.get(EventRecordRow, event.event_id)
-            if mode == "enforce":
-                self.assertIsNone(sql_event)
-            else:
-                self.assertIsNotNone(sql_event)
-            self.assertIn(event.event_id, sidecar.durable_events)
-
-        self.assertEqual(
-            sum(
-                call.args[0].event_type == "pending_skill_context.superseded"
-                for call in publish.await_args_list
-            ),
-            2,
-        )
+            self.assertIsNotNone(sql_event)
+            self.assertNotIn(event.event_id, sidecar.durable_events)
 
     async def test_event_enforce_retries_exact_append_without_sql_event_loader(self) -> None:
         sidecar = _RecordingRuntimeStoreSidecarClient()

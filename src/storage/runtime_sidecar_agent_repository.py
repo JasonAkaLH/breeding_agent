@@ -234,14 +234,24 @@ class RuntimeSidecarAgentRepository:
         items = await self.list_items(run.run_id)
         item_id = f"agent-item:{run.run_id}:user-initial"
         payload = canonicalize_agent_payload({"text": commit.text})
+        now = self._now()
+        activation_item = _initial_activation_item(run, commit, now=now)
+        activation_items = tuple(
+            item for item in items if item.kind is AgentItemKind.SKILL_ACTIVATION
+        )
         existing = next((item for item in items if item.item_id == item_id), None)
         if existing is not None:
             if existing.payload_sha256 != payload.sha256:
                 raise AgentStorageConflict("agent_user_message_conflict")
-            return AgentUserMessageCommitResult(run, existing)
+            stored_activation = _validate_sidecar_initial_activation(
+                activation_items,
+                expected=activation_item,
+            )
+            return AgentUserMessageCommitResult(run, existing, stored_activation)
+        if activation_items:
+            raise AgentStorageConflict("agent_initial_activation_without_user")
         if run.next_item_sequence != 1:
             raise AgentStorageConflict("agent_user_message_sequence_conflict")
-        now = self._now()
         item = _item(
             item_id=item_id,
             run=run,
@@ -252,23 +262,30 @@ class RuntimeSidecarAgentRepository:
             created_at=now,
             committed_at=now,
         )
+        committed_items = (item,) if activation_item is None else (item, activation_item)
         updated_run = replace(
             run,
-            next_item_sequence=2,
+            next_item_sequence=2 if activation_item is None else 3,
             revision=run.revision + 1,
             updated_at=now,
         )
+        identity = hashlib.sha256(
+            "\0".join(
+                item.payload_sha256 for item in committed_items
+            ).encode()
+        ).hexdigest()
         response = await self._commit(
             operation="commit_user_message",
             run=updated_run,
-            items=(item,),
+            items=committed_items,
             expected_revision=commit.expected_revision,
             expected_claim_token=commit.expected_claim_token,
-            idempotency_key=f"agent-user-message:{run.run_id}:{payload.sha256}",
+            idempotency_key=f"agent-user-message:{run.run_id}:{identity}",
         )
         return AgentUserMessageCommitResult(
             _run_from_wire(response["run"]),
             item,
+            activation_item,
         )
 
     async def commit_agent_call_outcome(self, commit: AgentCallOutcomeCommit) -> AgentItem:
@@ -927,6 +944,74 @@ def _item_from_wire(value: Mapping[str, Any]) -> AgentItem:
         created_at=_datetime(value.get("created_at_ms")),
         committed_at=_datetime(value.get("committed_at_ms")),
     )
+
+
+def _initial_activation_item(
+    run: AgentRun,
+    commit: AgentUserMessageCommit,
+    *,
+    now: datetime,
+) -> AgentItem | None:
+    payload_text = commit.skill_activation_payload_json
+    if payload_text is None:
+        return None
+    value = json.loads(payload_text)
+    profile = value.get("profile")
+    capability_id = profile.get("capability_id") if isinstance(profile, dict) else None
+    revision = value.get("pinned_bundle_revision")
+    profile_digest = value.get("profile_digest")
+    if (
+        value.get("binding_mode") != "hint"
+        or not isinstance(capability_id, str)
+        or not capability_id.startswith("skill.")
+        or not isinstance(revision, str)
+        or not revision
+        or not isinstance(profile_digest, str)
+        or canonicalize_agent_payload(profile).sha256 != profile_digest
+    ):
+        raise AgentStorageConflict("agent_initial_activation_payload_invalid")
+    payload = canonicalize_agent_payload(value)
+    if (
+        payload.json_text != payload_text
+        or payload.sha256 != commit.skill_activation_payload_sha256
+    ):
+        raise AgentStorageConflict("agent_initial_activation_payload_invalid")
+    identity = hashlib.sha256(
+        f"{run.run_id}\0{capability_id}\0{revision}".encode()
+    ).hexdigest()[:24]
+    return _item(
+        item_id=f"agent-item:{run.run_id}:skill-activation:{identity}",
+        run=run,
+        sequence=2,
+        kind=AgentItemKind.SKILL_ACTIVATION,
+        state=AgentItemState.COMMITTED,
+        payload=payload,
+        created_at=now,
+        committed_at=now,
+    )
+
+
+def _validate_sidecar_initial_activation(
+    items: tuple[AgentItem, ...],
+    *,
+    expected: AgentItem | None,
+) -> AgentItem | None:
+    if expected is None:
+        if items:
+            raise AgentStorageConflict("agent_initial_activation_presence_conflict")
+        return None
+    if len(items) != 1:
+        raise AgentStorageConflict("agent_initial_activation_presence_conflict")
+    stored = items[0]
+    if (
+        stored.item_id != expected.item_id
+        or stored.sequence != 2
+        or stored.state is not AgentItemState.COMMITTED
+        or stored.payload_json != expected.payload_json
+        or stored.payload_sha256 != expected.payload_sha256
+    ):
+        raise AgentStorageConflict("agent_initial_activation_identity_conflict")
+    return stored
 
 
 def _waiting_status(

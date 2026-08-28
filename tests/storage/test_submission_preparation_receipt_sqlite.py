@@ -341,7 +341,7 @@ class SubmissionPreparationReceiptSQLiteTest(SQLiteStorageTestCase):
         self.assertEqual(replay, first)
         self.assertEqual(json.loads(replay.route_decision)["decision"], "no_server")
 
-    def test_pending_skill_supersede_recovers_count_from_operation_timestamp(self) -> None:
+    def test_pending_skill_supersede_uses_task_bound_transition_receipt(self) -> None:
         context = PendingSkillContext(
             context_id="context-1",
             conversation_id="conversation-1",
@@ -357,53 +357,53 @@ class SubmissionPreparationReceiptSQLiteTest(SQLiteStorageTestCase):
             updated_at=self.now,
         )
         asyncio.run(self.storage.save_pending_skill_context(context))
-        self.assertEqual(
-            asyncio.run(
-                self.storage.materialize_submission_pending_skill_supersede_exact(
-                    username="alice",
-                    conversation_id="conversation-1",
-                    task_id="task-false",
-                    should_supersede=False,
-                    occurred_at=self.now + timedelta(seconds=1),
-                )
-            ),
-            0,
-        )
-        with self.session_factory() as session:
-            self.assertEqual(session.query(EventRecordRow).count(), 0)
-
         occurred_at = self.now + timedelta(seconds=2)
-        self.assertEqual(
-            asyncio.run(
-                self.storage.materialize_submission_pending_skill_supersede_exact(
-                    username="alice",
-                    conversation_id="conversation-1",
-                    task_id="task-1",
-                    should_supersede=True,
-                    occurred_at=occurred_at,
-                )
-            ),
-            1,
-        )
-        self.assertEqual(
-            asyncio.run(
-                self.storage.materialize_submission_pending_skill_supersede_exact(
-                    username="alice",
-                    conversation_id="conversation-1",
-                    task_id="task-empty",
-                    should_supersede=True,
-                    occurred_at=occurred_at + timedelta(microseconds=1),
-                )
-            ),
-            0,
-        )
-        with self.session_factory() as session:
-            self.assertIsNone(
-                session.get(
-                    EventRecordRow,
-                    "submission-pending-skill-superseded:v1:task-empty",
-                )
+        first_event, first_duplicate = asyncio.run(
+            self.storage.materialize_submission_pending_skill_transition_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                prepared_execution_sha256="a" * 64,
+                target_status="superseded",
+                reason="new_skill_hint",
+                pending_context=None,
+                occurred_at=occurred_at,
             )
+        )
+        replay_event, replay_duplicate = asyncio.run(
+            self.storage.materialize_submission_pending_skill_transition_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                prepared_execution_sha256="a" * 64,
+                target_status="superseded",
+                reason="new_skill_hint",
+                pending_context=None,
+                occurred_at=occurred_at,
+            )
+        )
+        self.assertFalse(first_duplicate)
+        self.assertTrue(replay_duplicate)
+        self.assertEqual(replay_event, first_event)
+        self.assertEqual(first_event.payload["count"], 1)
+        self.assertNotIn("context-1", json.dumps(first_event.payload))
+
+        empty_event, empty_duplicate = asyncio.run(
+            self.storage.materialize_submission_pending_skill_transition_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-empty",
+                prepared_execution_sha256="b" * 64,
+                target_status="superseded",
+                reason="new_forced_capability",
+                pending_context=None,
+                occurred_at=occurred_at + timedelta(microseconds=1),
+            )
+        )
+        self.assertFalse(empty_duplicate)
+        self.assertEqual(empty_event.payload["count"], 0)
+        with self.session_factory() as session:
+            self.assertEqual(session.query(EventRecordRow).count(), 2)
         replacement = replace(
             context,
             context_id="context-2",
@@ -413,24 +413,24 @@ class SubmissionPreparationReceiptSQLiteTest(SQLiteStorageTestCase):
             updated_at=occurred_at + timedelta(seconds=1),
         )
         asyncio.run(self.storage.save_pending_skill_context(replacement))
-        self.assertEqual(
-            asyncio.run(
-                self.storage.materialize_submission_pending_skill_supersede_exact(
-                    username="alice",
-                    conversation_id="conversation-1",
-                    task_id="task-1",
-                    should_supersede=True,
-                    occurred_at=occurred_at,
-                )
-            ),
-            1,
+        replay_after_new_event, replay_after_new_duplicate = asyncio.run(
+            self.storage.materialize_submission_pending_skill_transition_exact(
+                username="alice",
+                conversation_id="conversation-1",
+                task_id="task-1",
+                prepared_execution_sha256="a" * 64,
+                target_status="superseded",
+                reason="new_skill_hint",
+                pending_context=None,
+                occurred_at=occurred_at,
+            )
         )
+        self.assertTrue(replay_after_new_duplicate)
+        self.assertEqual(replay_after_new_event, first_event)
         self.assertEqual(
             asyncio.run(self.storage.get_pending_skill_context("context-2")).status,
             "pending_user_input",
         )
-        with self.session_factory() as session:
-            self.assertEqual(session.query(EventRecordRow).count(), 0)
 
     def test_no_sql_task_intent_and_convergence_are_exact_after_faults(self) -> None:
         asyncio.run(

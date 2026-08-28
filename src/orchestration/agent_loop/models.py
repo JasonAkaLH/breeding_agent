@@ -360,16 +360,43 @@ class AgentUserMessageCommit:
     expected_revision: int
     expected_claim_token: str | None
     text: str
+    skill_activation_payload_json: str | None = None
+    skill_activation_payload_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id or not self.text.strip():
             raise ValueError("Agent user message commit must not be empty")
+        payload = self.skill_activation_payload_json
+        digest = self.skill_activation_payload_sha256
+        if (payload is None) != (digest is None):
+            raise ValueError("agent_skill_activation_commit_identity_incomplete")
+        if payload is not None:
+            try:
+                value = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise ValueError("agent_skill_activation_commit_payload_invalid") from exc
+            canonical = canonical_json(value) + "\n"
+            if (
+                canonical != payload
+                or not isinstance(value, dict)
+                or set(value)
+                != {
+                    "binding_mode",
+                    "pinned_bundle_revision",
+                    "profile",
+                    "profile_digest",
+                }
+                or value.get("binding_mode") != "hint"
+                or hashlib.sha256(payload.encode()).hexdigest() != digest
+            ):
+                raise ValueError("agent_skill_activation_commit_payload_invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class AgentUserMessageCommitResult:
     run: AgentRun
     item: AgentItem
+    activation_item: AgentItem | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -42,6 +42,8 @@ class AgentExecutionRequest:
     resolved_user_message: str | None = None
     memory_context: Mapping[str, Any] | None = None
     available_mcp_servers: tuple[UserMCPServerProfile, ...] = ()
+    skill_activation_payload_json: str | None = None
+    skill_activation_payload_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -55,6 +57,10 @@ class AgentExecutionRequest:
             )
         ):
             raise ValueError("agent_execution_request_identity_invalid")
+        if (self.skill_activation_payload_json is None) != (
+            self.skill_activation_payload_sha256 is None
+        ):
+            raise ValueError("agent_execution_request_activation_identity_incomplete")
 
     @property
     def effective_user_message(self) -> str:
@@ -126,6 +132,9 @@ class AgentLoopOrchestrator:
         if not _task_matches_request(task, request):
             raise AgentStorageConflict("agent_task_identity_mismatch")
         assert task is not None
+        has_activation = request.skill_activation_payload_json is not None
+        if (str(task.routing_mode) == "hint") != has_activation:
+            raise AgentStorageConflict("agent_hint_activation_presence_mismatch")
         task = await self._ensure_task_running(task)
         if not _task_matches_request(task, request):
             raise AgentStorageConflict("agent_task_identity_mismatch")
@@ -154,10 +163,17 @@ class AgentLoopOrchestrator:
                 expected_revision=run.revision,
                 expected_claim_token=run.claim_token,
                 text=request.user_message,
+                skill_activation_payload_json=request.skill_activation_payload_json,
+                skill_activation_payload_sha256=request.skill_activation_payload_sha256,
             )
         )
         run = initialized.run
-        _validate_initialized_user_item(initialized, expected_run)
+        _validate_initialized_user_item(
+            initialized,
+            expected_run,
+            expected_activation_payload_json=request.skill_activation_payload_json,
+            expected_activation_payload_sha256=request.skill_activation_payload_sha256,
+        )
         if initialized.item.committed_at is None:
             raise AgentStorageConflict("agent_user_message_committed_at_missing")
         started_event_at = initialized.item.committed_at
@@ -230,10 +246,9 @@ class AgentLoopOrchestrator:
             or None,
             safe_mcp_server_profiles=request.available_mcp_servers,
         )
-        required_name = (
-            provider_safe_tool_name(request.requested_capability_id)
-            if request.requested_capability_id
-            else None
+        required_name = initial_required_tool_name(
+            task.routing_mode,
+            request.requested_capability_id,
         )
         loop_result = await self._runner.run(
             run.run_id,
@@ -413,6 +428,9 @@ def _validate_run_identity(
 def _validate_initialized_user_item(
     initialized: AgentUserMessageCommitResult,
     expected_run: AgentRun,
+    *,
+    expected_activation_payload_json: str | None,
+    expected_activation_payload_sha256: str | None,
 ) -> None:
     run = initialized.run
     item = initialized.item
@@ -426,6 +444,34 @@ def _validate_initialized_user_item(
         or item.state is not AgentItemState.COMMITTED
     ):
         raise AgentStorageConflict("agent_user_message_identity_mismatch")
+    activation = initialized.activation_item
+    if expected_activation_payload_json is None:
+        if activation is not None:
+            raise AgentStorageConflict("agent_initial_activation_presence_mismatch")
+        return
+    if (
+        activation is None
+        or activation.run_id != expected_run.run_id
+        or activation.task_id != expected_run.task_id
+        or activation.sequence != 2
+        or activation.kind is not AgentItemKind.SKILL_ACTIVATION
+        or activation.state is not AgentItemState.COMMITTED
+        or activation.payload_json != expected_activation_payload_json
+        or activation.payload_sha256 != expected_activation_payload_sha256
+    ):
+        raise AgentStorageConflict("agent_initial_activation_identity_mismatch")
+
+
+def initial_required_tool_name(
+    routing_mode: object,
+    requested_capability_id: str | None,
+) -> str | None:
+    mode = str(routing_mode)
+    if mode in {"auto", "hint"}:
+        return None
+    if mode != "force_capability" or requested_capability_id is None:
+        raise AgentStorageConflict("agent_routing_mode_invalid")
+    return provider_safe_tool_name(requested_capability_id)
 
 
 def model_binding_digest(*, name: str, value: str) -> str:

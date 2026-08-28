@@ -23,6 +23,7 @@ from .skill_activation import (
     DelegatedSkillActivationService,
     SkillActivationCommitPort,
     build_canonical_skill_activation,
+    build_delegated_skill_instruction_result,
     build_skill_activation_item,
 )
 from .mcp_binding import RunBoundMCPTextGenerator
@@ -44,6 +45,7 @@ from .orchestrator import (
     AgentExecutionRequest,
     AgentLoopOrchestrator,
     AgentOrchestrationResult,
+    initial_required_tool_name,
 )
 from .models import (
     AgentCancellationToken,
@@ -133,6 +135,7 @@ __all__ = [
     "SkillActivationCommitPort",
     "CanonicalSkillActivation",
     "build_canonical_skill_activation",
+    "build_delegated_skill_instruction_result",
     "build_skill_activation_item",
     "RunBoundMCPTextGenerator",
     "AgentContextBuilder",
@@ -150,4 +153,5 @@ __all__ = [
     "AgentExecutionRequest",
     "AgentLoopOrchestrator",
     "AgentOrchestrationResult",
+    "initial_required_tool_name",
 ]

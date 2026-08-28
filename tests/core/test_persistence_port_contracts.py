@@ -216,7 +216,7 @@ EXPECTED_METHODS_BY_PORT = {
         "reserve_message_identity",
     ),
     "SubmissionPreparationReceiptStoragePort": (
-        "materialize_submission_pending_skill_supersede_exact",
+        "materialize_submission_pending_skill_transition_exact",
         "settle_submission_route_decision_exact",
         "materialize_submission_no_server_intent_exact",
         "converge_submission_no_server_without_sql_task",

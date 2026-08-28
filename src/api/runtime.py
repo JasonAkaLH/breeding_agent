@@ -349,6 +349,8 @@ from src.orchestration.agent_loop import (
     CapabilityInvocationService,
     CapabilityVisibilityContext,
     DelegatedSkillActivationService,
+    build_canonical_skill_activation,
+    build_delegated_skill_instruction_result,
     default_agent_invocation_policy,
 )
 from src.orchestration.agent_loop.lease import AgentLeaseController
@@ -453,6 +455,10 @@ class SubmissionAdmissionUnavailableError(RuntimeError):
     code = "submission_admission_unavailable"
 
 
+class SkillHintUnavailableError(RuntimeError):
+    code = "skill_hint_unavailable"
+
+
 UNFINISHED_TASK_STATUSES = {
     TaskStatus.ACCEPTED,
     TaskStatus.PLANNING,
@@ -493,6 +499,15 @@ RESUME_SKILL_INTERNAL_METADATA_KEYS = frozenset(
 SYSTEM_MANAGED_METADATA_KEYS = frozenset(
     {
         "skill_bundle_revision",
+        "bundle_revision",
+        "pinned_bundle_revision",
+        "profile",
+        "public_skill_profile",
+        "profile_digest",
+        "activation",
+        "skill_activation",
+        "skill_activation_payload",
+        "skill_activation_payload_sha256",
         "mcp_bundle_revision",
         "uploaded_artifacts",
         "skill_artifacts",
@@ -1406,10 +1421,14 @@ class ApiRuntime(
                 conversation_id, existing_conversation
             )
         routing_mode = self._routing_mode(request.routing_mode)
-        if routing_mode == RoutingMode.FORCE_CAPABILITY and not request.capability_id:
-            raise ValueError("capability_id is required when routing_mode is force_capability")
         requested_capability_id = self._canonical_capability_id(request.capability_id)
-        self._ensure_supported_capability(requested_capability_id)
+        skill_activation = None
+        if routing_mode == RoutingMode.HINT:
+            skill_activation = self._build_skill_hint_activation(
+                requested_capability_id
+            )
+        else:
+            self._ensure_supported_capability(requested_capability_id)
         explicit_force_capability = routing_mode == RoutingMode.FORCE_CAPABILITY and requested_capability_id is not None
         continued_pending_context: PendingSkillContext | None = None
         if (
@@ -1523,7 +1542,7 @@ class ApiRuntime(
             metadata["canonical_capability_id"] = requested_capability_id
         if continued_pending_context is not None:
             metadata.update(self._pending_skill_continuation_metadata(continued_pending_context))
-        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
+        if continued_pending_context is not None:
             metadata["defer_task_completed_until_pending_skill_context_processed"] = True
         if self._skill_runtime_state is not None:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
@@ -1582,8 +1601,7 @@ class ApiRuntime(
             "mcp_rollout_mode": mcp_assignment.routing_mode.value,
             "defer_task_completed_until_pending_skill_context_processed": (
                 True
-                if requested_capability_id is not None
-                and requested_capability_id.startswith("skill.")
+                if continued_pending_context is not None
                 else None
             ),
             "forced_by_mcp_command": (
@@ -1689,6 +1707,7 @@ class ApiRuntime(
             ),
             claim_owner=self._submission_claim_owner,
             claim_expires_at=now + self._submission_claim_ttl,
+            skill_activation=skill_activation,
         )
         try:
             admitted = await self.storage.admit_submission(admission_request)
@@ -2661,6 +2680,30 @@ class ApiRuntime(
         ).hexdigest()
         return f"submission-event:v1:{task_id}:{digest}"
 
+    @staticmethod
+    def _submission_pending_context(
+        record: SubmissionRecoveryRecord,
+        continuation: Mapping[str, Any],
+    ) -> PendingSkillContext | None:
+        pending = continuation.get("pending_context")
+        if not isinstance(pending, Mapping):
+            return None
+        capability_id = str(pending["capability_id"])
+        return PendingSkillContext(
+            context_id=str(pending["context_id"]),
+            conversation_id=record.conversation_id,
+            username=record.username,
+            capability_id=capability_id,
+            skill_name=capability_id.removeprefix("skill."),
+            source_task_id=record.task_id,
+            source_message_id=record.message_id,
+            original_user_message=str(pending["original_user_message"]),
+            missing_requirements=tuple(pending["missing_requirements"]),
+            assistant_message=str(pending["assistant_message"]),
+            created_at=record.created_at,
+            updated_at=record.created_at,
+        )
+
     async def _append_submission_event_exact(self, event: EventRecord) -> bool:
         saved, duplicate = await self.storage.append_event_exact(event)
         if not duplicate:
@@ -2758,6 +2801,7 @@ class ApiRuntime(
         metadata["available_mcp_server_ids"] = [
             profile.server_id for profile in profiles
         ]
+        activation = continuation.get("skill_activation")
         return AgentExecutionRequest(
             task_id=record.task_id,
             conversation_id=record.conversation_id,
@@ -2778,6 +2822,16 @@ class ApiRuntime(
             ),
             memory_context=memory_context,
             available_mcp_servers=profiles,
+            skill_activation_payload_json=(
+                str(activation["payload"])
+                if isinstance(activation, Mapping)
+                else None
+            ),
+            skill_activation_payload_sha256=(
+                str(activation["payload_sha256"])
+                if isinstance(activation, Mapping)
+                else None
+            ),
         )
 
     async def _prepared_task_input_attachment_metadata(
@@ -3335,31 +3389,62 @@ class ApiRuntime(
                     created_at=record.created_at,
                 )
             )
-        superseded_count = (
-            await self.storage.materialize_submission_pending_skill_supersede_exact(
-                username=record.username,
-                conversation_id=record.conversation_id,
-                task_id=record.task_id,
-                should_supersede=(
-                    continuation["routing_mode"]
-                    == str(RoutingMode.FORCE_CAPABILITY)
-                    or isinstance(binding, Mapping)
-                ),
-                occurred_at=record.created_at,
+        pending_context = self._submission_pending_context(record, continuation)
+        transition: tuple[str, str, PendingSkillContext | None] | None = None
+        if pending_context is not None:
+            transition = ("consumed", "legacy_pending_continued", pending_context)
+        elif isinstance(binding, Mapping):
+            transition = ("superseded", "new_mcp_binding", None)
+        elif continuation["routing_mode"] == str(RoutingMode.HINT):
+            transition = ("superseded", "new_skill_hint", None)
+        elif continuation["routing_mode"] == str(RoutingMode.FORCE_CAPABILITY):
+            transition = ("superseded", "new_forced_capability", None)
+        if transition is not None:
+            if record.prepared_execution_sha256 is None:
+                raise RuntimeError("submission_pending_transition_prepared_missing")
+            target_status, reason, prepared_pending_context = transition
+            receipt_event, duplicate = (
+                await self.storage.materialize_submission_pending_skill_transition_exact(
+                    username=record.username,
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    prepared_execution_sha256=record.prepared_execution_sha256,
+                    target_status=target_status,
+                    reason=reason,
+                    pending_context=prepared_pending_context,
+                    occurred_at=record.created_at,
+                )
             )
-        )
-        if superseded_count:
+            if not duplicate:
+                try:
+                    await self.event_broker.publish(receipt_event)
+                except Exception:
+                    logger.warning(
+                        "pending skill transition audit publication failed for task %s",
+                        record.task_id,
+                        exc_info=True,
+                    )
+        if continuation["routing_mode"] == str(RoutingMode.HINT):
+            activation_wrapper = continuation.get("skill_activation")
+            if not isinstance(activation_wrapper, Mapping):
+                raise RuntimeError("submission_hint_activation_missing")
+            activation = json.loads(str(activation_wrapper["payload"]))
+            pinned_revision = str(activation["pinned_bundle_revision"])
+            safe_revision_ref = hashlib.sha256(
+                b"maf.skill.hint_bound.revision.v1\0" + pinned_revision.encode("utf-8")
+            ).hexdigest()
             await self._append_submission_event_exact(
                 EventRecord(
                     event_id=self._submission_event_id(
-                        record.task_id, "pending_skill_context.superseded"
+                        record.task_id, "skill.hint_bound"
                     ),
                     conversation_id=record.conversation_id,
                     task_id=record.task_id,
-                    event_type="pending_skill_context.superseded",
+                    event_type="skill.hint_bound",
                     payload={
-                        "count": superseded_count,
-                        "reason": "new_forced_capability",
+                        "capability_id": continuation["requested_capability_id"],
+                        "safe_revision_ref": safe_revision_ref,
+                        "profile_digest": activation["profile_digest"],
                     },
                     visibility=EventVisibility.AUDIT_ONLY,
                     created_at=record.created_at,
@@ -3577,6 +3662,7 @@ class ApiRuntime(
                 for item in context.available_mcp_servers
             ],
             "requested_capability_id": prepared["requested_capability_id"],
+            "skill_activation": prepared.get("skill_activation"),
         }
         request = await self._submission_agent_request(
             record,
@@ -12080,6 +12166,59 @@ class ApiRuntime(
             return
         raise ValueError(f"Unsupported capability_id: {capability_id}")
 
+    def _build_skill_hint_activation(
+        self,
+        capability_id: str | None,
+    ) -> dict[str, str]:
+        state = self._skill_runtime_state
+        if state is None or capability_id is None:
+            raise SkillHintUnavailableError()
+        try:
+            bundle = state.active_bundle
+            descriptor = bundle.skill_capabilities.descriptors_by_id.get(
+                capability_id
+            )
+            if (
+                descriptor is None
+                or not descriptor.public
+                or not descriptor.enabled
+                or descriptor.kind != "skill"
+                or not capability_id.startswith("skill.")
+            ):
+                raise SkillHintUnavailableError()
+            skill_name = bundle.skill_capabilities.skill_name_by_capability_id.get(
+                capability_id
+            )
+            manifest = next(
+                (
+                    skill
+                    for skill in bundle.catalog.skills
+                    if skill.name == skill_name
+                ),
+                None,
+            )
+            if manifest is None:
+                raise SkillHintUnavailableError()
+            profile = build_public_skill_profile(
+                manifest,
+                capability_id=capability_id,
+                descriptor=descriptor,
+            )
+            activation = build_canonical_skill_activation(
+                binding_mode="hint",
+                profile=profile,
+                pinned_bundle_revision=bundle.revision,
+                resolved_bundle_revision=bundle.revision,
+            )
+        except SkillHintUnavailableError:
+            raise
+        except Exception as exc:
+            raise SkillHintUnavailableError() from exc
+        return {
+            "payload": activation.payload_json,
+            "payload_sha256": activation.payload_sha256,
+        }
+
     def _ensure_mcp_capability_matches_assignment(
         self,
         capability_id: str | None,
@@ -14807,7 +14946,7 @@ def build_api_runtime(
             return None
         return await runtime._mcp_invocation_shadow_hook(**values)
 
-    def activate_delegated_skill(
+    async def activate_delegated_skill(
         run,
         capability_id: str,
         metadata: Mapping[str, Any],
@@ -14852,10 +14991,9 @@ def build_api_runtime(
             descriptor=descriptor,
         )
         try:
-            item, profile_digest = delegated_skill_activation.build_item(
-                run=run,
+            expected_activation = build_canonical_skill_activation(
+                binding_mode="hint",
                 profile=profile,
-                sequence=run.next_item_sequence,
                 pinned_bundle_revision=pinned_revision,
                 resolved_bundle_revision=bundle.revision,
             )
@@ -14864,13 +15002,64 @@ def build_api_runtime(
                 AgentCallOutcomeStatus.FAILED,
                 safe_error_code="agent_skill_activation_invalid",
             )
+        existing_activation = None
+        for candidate in await agent_repository.list_items(run.run_id):
+            if candidate.kind.value != "skill_activation":
+                continue
+            try:
+                payload = json.loads(candidate.payload_json)
+                candidate_capability_id = str(
+                    payload.get("profile", {}).get("capability_id") or ""
+                )
+            except (AttributeError, TypeError, ValueError):
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code="delegated_skill_instruction_invalid",
+                )
+            if candidate_capability_id != capability_id:
+                continue
+            if (
+                payload.get("binding_mode") not in {"hint", "delegated"}
+                or payload.get("pinned_bundle_revision") != pinned_revision
+                or payload.get("profile_digest")
+                != expected_activation.profile_digest
+                or existing_activation is not None
+            ):
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code="delegated_skill_instruction_invalid",
+                )
+            existing_activation = candidate
+        item = None
+        if existing_activation is None:
+            try:
+                item, _profile_digest = delegated_skill_activation.build_item(
+                    run=run,
+                    profile=profile,
+                    sequence=run.next_item_sequence,
+                    pinned_bundle_revision=pinned_revision,
+                    resolved_bundle_revision=bundle.revision,
+                )
+            except (TypeError, ValueError):
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code="delegated_skill_instruction_invalid",
+                )
+        try:
+            safe_result = build_delegated_skill_instruction_result(
+                capability_id=capability_id,
+                pinned_bundle_revision=pinned_revision,
+                profile_digest=expected_activation.profile_digest,
+                instruction_body=manifest.body,
+            )
+        except (TypeError, ValueError):
+            return AgentCallExecution(
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code="delegated_skill_instruction_invalid",
+            )
         return AgentCallExecution(
             AgentCallOutcomeStatus.COMPLETED,
-            safe_result_payload={
-                "activation": "completed",
-                "capability_id": capability_id,
-                "profile_digest": profile_digest,
-            },
+            safe_result_payload=safe_result,
             skill_activation_item=item,
         )
 

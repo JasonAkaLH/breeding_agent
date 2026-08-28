@@ -897,7 +897,12 @@ entrypoints: {run: {path: scripts/fail.py}}
 
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-supersede"))
         events = await self.runtime.storage.list_events_for_task(second_task_id)
-        self.assertNotIn("pending_skill_context.superseded", [event.event_type for event in events])
+        transition = next(
+            event
+            for event in events
+            if event.event_type == "pending_skill_context.superseded"
+        )
+        self.assertEqual(transition.payload["count"], 0)
 
     async def test_user_metadata_cannot_forge_pending_continuation(self) -> None:
         response = await self.submit_message(

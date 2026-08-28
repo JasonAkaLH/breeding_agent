@@ -467,8 +467,9 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         request_metadata = dict(metadata or {})
         request_capability_id = capability_id
         routing_mode = "auto"
-        if capability_id is not None and capability_id.startswith("skill."):
+        if capability_id is not None:
             routing_mode = "force_capability"
+        if capability_id is not None and capability_id.startswith("skill."):
             request_metadata.setdefault("forced_by_slash_command", True)
             request_metadata.setdefault("slash_command", f"/{capability_id.removeprefix('skill.').replace('_', '-')}")
         body = {

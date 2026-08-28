@@ -77,6 +77,7 @@ _CONTINUATION_KEYS = {
     "available_mcp_servers",
     "pending_context",
     "initial_no_server_eligible",
+    "skill_activation",
 }
 
 
@@ -154,6 +155,7 @@ class SubmissionAdmissionRequestBuilderTests(unittest.TestCase):
         self.assertIsNone(continuation["mcp_binding"])
         self.assertIsNone(continuation["mcp_assignment"])
         self.assertIsNone(continuation["pending_context"])
+        self.assertIsNone(continuation["skill_activation"])
 
     def test_projection_and_continuation_use_the_approved_digest_domains(self) -> None:
         request = build_submission_admission_request(**_builder_values())

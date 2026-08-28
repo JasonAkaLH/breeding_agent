@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from src.core.models import PendingSkillContext
+from src.core.models import Conversation, PendingSkillContext
 from src.storage.sqlite import SQLiteStorage
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLitePendingSkillContextRepositoryTest(SQLiteStorageTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.storage = SQLiteStorage(self.session_factory)
+        asyncio.run(
+            self.storage.save_conversation(
+                Conversation(conversation_id="conv-1", username="acc-1")
+            )
+        )
+
     def _context(self, context_id: str = "ctx-1", *, conversation_id: str = "conv-1") -> PendingSkillContext:
         return PendingSkillContext(
             context_id=context_id,
@@ -58,13 +67,67 @@ class SQLitePendingSkillContextRepositoryTest(SQLiteStorageTestCase):
         self.assertEqual(old.status, "superseded")
 
     def test_async_facade_exposes_pending_context_methods(self) -> None:
-        storage = SQLiteStorage(self.session_factory)
         context = self._context()
 
-        saved = asyncio.run(storage.save_pending_skill_context(context))
-        active = asyncio.run(storage.get_active_pending_skill_context("conv-1"))
-        consumed = asyncio.run(storage.mark_pending_skill_context_consumed("ctx-1"))
+        saved = asyncio.run(self.storage.save_pending_skill_context(context))
+        active = asyncio.run(self.storage.get_active_pending_skill_context("conv-1"))
+        consumed = asyncio.run(self.storage.mark_pending_skill_context_consumed("ctx-1"))
 
         self.assertEqual(saved.context_id, "ctx-1")
         self.assertEqual(active.context_id, "ctx-1")
         self.assertEqual(consumed.status, "consumed")
+
+    def test_prepared_pending_context_is_consumed_once_with_exact_receipt(self) -> None:
+        context = self._context()
+        asyncio.run(self.storage.save_pending_skill_context(context))
+        occurred_at = datetime(2026, 5, 20, 6, 5, 0)
+
+        first, duplicate = asyncio.run(
+            self.storage.materialize_submission_pending_skill_transition_exact(
+                username="acc-1",
+                conversation_id="conv-1",
+                task_id="task-current",
+                prepared_execution_sha256="a" * 64,
+                target_status="consumed",
+                reason="legacy_pending_continued",
+                pending_context=context,
+                occurred_at=occurred_at,
+            )
+        )
+        replay, replay_duplicate = asyncio.run(
+            self.storage.materialize_submission_pending_skill_transition_exact(
+                username="acc-1",
+                conversation_id="conv-1",
+                task_id="task-current",
+                prepared_execution_sha256="a" * 64,
+                target_status="consumed",
+                reason="legacy_pending_continued",
+                pending_context=context,
+                occurred_at=occurred_at,
+            )
+        )
+
+        self.assertFalse(duplicate)
+        self.assertTrue(replay_duplicate)
+        self.assertEqual(replay, first)
+        self.assertEqual(first.event_type, "pending_skill_context.consumed")
+        self.assertEqual(first.payload["count"], 1)
+        self.assertEqual(
+            asyncio.run(self.storage.get_pending_skill_context("ctx-1")).status,
+            "consumed",
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "pending_skill_transition_context_conflict"
+        ):
+            asyncio.run(
+                self.storage.materialize_submission_pending_skill_transition_exact(
+                    username="acc-1",
+                    conversation_id="conv-1",
+                    task_id="different-task",
+                    prepared_execution_sha256="b" * 64,
+                    target_status="consumed",
+                    reason="legacy_pending_continued",
+                    pending_context=context,
+                    occurred_at=occurred_at + timedelta(seconds=1),
+                )
+            )

@@ -224,7 +224,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "mark_pending_skill_context_consumed": "(self, context_id: 'str') -> 'PendingSkillContext | None'",
   "mark_pending_skill_context_superseded": "(self, conversation_id: 'str') -> 'int'",
   "materialize_submission_no_server_intent_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', occurred_at: 'datetime') -> 'MCPInitialIntentCreateResult'",
-  "materialize_submission_pending_skill_supersede_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', should_supersede: 'bool', occurred_at: 'datetime') -> 'int'",
+  "materialize_submission_pending_skill_transition_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', prepared_execution_sha256: 'str', target_status: 'str', reason: 'str', pending_context: 'PendingSkillContext | None', occurred_at: 'datetime') -> 'tuple[EventRecord, bool]'",
   "mark_user_mcp_server_deleted": "(self, owner_user_id: 'str', server_id: 'str', *, deleted_at: 'datetime') -> 'UserMCPServer | None'",
   "pause_mcp_remote_task_for_input": "(self, owner_user_id: 'str', task_id: 'str', safe_remote_task_ref: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', input_requests: 'Mapping[str, Any]', conversation_id: 'str', source_message_id: 'str', updated_at: 'datetime') -> 'MCPRemoteTaskBinding | None'",
   "produce_mcp_cp7_safety_snapshot": "(self, candidate_id: 'str') -> 'MCPCP7SafetySnapshot'",

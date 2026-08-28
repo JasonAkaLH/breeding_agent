@@ -221,21 +221,30 @@ class SubmissionPreparationReceiptPostgresIntegrationTest(
             )
         )
         occurred_at = self.now + timedelta(seconds=1)
-        first = await self.storage.materialize_submission_pending_skill_supersede_exact(
+        first, first_duplicate = await self.storage.materialize_submission_pending_skill_transition_exact(
             username=self.username,
             conversation_id=self.conversation_id,
             task_id=self.task_id,
-            should_supersede=True,
+            prepared_execution_sha256="a" * 64,
+            target_status="superseded",
+            reason="new_forced_capability",
+            pending_context=None,
             occurred_at=occurred_at,
         )
-        replay = await self.storage.materialize_submission_pending_skill_supersede_exact(
+        replay, replay_duplicate = await self.storage.materialize_submission_pending_skill_transition_exact(
             username=self.username,
             conversation_id=self.conversation_id,
             task_id=self.task_id,
-            should_supersede=True,
+            prepared_execution_sha256="a" * 64,
+            target_status="superseded",
+            reason="new_forced_capability",
+            pending_context=None,
             occurred_at=occurred_at,
         )
-        self.assertEqual((first, replay), (1, 1))
+        self.assertFalse(first_duplicate)
+        self.assertTrue(replay_duplicate)
+        self.assertEqual(replay, first)
+        self.assertEqual(first.payload["count"], 1)
 
     async def _write(
         self,

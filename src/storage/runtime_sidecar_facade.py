@@ -113,15 +113,16 @@ def validate_runtime_sidecar_submission_envelopes(
         },
         limit_name="submission_message_projection_bytes",
     )
-    continuation_value = _closed_json_mapping(
+    continuation_keys = {
+        "schema", "request_fingerprint", "conversation_id", "message_id", "task_id",
+        "owner_scope", "message_content_sha256", "routing_mode", "requested_capability_id",
+        "model_options", "bundle_revisions", "execution_metadata", "upload_refs",
+        "sheet_selections", "mcp_binding", "mcp_assignment", "available_mcp_servers",
+        "pending_context", "initial_no_server_eligible",
+    }
+    continuation_value = _closed_json_mapping_one_of(
         continuation,
-        keys={
-            "schema", "request_fingerprint", "conversation_id", "message_id", "task_id",
-            "owner_scope", "message_content_sha256", "routing_mode", "requested_capability_id",
-            "model_options", "bundle_revisions", "execution_metadata", "upload_refs",
-            "sheet_selections", "mcp_binding", "mcp_assignment", "available_mcp_servers",
-            "pending_context", "initial_no_server_eligible",
-        },
+        key_options=(continuation_keys, continuation_keys | {"skill_activation"}),
         limit_name="submission_continuation_bytes",
     )
     _validate_sha256(request_fingerprint)
@@ -169,6 +170,7 @@ def validate_runtime_sidecar_submission_envelopes(
     _validate_bundle_revisions(continuation_value.get("bundle_revisions"))
     _validate_execution_metadata(continuation_value.get("execution_metadata"))
     _validate_safe_references(continuation_value, conversation_id)
+    _validate_continuation_skill_activation(continuation_value)
     _reject_submission_forbidden_keys(message["metadata"])
     return conversation, message, continuation_value
 
@@ -807,6 +809,48 @@ def _closed_json_mapping(
     if set(decoded) != keys:
         _raise_response_invalid()
     return decoded
+
+
+def _closed_json_mapping_one_of(
+    value: bytes,
+    *,
+    key_options: tuple[set[str], ...],
+    limit_name: str,
+) -> dict[str, Any]:
+    if not value or len(value) > resource_limit(limit_name):
+        _raise_response_invalid()
+    _validate_canonical_json_object(value)
+    decoded = json.loads(value)
+    if not any(set(decoded) == keys for keys in key_options):
+        _raise_response_invalid()
+    return decoded
+
+
+def _validate_continuation_skill_activation(value: Mapping[str, Any]) -> None:
+    routing_mode = value.get("routing_mode")
+    activation_present = "skill_activation" in value
+    activation = value.get("skill_activation")
+    if not activation_present:
+        if routing_mode == "hint":
+            _raise_response_invalid()
+        return
+    if routing_mode == "hint":
+        capability_id = value.get("requested_capability_id")
+        if (
+            not _non_empty_string(capability_id)
+            or not str(capability_id).startswith("skill.")
+            or value.get("pending_context") is not None
+        ):
+            _raise_response_invalid()
+        _validate_prepared_skill_activation(
+            activation,
+            capability_id=str(capability_id),
+            skill_bundle_revision=value["bundle_revisions"].get(
+                "skill_bundle_revision"
+            ),
+        )
+    elif activation is not None:
+        _raise_response_invalid()
 
 
 def _is_nullable_string(value: Any) -> bool:

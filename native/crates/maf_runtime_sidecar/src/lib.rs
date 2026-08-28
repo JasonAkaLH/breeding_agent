@@ -5100,30 +5100,36 @@ pub(crate) fn validate_admit_submission_request(
         ],
         "message projection",
     )?;
+    let continuation_value: serde_json::Value = serde_json::from_slice(&request.continuation_json)
+        .map_err(|_| write_failed("submission continuation JSON is invalid"))?;
+    let mut continuation_keys = vec![
+        "schema",
+        "request_fingerprint",
+        "conversation_id",
+        "message_id",
+        "task_id",
+        "owner_scope",
+        "message_content_sha256",
+        "routing_mode",
+        "requested_capability_id",
+        "model_options",
+        "bundle_revisions",
+        "execution_metadata",
+        "upload_refs",
+        "sheet_selections",
+        "mcp_binding",
+        "mcp_assignment",
+        "available_mcp_servers",
+        "pending_context",
+        "initial_no_server_eligible",
+    ];
+    if continuation_value.get("skill_activation").is_some() {
+        continuation_keys.push("skill_activation");
+    }
     validate_canonical_json_object(
         &request.continuation_json,
         SUBMISSION_CONTINUATION_MAX_BYTES,
-        &[
-            "schema",
-            "request_fingerprint",
-            "conversation_id",
-            "message_id",
-            "task_id",
-            "owner_scope",
-            "message_content_sha256",
-            "routing_mode",
-            "requested_capability_id",
-            "model_options",
-            "bundle_revisions",
-            "execution_metadata",
-            "upload_refs",
-            "sheet_selections",
-            "mcp_binding",
-            "mcp_assignment",
-            "available_mcp_servers",
-            "pending_context",
-            "initial_no_server_eligible",
-        ],
+        &continuation_keys,
         "submission continuation",
     )?;
     let expected_projection = domain_digest(
@@ -5190,31 +5196,32 @@ fn validate_projection_identity(
         ],
         "message projection",
     )?;
-    let continuation_object = exact_object(
-        &continuation,
-        &[
-            "schema",
-            "request_fingerprint",
-            "conversation_id",
-            "message_id",
-            "task_id",
-            "owner_scope",
-            "message_content_sha256",
-            "routing_mode",
-            "requested_capability_id",
-            "model_options",
-            "bundle_revisions",
-            "execution_metadata",
-            "upload_refs",
-            "sheet_selections",
-            "mcp_binding",
-            "mcp_assignment",
-            "available_mcp_servers",
-            "pending_context",
-            "initial_no_server_eligible",
-        ],
-        "submission continuation",
-    )?;
+    let mut continuation_keys = vec![
+        "schema",
+        "request_fingerprint",
+        "conversation_id",
+        "message_id",
+        "task_id",
+        "owner_scope",
+        "message_content_sha256",
+        "routing_mode",
+        "requested_capability_id",
+        "model_options",
+        "bundle_revisions",
+        "execution_metadata",
+        "upload_refs",
+        "sheet_selections",
+        "mcp_binding",
+        "mcp_assignment",
+        "available_mcp_servers",
+        "pending_context",
+        "initial_no_server_eligible",
+    ];
+    if continuation.get("skill_activation").is_some() {
+        continuation_keys.push("skill_activation");
+    }
+    let continuation_object =
+        exact_object(&continuation, &continuation_keys, "submission continuation")?;
     let content = message_object["content"]
         .as_str()
         .ok_or_else(|| write_failed("message projection content must be a string"))?;
@@ -5259,6 +5266,7 @@ fn validate_projection_identity(
     validate_bundle_revisions(&continuation["bundle_revisions"])?;
     validate_execution_metadata(&continuation["execution_metadata"])?;
     validate_safe_references(continuation_object, &request.conversation_id)?;
+    validate_continuation_skill_activation(continuation_object)?;
     reject_forbidden_keys(&message["metadata"])?;
     Ok(())
 }
@@ -5431,6 +5439,41 @@ fn validate_prepared_v2_relations(
             }
         }
         _ => return Err(write_failed("prepared v2 routing mode is invalid")),
+    }
+    Ok(())
+}
+
+fn validate_continuation_skill_activation(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), RuntimeSidecarError> {
+    let routing_mode = object["routing_mode"]
+        .as_str()
+        .ok_or_else(|| write_failed("submission continuation routing mode is invalid"))?;
+    let activation = object.get("skill_activation");
+    if activation.is_none() {
+        if routing_mode == "hint" {
+            return Err(write_failed("legacy continuation cannot carry hint"));
+        }
+        return Ok(());
+    }
+    let activation = activation.expect("checked above");
+    if routing_mode == "hint" {
+        let capability_id = object["requested_capability_id"]
+            .as_str()
+            .filter(|value| value.starts_with("skill."))
+            .ok_or_else(|| write_failed("submission hint capability is invalid"))?;
+        if !object["pending_context"].is_null() {
+            return Err(write_failed("submission hint pending context is invalid"));
+        }
+        validate_prepared_skill_activation(
+            activation,
+            capability_id,
+            &object["bundle_revisions"]["skill_bundle_revision"],
+        )?;
+    } else if !activation.is_null() {
+        return Err(write_failed(
+            "non-hint continuation cannot carry skill activation",
+        ));
     }
     Ok(())
 }

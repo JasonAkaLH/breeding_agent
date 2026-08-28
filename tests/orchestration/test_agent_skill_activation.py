@@ -13,8 +13,11 @@ from src.orchestration.agent_loop.models import (
     AgentRunStatus,
 )
 from src.orchestration.agent_loop.skill_activation import (
+    AGENT_MODEL_RESULT_MAX_BYTES,
+    DELEGATED_SKILL_INSTRUCTION_MAX_CODE_POINTS,
     DelegatedSkillActivationService,
     build_canonical_skill_activation,
+    build_delegated_skill_instruction_result,
     build_skill_activation_item,
 )
 from src.storage.agent_payload import AGENT_PAYLOAD_MAX_BYTES, AgentPayloadError
@@ -30,6 +33,48 @@ class _RecordingActivationPort:
 
 
 class DelegatedSkillActivationServiceTest(unittest.IsolatedAsyncioTestCase):
+    def test_delegated_instruction_uses_bounded_model_result_envelope(self) -> None:
+        body = "# Instructions\nUse the pinned workflow."
+        result = build_delegated_skill_instruction_result(
+            capability_id="skill.report",
+            pinned_bundle_revision="revision-1",
+            profile_digest="a" * 64,
+            instruction_body=body,
+        )
+
+        self.assertEqual(result["schema"], "maf.agent.model_result.v1")
+        self.assertEqual(
+            result["projection_revision"], "delegated-skill-instruction-v1"
+        )
+        self.assertEqual(result["projection_mode"], "inline")
+        self.assertFalse(result["projection_truncated"])
+        self.assertEqual(
+            result["model_view"]["schema"],
+            "maf.agent.delegated_skill_activation.v1",
+        )
+        self.assertEqual(result["model_view"]["instruction_body"], body)
+        encoded = (
+            json.dumps(
+                result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            + "\n"
+        ).encode()
+        self.assertEqual(result["projected_size_bytes"], len(encoded))
+        self.assertLessEqual(len(encoded), AGENT_MODEL_RESULT_MAX_BYTES)
+        self.assertNotIn("profile", result["model_view"])
+
+    def test_delegated_instruction_rejects_missing_and_over_limit_body(self) -> None:
+        for body in ("", "x" * (DELEGATED_SKILL_INSTRUCTION_MAX_CODE_POINTS + 1)):
+            with self.subTest(size=len(body)), self.assertRaisesRegex(
+                ValueError, "delegated_skill_instruction_invalid"
+            ):
+                build_delegated_skill_instruction_result(
+                    capability_id="skill.report",
+                    pinned_bundle_revision="revision-1",
+                    profile_digest="a" * 64,
+                    instruction_body=body,
+                )
+
     def test_canonical_builder_has_exact_keys_and_item_reuses_payload_bytes(self) -> None:
         profile = PublicSkillProfile(
             capability_id="skill.report",

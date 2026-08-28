@@ -11,6 +11,10 @@ from src.storage.agent_payload import CanonicalAgentPayload, canonicalize_agent_
 from .models import AgentItem, AgentItemKind, AgentItemState, AgentRun
 
 
+DELEGATED_SKILL_INSTRUCTION_MAX_CODE_POINTS = 20_000
+AGENT_MODEL_RESULT_MAX_BYTES = 80_000
+
+
 class SkillActivationCommitPort(Protocol):
     async def commit_skill_activation(self, item: AgentItem) -> AgentItem: ...
 
@@ -91,6 +95,49 @@ def build_skill_activation_item(
         created_at=committed_at,
         committed_at=committed_at,
     )
+
+
+def build_delegated_skill_instruction_result(
+    *,
+    capability_id: str,
+    pinned_bundle_revision: str,
+    profile_digest: str,
+    instruction_body: str,
+) -> dict[str, Any]:
+    if not instruction_body.strip() or len(instruction_body) > DELEGATED_SKILL_INSTRUCTION_MAX_CODE_POINTS:
+        raise ValueError("delegated_skill_instruction_invalid")
+    instruction_sha256 = hashlib.sha256(instruction_body.encode("utf-8")).hexdigest()
+    model_view = {
+        "schema": "maf.agent.delegated_skill_activation.v1",
+        "capability_id": capability_id,
+        "pinned_bundle_revision": pinned_bundle_revision,
+        "profile_digest": profile_digest,
+        "instruction_body": instruction_body,
+        "instruction_sha256": instruction_sha256,
+    }
+    canonical_model_view = canonicalize_agent_payload(model_view)
+    result: dict[str, Any] = {
+        "schema": "maf.agent.model_result.v1",
+        "projection_revision": "delegated-skill-instruction-v1",
+        "projection_mode": "inline",
+        "model_view": model_view,
+        "original_size_bytes": canonical_model_view.size_bytes,
+        "projected_size_bytes": 0,
+        "raw_sha256": canonical_model_view.sha256,
+        "projection_truncated": False,
+    }
+    for _ in range(3):
+        canonical_result = canonicalize_agent_payload(result)
+        if result["projected_size_bytes"] == canonical_result.size_bytes:
+            break
+        result["projected_size_bytes"] = canonical_result.size_bytes
+    canonical_result = canonicalize_agent_payload(result)
+    if (
+        canonical_result.size_bytes > AGENT_MODEL_RESULT_MAX_BYTES
+        or result["projected_size_bytes"] != canonical_result.size_bytes
+    ):
+        raise ValueError("delegated_skill_instruction_invalid")
+    return result
 
 
 def _activation_from_payload(
