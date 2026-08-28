@@ -37,6 +37,14 @@ from .result_artifacts import (
     AgentSkillResultArtifactJanitor,
     AgentSkillResultArtifactStager,
 )
+from .transient_results import (
+    AGENT_TRANSIENT_SKILL_RESULT_MANIFEST_SCHEMA,
+    AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION,
+    AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND,
+    AgentTransientSkillResultStage,
+    AgentTransientSkillResultStore,
+    transient_skill_result_stage_ref,
+)
 from .terminal_events import build_agent_terminal_event
 from .context import AgentContextBuilder, AgentContextRules
 from .context_budget import (
@@ -160,6 +168,12 @@ __all__ = [
     "skill_result_artifact_id",
     "AgentSkillResultArtifactStager",
     "AgentSkillResultArtifactJanitor",
+    "AGENT_TRANSIENT_SKILL_RESULT_MANIFEST_SCHEMA",
+    "AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION",
+    "AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND",
+    "AgentTransientSkillResultStage",
+    "AgentTransientSkillResultStore",
+    "transient_skill_result_stage_ref",
     "build_agent_terminal_event",
     "AgentContextBuilder",
     "AgentContextRules",

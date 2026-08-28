@@ -350,6 +350,7 @@ from src.orchestration.agent_loop import (
     AgentToolCatalogBuilder,
     AgentSkillResultArtifactStager,
     AgentSkillResultArtifactJanitor,
+    AgentTransientSkillResultStore,
     CapabilityInvocationService,
     CapabilityVisibilityContext,
     DelegatedSkillActivationService,
@@ -15068,6 +15069,10 @@ def build_api_runtime(
         manifest_root=agent_skill_result_manifest_root,
         now_fn=lambda: datetime.now(timezone.utc),
     )
+    agent_transient_skill_result_store = AgentTransientSkillResultStore(
+        Path(database_path).parent / "agent_transient_skill_results",
+        now_fn=lambda: datetime.now(timezone.utc),
+    )
     runtime_holder: dict[str, ApiRuntime] = {}
 
     async def agent_invocation_hook(**values: Any):
@@ -15251,7 +15256,8 @@ def build_api_runtime(
         current_user_input_loader=invocation_contexts.current_user_input,
         continuation_loader=invocation_commit_port.continuation_locator_for_call,
         delegated_skill_activator=activate_delegated_skill,
-        result_artifact_stager=agent_skill_result_stager.stage,
+        legacy_result_artifact_stager=agent_skill_result_stager.stage,
+        transient_result_stager=agent_transient_skill_result_store.stage,
         result_projection_observer=observe_agent_result_projection,
         invocation_hook=agent_invocation_hook,
     )

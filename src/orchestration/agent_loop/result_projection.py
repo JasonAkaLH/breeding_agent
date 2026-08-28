@@ -9,12 +9,31 @@ from typing import Any, Mapping, Sequence
 
 from src.storage.agent_payload import AgentPayloadError, canonicalize_agent_payload
 
+from .transient_results import (
+    AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION,
+    transient_skill_result_stage_ref,
+)
+
 
 MODEL_VIEW_MAX_CODE_POINTS = 20_000
 MODEL_RESULT_MAX_BYTES = 80_000
 SKILL_RESULT_PROJECTION_REVISION = "skill-result-v1"
 MCP_RESULT_PROJECTION_REVISION = "mcp-result-v1"
 DELEGATED_RESULT_PROJECTION_REVISION = "delegated-skill-instruction-v1"
+SKILL_RESULT_PROJECTION_POLICY_LEGACY = "legacy"
+SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY = (
+    "full_inline_then_legacy"
+)
+SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT = (
+    "full_inline_then_transient"
+)
+_SKILL_RESULT_PROJECTION_POLICIES = frozenset(
+    {
+        SKILL_RESULT_PROJECTION_POLICY_LEGACY,
+        SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
+        SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
+    }
+)
 _RAW_MAX_DEPTH = 64
 _RAW_MAX_NODES = 200_000
 _SKILL_PREVIEW_KEYS = (
@@ -87,6 +106,8 @@ class AgentCallResultProjection:
     spill_required: bool
     spill_artifact_id: str | None
     error_code: str | None = None
+    transient_stage_required: bool = False
+    transient_stage_ref: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -106,6 +127,7 @@ class AgentCallResultProjector:
         safe_error_code: str | None,
         artifact_ids: Sequence[str] = (),
         continuation_locator: Mapping[str, Any] | None = None,
+        skill_projection_policy: str = SKILL_RESULT_PROJECTION_POLICY_LEGACY,
     ) -> AgentCallResultProjection:
         try:
             raw_value = _strict_json_value(output_payload)
@@ -145,6 +167,7 @@ class AgentCallResultProjector:
             safe_error_code=safe_error_code,
             artifact_ids=artifact_ids,
             continuation_locator=continuation_locator,
+            skill_projection_policy=skill_projection_policy,
         )
 
     def _delegated(
@@ -276,7 +299,123 @@ class AgentCallResultProjector:
         safe_error_code: str | None,
         artifact_ids: Sequence[str],
         continuation_locator: Mapping[str, Any] | None,
+        skill_projection_policy: str,
     ) -> AgentCallResultProjection:
+        if skill_projection_policy not in _SKILL_RESULT_PROJECTION_POLICIES:
+            return _rejected(
+                "agent_result_invalid",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
+        if skill_projection_policy != SKILL_RESULT_PROJECTION_POLICY_LEGACY:
+            if (
+                not capability_id.startswith("skill.")
+                or outcome != "completed"
+                or safe_error_code is not None
+                or continuation_locator is not None
+                or (
+                    skill_projection_policy
+                    == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+                    and artifact_ids
+                )
+                or (
+                    skill_projection_policy
+                    == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
+                    and not artifact_ids
+                )
+                or _contains_forbidden_raw_value(raw_value)
+            ):
+                return _rejected(
+                    "agent_result_invalid",
+                    canonical_raw=canonical_raw,
+                    raw_sha256=raw_sha256,
+                )
+            try:
+                full_result = build_model_result_envelope(
+                    projection_revision=SKILL_RESULT_PROJECTION_REVISION,
+                    projection_mode="inline",
+                    model_view=raw_value,
+                    original_size_bytes=len(canonical_raw),
+                    raw_sha256=raw_sha256,
+                    projection_truncated=False,
+                )
+                _preflight_tool_result(
+                    call_item_id=call_item_id,
+                    outcome=outcome,
+                    safe_result=full_result,
+                    safe_error_code=safe_error_code,
+                    artifact_ids=artifact_ids,
+                )
+            except (AgentPayloadError, ValueError):
+                full_result = None
+            if full_result is not None:
+                return AgentCallResultProjection(
+                    safe_result_payload=full_result,
+                    canonical_raw_bytes=canonical_raw,
+                    raw_sha256=raw_sha256,
+                    original_size_bytes=len(canonical_raw),
+                    projection_revision=SKILL_RESULT_PROJECTION_REVISION,
+                    projection_mode="inline",
+                    projection_truncated=False,
+                    spill_required=False,
+                    spill_artifact_id=None,
+                )
+            if (
+                skill_projection_policy
+                == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+            ):
+                stage_ref = transient_skill_result_stage_ref(
+                    call_item_id=call_item_id,
+                    raw_sha256=raw_sha256,
+                    projection_revision=(
+                        AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+                    ),
+                )
+                try:
+                    receipt = build_model_result_envelope(
+                        projection_revision=(
+                            AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+                        ),
+                        projection_mode="transient_staged",
+                        model_view={
+                            "complete_result_pending_context_injection": True,
+                            "schema": (
+                                "maf.agent.transient_skill_result_receipt.v1"
+                            ),
+                            "stage_ref": stage_ref,
+                        },
+                        original_size_bytes=len(canonical_raw),
+                        raw_sha256=raw_sha256,
+                        projection_truncated=True,
+                    )
+                    _preflight_tool_result(
+                        call_item_id=call_item_id,
+                        outcome=outcome,
+                        safe_result=receipt,
+                        safe_error_code=safe_error_code,
+                        artifact_ids=(),
+                    )
+                except (AgentPayloadError, ValueError):
+                    return _rejected(
+                        "agent_result_projection_too_large",
+                        canonical_raw=canonical_raw,
+                        raw_sha256=raw_sha256,
+                    )
+                return AgentCallResultProjection(
+                    safe_result_payload=receipt,
+                    canonical_raw_bytes=canonical_raw,
+                    raw_sha256=raw_sha256,
+                    original_size_bytes=len(canonical_raw),
+                    projection_revision=(
+                        AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+                    ),
+                    projection_mode="transient_staged",
+                    projection_truncated=True,
+                    spill_required=False,
+                    spill_artifact_id=None,
+                    transient_stage_required=True,
+                    transient_stage_ref=stage_ref,
+                )
         model_view = _sanitize_model_value(raw_value)
         if not isinstance(model_view, dict):
             model_view = {}

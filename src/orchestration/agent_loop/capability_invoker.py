@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
@@ -15,6 +16,7 @@ from src.orchestration.agent_loop.lease import AgentLeaseHandle
 
 from .models import (
     AgentCallOutcomeStatus,
+    AgentItem,
     AgentItemKind,
     AgentItemState,
     AgentRun,
@@ -22,13 +24,21 @@ from .models import (
     AgentStorageConflict,
     AgentToolCall,
 )
+from .context_budget import AgentContextBudget
 from .repository import AgentRunRepository
 from .observability import (
     AgentMetricsRecorder,
     AgentResultProjectionObservation,
 )
-from .result_projection import AgentCallResultProjection, AgentCallResultProjector
+from .result_projection import (
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
+    SKILL_RESULT_PROJECTION_POLICY_LEGACY,
+    AgentCallResultProjection,
+    AgentCallResultProjector,
+)
 from .runner import AgentCallExecution
+from .transient_results import AgentTransientSkillResultStage
 
 
 @dataclass(slots=True)
@@ -86,7 +96,8 @@ class AgentCapabilityInvoker:
         ]
         | None = None,
         result_projector: AgentCallResultProjector | None = None,
-        result_artifact_stager: Callable[..., Any] | None = None,
+        legacy_result_artifact_stager: Callable[..., Any] | None = None,
+        transient_result_stager: Callable[..., Any] | None = None,
         result_projection_observer: Callable[..., Any] | None = None,
         metrics_recorder: AgentMetricsRecorder | None = None,
         invocation_hook: Callable[..., Any] | None = None,
@@ -100,7 +111,8 @@ class AgentCapabilityInvoker:
         self._load_continuation = continuation_loader
         self._activate_delegated_skill = delegated_skill_activator
         self._result_projector = result_projector or AgentCallResultProjector()
-        self._stage_result_artifact = result_artifact_stager
+        self._stage_legacy_result_artifact = legacy_result_artifact_stager
+        self._stage_transient_result = transient_result_stager
         self._observe_result_projection = result_projection_observer
         self._metrics = metrics_recorder
         self._invocation_hook = invocation_hook
@@ -136,8 +148,6 @@ class AgentCapabilityInvoker:
         )
         if call_item is None or reservation is None:
             raise AgentStorageConflict("agent_continuation_call_result_missing")
-        import json
-
         payload = json.loads(call_item.payload_json)
         arguments_json = str(payload.get("arguments_json") or "{}")
         arguments = json.loads(arguments_json)
@@ -179,7 +189,7 @@ class AgentCapabilityInvoker:
         cancellation,
         lease_handle: AgentLeaseHandle | None = None,
     ) -> AgentCallExecution:
-        del call, result_reservation
+        del call
         task = await self._load_task(run.task_id)
         node = await self._load_node(_node_id(call_item))
         if not isinstance(task, Task) or not isinstance(node, TaskNode):
@@ -357,6 +367,18 @@ class AgentCapabilityInvoker:
                     safe_error_code="agent_continuation_locator_missing",
                 )
             continuation_locator = dict(locator)
+        try:
+            skill_projection_policy = await self._skill_projection_policy(
+                run=run,
+                capability_id=capability_id,
+                status=status,
+                artifacts=artifacts,
+            )
+        except ValueError:
+            return AgentCallExecution(
+                AgentCallOutcomeStatus.FAILED,
+                safe_error_code="agent_context_budget_invalid",
+            )
         projection = self._result_projector.project(
             capability_id=capability_id,
             output_payload=result.output_payload,
@@ -367,6 +389,7 @@ class AgentCapabilityInvoker:
             ),
             artifact_ids=tuple(artifact.artifact_id for artifact in artifacts),
             continuation_locator=continuation_locator,
+            skill_projection_policy=skill_projection_policy,
         )
         if not projection.accepted:
             await self._record_result_projection(
@@ -381,7 +404,7 @@ class AgentCapabilityInvoker:
                 safe_error_code=projection.error_code,
             )
         if projection.spill_required:
-            if self._stage_result_artifact is None:
+            if self._stage_legacy_result_artifact is None:
                 await self._record_result_projection(
                     run=run,
                     call_item=call_item,
@@ -395,7 +418,7 @@ class AgentCapabilityInvoker:
                     safe_error_code="agent_result_artifact_persist_failed",
                 )
             try:
-                staged = self._stage_result_artifact(
+                staged = self._stage_legacy_result_artifact(
                     run=run,
                     call_item=call_item,
                     node_id=node.node_id,
@@ -436,6 +459,71 @@ class AgentCapabilityInvoker:
                     safe_error_code="agent_result_artifact_persist_failed",
                 )
             artifacts = (*artifacts, staged)
+        if projection.transient_stage_required:
+            if (
+                self._stage_transient_result is None
+                or artifacts
+                or not isinstance(result_reservation, AgentItem)
+                or result_reservation.kind is not AgentItemKind.TOOL_RESULT
+                or result_reservation.state is not AgentItemState.RESERVED
+                or result_reservation.source_call_item_id != call_item.item_id
+            ):
+                await self._record_result_projection(
+                    run=run,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                    projection=projection,
+                    artifact_count=0,
+                    error_code="agent_transient_skill_result_stage_failed",
+                )
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code=(
+                        "agent_transient_skill_result_stage_failed"
+                    ),
+                )
+            try:
+                transient_stage = self._stage_transient_result(
+                    run=run,
+                    call_item=call_item,
+                    result_item_id=result_reservation.item_id,
+                    node_id=node.node_id,
+                    capability_id=capability_id,
+                    canonical_raw_bytes=projection.canonical_raw_bytes,
+                    raw_sha256=projection.raw_sha256,
+                    projection_revision=projection.projection_revision,
+                    expected_stage_ref=projection.transient_stage_ref,
+                )
+                if hasattr(transient_stage, "__await__"):
+                    transient_stage = await transient_stage
+            except Exception:
+                transient_stage = None
+            if (
+                not isinstance(
+                    transient_stage, AgentTransientSkillResultStage
+                )
+                or transient_stage.stage_ref
+                != projection.transient_stage_ref
+                or transient_stage.raw_sha256 != projection.raw_sha256
+                or transient_stage.raw_size_bytes
+                != projection.original_size_bytes
+                or transient_stage.projection_revision
+                != projection.projection_revision
+            ):
+                await self._record_result_projection(
+                    run=run,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                    projection=projection,
+                    artifact_count=0,
+                    error_code="agent_transient_skill_result_stage_failed",
+                )
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code=(
+                        "agent_transient_skill_result_stage_failed"
+                    ),
+                )
         await self._record_result_projection(
             run=run,
             call_item=call_item,
@@ -450,6 +538,47 @@ class AgentCapabilityInvoker:
             safe_error_code=(
                 execution.error.code if execution.error is not None else None
             ),
+        )
+
+    async def _skill_projection_policy(
+        self,
+        *,
+        run: AgentRun,
+        capability_id: str,
+        status: AgentCallOutcomeStatus,
+        artifacts: tuple[AgentStagedArtifact, ...],
+    ) -> str:
+        if (
+            status is not AgentCallOutcomeStatus.COMPLETED
+            or not capability_id.startswith("skill.")
+        ):
+            return SKILL_RESULT_PROJECTION_POLICY_LEGACY
+        items = await self._runs.list_items(run.run_id)
+        user_item = next(
+            (
+                item
+                for item in items
+                if item.kind is AgentItemKind.USER_MESSAGE
+                and item.state is AgentItemState.COMMITTED
+            ),
+            None,
+        )
+        if user_item is None:
+            raise ValueError("agent_context_budget_invalid")
+        try:
+            user_payload = json.loads(user_item.payload_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("agent_context_budget_invalid") from exc
+        if not isinstance(user_payload, Mapping):
+            raise ValueError("agent_context_budget_invalid")
+        budget_payload = user_payload.get("context_budget")
+        if budget_payload is None:
+            return SKILL_RESULT_PROJECTION_POLICY_LEGACY
+        AgentContextBudget.from_payload(budget_payload)
+        return (
+            SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
+            if artifacts
+            else SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
         )
 
     async def _record_result_projection(

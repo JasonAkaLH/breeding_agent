@@ -7,6 +7,8 @@ import unittest
 from src.orchestration.agent_loop.result_projection import (
     MODEL_RESULT_MAX_BYTES,
     MODEL_VIEW_MAX_CODE_POINTS,
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
     AgentCallResultProjector,
 )
 from src.orchestration.agent_loop.skill_activation import (
@@ -91,6 +93,91 @@ class AgentCallResultProjectorTest(unittest.TestCase):
             canonicalize_agent_payload(projected.safe_result_payload).size_bytes,
             MODEL_RESULT_MAX_BYTES,
         )
+
+    def test_budgeted_skill_result_uses_only_whole_item_limit_for_inline(self) -> None:
+        payload = {"answer": "x" * 100_000}
+
+        projected = self.project(
+            "skill.lookup",
+            payload,
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+            ),
+        )
+
+        self.assertTrue(projected.accepted)
+        self.assertEqual(projected.projection_mode, "inline")
+        self.assertFalse(projected.projection_truncated)
+        self.assertFalse(projected.spill_required)
+        self.assertFalse(projected.transient_stage_required)
+        self.assertEqual(projected.safe_result_payload["model_view"], payload)
+        self.assertGreater(
+            canonicalize_agent_payload(projected.safe_result_payload).size_bytes,
+            MODEL_RESULT_MAX_BYTES,
+        )
+
+    def test_budgeted_large_skill_without_business_artifacts_uses_v2_receipt(
+        self,
+    ) -> None:
+        projected = self.project(
+            "skill.lookup",
+            {"records": ["x" * 150_000]},
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+            ),
+        )
+
+        self.assertTrue(projected.accepted)
+        self.assertEqual(projected.projection_revision, "skill-result-v2")
+        self.assertEqual(projected.projection_mode, "transient_staged")
+        self.assertTrue(projected.projection_truncated)
+        self.assertTrue(projected.transient_stage_required)
+        self.assertFalse(projected.spill_required)
+        self.assertIsNone(projected.spill_artifact_id)
+        self.assertEqual(
+            projected.safe_result_payload["model_view"],
+            {
+                "complete_result_pending_context_injection": True,
+                "schema": "maf.agent.transient_skill_result_receipt.v1",
+                "stage_ref": projected.transient_stage_ref,
+            },
+        )
+        self.assertRegex(
+            projected.transient_stage_ref or "",
+            r"^agent-transient-skill-result:[0-9a-f]{64}$",
+        )
+
+    def test_budgeted_large_skill_with_business_artifact_keeps_v1_legacy(
+        self,
+    ) -> None:
+        projected = self.project(
+            "skill.lookup",
+            {"records": ["x" * 150_000]},
+            artifact_ids=("business-artifact",),
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
+            ),
+        )
+
+        self.assertTrue(projected.accepted)
+        self.assertEqual(projected.projection_revision, "skill-result-v1")
+        self.assertEqual(projected.projection_mode, "artifact_backed")
+        self.assertTrue(projected.spill_required)
+        self.assertFalse(projected.transient_stage_required)
+
+    def test_budgeted_skill_rejects_forbidden_raw_before_inline_classification(
+        self,
+    ) -> None:
+        projected = self.project(
+            "skill.lookup",
+            {"answer": "safe", "storage_key": "private/object"},
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+            ),
+        )
+
+        self.assertEqual(projected.error_code, "agent_result_invalid")
+        self.assertIsNone(projected.safe_result_payload)
 
     def test_spill_rejects_internal_authority_but_allows_business_urls(self) -> None:
         large = ["x" * 10_000 for _ in range(20)]

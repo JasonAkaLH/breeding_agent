@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +34,10 @@ from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactStager,
     parse_skill_result_storage_ref,
 )
-from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
+from src.orchestration.agent_loop.result_projection import (
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
+    AgentCallResultProjector,
+)
 from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.agent_payload import (
     AGENT_PAYLOAD_MAX_BYTES,
@@ -497,6 +501,44 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                     AgentCallOutcomeStatus.COMPLETED,
                     staged_artifacts=(drifted,),
                 )
+            )
+
+    async def test_transient_receipt_commits_with_no_artifact_metadata(self) -> None:
+        committed = await self._commit_two_calls()
+        call_item = committed.call_items[0]
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.one",
+            output_payload={"records": ["x" * 150_000]},
+            call_item_id=call_item.item_id,
+            outcome="completed",
+            safe_error_code=None,
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+            ),
+        )
+        self.assertTrue(projection.transient_stage_required)
+        outcome = AgentCallOutcomeCommit(
+            "run-1",
+            committed.run.revision,
+            None,
+            call_item.item_id,
+            projection.safe_result_payload,
+            AgentCallOutcomeStatus.COMPLETED,
+            staged_artifacts=(),
+        )
+
+        first = await self.repository.commit_agent_call_outcome(outcome)
+        replay = await self.repository.commit_agent_call_outcome(outcome)
+
+        self.assertEqual(replay, first)
+        self.assertEqual(
+            json.loads(first.payload_json)["safe_result"]["projection_mode"],
+            "transient_staged",
+        )
+        with self.session_factory() as session:
+            self.assertEqual(
+                session.scalar(select(func.count()).select_from(ArtifactRow)),
+                0,
             )
 
     async def test_projection_failure_commits_failed_node_and_result_together(self) -> None:

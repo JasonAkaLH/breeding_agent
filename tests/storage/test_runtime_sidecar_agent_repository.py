@@ -29,7 +29,10 @@ from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactStager,
 )
-from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
+from src.orchestration.agent_loop.result_projection import (
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
+    AgentCallResultProjector,
+)
 from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.runtime_sidecar_agent_repository import RuntimeSidecarAgentRepository
 from src.storage.agent_payload import agent_compaction_source_digest
@@ -411,3 +414,62 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertEqual(artifact["storage_ref"], staged.storage_ref)
         node = self.client.get_task_node(node_id=sampled.node_ids[0])["node"]
         self.assertEqual(node["status"], "completed")
+
+    async def test_transient_receipt_replays_without_sidecar_artifact(self) -> None:
+        binding = AgentModelBinding("edition-a")
+        run = await self.repository.create_run(
+            AgentRun(
+                "run-agent-transient-result",
+                self.task["task_id"],
+                self.task["conversation_id"],
+                AgentRunStatus.RUNNING,
+                binding,
+            )
+        )
+        sampled = await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                run.run_id,
+                run.revision,
+                None,
+                AgentSample(
+                    "sample-transient-result",
+                    binding,
+                    "",
+                    (AgentToolCall("call-large", "tool_large", "{}", 0),),
+                    AgentUsage(status="usage_unavailable"),
+                    AgentFinishMetadata("tool_calls", 1),
+                ),
+                {"tool_large": "skill.large"},
+            )
+        )
+        call = sampled.call_items[0]
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.large",
+            output_payload={"rows": ["x" * 150_000]},
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+            ),
+        )
+        commit = AgentCallOutcomeCommit(
+            run.run_id,
+            sampled.run.revision,
+            None,
+            call.item_id,
+            projection.safe_result_payload,
+            AgentCallOutcomeStatus.COMPLETED,
+            (),
+        )
+
+        first = await self.repository.commit_agent_call_outcome(commit)
+        replay = await self.repository.commit_agent_call_outcome(commit)
+
+        self.assertEqual(replay, first)
+        self.assertEqual(
+            self.client.list_artifacts_for_task(task_id=run.task_id)[
+                "artifacts"
+            ],
+            [],
+        )

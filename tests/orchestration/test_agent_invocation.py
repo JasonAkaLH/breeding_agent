@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from src.orchestration.agent_loop.invocation import (
 )
 from src.orchestration.agent_loop.lease import AgentLeaseHandle
 from src.orchestration.agent_loop.capability_invoker import AgentCapabilityInvoker
+from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
@@ -34,6 +36,9 @@ from src.orchestration.agent_loop.models import (
 )
 from src.orchestration.agent_loop.task_projection import (
     AgentTaskInvocationCommitPort,
+)
+from src.orchestration.agent_loop.transient_results import (
+    AgentTransientSkillResultStage,
 )
 from src.orchestration.models import ExecutionInstance, InstanceState
 from src.orchestration.registry import InstanceRegistry
@@ -167,6 +172,152 @@ class _AgentFixtureCommitPort(_RecordingCommitPort):
 
 
 class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_budgeted_large_skill_stages_private_result_without_artifact(
+        self,
+    ) -> None:
+        capability_id = "skill.large"
+        instances = InstanceRegistry()
+        instances.register(
+            ExecutionInstance(
+                "instance-large", (capability_id,), InstanceState.ONLINE, 0
+            )
+        )
+        task = Task("task-1", "conv-1", "message-1", status=TaskStatus.RUNNING)
+        node = TaskNode(
+            "node-1", task.task_id, capability_id, status=NodeStatus.PENDING
+        )
+        port = _RecordingCommitPort(task=task, node=node)
+        kernel = CapabilityInvocationService(
+            instance_selector=InstanceSelector(instances),
+            executor=FakeExecutor(
+                {
+                    capability_id: CapabilityExecutionResult(
+                        capability_id=capability_id,
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        output_payload={"records": ["x" * 150_000]},
+                    )
+                }
+            ),
+            commit_port=port,
+            now_fn=lambda: datetime(2026, 8, 28, 12, 0),
+        )
+        run = AgentRun(
+            run_id="run-1",
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding("edition-a"),
+            revision=3,
+        )
+        budget = AgentContextBudget.from_model_context_window(450_000)
+        user_payload = json.dumps(
+            {"context_budget": budget.to_payload(), "text": "question"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        user_item = AgentItem(
+            "user-1",
+            run.run_id,
+            run.task_id,
+            1,
+            AgentItemKind.USER_MESSAGE,
+            AgentItemState.COMMITTED,
+            user_payload,
+            "a" * 64,
+        )
+        call_item = AgentItem(
+            "call-item-1",
+            run.run_id,
+            run.task_id,
+            2,
+            AgentItemKind.TOOL_CALL,
+            AgentItemState.COMMITTED,
+            '{"node_id":"node-1"}\n',
+            "b" * 64,
+        )
+        reservation = AgentItem(
+            "result-item-1",
+            run.run_id,
+            run.task_id,
+            3,
+            AgentItemKind.TOOL_RESULT,
+            AgentItemState.RESERVED,
+            "{}\n",
+            "c" * 64,
+            source_call_item_id=call_item.item_id,
+        )
+
+        class Runs:
+            async def list_items(_self, _run_id: str):
+                return (user_item, call_item, reservation)
+
+        transient_calls: list[dict[str, object]] = []
+
+        def stage_transient(**values: object) -> AgentTransientSkillResultStage:
+            transient_calls.append(values)
+            raw = values["canonical_raw_bytes"]
+            assert isinstance(raw, bytes)
+            return AgentTransientSkillResultStage(
+                stage_ref=str(values["expected_stage_ref"]),
+                raw_size_bytes=len(raw),
+                raw_sha256=str(values["raw_sha256"]),
+                projection_revision=str(values["projection_revision"]),
+            )
+
+        invoker = AgentCapabilityInvoker(
+            invocation_service=kernel,
+            runs=Runs(),
+            task_loader=AsyncMock(return_value=task),
+            node_loader=AsyncMock(return_value=node),
+            request_metadata_loader=lambda _run: {},
+            current_user_input_loader=lambda _run: "question",
+            legacy_result_artifact_stager=lambda **_values: self.fail(
+                "v2 transient result must not call legacy Artifact stager"
+            ),
+            transient_result_stager=stage_transient,
+        )
+
+        outcome = await invoker.invoke(
+            run=run,
+            call=AgentToolCall("call-1", "skill_large", "{}", 0),
+            call_item=call_item,
+            result_reservation=reservation,
+            capability_id=capability_id,
+            effective_payload={},
+            cancellation=None,
+        )
+
+        self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
+        self.assertEqual(outcome.staged_artifacts, ())
+        self.assertEqual(
+            outcome.safe_result_payload["projection_mode"],
+            "transient_staged",
+        )
+        self.assertEqual(len(transient_calls), 1)
+        self.assertEqual(
+            transient_calls[0]["result_item_id"], reservation.item_id
+        )
+
+        def fail_stage(**_values: object) -> None:
+            raise RuntimeError("injected")
+
+        invoker._stage_transient_result = fail_stage  # noqa: SLF001
+        failed = await invoker.invoke(
+            run=run,
+            call=AgentToolCall("call-1", "skill_large", "{}", 0),
+            call_item=call_item,
+            result_reservation=reservation,
+            capability_id=capability_id,
+            effective_payload={},
+            cancellation=None,
+        )
+        self.assertEqual(failed.status, AgentCallOutcomeStatus.FAILED)
+        self.assertEqual(
+            failed.safe_error_code,
+            "agent_transient_skill_result_stage_failed",
+        )
+
     async def test_agent_terminal_projection_is_candidate_only_until_outcome_cas(self) -> None:
         storage = SimpleNamespace(
             save_task_node=AsyncMock(),
