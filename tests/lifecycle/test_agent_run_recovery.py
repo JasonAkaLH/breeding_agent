@@ -20,6 +20,7 @@ from src.lifecycle.agent_run_recovery import (
     AgentAuthorityResolution,
     AgentRecoveryState,
     AgentRunRecoveryCoordinator,
+    AgentTransientRecoveryOutcome,
 )
 from src.lifecycle.cancellation_service import CancellationService
 from src.orchestration.agent_loop.continuation import (
@@ -42,6 +43,14 @@ from src.orchestration.agent_loop.models import (
     AgentToolCall,
     AgentUsage,
     AgentUserMessageCommit,
+)
+from src.orchestration.agent_loop.result_projection import (
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
+    AgentCallResultProjector,
+    build_model_result_envelope,
+)
+from src.orchestration.agent_loop.transient_results import (
+    AgentTransientSkillResultStore,
 )
 from src.storage.sqlite import (
     SQLiteAgentRepository,
@@ -733,6 +742,126 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(tool_result.payload_json)
         self.assertEqual(payload["outcome"], "aborted")
         self.assertEqual(payload["safe_error_code"], "side_effect_unknown_no_replay")
+
+    async def test_startup_recovery_commits_matching_transient_stage_without_replay(
+        self,
+    ) -> None:
+        task_id = "task-transient-crashed"
+        run_id = "run-transient-crashed"
+        with self.sessions.begin() as session:
+            session.add(
+                TaskRow(
+                    task_id=task_id,
+                    conversation_id="conv-transient-crashed",
+                    root_message_id="message-transient-crashed",
+                    status="running",
+                    routing_mode="auto",
+                )
+            )
+        run = await self.repository.create_run(
+            AgentRun(
+                run_id,
+                task_id,
+                "conv-transient-crashed",
+                AgentRunStatus.RUNNING,
+                self.binding,
+            )
+        )
+        sampled = await self.repository.commit_agent_sample(
+            AgentSampleCommit(
+                run_id=run_id,
+                expected_revision=run.revision,
+                expected_claim_token=None,
+                sample=AgentSample(
+                    sample_id="sample-transient-crashed",
+                    binding=self.binding,
+                    visible_text="",
+                    tool_calls=(
+                        AgentToolCall("call-transient", "tool_safe", "{}", 0),
+                    ),
+                    usage=AgentUsage(status="usage_unavailable"),
+                    finish=AgentFinishMetadata("tool_calls", 1),
+                ),
+                capability_ids_by_tool_name={"tool_safe": "skill.safe"},
+            )
+        )
+        call = sampled.call_items[0]
+        reservation = sampled.result_reservations[0]
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.safe",
+            output_payload={"rows": ["x" * 150_000]},
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+            ),
+        )
+        store = AgentTransientSkillResultStore(
+            Path(self.temp_dir.name) / "transient-results"
+        )
+        store.stage(
+            run=sampled.run,
+            call_item=call,
+            result_item_id=reservation.item_id,
+            node_id=sampled.node_ids[0],
+            capability_id="skill.safe",
+            canonical_raw_bytes=projection.canonical_raw_bytes,
+            raw_sha256=projection.raw_sha256,
+            projection_revision=projection.projection_revision,
+            expected_stage_ref=projection.transient_stage_ref,
+        )
+
+        def recover_stage(current_run, current_call, current_result):
+            recovered = store.recover_stage(
+                run=current_run,
+                call_item=current_call,
+                result_item=current_result,
+            )
+            if recovered is None:
+                return None
+            return AgentTransientRecoveryOutcome(
+                safe_result_payload=build_model_result_envelope(
+                    projection_revision=recovered.projection_revision,
+                    projection_mode="transient_staged",
+                    model_view={
+                        "complete_result_pending_context_injection": True,
+                        "schema": (
+                            "maf.agent.transient_skill_result_receipt.v1"
+                        ),
+                        "stage_ref": recovered.stage_ref,
+                    },
+                    original_size_bytes=recovered.raw_size_bytes,
+                    raw_sha256=recovered.raw_sha256,
+                    projection_truncated=True,
+                )
+            )
+
+        resumer = _RecordingResumer(self.repository)
+        coordinator = AgentRunRecoveryCoordinator(
+            runs=self.repository,
+            writer=self.repository,
+            lease_store=self.repository,
+            resumer=resumer,
+            owner_id="transient-recovery-worker",
+            transient_result_recoverer=recover_stage,
+        )
+
+        recovered = await coordinator.recover_crashed_run(run_id)
+
+        self.assertEqual(recovered.state, AgentRecoveryState.RESUMED)
+        self.assertEqual(resumer.run_ids, [run_id])
+        result = next(
+            item
+            for item in await self.repository.list_items(run_id)
+            if item.item_id == reservation.item_id
+        )
+        payload = json.loads(result.payload_json)
+        self.assertEqual(payload["outcome"], "completed")
+        self.assertEqual(
+            payload["safe_result"]["projection_mode"], "transient_staged"
+        )
+        self.assertEqual(payload["artifact_refs"], [])
 
     async def test_startup_recovery_only_forwards_initial_tool_for_pristine_run(self) -> None:
         initialized_runs = {}

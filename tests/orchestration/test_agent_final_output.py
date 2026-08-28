@@ -103,10 +103,18 @@ class AgentFinalOutputPublisherTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
         candidate = await self._candidate()
+        cleanup_statuses = []
+
+        class Cleaner:
+            def cleanup_terminal(_self, *, run, items):
+                cleanup_statuses.append((run.status, len(items)))
+                return 0
+
         publisher = AgentFinalOutputPublisher(
             runs=self.repository,
             writer=self.repository,
             lease_controller=self.leases,
+            transient_result_cleaner=Cleaner(),
         )
         result = await publisher.publish(
             run_id="run-1",
@@ -120,6 +128,10 @@ class AgentFinalOutputPublisherTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(retry, result)
         self.assertEqual(result.run.status, AgentRunStatus.COMPLETED)
+        self.assertEqual(
+            [status for status, _count in cleanup_statuses],
+            [AgentRunStatus.COMPLETED, AgentRunStatus.COMPLETED],
+        )
         with self.sessions() as session:
             self.assertEqual(session.scalar(select(func.count()).select_from(AgentFinalReceiptRow)), 1)
             self.assertEqual(session.scalar(select(func.count()).select_from(MessageRow)), 1)
@@ -169,10 +181,15 @@ class AgentFinalOutputPublisherTest(unittest.IsolatedAsyncioTestCase):
         with self.sessions() as session:
             self.assertEqual(session.scalar(select(func.count()).select_from(AgentFinalReceiptRow)), 0)
             self.assertEqual(session.scalar(select(func.count()).select_from(MessageRow)), 0)
+        class FailingCleaner:
+            def cleanup_terminal(self, **_kwargs):
+                raise RuntimeError("cleanup failed")
+
         recovered = AgentFinalOutputPublisher(
             runs=self.repository,
             writer=self.repository,
             lease_controller=self.leases,
+            transient_result_cleaner=FailingCleaner(),
         )
         result = await recovered.publish(
             run_id="run-1",

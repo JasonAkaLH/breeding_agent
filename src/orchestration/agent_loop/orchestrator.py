@@ -105,6 +105,7 @@ class AgentLoopOrchestrator:
         initialization_event_recorder: (
             Callable[[EventRecord], Awaitable[bool]] | None
         ) = None,
+        transient_result_cleaner: Any | None = None,
     ) -> None:
         self._runs = runs
         self._writer = writer
@@ -119,6 +120,7 @@ class AgentLoopOrchestrator:
         self._make_event = make_event
         self._load_event = event_loader
         self._record_initialization_event = initialization_event_recorder
+        self._transient_result_cleaner = transient_result_cleaner
 
     async def start_or_resume(
         self,
@@ -302,6 +304,23 @@ class AgentLoopOrchestrator:
         self, result: AgentLoopRunResult
     ) -> AgentOrchestrationResult:
         if result.state != "final_candidate":
+            if (
+                self._transient_result_cleaner is not None
+                and result.run.status
+                in {
+                    AgentRunStatus.COMPLETED,
+                    AgentRunStatus.FAILED,
+                    AgentRunStatus.CANCELLED,
+                }
+            ):
+                try:
+                    items = await self._runs.list_items(result.run.run_id)
+                    self._transient_result_cleaner.cleanup_terminal(
+                        run=result.run,
+                        items=items,
+                    )
+                except Exception:
+                    pass
             return AgentOrchestrationResult(result.run, result.state)
         if result.final_candidate is None:
             raise AgentStorageConflict("agent_final_candidate_missing")
@@ -367,6 +386,15 @@ class AgentLoopOrchestrator:
             expected_claim_token=run.claim_token,
             safe_reason_code=reason_code,
         )
+        if self._transient_result_cleaner is not None:
+            try:
+                items = await self._runs.list_items(cancelled.run_id)
+                self._transient_result_cleaner.cleanup_terminal(
+                    run=cancelled,
+                    items=items,
+                )
+            except Exception:
+                pass
         self._contexts.release(run.run_id)
         return cancelled
 

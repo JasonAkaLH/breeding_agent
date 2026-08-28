@@ -41,6 +41,10 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         source = inspect.getsource(ApiRuntime.start)
         self.assertLess(
             source.index("await self._recover_agent_runs()"),
+            source.index("await agent_transient_result_janitor.run_once()"),
+        )
+        self.assertLess(
+            source.index("await agent_transient_result_janitor.run_once()"),
             source.index("await agent_skill_result_janitor.run_once()"),
         )
         self.assertLess(

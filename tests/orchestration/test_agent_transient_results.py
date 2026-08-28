@@ -6,6 +6,8 @@ import os
 import stat
 import tempfile
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.orchestration.agent_loop.models import (
@@ -21,6 +23,8 @@ from src.orchestration.agent_loop.transient_results import (
     AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND,
     AgentTransientSkillResultStage,
     AgentTransientSkillResultResolver,
+    AgentTransientSkillResultCleaner,
+    AgentTransientSkillResultJanitor,
     AgentTransientSkillResultStore,
     transient_skill_result_stage_ref,
 )
@@ -29,7 +33,7 @@ from src.orchestration.agent_loop.result_projection import (
 )
 
 
-class AgentTransientSkillResultStoreTest(unittest.TestCase):
+class AgentTransientSkillResultStoreTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name) / "transient"
@@ -78,6 +82,38 @@ class AgentTransientSkillResultStoreTest(unittest.TestCase):
         }
         values.update(overrides)
         return self.store.stage(**values)
+
+    def result_item(self) -> AgentItem:
+        receipt = build_model_result_envelope(
+            projection_revision="skill-result-v2",
+            projection_mode="transient_staged",
+            model_view={
+                "complete_result_pending_context_injection": True,
+                "schema": "maf.agent.transient_skill_result_receipt.v1",
+                "stage_ref": self.stage_ref,
+            },
+            original_size_bytes=len(self.raw),
+            raw_sha256=self.raw_sha256,
+            projection_truncated=True,
+        )
+        durable_payload = {
+            "artifact_refs": [],
+            "call_item_id": self.call.item_id,
+            "outcome": "completed",
+            "safe_error_code": None,
+            "safe_result": receipt,
+        }
+        return AgentItem(
+            item_id="result-1",
+            run_id=self.run.run_id,
+            task_id=self.run.task_id,
+            sequence=3,
+            kind=AgentItemKind.TOOL_RESULT,
+            state=AgentItemState.COMMITTED,
+            payload_json=json.dumps(durable_payload) + "\n",
+            payload_sha256="b" * 64,
+            source_call_item_id=self.call.item_id,
+        )
 
     def test_stage_is_private_exact_and_contains_no_artifact_or_location(self) -> None:
         first = self.stage()
@@ -171,36 +207,9 @@ class AgentTransientSkillResultStoreTest(unittest.TestCase):
 
     def test_resolver_replaces_exact_receipt_with_complete_raw(self) -> None:
         self.stage()
-        receipt = build_model_result_envelope(
-            projection_revision="skill-result-v2",
-            projection_mode="transient_staged",
-            model_view={
-                "complete_result_pending_context_injection": True,
-                "schema": "maf.agent.transient_skill_result_receipt.v1",
-                "stage_ref": self.stage_ref,
-            },
-            original_size_bytes=len(self.raw),
-            raw_sha256=self.raw_sha256,
-            projection_truncated=True,
-        )
-        durable_payload = {
-            "artifact_refs": [],
-            "call_item_id": self.call.item_id,
-            "outcome": "completed",
-            "safe_error_code": None,
-            "safe_result": receipt,
-        }
-        result = AgentItem(
-            item_id="result-1",
-            run_id=self.run.run_id,
-            task_id=self.run.task_id,
-            sequence=3,
-            kind=AgentItemKind.TOOL_RESULT,
-            state=AgentItemState.COMMITTED,
-            payload_json=json.dumps(durable_payload) + "\n",
-            payload_sha256="b" * 64,
-            source_call_item_id=self.call.item_id,
-        )
+        result = self.result_item()
+        durable_payload = json.loads(result.payload_json)
+        receipt = durable_payload["safe_result"]
         resolver = AgentTransientSkillResultResolver(self.store)
 
         first = resolver.resolve_tool_result(
@@ -259,3 +268,91 @@ class AgentTransientSkillResultStoreTest(unittest.TestCase):
                 result_item=result,
                 durable_payload=durable_payload,
             )
+
+    def test_cleaner_deletes_only_after_terminal_authority(self) -> None:
+        self.stage()
+        result = self.result_item()
+        cleaner = AgentTransientSkillResultCleaner(self.store)
+
+        with self.assertRaisesRegex(ValueError, "cleanup_not_terminal"):
+            cleaner.cleanup_terminal(
+                run=self.run,
+                items=(self.call, result),
+            )
+        self.assertTrue(self.store.manifest_path(self.stage_ref).exists())
+
+        removed = cleaner.cleanup_terminal(
+            run=replace(self.run, status=AgentRunStatus.COMPLETED),
+            items=(self.call, result),
+        )
+
+        self.assertEqual(removed, 1)
+        self.assertFalse(self.store.manifest_path(self.stage_ref).exists())
+        self.assertEqual(
+            tuple(path for path in self.store.raw_root.rglob("*") if path.is_file()),
+            (),
+        )
+
+    async def test_janitor_deletes_terminal_stage_and_retains_unmanifested_raw(
+        self,
+    ) -> None:
+        self.stage()
+        result = self.result_item()
+
+        class Runs:
+            async def get_run(_self, _run_id: str):
+                return replace(self.run, status=AgentRunStatus.COMPLETED)
+
+            async def list_items(_self, _run_id: str):
+                return (self.call, result)
+
+        janitor = AgentTransientSkillResultJanitor(
+            store=self.store,
+            runs=Runs(),
+            storage=object(),
+        )
+        cleaned = await janitor.run_once()
+        self.assertEqual(cleaned.stages_removed, 1)
+
+        self.stage()
+        self.store.manifest_path(self.stage_ref).unlink()
+        retained = await janitor.run_once()
+        self.assertEqual(retained.stages_removed, 0)
+        self.assertEqual(retained.unmanifested_raw_retained, 1)
+        self.assertEqual(
+            len(
+                tuple(
+                    path
+                    for path in self.store.raw_root.rglob("*")
+                    if path.is_file()
+                )
+            ),
+            1,
+        )
+
+    async def test_janitor_uses_age_only_with_missing_run_and_terminal_task(
+        self,
+    ) -> None:
+        self.stage()
+        manifest = self.store.load_manifest(self.stage_ref)
+        staged_at = datetime.fromisoformat(str(manifest["staged_at"]))
+
+        class MissingRuns:
+            async def get_run(_self, _run_id: str):
+                return None
+
+        class MissingTaskStorage:
+            async def get_task(_self, _task_id: str):
+                return None
+
+        janitor = AgentTransientSkillResultJanitor(
+            store=self.store,
+            runs=MissingRuns(),
+            storage=MissingTaskStorage(),
+            now_fn=lambda: staged_at + timedelta(hours=25),
+        )
+
+        cleaned = await janitor.run_once()
+
+        self.assertEqual(cleaned.stages_removed, 1)
+        self.assertFalse(self.store.manifest_path(self.stage_ref).exists())

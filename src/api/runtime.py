@@ -319,6 +319,7 @@ from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.agent_run_recovery import (
     AgentAuthorityResolution,
     AgentRunRecoveryCoordinator,
+    AgentTransientRecoveryOutcome,
 )
 from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.errors import ConversationBusyError
@@ -355,12 +356,15 @@ from src.orchestration.agent_loop import (
     AgentSkillResultArtifactJanitor,
     AgentTransientSkillResultStore,
     AgentTransientSkillResultResolver,
+    AgentTransientSkillResultCleaner,
+    AgentTransientSkillResultJanitor,
     CapabilityInvocationService,
     CapabilityVisibilityContext,
     DelegatedSkillActivationService,
     build_canonical_skill_activation,
     build_delegated_skill_instruction_result,
     build_agent_terminal_event,
+    build_model_result_envelope,
     default_agent_invocation_policy,
 )
 from src.orchestration.agent_loop.lease import AgentLeaseController
@@ -864,6 +868,9 @@ class ApiRuntime(
         self._mcp_cp7_maintenance_authorizer = mcp_cp7_maintenance_authorizer
         self._submission_admission_coordinator = submission_admission_coordinator
         self._prepared_agent_recovery_loader = prepared_agent_recovery_loader
+        self._agent_transient_result_janitor: (
+            AgentTransientSkillResultJanitor | None
+        ) = None
         self._agent_skill_result_janitor: AgentSkillResultArtifactJanitor | None = None
         self._submission_claim_owner = f"api-submission:{uuid4().hex}"
         self._submission_claim_ttl = timedelta(seconds=30)
@@ -10217,6 +10224,11 @@ class ApiRuntime(
             raise
         try:
             await self._recover_agent_runs()
+            agent_transient_result_janitor = getattr(
+                self, "_agent_transient_result_janitor", None
+            )
+            if agent_transient_result_janitor is not None:
+                await agent_transient_result_janitor.run_once()
             agent_skill_result_janitor = getattr(
                 self, "_agent_skill_result_janitor", None
             )
@@ -15077,6 +15089,9 @@ def build_api_runtime(
         Path(database_path).parent / "agent_transient_skill_results",
         now_fn=lambda: datetime.now(timezone.utc),
     )
+    agent_transient_result_cleaner = AgentTransientSkillResultCleaner(
+        agent_transient_skill_result_store
+    )
     runtime_holder: dict[str, ApiRuntime] = {}
 
     async def agent_invocation_hook(**values: Any):
@@ -15308,6 +15323,7 @@ def build_api_runtime(
         lease_controller=lease_controller,
         candidate_builder=agent_context_candidate_builder,
         transient_result_resolver=agent_transient_result_resolver,
+        transient_result_cleaner=agent_transient_result_cleaner,
     )
     agent_runner = AgentLoopRunner(
         runs=agent_repository,
@@ -15329,6 +15345,7 @@ def build_api_runtime(
         runs=agent_repository,
         writer=agent_repository,
         lease_controller=lease_controller,
+        transient_result_cleaner=agent_transient_result_cleaner,
     )
 
     def build_agent_model_binding(
@@ -15390,13 +15407,40 @@ def build_api_runtime(
         record_event=record_live_event,
         make_event=make_agent_event,
         initialization_event_recorder=record_initialization_event_exact,
+        transient_result_cleaner=agent_transient_result_cleaner,
     )
+    def recover_transient_skill_result(run, call_item, result_item):
+        recovered = agent_transient_skill_result_store.recover_stage(
+            run=run,
+            call_item=call_item,
+            result_item=result_item,
+        )
+        if recovered is None:
+            return None
+        return AgentTransientRecoveryOutcome(
+            safe_result_payload=build_model_result_envelope(
+                projection_revision=recovered.projection_revision,
+                projection_mode="transient_staged",
+                model_view={
+                    "complete_result_pending_context_injection": True,
+                    "schema": (
+                        "maf.agent.transient_skill_result_receipt.v1"
+                    ),
+                    "stage_ref": recovered.stage_ref,
+                },
+                original_size_bytes=recovered.raw_size_bytes,
+                raw_sha256=recovered.raw_sha256,
+                projection_truncated=True,
+            )
+        )
+
     agent_recovery = AgentRunRecoveryCoordinator(
         runs=agent_repository,
         writer=agent_repository,
         lease_store=agent_repository,
         resumer=agent_loop_orchestrator,
         owner_id=f"api-agent-recovery:{uuid4().hex}",
+        transient_result_recoverer=recover_transient_skill_result,
     )
     interrupt_service = InterruptService(
         storage,
@@ -15504,6 +15548,12 @@ def build_api_runtime(
     runtime._agent_skill_result_janitor = AgentSkillResultArtifactJanitor(
         file_store=artifact_file_store,
         manifest_root=agent_skill_result_manifest_root,
+        storage=storage,
+        runs=agent_repository,
+        now_fn=lambda: datetime.now(timezone.utc),
+    )
+    runtime._agent_transient_result_janitor = AgentTransientSkillResultJanitor(
+        store=agent_transient_skill_result_store,
         storage=storage,
         runs=agent_repository,
         now_fn=lambda: datetime.now(timezone.utc),

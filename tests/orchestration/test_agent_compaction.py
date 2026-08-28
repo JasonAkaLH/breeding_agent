@@ -136,12 +136,23 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_binding_summary_advances_boundary_without_deleting_sources(self) -> None:
         model = _SummaryModel(self.binding)
+        cleaned_boundaries = []
+
+        class Cleaner:
+            def cleanup_covered(
+                _self, *, run, items, covered_end_sequence
+            ):
+                cleaned_boundaries.append(
+                    (run.compacted_through_sequence, covered_end_sequence)
+                )
+
         service = AgentCompactionService(
             runs=self.repository,
             writer=self.repository,
             model=model,
             lease_controller=self.leases,
             candidate_builder=self.candidate_builder,
+            transient_result_cleaner=Cleaner(),
             minimum_suffix_items=2,
         )
         calls = 0
@@ -164,6 +175,7 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model.requests), 1)
         self.assertEqual(model.requests[0].binding, self.binding)
         self.assertEqual(outcome.run.compacted_through_sequence, 3)
+        self.assertEqual(cleaned_boundaries, [(3, 3)])
         self.assertEqual([item.sequence for item in outcome.items], [1, 2, 3, 4, 5, 6])
         context = AgentContextBuilder(
             AgentContextRules("stable", "tool rules", "final guard")

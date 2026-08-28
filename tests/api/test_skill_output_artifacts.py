@@ -350,10 +350,7 @@ print(json.dumps({
                 self.workspace / "agent_transient_skill_results" / "raw"
             ).rglob("result.json")
         )
-        self.assertEqual(len(raw_paths), 1)
-        raw = json.loads(raw_paths[0].read_text(encoding="utf-8"))
-        self.assertEqual(len(raw["articles"]), 28)
-        self.assertEqual(raw["articles"], raw["structured_content"]["articles"])
+        self.assertEqual(raw_paths, ())
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         skill_node = next(
             node for node in nodes if node.capability_id == self.active_skill_id
@@ -370,7 +367,7 @@ print(json.dumps({
         )
         audit_log = (self.workspace / "audit.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("article-0", audit_log)
-        self.assertNotIn(str(raw_paths[0]), audit_log)
+        self.assertNotIn("agent_transient_skill_results", audit_log)
 
     async def test_invalid_raw_result_commits_typed_failed_node_without_stage(self) -> None:
         await self._use_skill("""print('{\"answer\": NaN}')\n""")

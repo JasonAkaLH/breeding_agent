@@ -23,10 +23,12 @@ class AgentFinalOutputPublisher:
         runs: AgentRunRepository,
         writer: AgentAtomicWriter,
         lease_controller: AgentLeaseController,
+        transient_result_cleaner=None,
     ) -> None:
         self._runs = runs
         self._writer = writer
         self._leases = lease_controller
+        self._transient_result_cleaner = transient_result_cleaner
 
     async def publish(
         self,
@@ -86,7 +88,23 @@ class AgentFinalOutputPublisher:
             )
 
         if run.status is AgentRunStatus.COMPLETED:
-            return await commit(handle)
+            result = await commit(handle)
+            await self._cleanup_after_final(result)
+            return result
         if run.status is not AgentRunStatus.RUNNING:
             raise AgentStorageConflict("agent_final_run_not_publishable")
-        return await self._leases.run_active_phase("final_publish", handle, commit)
+        result = await self._leases.run_active_phase("final_publish", handle, commit)
+        await self._cleanup_after_final(result)
+        return result
+
+    async def _cleanup_after_final(self, result: AgentFinalOutputResult) -> None:
+        if self._transient_result_cleaner is None:
+            return
+        try:
+            items = await self._runs.list_items(result.run.run_id)
+            self._transient_result_cleaner.cleanup_terminal(
+                run=result.run,
+                items=items,
+            )
+        except Exception:
+            pass

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
+from src.core.enums import TaskStatus
 from src.storage.agent_payload import canonicalize_agent_payload
 from src.storage.artifact_files import (
     LocalArtifactFileStore,
@@ -32,6 +33,16 @@ _RAW_FILENAME = "result.json"
 @dataclass(frozen=True, slots=True)
 class AgentTransientSkillResultStage:
     stage_ref: str
+    raw_size_bytes: int
+    raw_sha256: str
+    projection_revision: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTransientSkillResultRecoveryStage:
+    stage_ref: str
+    capability_id: str
+    node_id: str
     raw_size_bytes: int
     raw_sha256: str
     projection_revision: str
@@ -70,6 +81,9 @@ class AgentTransientSkillResultStore:
         digest = _stage_ref_digest(stage_ref)
         return self._manifest_root / f"{digest}.json"
 
+    def manifest_paths(self) -> tuple[Path, ...]:
+        return tuple(sorted(self._manifest_root.iterdir()))
+
     def load_manifest(self, stage_ref: str) -> dict[str, object]:
         try:
             return _load_manifest(self.manifest_path(stage_ref))
@@ -99,6 +113,108 @@ class AgentTransientSkillResultStore:
         except (OSError, TypeError, ValueError):
             raise ValueError(
                 "agent_transient_skill_result_unavailable"
+            ) from None
+
+    def recover_stage(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        result_item: AgentItem,
+    ) -> AgentTransientSkillResultRecoveryStage | None:
+        matches: list[dict[str, object]] = []
+        for path in self.manifest_paths():
+            try:
+                manifest = _load_manifest(path)
+            except (OSError, TypeError, ValueError):
+                continue
+            if (
+                manifest["run_id"] == run.run_id
+                and manifest["call_item_id"] == call_item.item_id
+                and manifest["result_item_id"] == result_item.item_id
+            ):
+                matches.append(manifest)
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ValueError("agent_transient_skill_result_unavailable")
+        manifest = matches[0]
+        try:
+            call_payload = json.loads(call_item.payload_json)
+            if (
+                not isinstance(call_payload, Mapping)
+                or call_item.kind is not AgentItemKind.TOOL_CALL
+                or result_item.kind is not AgentItemKind.TOOL_RESULT
+                or result_item.source_call_item_id != call_item.item_id
+                or manifest["task_id"] != run.task_id
+                or manifest["conversation_id"] != run.conversation_id
+                or manifest["node_id"] != call_payload.get("node_id")
+                or manifest["capability_id"]
+                != call_payload.get("capability_id")
+            ):
+                raise ValueError("identity_drift")
+            raw = self.read_raw(
+                str(manifest["stage_ref"]),
+                expected_size_bytes=int(manifest["raw_size_bytes"]),
+                expected_sha256=str(manifest["raw_sha256"]),
+            )
+            value = json.loads(raw.decode("utf-8"))
+            if (
+                not isinstance(value, dict)
+                or (
+                    json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                != raw
+            ):
+                raise ValueError("raw_drift")
+            return AgentTransientSkillResultRecoveryStage(
+                stage_ref=str(manifest["stage_ref"]),
+                capability_id=str(manifest["capability_id"]),
+                node_id=str(manifest["node_id"]),
+                raw_size_bytes=int(manifest["raw_size_bytes"]),
+                raw_sha256=str(manifest["raw_sha256"]),
+                projection_revision=str(manifest["projection_revision"]),
+            )
+        except (OSError, TypeError, ValueError):
+            raise ValueError(
+                "agent_transient_skill_result_unavailable"
+            ) from None
+
+    def delete_stage(
+        self,
+        stage_ref: str,
+        *,
+        expected_run_id: str | None = None,
+        expected_result_item_id: str | None = None,
+    ) -> bool:
+        try:
+            manifest = _load_manifest(self.manifest_path(stage_ref))
+            if (
+                (expected_run_id is not None and manifest["run_id"] != expected_run_id)
+                or (
+                    expected_result_item_id is not None
+                    and manifest["result_item_id"] != expected_result_item_id
+                )
+            ):
+                raise ValueError("identity_drift")
+            storage_key = (
+                f"{sanitize_storage_component(stage_ref)}/{_RAW_FILENAME}"
+            )
+            raw_deleted = self._raw_store.delete(storage_key)
+            manifest_path = self.manifest_path(stage_ref)
+            manifest_path.unlink()
+            _fsync_directory(self._manifest_root)
+            return raw_deleted
+        except (OSError, TypeError, ValueError):
+            raise ValueError(
+                "agent_transient_skill_result_cleanup_failed"
             ) from None
 
     def stage(
@@ -442,6 +558,189 @@ class AgentTransientSkillResultResolver:
                 "result": raw_value,
             },
         }
+
+
+class AgentTransientSkillResultCleaner:
+    def __init__(self, store: AgentTransientSkillResultStore) -> None:
+        self._store = store
+
+    def cleanup_terminal(
+        self,
+        *,
+        run: AgentRun,
+        items: tuple[AgentItem, ...],
+    ) -> int:
+        terminal = str(run.status) in {"completed", "failed", "cancelled"}
+        if not terminal:
+            raise ValueError("agent_transient_skill_result_cleanup_not_terminal")
+        return self._cleanup(run=run, items=items)
+
+    def cleanup_covered(
+        self,
+        *,
+        run: AgentRun,
+        items: tuple[AgentItem, ...],
+        covered_end_sequence: int,
+    ) -> int:
+        return self._cleanup(
+            run=run,
+            items=tuple(
+                item
+                for item in items
+                if item.sequence <= covered_end_sequence
+            ),
+        )
+
+    def _cleanup(
+        self,
+        *,
+        run: AgentRun,
+        items: tuple[AgentItem, ...],
+    ) -> int:
+        removed = 0
+        for item in items:
+            stage_ref = transient_stage_ref_from_result_item(item)
+            if stage_ref is None:
+                continue
+            self._store.delete_stage(
+                stage_ref,
+                expected_run_id=run.run_id,
+                expected_result_item_id=item.item_id,
+            )
+            removed += 1
+        return removed
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTransientSkillResultJanitorResult:
+    stages_removed: int = 0
+    retained: int = 0
+    unmanifested_raw_retained: int = 0
+
+
+class AgentTransientSkillResultJanitor:
+    def __init__(
+        self,
+        *,
+        store: AgentTransientSkillResultStore,
+        runs: object,
+        storage: object,
+        now_fn: Callable[[], datetime] | None = None,
+        retention_seconds: int = 24 * 60 * 60,
+    ) -> None:
+        self._store = store
+        self._runs = runs
+        self._storage = storage
+        self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._retention_seconds = retention_seconds
+
+    async def run_once(self) -> AgentTransientSkillResultJanitorResult:
+        removed = 0
+        retained = 0
+        manifested_stage_refs: set[str] = set()
+        for path in self._store.manifest_paths():
+            try:
+                manifest = _load_manifest(path)
+                stage_ref = str(manifest["stage_ref"])
+                manifested_stage_refs.add(stage_ref)
+                run = await self._runs.get_run(str(manifest["run_id"]))
+                should_delete = False
+                if run is not None:
+                    if (
+                        run.task_id != manifest["task_id"]
+                        or run.conversation_id != manifest["conversation_id"]
+                    ):
+                        retained += 1
+                        continue
+                    items = await self._runs.list_items(run.run_id)
+                    result = next(
+                        (
+                            item
+                            for item in items
+                            if item.item_id == manifest["result_item_id"]
+                        ),
+                        None,
+                    )
+                    if result is None:
+                        retained += 1
+                        continue
+                    should_delete = bool(
+                        run.status.value in {"completed", "failed", "cancelled"}
+                        or result.sequence <= run.compacted_through_sequence
+                    )
+                else:
+                    staged_at = datetime.fromisoformat(str(manifest["staged_at"]))
+                    now = self._now()
+                    if staged_at.tzinfo is None:
+                        staged_at = staged_at.replace(tzinfo=timezone.utc)
+                    if now.tzinfo is None:
+                        now = now.replace(tzinfo=timezone.utc)
+                    if (now - staged_at).total_seconds() >= self._retention_seconds:
+                        task = await self._storage.get_task(
+                            str(manifest["task_id"])
+                        )
+                        should_delete = bool(
+                            task is None
+                            or task.status
+                            in {
+                                TaskStatus.COMPLETED,
+                                TaskStatus.FAILED,
+                                TaskStatus.CANCELLED,
+                            }
+                        )
+                if should_delete:
+                    self._store.delete_stage(
+                        stage_ref,
+                        expected_run_id=str(manifest["run_id"]),
+                        expected_result_item_id=str(manifest["result_item_id"]),
+                    )
+                    removed += 1
+                else:
+                    retained += 1
+            except Exception:
+                retained += 1
+        unmanifested = 0
+        for path in self._store.raw_root.rglob(_RAW_FILENAME):
+            stage_ref = path.parent.name
+            if stage_ref not in manifested_stage_refs:
+                unmanifested += 1
+        return AgentTransientSkillResultJanitorResult(
+            stages_removed=removed,
+            retained=retained,
+            unmanifested_raw_retained=unmanifested,
+        )
+
+
+def transient_stage_ref_from_result_item(item: AgentItem) -> str | None:
+    if (
+        item.kind is not AgentItemKind.TOOL_RESULT
+        or item.state.value != "committed"
+    ):
+        return None
+    try:
+        payload = json.loads(item.payload_json)
+    except json.JSONDecodeError:
+        return None
+    safe_result = payload.get("safe_result") if isinstance(payload, dict) else None
+    model_view = (
+        safe_result.get("model_view")
+        if isinstance(safe_result, dict)
+        else None
+    )
+    if (
+        not isinstance(model_view, dict)
+        or safe_result.get("schema") != "maf.agent.model_result.v1"
+        or safe_result.get("projection_revision")
+        != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+        or safe_result.get("projection_mode") != "transient_staged"
+        or safe_result.get("projection_truncated") is not True
+        or model_view.get("schema")
+        != "maf.agent.transient_skill_result_receipt.v1"
+        or not isinstance(model_view.get("stage_ref"), str)
+    ):
+        return None
+    _stage_ref_digest(model_view["stage_ref"])
+    return model_view["stage_ref"]
 
 def transient_skill_result_stage_ref(
     *,

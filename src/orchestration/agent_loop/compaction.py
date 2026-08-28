@@ -55,6 +55,7 @@ class AgentCompactionService:
         lease_controller: AgentLeaseController,
         candidate_builder: AgentContextCandidateBuilder,
         transient_result_resolver: Any | None = None,
+        transient_result_cleaner: Any | None = None,
         minimum_suffix_items: int = 2,
     ) -> None:
         if minimum_suffix_items < 1:
@@ -65,6 +66,7 @@ class AgentCompactionService:
         self._leases = lease_controller
         self._candidate_builder = candidate_builder
         self._transient_result_resolver = transient_result_resolver
+        self._transient_result_cleaner = transient_result_cleaner
         self._minimum_suffix_items = minimum_suffix_items
 
     async def compact_until_fit(
@@ -123,6 +125,15 @@ class AgentCompactionService:
                     summary=sample.visible_text,
                 )
             )
+            if self._transient_result_cleaner is not None:
+                try:
+                    self._transient_result_cleaner.cleanup_covered(
+                        run=committed.run,
+                        items=items,
+                        covered_end_sequence=covered_range[1],
+                    )
+                except Exception:
+                    pass
             items = await self._runs.list_items(run_id)
             next_result = repreflight(committed.run, items)
             if inspect.isawaitable(next_result):

@@ -57,6 +57,11 @@ class AgentRecoveryResult:
     loop_result: Any | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AgentTransientRecoveryOutcome:
+    safe_result_payload: Mapping[str, Any]
+
+
 class AgentClaimedRunResumer(Protocol):
     async def run_claimed(
         self,
@@ -75,6 +80,12 @@ AuthorityResolver = Callable[
     AgentAuthorityResolution | Awaitable[AgentAuthorityResolution],
 ]
 Acknowledger = Callable[[], Any | Awaitable[Any]]
+TransientResultRecoverer = Callable[
+    [AgentRun, AgentItem, AgentItem],
+    AgentTransientRecoveryOutcome
+    | None
+    | Awaitable[AgentTransientRecoveryOutcome | None],
+]
 
 
 class AgentRunRecoveryCoordinator:
@@ -108,6 +119,7 @@ class AgentRunRecoveryCoordinator:
         locator_service: AgentContinuationLocatorService | None = None,
         lease_ttl_seconds: float = 30,
         owner_id: str = "agent-recovery",
+        transient_result_recoverer: TransientResultRecoverer | None = None,
     ) -> None:
         self._runs = runs
         self._writer = writer
@@ -115,6 +127,7 @@ class AgentRunRecoveryCoordinator:
         self._resumer = resumer
         self._locators = locator_service or AgentContinuationLocatorService()
         self._owner_id = owner_id
+        self._recover_transient_result = transient_result_recoverer
 
     async def continue_waiting_call(
         self,
@@ -220,15 +233,63 @@ class AgentRunRecoveryCoordinator:
             if call_id is None:
                 raise AgentStorageConflict("agent_recovery_call_identity_missing")
             latest = await self._require_run(run_id)
+            recovered = None
+            recovery_error = None
+            if self._recover_transient_result is not None:
+                try:
+                    recovered = self._recover_transient_result(
+                        latest,
+                        calls[call_id],
+                        reservation,
+                    )
+                    if inspect.isawaitable(recovered):
+                        recovered = await recovered
+                    if recovered is not None and not isinstance(
+                        recovered, AgentTransientRecoveryOutcome
+                    ):
+                        raise ValueError(
+                            "agent_transient_skill_result_unavailable"
+                        )
+                except ValueError as exc:
+                    recovery_error = (
+                        str(exc)
+                        if str(exc)
+                        in {
+                            "agent_transient_skill_result_stage_failed",
+                            "agent_transient_skill_result_unavailable",
+                        }
+                        else "agent_transient_skill_result_unavailable"
+                    )
             await self._writer.commit_agent_call_outcome(
                 AgentCallOutcomeCommit(
                     run_id=run_id,
                     expected_revision=latest.revision,
                     expected_claim_token=handle.current.token,
                     call_item_id=call_id,
-                    safe_result_payload={"status": "aborted"},
-                    status=AgentCallOutcomeStatus.ABORTED,
-                    safe_error_code="side_effect_unknown_no_replay",
+                    safe_result_payload=(
+                        recovered.safe_result_payload
+                        if recovered is not None
+                        else (
+                            None
+                            if recovery_error is not None
+                            else {"status": "aborted"}
+                        )
+                    ),
+                    status=(
+                        AgentCallOutcomeStatus.COMPLETED
+                        if recovered is not None
+                        else AgentCallOutcomeStatus.FAILED
+                        if recovery_error is not None
+                        else AgentCallOutcomeStatus.ABORTED
+                    ),
+                    safe_error_code=(
+                        recovery_error
+                        or (
+                            None
+                            if recovered is not None
+                            else "side_effect_unknown_no_replay"
+                        )
+                    ),
                 )
             )
 
