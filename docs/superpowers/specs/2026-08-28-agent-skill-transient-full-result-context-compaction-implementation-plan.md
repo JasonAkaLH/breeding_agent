@@ -8,7 +8,7 @@
 
 计划日期：2026-08-28
 
-状态：`ready_for_implementation`（经一次获批修订、第二轮document-perfectization复审以100/100通过；业务代码尚未实施）
+状态：`implementation_in_progress`（Checkpoint 0～F已完成；待Checkpoint G全量门禁、真实smoke与交付证据）
 
 目标分支：`main`
 

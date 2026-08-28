@@ -15,6 +15,8 @@ EXPECTED_METRICS = {
     "agent_aborted_calls_total",
     "agent_compaction_duration_seconds",
     "agent_compactions_total",
+    "agent_context_compactions_total",
+    "agent_context_preflights_total",
     "agent_final_publish_delay_seconds",
     "agent_lease_acquire_total",
     "agent_lease_lost_total",
@@ -29,6 +31,7 @@ EXPECTED_METRICS = {
     "agent_sample_duration_seconds",
     "agent_samples_total",
     "agent_time_to_final_seconds",
+    "agent_transient_skill_results_total",
     "agent_tool_call_duration_seconds",
     "agent_tool_calls_total",
     "agent_waiting_total",
@@ -60,6 +63,8 @@ class AgentMetricsTest(unittest.TestCase):
             "invalid",
             "artifact_persist_failed",
             "projection_too_large",
+            "transient_staged",
+            "transient_stage_failed",
         }
 
         for outcome in outcomes:
@@ -74,6 +79,33 @@ class AgentMetricsTest(unittest.TestCase):
                 "agent_result_projections_total",
                 projection_mode="skill.secret",
             )
+
+    def test_context_and_transient_metrics_have_only_closed_outcomes(self) -> None:
+        recorder = AgentMetricsRecorder(InMemoryAgentMetricSink())
+        closed_values = {
+            "agent_context_preflights_total": (
+                "decision",
+                {"fits", "compaction_required", "required_too_large"},
+            ),
+            "agent_context_compactions_total": (
+                "outcome",
+                {"completed", "failed", "no_progress", "required_too_large"},
+            ),
+            "agent_transient_skill_results_total": (
+                "outcome",
+                {"staged", "injected", "covered", "cleaned", "failed"},
+            ),
+        }
+
+        for metric_name, (label_name, values) in closed_values.items():
+            for value in values:
+                with self.subTest(metric=metric_name, value=value):
+                    self.assertTrue(
+                        recorder.record(metric_name, **{label_name: value})
+                    )
+            with self.subTest(metric=metric_name, value="task-1"):
+                with self.assertRaisesRegex(ValueError, "label_invalid"):
+                    recorder.record(metric_name, **{label_name: "task-1"})
 
     def test_high_cardinality_unknown_and_secret_labels_are_rejected(self) -> None:
         for labels in (

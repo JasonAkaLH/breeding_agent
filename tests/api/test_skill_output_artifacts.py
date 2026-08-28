@@ -365,6 +365,15 @@ print(json.dumps({
             ),
             1,
         )
+        projected = await self._result_projection_event(task_id)
+        self.assertEqual(projected.payload["projection_mode"], "transient_staged")
+        self.assertEqual(projected.payload["artifact_count"], 0)
+        self.assertEqual(projected.payload["raw_sha256"], safe_result["raw_sha256"])
+        self.assertEqual(
+            projected.payload["projected_size_bytes"],
+            safe_result["projected_size_bytes"],
+        )
+        self.assertIsNone(projected.payload["error_code"])
         audit_log = (self.workspace / "audit.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("article-0", audit_log)
         self.assertNotIn("agent_transient_skill_results", audit_log)
@@ -454,6 +463,14 @@ print(json.dumps({'rows': ['x' * 10000 for _ in range(20)]}))
             node for node in nodes if node.capability_id == self.active_skill_id
         )
         self.assertEqual(str(skill_node.status), "failed")
+        projected = await self._result_projection_event(task_id)
+        self.assertEqual(
+            projected.payload["projection_mode"], "transient_stage_failed"
+        )
+        self.assertEqual(
+            projected.payload["error_code"],
+            "agent_transient_skill_result_stage_failed",
+        )
 
     async def test_new_output_replaces_old_output_in_same_conversation(self) -> None:
         await self._use_skill(

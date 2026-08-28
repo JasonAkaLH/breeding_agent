@@ -26,6 +26,7 @@ from .models import (
     AgentToolChoice,
 )
 from .repository import AgentAtomicWriter, AgentRunRepository
+from .observability import AgentMetricsRecorder
 
 
 Repreflight = Callable[
@@ -56,6 +57,7 @@ class AgentCompactionService:
         candidate_builder: AgentContextCandidateBuilder,
         transient_result_resolver: Any | None = None,
         transient_result_cleaner: Any | None = None,
+        metrics_recorder: AgentMetricsRecorder | None = None,
         minimum_suffix_items: int = 2,
     ) -> None:
         if minimum_suffix_items < 1:
@@ -67,6 +69,7 @@ class AgentCompactionService:
         self._candidate_builder = candidate_builder
         self._transient_result_resolver = transient_result_resolver
         self._transient_result_cleaner = transient_result_cleaner
+        self._metrics = metrics_recorder
         self._minimum_suffix_items = minimum_suffix_items
 
     async def compact_until_fit(
@@ -77,6 +80,36 @@ class AgentCompactionService:
         candidate: AgentContextCandidate,
         repreflight: Repreflight,
         force: bool = False,
+    ) -> AgentCompactionOutcome:
+        try:
+            outcome = await self._compact_until_fit(
+                run_id=run_id,
+                handle=handle,
+                candidate=candidate,
+                repreflight=repreflight,
+                force=force,
+            )
+        except Exception as exc:
+            error_code = str(exc)
+            if error_code == "agent_context_required_segments_too_large":
+                metric_outcome = "required_too_large"
+            elif error_code == "agent_compaction_no_progress":
+                metric_outcome = "no_progress"
+            else:
+                metric_outcome = "failed"
+            self._record_compaction(metric_outcome)
+            raise
+        self._record_compaction("completed")
+        return outcome
+
+    async def _compact_until_fit(
+        self,
+        *,
+        run_id: str,
+        handle: AgentLeaseHandle,
+        candidate: AgentContextCandidate,
+        repreflight: Repreflight,
+        force: bool,
     ) -> AgentCompactionOutcome:
         current = candidate
         prior_range: tuple[int, int] | None = None
@@ -152,6 +185,13 @@ class AgentCompactionService:
             items=await self._runs.list_items(run_id),
             candidate=current,
         )
+
+    def _record_compaction(self, outcome: str) -> None:
+        if self._metrics is not None:
+            self._metrics.record(
+                "agent_context_compactions_total",
+                outcome=outcome,
+            )
 
     async def _largest_fitting_request(
         self,

@@ -20,6 +20,7 @@ from .models import (
     AgentToolChoice,
     AgentToolDescriptor,
 )
+from .observability import AgentMetricsRecorder
 from .tool_catalog import AgentToolCatalog
 
 
@@ -60,9 +61,11 @@ class AgentContextCandidateBuilder:
         *,
         context_builder: AgentContextBuilder,
         token_counter: TokenCounter | None = None,
+        metrics_recorder: AgentMetricsRecorder | None = None,
     ) -> None:
         self._context_builder = context_builder
         self._count = token_counter or _count_with_bound_model
+        self._metrics = metrics_recorder
 
     async def build(
         self,
@@ -133,19 +136,30 @@ class AgentContextCandidateBuilder:
             decision = (
                 AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED
             )
-        return AgentContextCandidate(
-            request=request,
-            preflight=AgentContextPreflightResult(
-                decision=decision,
-                required_tokens=required_tokens,
-                history_tokens=history_tokens,
-                transient_tokens=transient_tokens,
-                tool_tokens=tool_tokens,
-                total_tokens=total_tokens,
-                total_context_limit_tokens=limit,
-                eligible_closed_history=eligible_closed_history,
-            ),
+        preflight = AgentContextPreflightResult(
+            decision=decision,
+            required_tokens=required_tokens,
+            history_tokens=history_tokens,
+            transient_tokens=transient_tokens,
+            tool_tokens=tool_tokens,
+            total_tokens=total_tokens,
+            total_context_limit_tokens=limit,
+            eligible_closed_history=eligible_closed_history,
         )
+        if self._metrics is not None:
+            self._metrics.record(
+                "agent_context_preflights_total",
+                decision={
+                    AgentContextPreflightDecision.FITS: "fits",
+                    AgentContextPreflightDecision.HISTORY_COMPACTION_REQUIRED: (
+                        "compaction_required"
+                    ),
+                    AgentContextPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE: (
+                        "required_too_large"
+                    ),
+                }[decision],
+            )
+        return AgentContextCandidate(request=request, preflight=preflight)
 
     async def count_request(self, request: AgentModelRequest) -> int:
         fragments = [

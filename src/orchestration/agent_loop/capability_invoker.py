@@ -599,6 +599,8 @@ class AgentCapabilityInvoker:
                 projection_mode = "artifact_persist_failed"
             elif effective_error == "agent_result_projection_too_large":
                 projection_mode = "projection_too_large"
+            elif effective_error == "agent_transient_skill_result_stage_failed":
+                projection_mode = "transient_stage_failed"
             else:
                 projection_mode = str(projection.projection_mode or "")
             safe_result = projection.safe_result_payload

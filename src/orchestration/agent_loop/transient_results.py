@@ -19,6 +19,7 @@ from src.storage.artifact_files import (
 )
 
 from .models import AgentItem, AgentItemKind, AgentRun
+from .observability import AgentMetricsRecorder
 
 
 AGENT_TRANSIENT_SKILL_RESULT_MANIFEST_SCHEMA = (
@@ -56,6 +57,7 @@ class AgentTransientSkillResultStore:
         root_dir: str | Path,
         *,
         now_fn: Callable[[], datetime] | None = None,
+        metrics_recorder: AgentMetricsRecorder | None = None,
     ) -> None:
         self._root = Path(root_dir)
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -68,6 +70,14 @@ class AgentTransientSkillResultStore:
         os.chmod(self._manifest_root, 0o700, follow_symlinks=False)
         _validate_private_directory(self._manifest_root)
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._metrics = metrics_recorder
+
+    def record_outcome(self, outcome: str) -> None:
+        if self._metrics is not None:
+            self._metrics.record(
+                "agent_transient_skill_results_total",
+                outcome=outcome,
+            )
 
     @property
     def raw_root(self) -> Path:
@@ -243,6 +253,7 @@ class AgentTransientSkillResultStore:
                 expected_stage_ref=expected_stage_ref,
             )
         except ValueError as exc:
+            self.record_outcome("failed")
             if str(exc) in {
                 "agent_transient_skill_result_stage_identity_invalid",
                 "agent_transient_skill_result_stage_conflict",
@@ -252,6 +263,7 @@ class AgentTransientSkillResultStore:
                 "agent_transient_skill_result_stage_invalid"
             ) from None
         except (OSError, TypeError):
+            self.record_outcome("failed")
             raise ValueError(
                 "agent_transient_skill_result_stage_invalid"
             ) from None
@@ -336,12 +348,14 @@ class AgentTransientSkillResultStore:
             expected_size_bytes=len(canonical_raw_bytes),
             expected_sha256=raw_sha256,
         )
-        return AgentTransientSkillResultStage(
+        stage = AgentTransientSkillResultStage(
             stage_ref=stage_ref,
             raw_size_bytes=len(canonical_raw_bytes),
             raw_sha256=raw_sha256,
             projection_revision=projection_revision,
         )
+        self.record_outcome("staged")
+        return stage
 
     def _create_or_validate_manifest(
         self,
@@ -549,7 +563,7 @@ class AgentTransientSkillResultResolver:
             != raw_bytes
         ):
             raise ValueError("raw_invalid")
-        return {
+        resolved = {
             "artifact_refs": [],
             "outcome": "completed",
             "safe_error_code": None,
@@ -558,6 +572,8 @@ class AgentTransientSkillResultResolver:
                 "result": raw_value,
             },
         }
+        self._store.record_outcome("injected")
+        return resolved
 
 
 class AgentTransientSkillResultCleaner:
@@ -573,7 +589,7 @@ class AgentTransientSkillResultCleaner:
         terminal = str(run.status) in {"completed", "failed", "cancelled"}
         if not terminal:
             raise ValueError("agent_transient_skill_result_cleanup_not_terminal")
-        return self._cleanup(run=run, items=items)
+        return self._cleanup(run=run, items=items, outcome="cleaned")
 
     def cleanup_covered(
         self,
@@ -589,6 +605,7 @@ class AgentTransientSkillResultCleaner:
                 for item in items
                 if item.sequence <= covered_end_sequence
             ),
+            outcome="covered",
         )
 
     def _cleanup(
@@ -596,6 +613,7 @@ class AgentTransientSkillResultCleaner:
         *,
         run: AgentRun,
         items: tuple[AgentItem, ...],
+        outcome: str,
     ) -> int:
         removed = 0
         for item in items:
@@ -607,6 +625,7 @@ class AgentTransientSkillResultCleaner:
                 expected_run_id=run.run_id,
                 expected_result_item_id=item.item_id,
             )
+            self._store.record_outcome(outcome)
             removed += 1
         return removed
 
@@ -694,6 +713,7 @@ class AgentTransientSkillResultJanitor:
                         expected_run_id=str(manifest["run_id"]),
                         expected_result_item_id=str(manifest["result_item_id"]),
                     )
+                    self._store.record_outcome("cleaned")
                     removed += 1
                 else:
                     retained += 1

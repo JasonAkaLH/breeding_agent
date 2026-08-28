@@ -66,6 +66,8 @@ _RESULT_PROJECTION_MODES = frozenset(
         "inline",
         "invalid",
         "projection_too_large",
+        "transient_staged",
+        "transient_stage_failed",
     }
 )
 _RESULT_PROJECTION_ERRORS = {
@@ -74,7 +76,18 @@ _RESULT_PROJECTION_ERRORS = {
     "inline": None,
     "invalid": "agent_result_invalid",
     "projection_too_large": "agent_result_projection_too_large",
+    "transient_staged": None,
+    "transient_stage_failed": "agent_transient_skill_result_stage_failed",
 }
+_CONTEXT_PREFLIGHT_DECISIONS = frozenset(
+    {"fits", "compaction_required", "required_too_large"}
+)
+_CONTEXT_COMPACTION_OUTCOMES = frozenset(
+    {"completed", "failed", "no_progress", "required_too_large"}
+)
+_TRANSIENT_RESULT_OUTCOMES = frozenset(
+    {"staged", "injected", "covered", "cleaned", "failed"}
+)
 
 
 AGENT_METRIC_SPECS = {
@@ -98,6 +111,15 @@ AGENT_METRIC_SPECS = {
     "agent_resume_total": AgentMetricSpec("counter", {"outcome": _OUTCOMES}),
     "agent_result_projections_total": AgentMetricSpec(
         "counter", {"projection_mode": _RESULT_PROJECTION_MODES}
+    ),
+    "agent_context_preflights_total": AgentMetricSpec(
+        "counter", {"decision": _CONTEXT_PREFLIGHT_DECISIONS}
+    ),
+    "agent_context_compactions_total": AgentMetricSpec(
+        "counter", {"outcome": _CONTEXT_COMPACTION_OUTCOMES}
+    ),
+    "agent_transient_skill_results_total": AgentMetricSpec(
+        "counter", {"outcome": _TRANSIENT_RESULT_OUTCOMES}
     ),
     "agent_lease_acquire_total": AgentMetricSpec(
         "counter", {"outcome": _OUTCOMES}
