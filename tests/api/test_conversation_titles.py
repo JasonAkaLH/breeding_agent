@@ -42,7 +42,7 @@ class ConversationTitleAPITest(APITestCase):
                 "model_editions": {
                     "default": "flash",
                     "options": [
-                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
+                        {"value": "flash", "label": "Flash", "trim_max_tokens": 1_024_000, "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
                     ],
                 },
             },
@@ -83,8 +83,8 @@ class ConversationTitleAPITest(APITestCase):
                 "model_editions": {
                     "default": "flash",
                     "options": [
-                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
-                        {"value": "pro", "label": "Pro", "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
+                        {"value": "flash", "label": "Flash", "trim_max_tokens": 1_024_000, "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
+                        {"value": "pro", "label": "Pro", "trim_max_tokens": 1_024_000, "reasoning_efforts": _test_reasoning_efforts(), "agent_capabilities": _agent_capabilities()},
                     ],
                 },
             },

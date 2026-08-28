@@ -2,7 +2,7 @@
 
 日期：2026-08-28
 
-状态：设计已逐节获用户批准，经两次获批修订；最新范围与实施计划第二轮document-perfectization复审以100/100通过，业务代码尚未实施
+状态：`complete_local`；Checkpoint A～G仓库实现、真实PostgreSQL/Runtime Sidecar、本地真实`bioinfo-daily` Task与全量门禁已闭合，未构建、推送或部署镜像，不宣称`release_complete`
 
 关联基线：`main@c4c9fc57`
 

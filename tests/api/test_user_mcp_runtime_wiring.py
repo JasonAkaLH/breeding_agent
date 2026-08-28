@@ -703,6 +703,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "value": "test",
                                 "label": "Test",
+                                "trim_max_tokens": 1_024_000,
                                 "reasoning_efforts": {
                                     "options": [
                                         {
@@ -903,6 +904,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "value": "test",
                                 "label": "Test",
+                                "trim_max_tokens": 1_024_000,
                                 "reasoning_efforts": {
                                     "options": [
                                         {

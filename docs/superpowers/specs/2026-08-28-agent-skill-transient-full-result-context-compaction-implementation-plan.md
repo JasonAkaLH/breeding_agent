@@ -8,7 +8,7 @@
 
 计划日期：2026-08-28
 
-状态：`implementation_in_progress`（Checkpoint 0～F已完成；待Checkpoint G全量门禁、真实smoke与交付证据）
+状态：`complete_local`（Checkpoint 0～G已完成；仓库实现、真实PostgreSQL/Runtime Sidecar、本地真实Skill Task与全量门禁已闭合，未部署`prod`）
 
 目标分支：`main`
 
@@ -677,3 +677,9 @@ docs(agent): close transient result context rollout
 A～E任一未完成时不得启动本地真实用户Task或把部分实现作为可发布版本。发现设计外的新产品决策时停止并回到用户；普通实现细节、测试补齐和现有合同一致性修复可在本计划范围内闭合。
 
 License Requirement：复用现有Python、SQLAlchemy、SQLite/PostgreSQL、Rust/Runtime Sidecar opaque AgentItem、tiktoken/provider tokenization、Agent result projector/context/compaction、LocalArtifactFileStore安全模式和兼容Artifact reader；不新增第三方依赖或许可类型。
+
+## 17. 实施结果
+
+Checkpoint A～F对应`b540c19d`、`11dd0d12`、`9d64717b`、`31fe3c36`、`af6f6dbc`、`7fd84a3c`。Checkpoint G完成Python/Frontend/Rust全量、隔离PostgreSQL Agent repository 6 / 6零skip、真实Runtime Sidecar、外部`bioinfo-daily`自测和本地统一Agent Task。真实Task返回30条，model-only full raw为307,329 bytes，Skill调用1次，stage 1份，preflight total=77,715/921,600 tokens且零compaction，final后stage/manifest和raw `skill_result` Artifact均为0。超90%的global closed-history compaction由受控fixture证明，不重复调用真实外部Skill。
+
+完整低敏证据见`2026-08-28-agent-skill-transient-full-result-context-compaction-implementation-evidence.md`。本轮未构建、推送、重启或部署镜像，`prod_untouched=true`。

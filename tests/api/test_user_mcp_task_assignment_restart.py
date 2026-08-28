@@ -291,6 +291,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
                         {
                             "value": "test",
                             "label": "Test",
+                            "trim_max_tokens": 1_024_000,
                             "reasoning_efforts": {
                                 "options": [
                                     {
