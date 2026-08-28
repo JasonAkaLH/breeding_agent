@@ -10,6 +10,7 @@ from src.core.models import EventRecord, Task
 from src.orchestration.models import UserMCPServerProfile
 
 from .capability_invoker import AgentInvocationContextStore
+from .context_budget import AgentContextBudget
 from .final_output import AgentFinalOutputPublisher
 from .models import (
     AgentCancellationToken,
@@ -97,6 +98,9 @@ class AgentLoopOrchestrator:
         binding_factory: Callable[[AgentExecutionRequest], AgentModelBinding],
         record_event: Callable[[EventRecord], Awaitable[None]],
         make_event: Callable[..., EventRecord],
+        context_budget_factory: (
+            Callable[[AgentModelBinding], AgentContextBudget] | None
+        ) = None,
         event_loader: Callable[[str, str], Awaitable[EventRecord | None]] | None = None,
         initialization_event_recorder: (
             Callable[[EventRecord], Awaitable[bool]] | None
@@ -110,6 +114,7 @@ class AgentLoopOrchestrator:
         self._load_task = task_loader
         self._task_cas = task_cas
         self._binding_factory = binding_factory
+        self._context_budget_factory = context_budget_factory
         self._record_event = record_event
         self._make_event = make_event
         self._load_event = event_loader
@@ -139,6 +144,11 @@ class AgentLoopOrchestrator:
         if not _task_matches_request(task, request):
             raise AgentStorageConflict("agent_task_identity_mismatch")
         binding = self._binding_factory(request)
+        context_budget = (
+            self._context_budget_factory(binding)
+            if self._context_budget_factory is not None
+            else None
+        )
         expected_run = AgentRun(
             run_id=_agent_run_id(request.task_id),
             task_id=request.task_id,
@@ -165,6 +175,7 @@ class AgentLoopOrchestrator:
                 text=request.user_message,
                 skill_activation_payload_json=request.skill_activation_payload_json,
                 skill_activation_payload_sha256=request.skill_activation_payload_sha256,
+                context_budget=context_budget,
             )
         )
         run = initialized.run

@@ -25,6 +25,7 @@ from src.orchestration.agent_loop.models import (
     AgentUsage,
     AgentUserMessageCommit,
 )
+from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactStager,
 )
@@ -260,9 +261,16 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
                 running.revision,
                 None,
                 "initial user message",
+                context_budget=AgentContextBudget.from_model_context_window(
+                    450_000
+                ),
             )
         )
         self.assertEqual(committed.item.kind.value, "user_message")
+        self.assertEqual(
+            json.loads(committed.item.payload_json)["context_budget"],
+            AgentContextBudget.from_model_context_window(450_000).to_payload(),
+        )
         self.assertEqual(
             await self.repository.reconcile_agent_run_consistency(running.run_id),
             committed.run,

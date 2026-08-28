@@ -1074,6 +1074,160 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(runtime._skill_runtime_state.retained, ["skill-r1"])
         self.assertEqual(runtime._skill_runtime_state.released, ["skill-r1"])
 
+    async def test_zero_item_run_restores_initialization_from_prepared_authority(
+        self,
+    ) -> None:
+        task = Task(
+            task_id="task-zero-item",
+            conversation_id="conversation-zero-item",
+            root_message_id="message-zero-item",
+            status=TaskStatus.RUNNING,
+            routing_mode="hint",
+            requested_capability_id="skill.one",
+        )
+        conversation = Conversation(
+            conversation_id=task.conversation_id,
+            username="alice",
+        )
+        root = Message(
+            message_id=task.root_message_id,
+            conversation_id=task.conversation_id,
+            role=MessageRole.USER,
+            content="current root text",
+            task_id=task.task_id,
+        )
+        run = AgentRun(
+            run_id=f"agent-run:{task.task_id}",
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding("prepared-model"),
+        )
+        activation_json = '{"binding_mode":"hint"}\n'
+        prepared = PreparedAgentRecoveryContext(
+            username="alice",
+            current_user_input="prepared user text",
+            initial_required_tool_name=None,
+            model_options={
+                "model_edition": "prepared-model",
+                "reasoning_effort": "minimal",
+                "thinking_enabled": False,
+            },
+            bundle_revisions={
+                "skill_bundle_revision": None,
+                "mcp_bundle_revision": None,
+            },
+            execution_metadata={"prepared_fact": "kept"},
+            memory_context={
+                "current_user_message": "prepared current text",
+                "resolved_user_message": "prepared resolved text",
+            },
+            mcp_binding=None,
+            mcp_assignment=None,
+            available_mcp_servers=(),
+            skill_activation_payload_json=activation_json,
+            skill_activation_payload_sha256="a" * 64,
+        )
+
+        class Storage:
+            async def get_task(_self, _task_id: str):
+                return task
+
+            async def get_conversation(_self, _conversation_id: str):
+                return conversation
+
+            async def get_message(_self, _message_id: str):
+                return root
+
+            async def list_task_input_attachments_for_task(
+                _self, _task_id: str
+            ):
+                return []
+
+        initialize = AsyncMock(return_value=SimpleNamespace(run=run))
+        recover = AsyncMock(return_value=SimpleNamespace(run=run))
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = Storage()
+        runtime.agent_run_repository = SimpleNamespace(
+            list_items=AsyncMock(return_value=())
+        )
+        runtime._prepared_agent_recovery_loader = SimpleNamespace(
+            load=AsyncMock(return_value=prepared)
+        )
+        runtime.agent_loop_orchestrator = SimpleNamespace(
+            initialize_run=initialize
+        )
+        runtime._agent_invocation_contexts = SimpleNamespace(merge=Mock())
+        runtime._agent_run_recovery = SimpleNamespace(
+            recover_crashed_run=recover
+        )
+        runtime._skill_runtime_state = None
+        runtime._mcp_runtime_state = None
+        runtime._task_skill_bundle_revisions = {}
+        runtime._task_mcp_bundle_revisions = {}
+        runtime._agent_cancellation_token = lambda _task_id: None
+
+        await runtime._recover_agent_run(run)
+
+        initialize.assert_awaited_once()
+        request = initialize.await_args.args[0]
+        self.assertEqual(request.user_message, "prepared user text")
+        self.assertEqual(request.current_user_message, "prepared current text")
+        self.assertEqual(request.resolved_user_message, "prepared resolved text")
+        self.assertEqual(request.memory_context, prepared.memory_context)
+        self.assertEqual(request.requested_capability_id, "skill.one")
+        self.assertEqual(
+            request.skill_activation_payload_json, activation_json
+        )
+        self.assertEqual(
+            request.skill_activation_payload_sha256, "a" * 64
+        )
+        recover.assert_awaited_once()
+
+    async def test_zero_item_run_without_prepared_authority_fails_closed(
+        self,
+    ) -> None:
+        task = Task(
+            task_id="task-zero-item-missing",
+            conversation_id="conversation-zero-item-missing",
+            root_message_id="message-zero-item-missing",
+            status=TaskStatus.RUNNING,
+        )
+        conversation = Conversation(
+            conversation_id=task.conversation_id,
+            username="alice",
+        )
+        run = AgentRun(
+            run_id=f"agent-run:{task.task_id}",
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding("prepared-model"),
+        )
+        initialize = AsyncMock()
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = SimpleNamespace(
+            get_task=AsyncMock(return_value=task),
+            get_conversation=AsyncMock(return_value=conversation),
+            get_message=AsyncMock(return_value=None),
+        )
+        runtime.agent_run_repository = SimpleNamespace(
+            list_items=AsyncMock(return_value=())
+        )
+        runtime._prepared_agent_recovery_loader = SimpleNamespace(
+            load=AsyncMock(return_value=None)
+        )
+        runtime.agent_loop_orchestrator = SimpleNamespace(
+            initialize_run=initialize
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "agent_startup_initialization_authority_missing"
+        ):
+            await runtime._recover_agent_run(run)
+
+        initialize.assert_not_awaited()
+
 
 class AgentRunLeaseRetryFailureBoundaryTest(unittest.IsolatedAsyncioTestCase):
     _run = staticmethod(AgentRunLeaseRetryStartupTest._run)

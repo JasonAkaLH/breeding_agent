@@ -49,7 +49,20 @@ class AgentContextBuilderTest(unittest.TestCase):
             next_item_sequence=3,
             revision=1,
         )
-        user = _item("user", 1, AgentItemKind.USER_MESSAGE, {"text": "what is this"})
+        user = _item(
+            "user",
+            1,
+            AgentItemKind.USER_MESSAGE,
+            {
+                "context_budget": {
+                    "compact_threshold_percent": 90,
+                    "model_context_window_tokens": 450_000,
+                    "policy_revision": "maf.agent.total_context_budget.v1",
+                    "total_context_limit_tokens": 405_000,
+                },
+                "text": "what is this",
+            },
+        )
         activation = _item(
             "activation",
             2,
@@ -78,6 +91,7 @@ class AgentContextBuilderTest(unittest.TestCase):
             "skill.one",
         )
         self.assertEqual(request.messages[3].content, "what is this")
+        self.assertNotIn("context_budget", request.messages[3].content or "")
 
     def test_recovered_summary_and_skill_activation_keep_order_and_become_system_messages(self) -> None:
         run = AgentRun(

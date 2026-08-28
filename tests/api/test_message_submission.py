@@ -223,6 +223,16 @@ class MessageSubmissionAPITest(APITestCase):
         items = await repository.list_items(run.run_id)
         self.assertGreaterEqual(len(items), 2)
         self.assertEqual([item.kind.value for item in items[:2]], ["user_message", "skill_activation"])
+        user_payload = json.loads(items[0].payload_json)
+        self.assertEqual(
+            user_payload["context_budget"],
+            {
+                "compact_threshold_percent": 90,
+                "model_context_window_tokens": 1_024_000,
+                "policy_revision": "maf.agent.total_context_budget.v1",
+                "total_context_limit_tokens": 921_600,
+            },
+        )
         activation = json.loads(items[1].payload_json)
         self.assertEqual(activation["binding_mode"], "hint")
         self.assertEqual(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -23,7 +24,9 @@ from src.orchestration.agent_loop.models import (
     AgentStorageConflict,
     AgentToolCall,
     AgentUsage,
+    AgentUserMessageCommit,
 )
+from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactStager,
 )
@@ -130,6 +133,35 @@ class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
             AgentSampleCommit(self.run_id, lease.revision, lease.token, sample, {})
         )
         self.assertEqual(committed.run.claim_token, lease.token)
+
+    async def test_initial_user_message_persists_exact_run_context_budget(
+        self,
+    ) -> None:
+        run = await self.repository.create_run(
+            AgentRun(
+                self.run_id,
+                self.task_id,
+                self.conversation_id,
+                AgentRunStatus.RUNNING,
+                AgentModelBinding("edition-pg"),
+            )
+        )
+        budget = AgentContextBudget.from_model_context_window(450_000)
+
+        committed = await self.repository.commit_agent_user_message(
+            AgentUserMessageCommit(
+                run_id=run.run_id,
+                expected_revision=run.revision,
+                expected_claim_token=None,
+                text="postgres user",
+                context_budget=budget,
+            )
+        )
+
+        self.assertEqual(
+            json.loads(committed.item.payload_json),
+            {"context_budget": budget.to_payload(), "text": "postgres user"},
+        )
 
     async def test_postgres_concurrent_lease_acquire_has_one_winner(self) -> None:
         await self.repository.create_run(

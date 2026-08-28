@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,6 +13,7 @@ from src.core.models import EventRecord
 from src.orchestration.agent_loop.capability_invoker import (
     AgentInvocationContextStore,
 )
+from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.models import (
     AgentModelBinding,
     AgentRun,
@@ -222,6 +224,9 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
                 task_loader=self.storage.get_task,
                 task_cas=self.storage.compare_and_set_task,
                 binding_factory=lambda _request: selected_binding,
+                context_budget_factory=lambda _binding: (
+                    AgentContextBudget.from_model_context_window(450_000)
+                ),
                 record_event=self.events.record,
                 make_event=make_event,
                 event_loader=self.events.load,
@@ -242,6 +247,10 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].sequence, 1)
         self.assertEqual(items[0].kind.value, "user_message")
+        self.assertEqual(
+            json.loads(items[0].payload_json)["context_budget"],
+            AgentContextBudget.from_model_context_window(450_000).to_payload(),
+        )
         self.assertEqual(
             set(self.events.events),
             {

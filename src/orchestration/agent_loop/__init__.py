@@ -39,6 +39,11 @@ from .result_artifacts import (
 )
 from .terminal_events import build_agent_terminal_event
 from .context import AgentContextBuilder, AgentContextRules
+from .context_budget import (
+    AGENT_CONTEXT_BUDGET_POLICY_REVISION,
+    AGENT_CONTEXT_COMPACT_THRESHOLD_PERCENT,
+    AgentContextBudget,
+)
 from .runner import (
     AgentCallExecution,
     AgentCallInvoker,
@@ -158,6 +163,9 @@ __all__ = [
     "build_agent_terminal_event",
     "AgentContextBuilder",
     "AgentContextRules",
+    "AgentContextBudget",
+    "AGENT_CONTEXT_BUDGET_POLICY_REVISION",
+    "AGENT_CONTEXT_COMPACT_THRESHOLD_PERCENT",
     "AgentCallExecution",
     "AgentCallInvoker",
     "AgentLoopRunResult",

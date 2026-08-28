@@ -25,6 +25,7 @@ from src.orchestration.agent_loop.models import (
     AgentUsage,
     AgentUserMessageCommit,
 )
+from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.skill_activation import (
     build_canonical_skill_activation,
 )
@@ -34,6 +35,11 @@ from src.orchestration.agent_loop.result_artifacts import (
 )
 from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
 from src.storage.artifact_files import LocalArtifactFileStore
+from src.storage.agent_payload import (
+    AGENT_PAYLOAD_MAX_BYTES,
+    AgentPayloadError,
+    canonicalize_agent_payload,
+)
 from src.storage.sqlite import (
     SQLiteAgentRepository,
     bootstrap_sqlite_database,
@@ -141,8 +147,15 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_initial_user_message_is_durable_idempotent_and_precedes_samples(self) -> None:
         run = await self._create()
+        budget = AgentContextBudget.from_model_context_window(450_000)
         initialized = await self.repository.commit_agent_user_message(
-            AgentUserMessageCommit(run.run_id, run.revision, None, "用户问题")
+            AgentUserMessageCommit(
+                run.run_id,
+                run.revision,
+                None,
+                "用户问题",
+                context_budget=budget,
+            )
         )
         duplicate = await self.repository.commit_agent_user_message(
             AgentUserMessageCommit(
@@ -150,12 +163,32 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                 initialized.run.revision,
                 None,
                 "用户问题",
+                context_budget=budget,
             )
         )
 
         self.assertEqual(initialized.item, duplicate.item)
         self.assertEqual(initialized.item.kind, AgentItemKind.USER_MESSAGE)
+        self.assertEqual(
+            initialized.item.payload_json,
+            '{"context_budget":{"compact_threshold_percent":90,'
+            '"model_context_window_tokens":450000,'
+            '"policy_revision":"maf.agent.total_context_budget.v1",'
+            '"total_context_limit_tokens":405000},"text":"用户问题"}\n',
+        )
         self.assertEqual(initialized.run.next_item_sequence, 2)
+        with self.assertRaisesRegex(AgentStorageConflict, "user_message_conflict"):
+            await self.repository.commit_agent_user_message(
+                AgentUserMessageCommit(
+                    run.run_id,
+                    initialized.run.revision,
+                    None,
+                    "用户问题",
+                    context_budget=AgentContextBudget.from_model_context_window(
+                        200_000
+                    ),
+                )
+            )
         committed = await self.repository.commit_agent_sample(
             AgentSampleCommit(
                 run.run_id,
@@ -170,6 +203,47 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             [AgentItemKind.USER_MESSAGE, AgentItemKind.ASSISTANT_MESSAGE],
         )
         self.assertEqual(committed.assistant_item.sequence, 2)
+
+    async def test_initial_user_budget_obeys_whole_item_128_kib_boundary(
+        self,
+    ) -> None:
+        budget = AgentContextBudget.from_model_context_window(450_000)
+        empty_size = canonicalize_agent_payload(
+            {"context_budget": budget.to_payload(), "text": ""}
+        ).size_bytes
+        text = "x" * (AGENT_PAYLOAD_MAX_BYTES - empty_size)
+        run = await self._create()
+
+        committed = await self.repository.commit_agent_user_message(
+            AgentUserMessageCommit(
+                run.run_id,
+                run.revision,
+                None,
+                text,
+                context_budget=budget,
+            )
+        )
+
+        self.assertEqual(
+            len(committed.item.payload_json.encode("utf-8")),
+            AGENT_PAYLOAD_MAX_BYTES,
+        )
+
+        self._seed_task("task-boundary-over", "conv-1")
+        over = await self.repository.create_run(
+            self._run(run_id="run-boundary-over", task_id="task-boundary-over")
+        )
+        with self.assertRaisesRegex(AgentPayloadError, "agent_payload_too_large"):
+            await self.repository.commit_agent_user_message(
+                AgentUserMessageCommit(
+                    over.run_id,
+                    over.revision,
+                    None,
+                    text + "x",
+                    context_budget=budget,
+                )
+            )
+        self.assertEqual(await self.repository.list_items(over.run_id), ())
 
     async def test_initial_user_and_hint_activation_commit_atomically_and_replay_exactly(self) -> None:
         run = await self._create()
@@ -192,6 +266,7 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             "用户问题",
             activation.payload_json,
             activation.payload_sha256,
+            AgentContextBudget.from_model_context_window(450_000),
         )
 
         initialized = await self.repository.commit_agent_user_message(commit)
@@ -203,6 +278,7 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                 "用户问题",
                 activation.payload_json,
                 activation.payload_sha256,
+                AgentContextBudget.from_model_context_window(450_000),
             )
         )
 
@@ -221,6 +297,9 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                     initialized.run.revision,
                     None,
                     "用户问题",
+                    context_budget=AgentContextBudget.from_model_context_window(
+                        450_000
+                    ),
                 )
             )
 
@@ -270,6 +349,7 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                             "用户问题",
                             activation.payload_json,
                             activation.payload_sha256,
+                            AgentContextBudget.from_model_context_window(450_000),
                         )
                     )
                 stored = await self.repository.get_run(run_id)

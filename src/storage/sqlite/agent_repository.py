@@ -396,7 +396,10 @@ class SQLiteAgentRepository:
     ) -> AgentUserMessageCommitResult:
         run = self._locked_run(session, commit.run_id)
         item_id = f"agent-item:{run.run_id}:user-initial"
-        payload = canonicalize_agent_payload({"text": commit.text})
+        user_payload: dict[str, Any] = {"text": commit.text}
+        if commit.context_budget is not None:
+            user_payload["context_budget"] = commit.context_budget.to_payload()
+        payload = canonicalize_agent_payload(user_payload)
         activation_payload, activation_item_id = _initial_activation_payload(
             run.run_id,
             commit,

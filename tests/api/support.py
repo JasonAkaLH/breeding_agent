@@ -29,6 +29,7 @@ def test_llm_config() -> dict[str, object]:
                 {
                     "value": "api-test",
                     "label": "API Test",
+                    "trim_max_tokens": 1_024_000,
                     "reasoning_efforts": {
                         "options": [
                             {

@@ -10,6 +10,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
+from .context_budget import AgentContextBudget
+
 
 AgentMessageRole = Literal["system", "user", "assistant", "tool"]
 AgentToolChoiceMode = Literal["auto", "required", "none"]
@@ -362,12 +364,17 @@ class AgentUserMessageCommit:
     text: str
     skill_activation_payload_json: str | None = None
     skill_activation_payload_sha256: str | None = None
+    context_budget: AgentContextBudget | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id or not self.text.strip():
             raise ValueError("Agent user message commit must not be empty")
         payload = self.skill_activation_payload_json
         digest = self.skill_activation_payload_sha256
+        if self.context_budget is not None and not isinstance(
+            self.context_budget, AgentContextBudget
+        ):
+            raise ValueError("agent_context_budget_invalid")
         if (payload is None) != (digest is None):
             raise ValueError("agent_skill_activation_commit_identity_incomplete")
         if payload is not None:

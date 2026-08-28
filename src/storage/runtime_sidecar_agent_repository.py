@@ -236,7 +236,10 @@ class RuntimeSidecarAgentRepository:
         )
         items = await self.list_items(run.run_id)
         item_id = f"agent-item:{run.run_id}:user-initial"
-        payload = canonicalize_agent_payload({"text": commit.text})
+        user_payload: dict[str, Any] = {"text": commit.text}
+        if commit.context_budget is not None:
+            user_payload["context_budget"] = commit.context_budget.to_payload()
+        payload = canonicalize_agent_payload(user_payload)
         now = self._now()
         activation_item = _initial_activation_item(run, commit, now=now)
         activation_items = tuple(

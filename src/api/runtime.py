@@ -154,6 +154,7 @@ from src.integrations.model_editions import (
     config_for_model_edition,
     default_model_edition,
     model_reasoning_effort_configs,
+    trim_max_tokens_for_model_edition,
     validate_model_reasoning_effort_configs,
 )
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
@@ -331,6 +332,7 @@ from src.orchestration.capability_fallback import (
 from src.orchestration.backpressure import DEFAULT_MAX_ACTIVE_TASKS, BackpressureGuard
 from src.orchestration.agent_loop import (
     AgentCallExecution,
+    AgentContextBudget,
     AgentContextBuilder,
     AgentContextRules,
     AgentCancellationToken,
@@ -10368,6 +10370,13 @@ class ApiRuntime(
         if conversation is None:
             raise RuntimeError("agent_startup_conversation_missing")
         await self._reconcile_agent_terminal_events(run)
+        list_agent_items = getattr(
+            getattr(self, "agent_run_repository", None), "list_items", None
+        )
+        uninitialized_run = bool(
+            callable(list_agent_items)
+            and not await list_agent_items(run.run_id)
+        )
         root_message = await self.storage.get_message(task.root_message_id)
         prepared = None
         prepared_loader = getattr(self, "_prepared_agent_recovery_loader", None)
@@ -10381,6 +10390,8 @@ class ApiRuntime(
                     root_message.content if root_message is not None else None
                 ),
             )
+        if uninitialized_run and prepared is None:
+            raise RuntimeError("agent_startup_initialization_authority_missing")
         if prepared is None:
             user_message = (
                 root_message.content
@@ -10417,6 +10428,45 @@ class ApiRuntime(
         metadata["available_mcp_server_ids"] = [
             profile.server_id for profile in profiles
         ]
+        if uninitialized_run:
+            assert prepared is not None
+            memory_context = prepared.memory_context
+            initialization_request = AgentExecutionRequest(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                root_message_id=task.root_message_id,
+                user_message=user_message,
+                owner_scope=owner_scope,
+                requested_capability_id=task.requested_capability_id,
+                metadata=metadata,
+                current_user_message=(
+                    str(memory_context.get("current_user_message"))
+                    if memory_context is not None
+                    and memory_context.get("current_user_message") is not None
+                    else None
+                ),
+                resolved_user_message=(
+                    str(memory_context.get("resolved_user_message"))
+                    if memory_context is not None
+                    and memory_context.get("resolved_user_message") is not None
+                    else None
+                ),
+                memory_context=memory_context,
+                available_mcp_servers=profiles,
+                skill_activation_payload_json=(
+                    prepared.skill_activation_payload_json
+                ),
+                skill_activation_payload_sha256=(
+                    prepared.skill_activation_payload_sha256
+                ),
+            )
+            await self._fail_if_effective_uploads_inactive_for_execution(
+                initialization_request
+            )
+            initialized = await self.agent_loop_orchestrator.initialize_run(
+                initialization_request
+            )
+            run = initialized.run
         if run.status in {
             AgentRunStatus.WAITING_FOR_INPUT,
             AgentRunStatus.WAITING_FOR_DEPENDENCY,
@@ -10430,7 +10480,7 @@ class ApiRuntime(
                 current_user_input=user_message,
             )
             return
-        if prepared is not None:
+        if prepared is not None and not uninitialized_run:
             await self._fail_if_effective_uploads_inactive_for_execution(
                 AgentExecutionRequest(
                     task_id=task.task_id,
@@ -15275,6 +15325,19 @@ def build_api_runtime(
             },
         )
 
+    def build_agent_context_budget(
+        binding: AgentModelBinding,
+    ) -> AgentContextBudget:
+        model_context_window_tokens = trim_max_tokens_for_model_edition(
+            binding.model_edition,
+            config=resolved_model_edition_config,
+        )
+        if model_context_window_tokens is None:
+            raise ValueError("agent_context_budget_invalid")
+        return AgentContextBudget.from_model_context_window(
+            model_context_window_tokens
+        )
+
     agent_loop_orchestrator = AgentLoopOrchestrator(
         runs=agent_repository,
         writer=agent_repository,
@@ -15284,6 +15347,7 @@ def build_api_runtime(
         task_loader=storage.get_task,
         task_cas=storage.compare_and_set_task,
         binding_factory=build_agent_model_binding,
+        context_budget_factory=build_agent_context_budget,
         record_event=record_live_event,
         make_event=make_agent_event,
         initialization_event_recorder=record_initialization_event_exact,
