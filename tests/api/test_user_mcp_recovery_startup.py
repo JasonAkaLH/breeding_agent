@@ -792,6 +792,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 [call.result_ref for call in calls],
             )
             self.assertEqual(
+                list(runtime._mcp_pending_action_payload_store._root.glob("*.bin")),
+                [],
+            )
+            self.assertEqual(
                 [
                     str(
                         (
@@ -1061,6 +1065,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([call.status for call in calls], ["input_required", "completed"])
             self.assertEqual(calls[1].continuation_of_call_ref, calls[0].call_ref)
             self.assertIsNone(calls[1].pending_action_id)
+            self.assertEqual(
+                list(runtime._mcp_pending_action_payload_store._root.glob("*.bin")),
+                [],
+            )
             self.assertIsNone(
                 await runtime.storage.get_mcp_sealed_state(
                     "alice", task.task_id, "mcp-request-state:mrtr-resume"
@@ -1282,6 +1290,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 await runtime.mcp_remote_task_recovery_worker.run_once(), 1
+            )
+            self.assertEqual(
+                list(runtime._mcp_pending_action_payload_store._root.glob("*.bin")),
+                [],
             )
             artifacts = await runtime.storage.list_artifacts_for_task(task.task_id)
             self.assertEqual(len(artifacts), 1)

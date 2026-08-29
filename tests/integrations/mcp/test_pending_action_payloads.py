@@ -17,6 +17,17 @@ from pathlib import Path
 import sys
 from unittest.mock import patch
 
+from src.core.models import (
+    MCPCallRecord,
+    MCPExecutionTerminalProjection,
+    MCPExecutionTerminalProjectionStatus,
+    MCPExecutionTerminalReason,
+    MCPPendingToolAction,
+    MCPPendingToolActionStatus,
+    MCPTerminalResultCompletionMode,
+    MCPTerminalResultReceipt,
+    MCPTerminalState,
+)
 from src.integrations.master_key import MasterKeyDeriver, MasterKeyDomain
 from src.integrations.mcp.cp7_artifacts import canonical_json_bytes
 from src.integrations.mcp.pending_action_payloads import (
@@ -26,6 +37,8 @@ from src.integrations.mcp.pending_action_payloads import (
     MCPPendingActionPayloadError,
     MCPPendingActionPayloadIdentity,
     MCPPendingActionPayloadStore,
+    pending_action_payload_deletion_evidence,
+    pending_action_payload_identity,
     pending_action_payload_ref,
 )
 
@@ -64,6 +77,145 @@ class PendingActionPayloadTest(unittest.IsolatedAsyncioTestCase):
     def _path(self, identity=None) -> Path:
         payload_ref = pending_action_payload_ref(identity or self.identity)
         return self.root / f"{payload_ref}.bin"
+
+    def test_terminal_evidence_follows_only_exact_direct_or_mrtr_binding(self) -> None:
+        action = MCPPendingToolAction(
+            action_id=self.identity.action_id,
+            owner_user_id=self.identity.owner_user_id,
+            conversation_id="conversation-1",
+            task_id=self.identity.task_id,
+            node_id=self.identity.node_id,
+            server_id=self.identity.server_id,
+            tool_name=self.identity.tool_name,
+            arguments_sha256=self.identity.arguments_sha256,
+            approval_fingerprint="sha256:approval",
+            arguments_payload_ref=pending_action_payload_ref(self.identity),
+            payload_file_sha256="sha256:file",
+            payload_size_bytes=12,
+            encryption_version=1,
+            server_config_version=self.identity.server_config_version,
+            server_security_version=self.identity.server_security_version,
+            input_schema_sha256=self.identity.input_schema_sha256,
+            status=MCPPendingToolActionStatus.CONSUMED,
+            revision=2,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            approved_at=datetime.now(timezone.utc),
+            consumed_at=datetime.now(timezone.utc),
+        )
+        original = MCPCallRecord(
+            call_ref="call-1",
+            branch_id="branch-1",
+            owner_user_id=action.owner_user_id,
+            task_id=action.task_id,
+            node_id=action.node_id,
+            server_id=action.server_id,
+            tool_name=action.tool_name,
+            status="input_required",
+            call_sequence=1,
+            arguments_sha256=action.arguments_sha256,
+            server_security_version=action.server_security_version,
+            input_schema_sha256=action.input_schema_sha256,
+            server_config_version=action.server_config_version,
+            pending_action_id=action.action_id,
+        )
+        continuation = replace(
+            original,
+            call_ref="call-2",
+            status="failed",
+            call_sequence=2,
+            pending_action_id=None,
+            continuation_of_call_ref=original.call_ref,
+            safe_error_code="remote_failed",
+        )
+        receipt = MCPTerminalResultReceipt(
+            result_receipt_id="receipt-2",
+            candidate_id="candidate-2",
+            owner_user_id=action.owner_user_id,
+            conversation_id=action.conversation_id,
+            task_id=action.task_id,
+            node_id=action.node_id,
+            intent_id="intent-1",
+            call_id=continuation.call_ref,
+            server_id=action.server_id,
+            server_config_version=action.server_config_version,
+            server_security_version=action.server_security_version,
+            terminal_state=MCPTerminalState.FAILED,
+            result_payload_sha256="sha256:" + "1" * 64,
+            safe_result_ref=None,
+            safe_result_ref_sha256=None,
+            safe_error_code="remote_failed",
+            completion_mode=MCPTerminalResultCompletionMode.NORMAL_TERMINAL_PROJECTION,
+            committed_at=datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(pending_action_payload_identity(action), self.identity)
+        evidence = pending_action_payload_deletion_evidence(
+            action=action,
+            call=continuation,
+            original_call=original,
+            receipt=receipt,
+            projection=None,
+        )
+        self.assertEqual(evidence.result_receipt_id, receipt.result_receipt_id)
+        self.assertIsNone(
+            pending_action_payload_deletion_evidence(
+                action=action,
+                call=replace(
+                    continuation,
+                    arguments_sha256="sha256:drift",
+                ),
+                original_call=original,
+                receipt=receipt,
+                projection=None,
+            )
+        )
+
+        unknown_call = replace(
+            original,
+            status="unknown",
+            safe_error_code="execution_status_unknown",
+        )
+        projection = MCPExecutionTerminalProjection(
+            projection_id="projection-1",
+            owner_user_id=action.owner_user_id,
+            conversation_id=action.conversation_id,
+            intent_id="intent-1",
+            call_id=unknown_call.call_ref,
+            task_id=action.task_id,
+            node_id=action.node_id,
+            status=MCPExecutionTerminalProjectionStatus.UNKNOWN,
+            revision=0,
+            no_replay=True,
+            reason_code=MCPExecutionTerminalReason.TRUSTED_TERMINAL_RESULT_ABSENT,
+            unknown_intent_revision=1,
+            unknown_event_id="unknown-event-1",
+            task_failed_event_id="task-failed-1",
+            unknown_terminal_at=datetime.now(timezone.utc),
+            task_terminal_status="failed",
+            node_terminal_status="failed",
+            result_receipt_id=None,
+            result_payload_sha256=None,
+            resolved_terminal_state=None,
+            safe_result_ref=None,
+            safe_result_ref_sha256=None,
+            safe_error_code=None,
+            resolved_intent_revision=None,
+            resolution_event_id=None,
+            correction_event_id=None,
+            result_committed_at=None,
+            resolved_at=None,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        evidence = pending_action_payload_deletion_evidence(
+            action=action,
+            call=unknown_call,
+            original_call=None,
+            receipt=None,
+            projection=projection,
+        )
+        self.assertEqual(evidence.unknown_projection_id, projection.projection_id)
 
     async def test_round_trip_is_encrypted_no_clobber_and_descriptor_guarded(self) -> None:
         arguments = {"query": "secret-customer-value", "page": 2}

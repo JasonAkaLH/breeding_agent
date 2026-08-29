@@ -21,7 +21,13 @@ from typing import Any, AsyncIterator
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from src.core.models import MCPPendingActionPayloadSnapshot
+from src.core.models import (
+    MCPCallRecord,
+    MCPExecutionTerminalProjection,
+    MCPPendingActionPayloadSnapshot,
+    MCPPendingToolAction,
+    MCPTerminalResultReceipt,
+)
 from src.integrations.master_key import (
     MasterKeyDomain,
     MasterKeyError,
@@ -140,6 +146,115 @@ class MCPPendingActionPayloadDeletionEvidence:
         return self.action_status == "consumed" and (
             ordinary_terminal or unknown_terminal
         )
+
+
+def pending_action_payload_identity(
+    action: MCPPendingToolAction,
+) -> MCPPendingActionPayloadIdentity:
+    return MCPPendingActionPayloadIdentity(
+        action_id=action.action_id,
+        owner_user_id=action.owner_user_id,
+        task_id=action.task_id,
+        node_id=action.node_id,
+        server_id=action.server_id,
+        tool_name=action.tool_name,
+        server_config_version=action.server_config_version,
+        server_security_version=action.server_security_version,
+        input_schema_sha256=action.input_schema_sha256,
+        arguments_sha256=action.arguments_sha256,
+    )
+
+
+def _action_call_identity_matches(
+    action: MCPPendingToolAction,
+    call: MCPCallRecord,
+) -> bool:
+    return (
+        call.owner_user_id == action.owner_user_id
+        and call.task_id == action.task_id
+        and call.node_id == action.node_id
+        and call.server_id == action.server_id
+        and call.tool_name == action.tool_name
+        and call.arguments_sha256 == action.arguments_sha256
+        and call.server_config_version == action.server_config_version
+        and call.server_security_version == action.server_security_version
+        and call.input_schema_sha256 == action.input_schema_sha256
+    )
+
+
+def _terminal_call_binds_action(
+    action: MCPPendingToolAction,
+    call: MCPCallRecord,
+    original_call: MCPCallRecord | None,
+) -> bool:
+    if original_call is None:
+        return (
+            call.pending_action_id == action.action_id
+            and call.continuation_of_call_ref is None
+            and _action_call_identity_matches(action, call)
+        )
+    return (
+        original_call.pending_action_id == action.action_id
+        and original_call.status == "input_required"
+        and _action_call_identity_matches(action, original_call)
+        and call.pending_action_id is None
+        and call.continuation_of_call_ref == original_call.call_ref
+        and call.branch_id == original_call.branch_id
+        and _action_call_identity_matches(action, call)
+    )
+
+
+def pending_action_payload_deletion_evidence(
+    *,
+    action: MCPPendingToolAction,
+    call: MCPCallRecord,
+    original_call: MCPCallRecord | None,
+    receipt: MCPTerminalResultReceipt | None,
+    projection: MCPExecutionTerminalProjection | None,
+) -> MCPPendingActionPayloadDeletionEvidence | None:
+    if str(action.status) != "consumed" or not _terminal_call_binds_action(
+        action, call, original_call
+    ):
+        return None
+    if (
+        receipt is not None
+        and call.status in {"completed", "failed", "cancelled"}
+        and str(receipt.terminal_state) == call.status
+        and receipt.owner_user_id == action.owner_user_id
+        and receipt.conversation_id == action.conversation_id
+        and receipt.task_id == action.task_id
+        and receipt.node_id == action.node_id
+        and receipt.call_id == call.call_ref
+        and receipt.server_id == action.server_id
+        and receipt.server_config_version == action.server_config_version
+        and receipt.server_security_version == action.server_security_version
+    ):
+        return MCPPendingActionPayloadDeletionEvidence(
+            action_id=action.action_id,
+            payload_ref=action.arguments_payload_ref,
+            action_status=str(action.status),
+            call_status=call.status,
+            result_receipt_id=receipt.result_receipt_id,
+        )
+    if (
+        projection is not None
+        and call.status == "unknown"
+        and str(projection.status) in {"unknown", "late_result_resolved"}
+        and projection.no_replay
+        and projection.owner_user_id == action.owner_user_id
+        and projection.conversation_id == action.conversation_id
+        and projection.task_id == action.task_id
+        and projection.node_id == action.node_id
+        and projection.call_id == call.call_ref
+    ):
+        return MCPPendingActionPayloadDeletionEvidence(
+            action_id=action.action_id,
+            payload_ref=action.arguments_payload_ref,
+            action_status=str(action.status),
+            call_status=call.status,
+            unknown_projection_id=projection.projection_id,
+        )
+    return None
 
 
 @dataclass(slots=True)
@@ -905,5 +1020,7 @@ __all__ = [
     "MCPValidatedPendingActionPayload",
     "PENDING_ACTION_PAYLOAD_ENCRYPTION_VERSION",
     "PENDING_ACTION_PAYLOAD_ORPHAN_GRACE",
+    "pending_action_payload_deletion_evidence",
+    "pending_action_payload_identity",
     "pending_action_payload_ref",
 ]

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from src.api.runtime import ApiRuntime, build_api_runtime as _build_api_runtime
 from src.core.enums import NodeStatus, TaskStatus
+from src.core.models import MCPTerminalState
 from tests.api.support import InMemoryTaskRuntimeSidecar
 
 build_api_runtime = partial(
@@ -185,6 +186,46 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         manager.reconcile_untracked.assert_awaited_once_with(limit=1000)
         manager.run_once.assert_not_awaited()
         manager.reconcile_artifacts_and_gc_once.assert_not_awaited()
+
+    async def test_terminal_candidate_recovery_retries_pending_payload_delete(
+        self,
+    ) -> None:
+        runtime = object.__new__(ApiRuntime)
+        candidate = SimpleNamespace(
+            terminal_state=MCPTerminalState.FAILED,
+            owner_user_id="alice",
+            task_id="task-1",
+            node_id="node-1",
+            call_id="call-1",
+            candidate_id="candidate-1",
+            result_payload_sha256="sha256:" + "1" * 64,
+        )
+        item = SimpleNamespace(candidate=candidate)
+        candidate_snapshot = object()
+        call = SimpleNamespace(call_ref="call-1")
+        runtime._mcp_startup_terminal_candidates = (item,)
+        runtime._mcp_terminal_candidate_snapshot_authority = Mock()
+        runtime._mcp_terminal_candidate_snapshot_authority.snapshot.return_value = (
+            candidate_snapshot
+        )
+        runtime._mcp_durable_result_snapshot_authority = None
+        runtime._mcp_pending_action_payload_store = object()
+        runtime._mcp_durable_result_lifecycle_manager = None
+        runtime._utcnow_naive = lambda: datetime(2026, 8, 19, 12, 0, 0)
+        runtime.storage = AsyncMock()
+        runtime.storage.recover_mcp_terminal_candidate.return_value = "committed_normal"
+        runtime.storage.get_mcp_call_record.return_value = call
+        runtime._delete_mcp_pending_action_payload_best_effort = AsyncMock()
+
+        await runtime._reconcile_mcp_terminal_candidates()
+
+        runtime.storage.recover_mcp_terminal_candidate.assert_awaited_once()
+        runtime.storage.get_mcp_call_record.assert_awaited_once_with(
+            "alice", "task-1", "call-1"
+        )
+        runtime._delete_mcp_pending_action_payload_best_effort.assert_awaited_once_with(
+            call
+        )
 
     async def test_candidate_capacity_warning_triggers_immediate_archive_scan(
         self,
@@ -377,6 +418,7 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(
                 intent_id="intent-1",
                 status="available",
+                owner_user_id="alice",
                 task_id="task-1",
                 node_id="node-1",
                 updated_at=datetime(2026, 8, 19, 11, 0, 0),
@@ -388,11 +430,23 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         )
         storage.converge_inactive_mcp_dispatch.return_value = "finalized"
         storage.converge_dispatched_mcp_calls_to_unknown.return_value = []
+        same_node_call = SimpleNamespace(call_ref="call-2", node_id="node-1")
+        other_node_call = SimpleNamespace(call_ref="call-1", node_id="node-2")
+        storage.list_mcp_call_records.return_value = [
+            same_node_call,
+            other_node_call,
+        ]
         runtime = self._runtime(storage)
+        runtime._mcp_pending_action_payload_store = object()
+        runtime._delete_mcp_pending_action_payload_best_effort = AsyncMock()
 
         await runtime._converge_inactive_and_unknown_mcp_dispatches()
 
         storage.converge_inactive_mcp_dispatch.assert_awaited_once()
+        storage.list_mcp_call_records.assert_awaited_once_with("alice", "task-1")
+        runtime._delete_mcp_pending_action_payload_best_effort.assert_awaited_once_with(
+            same_node_call
+        )
         storage.converge_dispatched_mcp_calls_to_unknown.assert_awaited_once()
 
     async def test_incomplete_active_claim_shape_blocks_ready(self) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
@@ -124,6 +125,8 @@ from src.integrations.mcp.pending_action_payloads import (
     MCPPendingActionPayloadIdentity,
     MCPPendingActionPayloadStore,
     MCPValidatedPendingActionPayload,
+    pending_action_payload_deletion_evidence,
+    pending_action_payload_identity,
 )
 from src.integrations.mcp.temporary_results import (
     MCPDurableResultSnapshotAuthority,
@@ -138,6 +141,7 @@ EXTERNAL_CONTENT_NOTICE = (
 )
 MAX_SELECTOR_STEPS = 64
 MAX_MCP_ATTACHMENT_SUMMARIES = 20
+logger = logging.getLogger(__name__)
 
 
 class MCPAttachmentSummaryError(ValueError):
@@ -619,7 +623,7 @@ class UserMCPDispatchCoordinator:
                             )
                         approved_payload_manager = (
                             self._pending_action_payload_store.open_validated(
-                                _pending_action_identity(pending_action),
+                                pending_action_payload_identity(pending_action),
                                 pending_action.arguments_payload_ref,
                                 on_gate_wait=lambda: self._renew_dispatch_claim(
                                     authority
@@ -706,7 +710,7 @@ class UserMCPDispatchCoordinator:
                             )
                         approved_payload_manager = (
                             self._pending_action_payload_store.open_validated(
-                                _pending_action_identity(pending_action),
+                                pending_action_payload_identity(pending_action),
                                 pending_action.arguments_payload_ref,
                                 on_gate_wait=lambda: self._renew_dispatch_claim(
                                     authority
@@ -1002,7 +1006,7 @@ class UserMCPDispatchCoordinator:
                     if grant is None:
                         assert approval_interrupt is not None
                         async with self._pending_action_payload_store.open_validated(
-                            _pending_action_identity(pending_action),
+                            pending_action_payload_identity(pending_action),
                             pending_action.arguments_payload_ref,
                             expected_snapshot=payload_snapshot,
                             on_gate_wait=lambda: self._renew_dispatch_claim(authority),
@@ -1081,7 +1085,7 @@ class UserMCPDispatchCoordinator:
                         )
                     approved_payload_manager = (
                         self._pending_action_payload_store.open_validated(
-                            _pending_action_identity(pending_action),
+                            pending_action_payload_identity(pending_action),
                             pending_action.arguments_payload_ref,
                             expected_snapshot=payload_snapshot,
                             on_gate_wait=lambda: self._renew_dispatch_claim(authority),
@@ -1507,6 +1511,11 @@ class UserMCPDispatchCoordinator:
             finally:
                 if approved_payload_manager is not None and approved_payload_entered:
                     await approved_payload_manager.__aexit__(None, None, None)
+                if pending_action is not None and approved_payload is not None:
+                    await self._delete_pending_action_payload_best_effort(
+                        pending_action,
+                        approved_payload.snapshot,
+                    )
                 if scope is not None and not keep_scope:
                     await self._gateway.close_scope(scope, "dispatch_step_complete")
                     if retained_scope is scope:
@@ -2044,6 +2053,72 @@ class UserMCPDispatchCoordinator:
         if not persist:
             return interrupt
         return await self._storage.save_interrupt(interrupt)
+
+    async def _delete_pending_action_payload_best_effort(
+        self,
+        action: MCPPendingToolAction,
+        snapshot: MCPPendingActionPayloadSnapshot,
+    ) -> None:
+        store = self._pending_action_payload_store
+        if store is None:
+            return
+        try:
+            persisted_action = await self._storage.get_mcp_pending_tool_action(
+                action.action_id
+            )
+            if persisted_action is None:
+                return
+            action = persisted_action
+            calls = await self._storage.list_mcp_call_records(
+                action.owner_user_id,
+                action.task_id,
+            )
+            direct_calls = [
+                call
+                for call in calls
+                if call.node_id == action.node_id
+                and call.pending_action_id == action.action_id
+            ]
+            if len(direct_calls) != 1:
+                return
+            direct = direct_calls[0]
+            continuations = [
+                call
+                for call in calls
+                if call.node_id == action.node_id
+                and call.continuation_of_call_ref == direct.call_ref
+            ]
+            if len(continuations) > 1:
+                return
+            candidates = [(direct, None)]
+            if continuations:
+                candidates.append((continuations[0], direct))
+            for call, original in candidates:
+                receipt = await self._storage.get_mcp_terminal_result_receipt_for_call(
+                    call.call_ref
+                )
+                projection = (
+                    await self._storage.get_mcp_execution_terminal_projection(
+                        call.call_ref
+                    )
+                )
+                evidence = pending_action_payload_deletion_evidence(
+                    action=action,
+                    call=call,
+                    original_call=original,
+                    receipt=receipt,
+                    projection=projection,
+                )
+                if evidence is None:
+                    continue
+                await store.delete_with_terminal_evidence(
+                    pending_action_payload_identity(action),
+                    snapshot,
+                    evidence,
+                )
+                return
+        except Exception:
+            logger.warning("mcp_pending_action_payload_cleanup_failed")
 
     async def _call_tool(
         self,
@@ -3251,23 +3326,6 @@ def _pending_action_id(
         }
     ).removeprefix("sha256:")
     return f"mcp-action-{digest}"
-
-
-def _pending_action_identity(
-    action: MCPPendingToolAction,
-) -> MCPPendingActionPayloadIdentity:
-    return MCPPendingActionPayloadIdentity(
-        action_id=action.action_id,
-        owner_user_id=action.owner_user_id,
-        task_id=action.task_id,
-        node_id=action.node_id,
-        server_id=action.server_id,
-        tool_name=action.tool_name,
-        server_config_version=action.server_config_version,
-        server_security_version=action.server_security_version,
-        input_schema_sha256=action.input_schema_sha256,
-        arguments_sha256=action.arguments_sha256,
-    )
 
 
 def _server_profile(server: UserMCPServer) -> UserMCPServerProfile:

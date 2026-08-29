@@ -60,6 +60,7 @@ from src.core.models import (
     Interrupt,
     InterruptAnswer,
     Message,
+    MCPCallRecord,
     MCPShadowAuditSample,
     MCPRolloutInstanceConfigLease,
     MCPNoServerConvergenceResult,
@@ -213,6 +214,8 @@ from src.integrations.mcp.pending_action_payloads import (
     MAX_PENDING_ACTION_ARGUMENT_BYTES,
     MCPPendingActionPayloadCipher,
     MCPPendingActionPayloadStore,
+    pending_action_payload_deletion_evidence,
+    pending_action_payload_identity,
 )
 from src.integrations.mcp.selector_context import (
     MCPDurableSelectorContextBuilder,
@@ -10943,6 +10946,14 @@ class ApiRuntime(
                 )
             if str(result) == "conflict":
                 raise RuntimeError("mcp_terminal_candidate_reconciliation_conflict")
+            if getattr(self, "_mcp_pending_action_payload_store", None) is not None:
+                call = await self.storage.get_mcp_call_record(
+                    candidate.owner_user_id,
+                    candidate.task_id,
+                    candidate.call_id,
+                )
+                if call is not None:
+                    await self._delete_mcp_pending_action_payload_best_effort(call)
             await self.storage.finish_mcp_remote_task_binding_from_receipt(
                 candidate.call_id,
                 mcp_terminal_receipt_id(
@@ -11710,6 +11721,57 @@ class ApiRuntime(
             )
             await asyncio.shield(task)
 
+    async def _delete_mcp_pending_action_payload_best_effort(
+        self,
+        call: MCPCallRecord,
+    ) -> None:
+        store = getattr(self, "_mcp_pending_action_payload_store", None)
+        if store is None:
+            return
+        try:
+            original = None
+            action_id = call.pending_action_id
+            if action_id is None and call.continuation_of_call_ref is not None:
+                original = await self.storage.get_mcp_call_record(
+                    call.owner_user_id,
+                    call.task_id,
+                    call.continuation_of_call_ref,
+                )
+                action_id = None if original is None else original.pending_action_id
+            if action_id is None:
+                return
+            action = await self.storage.get_mcp_pending_tool_action(action_id)
+            if action is None:
+                return
+            receipt = await self.storage.get_mcp_terminal_result_receipt_for_call(
+                call.call_ref
+            )
+            projection = await self.storage.get_mcp_execution_terminal_projection(
+                call.call_ref
+            )
+            evidence = pending_action_payload_deletion_evidence(
+                action=action,
+                call=call,
+                original_call=original,
+                receipt=receipt,
+                projection=projection,
+            )
+            if evidence is None:
+                return
+            identity = pending_action_payload_identity(action)
+            async with store.open_validated(
+                identity,
+                action.arguments_payload_ref,
+            ) as opened:
+                snapshot = opened.snapshot
+            await store.delete_with_terminal_evidence(
+                identity,
+                snapshot,
+                evidence,
+            )
+        except Exception:
+            logger.warning("mcp_pending_action_payload_cleanup_failed")
+
     async def _recover_user_mcp_calls(self) -> None:
         while True:
             converged = await self.storage.converge_dispatched_mcp_calls_to_unknown(
@@ -11769,6 +11831,16 @@ class ApiRuntime(
             )
             if str(result) == "conflict":
                 raise RuntimeError("mcp_startup_inactive_dispatch_conflict")
+            if getattr(self, "_mcp_pending_action_payload_store", None) is not None:
+                calls = await self.storage.list_mcp_call_records(
+                    intent.owner_user_id,
+                    intent.task_id,
+                )
+                for call in sorted(calls, key=lambda item: item.call_ref):
+                    if call.node_id == intent.node_id:
+                        await self._delete_mcp_pending_action_payload_best_effort(
+                            call
+                        )
         await self._recover_user_mcp_calls()
 
     async def _reconcile_mcp_remote_bindings(self) -> None:
@@ -14677,6 +14749,17 @@ def build_api_runtime(
                     )
             if str(committed) == "conflict":
                 raise RuntimeError("mcp_remote_task_terminal_commit_conflict")
+            runtime = mcp_runtime_holder.get("runtime")
+            if runtime is not None:
+                call = await storage.get_mcp_call_record(
+                    binding.owner_user_id,
+                    binding.task_id,
+                    binding.call_ref,
+                )
+                if call is not None:
+                    await runtime._delete_mcp_pending_action_payload_best_effort(
+                        call
+                    )
             parsed_outcome = remote_parsed_results.pop(binding.call_ref, None)
             published_projection = None
             if result_ref is not None:
