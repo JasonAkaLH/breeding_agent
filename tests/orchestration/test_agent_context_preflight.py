@@ -32,6 +32,7 @@ from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
     AgentCallResultProjector,
+    build_tool_result_reuse_receipt,
 )
 from src.orchestration.agent_loop.tool_catalog import AgentToolCatalog
 from src.orchestration.agent_loop.transient_results import (
@@ -408,3 +409,70 @@ class AgentContextPreflightTest(unittest.IsolatedAsyncioTestCase):
             catalog=AgentToolCatalog((), {}),
         )
         self.assertEqual(loaded, [])
+
+        current_assistant = _item(
+            "assistant-current",
+            6,
+            AgentItemKind.ASSISTANT_MESSAGE,
+            {"text": ""},
+        )
+        current_call = _item(
+            "call-current",
+            7,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": "{}",
+                "call_id": "provider-current",
+                "capability_id": "skill.lookup",
+                "node_id": "node-current",
+                "provider_safe_name": "skill_lookup",
+            },
+            parent_item_id=current_assistant.item_id,
+            call_ordinal=0,
+        )
+        current_result = _item(
+            "result-current",
+            8,
+            AgentItemKind.TOOL_RESULT,
+            {
+                "artifact_refs": [],
+                "call_item_id": current_call.item_id,
+                "outcome": "completed",
+                "safe_error_code": None,
+                "safe_result": build_tool_result_reuse_receipt(
+                    source_result_item_id=result.item_id,
+                    source_result_payload_sha256=result.payload_sha256,
+                ),
+            },
+            parent_item_id=current_assistant.item_id,
+            source_call_item_id=current_call.item_id,
+        )
+        loaded.clear()
+        reused = await AgentContextCandidateBuilder(
+            context_builder=AgentContextBuilder(
+                AgentContextRules("stable", "safe", "final"),
+                skill_result_artifact_resolver=Resolver(),
+            ),
+            token_counter=_count_characters,
+            skill_result_artifact_loader=load_artifact,
+        ).build(
+            run=replace(
+                run,
+                next_item_sequence=9,
+                compacted_through_sequence=4,
+            ),
+            items=(
+                user,
+                assistant,
+                call,
+                result,
+                summary,
+                current_assistant,
+                current_call,
+                current_result,
+            ),
+            catalog=AgentToolCatalog((), {}),
+        )
+        self.assertEqual(loaded, [projection.spill_artifact_id])
+        self.assertEqual(reused.preflight.history_tokens, 0)
+        self.assertGreater(reused.preflight.required_tokens, 150_000)

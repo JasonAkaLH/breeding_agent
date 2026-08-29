@@ -305,6 +305,88 @@ print(json.dumps({{
             1,
         )
 
+    async def test_exact_second_skill_call_reuses_first_result(self) -> None:
+        skill_root, network_marker = self._write_bioinfo_skill()
+
+        def repeated_call() -> str:
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "capability_id": "skill.bioinfo_daily",
+                            "arguments": {
+                                "date_range": "最近七天",
+                                "max_results": 30,
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+        def agent_fixture(prompt: str, **_kwargs) -> str:
+            full_results = prompt.count("maf.agent.skill_result_full.v1")
+            if full_results == 1:
+                return repeated_call()
+            if full_results >= 2:
+                return "已复用首次检索结果完成回答。"
+            return repeated_call()
+
+        await self.reconfigure_runtime(
+            skill_roots=(skill_root,),
+            public_skill_roots=(skill_root,),
+            main_agent_stream_generator=agent_fixture,
+            enable_conversation_memory=False,
+        )
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-bioinfo-exact-reuse",
+                "content": "检索最近七天的育种文献",
+                "routing_mode": "hint",
+                "capability_id": "skill.bioinfo_daily",
+                "metadata": {},
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        self.assertEqual(
+            (await self.wait_for_terminal_task(task_id))["status"],
+            "completed",
+        )
+        self.assertEqual(network_marker.read_text(encoding="utf-8"), "1")
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        assert run is not None
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        calls = [item for item in items if item.kind is AgentItemKind.TOOL_CALL]
+        results = [
+            item
+            for item in items
+            if item.kind is AgentItemKind.TOOL_RESULT
+            and item.state is AgentItemState.COMMITTED
+        ]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(results), 2)
+        first = json.loads(results[0].payload_json)
+        second = json.loads(results[1].payload_json)
+        self.assertEqual(first["safe_result"]["projection_mode"], "transient_staged")
+        self.assertEqual(
+            second["safe_result"],
+            {
+                "schema": "maf.agent.tool_result_reuse_receipt.v1",
+                "source_result_item_id": results[0].item_id,
+                "source_result_payload_sha256": results[0].payload_sha256,
+            },
+        )
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        projection_modes = [
+            event.payload["projection_mode"]
+            for event in events
+            if event.event_type == "agent.result_projected"
+        ]
+        self.assertEqual(projection_modes, ["transient_staged", "reused"])
+
     async def test_same_large_result_with_business_artifact_is_full_model_only(
         self,
     ) -> None:

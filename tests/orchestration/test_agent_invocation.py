@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from dataclasses import replace
@@ -37,6 +38,10 @@ from src.orchestration.agent_loop.models import (
     AgentRunStatus,
     AgentToolCall,
     AgentTaskLease,
+)
+from src.orchestration.agent_loop.observability import (
+    AgentMetricsRecorder,
+    InMemoryAgentMetricSink,
 )
 from src.orchestration.agent_loop.task_projection import (
     AgentTaskInvocationCommitPort,
@@ -290,6 +295,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             capability_id=capability_id,
             effective_payload={},
             cancellation=None,
+            allow_result_reuse=False,
         )
 
         self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
@@ -315,6 +321,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             capability_id=capability_id,
             effective_payload={},
             cancellation=None,
+            allow_result_reuse=False,
         )
         self.assertEqual(failed.status, AgentCallOutcomeStatus.FAILED)
         self.assertEqual(
@@ -478,6 +485,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             effective_payload={},
             cancellation=None,
             lease_handle=handle,
+            allow_result_reuse=False,
         )
 
         self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
@@ -574,6 +582,219 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
         await invoker.resume(locator, lease_handle=handle)
 
         self.assertIs(invoker.invoke.await_args.kwargs["lease_handle"], handle)
+        self.assertFalse(
+            invoker.invoke.await_args.kwargs["allow_result_reuse"]
+        )
+
+    async def test_exact_completed_result_is_reused_before_invocation(self) -> None:
+        run = AgentRun(
+            "run-reuse",
+            "task-reuse",
+            "conv-reuse",
+            AgentRunStatus.RUNNING,
+            AgentModelBinding("edition-a"),
+            revision=3,
+        )
+
+        def item(item_id, sequence, kind, payload, **kwargs):
+            text = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+            return AgentItem(
+                item_id,
+                run.run_id,
+                run.task_id,
+                sequence,
+                kind,
+                kwargs.pop("state", AgentItemState.COMMITTED),
+                text,
+                hashlib.sha256(text.encode()).hexdigest(),
+                **kwargs,
+            )
+
+        root_call = item(
+            "call-root",
+            1,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": '{"query":"rice"}',
+                "call_id": "provider-root",
+                "capability_id": "cap.lookup",
+                "node_id": "node-root",
+                "provider_safe_name": "cap_lookup",
+            },
+        )
+        root_result = item(
+            "result-root",
+            2,
+            AgentItemKind.TOOL_RESULT,
+            {
+                "artifact_refs": [],
+                "call_item_id": root_call.item_id,
+                "outcome": "completed",
+                "safe_error_code": None,
+                "safe_result": {"answer": "root"},
+            },
+            source_call_item_id=root_call.item_id,
+        )
+        current_call = item(
+            "call-current",
+            3,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": '{"query":"rice"}',
+                "call_id": "provider-current",
+                "capability_id": "cap.lookup",
+                "node_id": "node-current",
+                "provider_safe_name": "cap_lookup",
+            },
+        )
+        reservation = item(
+            "result-current",
+            4,
+            AgentItemKind.TOOL_RESULT,
+            {},
+            state=AgentItemState.RESERVED,
+            source_call_item_id=current_call.item_id,
+        )
+
+        stored_items = [root_call, root_result, current_call, reservation]
+
+        class Runs:
+            async def list_items(self, _run_id):
+                return tuple(stored_items)
+
+        observations = []
+        metric_sink = InMemoryAgentMetricSink()
+
+        async def observe(**values):
+            observations.append(values["observation"])
+
+        invocation = SimpleNamespace(
+            invoke=AsyncMock(side_effect=AssertionError("must not invoke"))
+        )
+        invoker = AgentCapabilityInvoker(
+            invocation_service=invocation,
+            runs=Runs(),
+            task_loader=AsyncMock(
+                return_value=Task(
+                    run.task_id,
+                    run.conversation_id,
+                    "message-reuse",
+                    status=TaskStatus.RUNNING,
+                )
+            ),
+            node_loader=AsyncMock(
+                return_value=TaskNode(
+                    "node-current",
+                    run.task_id,
+                    "cap.lookup",
+                    status=NodeStatus.PENDING,
+                )
+            ),
+            request_metadata_loader=lambda _run: {},
+            current_user_input_loader=lambda _run: "",
+            result_projection_observer=observe,
+            metrics_recorder=AgentMetricsRecorder(metric_sink),
+        )
+
+        outcome = await invoker.invoke(
+            run=run,
+            call=AgentToolCall(
+                "provider-current",
+                "cap_lookup",
+                '{"query":"rice"}',
+                0,
+            ),
+            call_item=current_call,
+            result_reservation=reservation,
+            capability_id="cap.lookup",
+            effective_payload={"query": "rice"},
+            cancellation=None,
+        )
+
+        self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
+        self.assertEqual(
+            outcome.safe_result_payload,
+            {
+                "schema": "maf.agent.tool_result_reuse_receipt.v1",
+                "source_result_item_id": root_result.item_id,
+                "source_result_payload_sha256": root_result.payload_sha256,
+            },
+        )
+        invocation.invoke.assert_not_awaited()
+        self.assertEqual(observations[0].projection_mode, "reused")
+        self.assertIsNone(observations[0].raw_sha256)
+        duplicate_metric = next(
+            sample
+            for sample in metric_sink.samples
+            if sample.name == "agent_tool_calls_total"
+        )
+        self.assertEqual(
+            dict(duplicate_metric.labels),
+            {"capability_kind": "internal", "outcome": "duplicate"},
+        )
+
+        committed_reuse = item(
+            "result-current",
+            4,
+            AgentItemKind.TOOL_RESULT,
+            {
+                "artifact_refs": [],
+                "call_item_id": current_call.item_id,
+                "outcome": "completed",
+                "safe_error_code": None,
+                "safe_result": outcome.safe_result_payload,
+            },
+            source_call_item_id=current_call.item_id,
+        )
+        third_call = item(
+            "call-third",
+            5,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": '{"query":"rice"}',
+                "call_id": "provider-third",
+                "capability_id": "cap.lookup",
+                "node_id": "node-third",
+                "provider_safe_name": "cap_lookup",
+            },
+        )
+        third_reservation = item(
+            "result-third",
+            6,
+            AgentItemKind.TOOL_RESULT,
+            {},
+            state=AgentItemState.RESERVED,
+            source_call_item_id=third_call.item_id,
+        )
+        stored_items[:] = [
+            root_call,
+            root_result,
+            current_call,
+            committed_reuse,
+            third_call,
+            third_reservation,
+        ]
+
+        third = await invoker.invoke(
+            run=run,
+            call=AgentToolCall(
+                "provider-third",
+                "cap_lookup",
+                '{"query":"rice"}',
+                0,
+            ),
+            call_item=third_call,
+            result_reservation=third_reservation,
+            capability_id="cap.lookup",
+            effective_payload={"query": "rice"},
+            cancellation=None,
+        )
+
+        self.assertEqual(
+            third.safe_result_payload["source_result_item_id"],
+            root_result.item_id,
+        )
+        invocation.invoke.assert_not_awaited()
 
     async def test_waiting_branches_keep_execution_revalidation_and_semantic_commit_order(
         self,
@@ -740,6 +961,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             capability_id="mcp.dispatch",
             effective_payload={"server_id": "server-1"},
             cancellation=None,
+            allow_result_reuse=False,
         )
 
         self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)

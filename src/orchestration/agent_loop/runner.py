@@ -32,6 +32,7 @@ from .models import (
     AgentToolChoice,
 )
 from .repository import AgentAtomicWriter, AgentRunRepository
+from .result_projection import agent_tool_repeat_key
 from .tool_catalog import (
     AgentToolCatalogBuilder,
     CapabilityInvocationPolicy,
@@ -219,7 +220,10 @@ class AgentLoopRunner:
                 try:
                     candidate = await build_candidate(run, items)
                 except ValueError as exc:
-                    if str(exc) == "agent_skill_result_artifact_unavailable":
+                    if str(exc) in {
+                        "agent_skill_result_artifact_unavailable",
+                        "agent_reused_tool_result_unavailable",
+                    }:
                         return await self._fail_context_run(
                             run_id,
                             handle,
@@ -245,7 +249,10 @@ class AgentLoopRunner:
                             repreflight=build_candidate,
                         )
                     except (RuntimeError, ValueError) as exc:
-                        if str(exc) == "agent_skill_result_artifact_unavailable":
+                        if str(exc) in {
+                            "agent_skill_result_artifact_unavailable",
+                            "agent_reused_tool_result_unavailable",
+                        }:
                             return await self._fail_context_run(
                                 run_id,
                                 handle,
@@ -348,7 +355,10 @@ class AgentLoopRunner:
                         latest, latest_items
                     )
                 except ValueError as exc:
-                    if str(exc) == "agent_skill_result_artifact_unavailable":
+                    if str(exc) in {
+                        "agent_skill_result_artifact_unavailable",
+                        "agent_reused_tool_result_unavailable",
+                    }:
                         return await self._fail_context_run(
                             run_id,
                             handle,
@@ -366,7 +376,10 @@ class AgentLoopRunner:
                         force=True,
                     )
                 except (RuntimeError, ValueError) as exc:
-                    if str(exc) == "agent_skill_result_artifact_unavailable":
+                    if str(exc) in {
+                        "agent_skill_result_artifact_unavailable",
+                        "agent_reused_tool_result_unavailable",
+                    }:
                         return await self._fail_context_run(
                             run_id,
                             handle,
@@ -449,10 +462,12 @@ class AgentLoopRunner:
             ),
         ):
             self._check_cancel(cancellation)
-            wave_results = await self._leases.run_active_phase(
+            groups = _repeat_groups(wave, tool_to_capability)
+            leaders = tuple(group[0] for group in groups)
+            leader_results = await self._leases.run_active_phase(
                 "capability_wave",
                 handle,
-                lambda _handle, current_wave=wave: self._execute_wave(
+                lambda _handle, current_wave=leaders: self._execute_wave(
                     run,
                     current_wave,
                     tool_to_capability,
@@ -462,36 +477,56 @@ class AgentLoopRunner:
                     _handle,
                 ),
             )
-            for (_, call_item, _), outcome in zip(wave, wave_results, strict=True):
-                latest = await self._require_active_run(run.run_id)
-                commit = AgentCallOutcomeCommit(
-                    run_id=run.run_id,
-                    expected_revision=latest.revision,
-                    expected_claim_token=handle.current.token,
-                    call_item_id=call_item.item_id,
-                    safe_result_payload=outcome.safe_result_payload,
-                    status=outcome.status,
-                    staged_artifacts=outcome.staged_artifacts,
-                    safe_error_code=outcome.safe_error_code,
-                    skill_activation_item=outcome.skill_activation_item,
+            leader_outcomes: dict[str, AgentCallExecution] = {}
+            for leader, outcome in zip(leaders, leader_results, strict=True):
+                leader_outcomes[leader[1].item_id] = outcome
+                await self._commit_call_outcome(
+                    run=run,
+                    call_item=leader[1],
+                    outcome=outcome,
+                    handle=handle,
                 )
-                try:
-                    committed_result = (
-                        await self._writer.commit_agent_call_outcome(commit)
-                    )
-                except Exception:
-                    committed_result = (
-                        await self._writer.commit_agent_call_outcome(commit)
-                    )
-                if outcome.status not in {
-                    AgentCallOutcomeStatus.WAITING_FOR_INPUT,
-                    AgentCallOutcomeStatus.WAITING_FOR_DEPENDENCY,
-                }:
-                    await self._record_terminal_event_best_effort(
+            for group in groups:
+                gate = leader_outcomes[group[0][1].item_id]
+                for follower in group[1:]:
+                    self._check_cancel(cancellation)
+                    if gate.status in {
+                        AgentCallOutcomeStatus.WAITING_FOR_INPUT,
+                        AgentCallOutcomeStatus.WAITING_FOR_DEPENDENCY,
+                    }:
+                        outcome = AgentCallExecution(
+                            AgentCallOutcomeStatus.ABORTED,
+                            safe_error_code="duplicate_call_leader_waiting",
+                        )
+                    elif gate.status is AgentCallOutcomeStatus.ABORTED:
+                        outcome = AgentCallExecution(
+                            AgentCallOutcomeStatus.ABORTED,
+                            safe_error_code="duplicate_call_leader_aborted",
+                        )
+                    else:
+                        latest_run = await self._require_active_run(run.run_id)
+                        outcome = (
+                            await self._leases.run_active_phase(
+                                "capability_wave",
+                                handle,
+                                lambda _handle, record=follower, active=latest_run: self._execute_wave(
+                                    active,
+                                    (record,),
+                                    tool_to_capability,
+                                    policies,
+                                    cancellation,
+                                    visibility,
+                                    _handle,
+                                ),
+                            )
+                        )[0]
+                    await self._commit_call_outcome(
                         run=run,
-                        call_item=call_item,
-                        result_item=committed_result,
+                        call_item=follower[1],
+                        outcome=outcome,
+                        handle=handle,
                     )
+                    gate = outcome
             latest = await self._runs.get_run(run.run_id)
             if latest is None:
                 raise AgentStorageConflict("agent_run_missing")
@@ -506,6 +541,45 @@ class AgentLoopRunner:
                     lease_handle=handle,
                 )
         return None
+
+    async def _commit_call_outcome(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        outcome: AgentCallExecution,
+        handle: AgentLeaseHandle,
+    ) -> AgentItem:
+        latest = await self._require_active_run(run.run_id)
+        commit = AgentCallOutcomeCommit(
+            run_id=run.run_id,
+            expected_revision=latest.revision,
+            expected_claim_token=handle.current.token,
+            call_item_id=call_item.item_id,
+            safe_result_payload=outcome.safe_result_payload,
+            status=outcome.status,
+            staged_artifacts=outcome.staged_artifacts,
+            safe_error_code=outcome.safe_error_code,
+            skill_activation_item=outcome.skill_activation_item,
+        )
+        try:
+            committed_result = await self._writer.commit_agent_call_outcome(
+                commit
+            )
+        except Exception:
+            committed_result = await self._writer.commit_agent_call_outcome(
+                commit
+            )
+        if outcome.status not in {
+            AgentCallOutcomeStatus.WAITING_FOR_INPUT,
+            AgentCallOutcomeStatus.WAITING_FOR_DEPENDENCY,
+        }:
+            await self._record_terminal_event_best_effort(
+                run=run,
+                call_item=call_item,
+                result_item=committed_result,
+            )
+        return committed_result
 
     async def _execute_wave(
         self,
@@ -596,6 +670,28 @@ def _parallel_safe(
     capability_id = tool_to_capability.get(call.provider_safe_name)
     policy = policies.get(capability_id or "")
     return bool(policy is not None and policy.parallel_safe)
+
+
+def _repeat_groups(
+    wave: tuple[tuple[AgentToolCall, AgentItem, AgentItem], ...],
+    tool_to_capability: Mapping[str, str],
+) -> tuple[tuple[tuple[AgentToolCall, AgentItem, AgentItem], ...], ...]:
+    groups: dict[
+        str, list[tuple[AgentToolCall, AgentItem, AgentItem]]
+    ] = {}
+    for record in wave:
+        call, call_item, _reservation = record
+        capability_id = tool_to_capability.get(call.provider_safe_name)
+        key = (
+            agent_tool_repeat_key(
+                capability_id=capability_id,
+                arguments_json=call.arguments_json,
+            )
+            if capability_id is not None
+            else f"unknown\0{call_item.item_id}"
+        )
+        groups.setdefault(key, []).append(record)
+    return tuple(tuple(group) for group in groups.values())
 
 
 def _truncate_utf8(value: str, max_bytes: int) -> str:

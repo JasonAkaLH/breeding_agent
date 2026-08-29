@@ -63,6 +63,7 @@ class AgentMetricsTest(unittest.TestCase):
             "invalid",
             "artifact_persist_failed",
             "projection_too_large",
+            "reused",
             "transient_staged",
             "transient_stage_failed",
         }

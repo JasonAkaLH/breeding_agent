@@ -9,7 +9,7 @@ from typing import Any
 
 from src.core.models import Artifact
 
-from .context import AgentContextBuilder
+from .context import AgentContextBuilder, resolve_reused_tool_result_source
 from .context_budget import AgentContextBudget
 from .models import (
     AgentItem,
@@ -24,6 +24,7 @@ from .models import (
 )
 from .observability import AgentMetricsRecorder
 from .result_artifacts import skill_result_artifact_id_from_durable_payload
+from .result_projection import parse_tool_result_reuse_receipt
 from .tool_catalog import AgentToolCatalog
 
 
@@ -195,9 +196,19 @@ class AgentContextCandidateBuilder:
             payload = json.loads(result.payload_json)
             if not isinstance(payload, Mapping):
                 raise ValueError("agent_skill_result_artifact_unavailable")
+            reused = resolve_reused_tool_result_source(
+                run=run,
+                current_call=call,
+                current_result=result,
+                all_items=items,
+            )
+            effective_call = call
+            effective_payload = payload
+            if reused is not None:
+                effective_call, _effective_result, effective_payload = reused
             artifact_id = skill_result_artifact_id_from_durable_payload(
-                call_item_id=call.item_id,
-                durable_payload=payload,
+                call_item_id=effective_call.item_id,
+                durable_payload=effective_payload,
             )
             if artifact_id is not None:
                 artifact_ids.add(artifact_id)
@@ -334,6 +345,7 @@ def _item_is_full_result_transport(item: AgentItem) -> bool:
                 and safe_result.get("projection_mode") == "transient_staged"
             )
             or safe_result.get("projection_mode") == "artifact_backed"
+            or parse_tool_result_reuse_receipt(safe_result) is not None
         )
     )
 

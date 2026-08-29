@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from src.core.enums import NodeStatus
 from src.core.models import Task, TaskNode
+from src.storage.agent_payload import canonicalize_agent_payload
 from src.orchestration.agent_loop.invocation import (
     CapabilityInvocationService,
     InvocationRequest,
@@ -36,6 +37,9 @@ from .result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_LEGACY,
     AgentCallResultProjection,
     AgentCallResultProjector,
+    agent_tool_repeat_key,
+    build_tool_result_reuse_receipt,
+    parse_tool_result_reuse_receipt,
 )
 from .runner import AgentCallExecution
 from .transient_results import AgentTransientSkillResultStage
@@ -176,6 +180,7 @@ class AgentCapabilityInvoker:
             effective_payload=effective_payload,
             cancellation=cancellation,
             lease_handle=lease_handle,
+            allow_result_reuse=False,
         )
 
     async def invoke(
@@ -189,8 +194,8 @@ class AgentCapabilityInvoker:
         effective_payload: Mapping[str, Any],
         cancellation,
         lease_handle: AgentLeaseHandle | None = None,
+        allow_result_reuse: bool = True,
     ) -> AgentCallExecution:
-        del call
         task = await self._load_task(run.task_id)
         node = await self._load_node(_node_id(call_item))
         if not isinstance(task, Task) or not isinstance(node, TaskNode):
@@ -198,6 +203,30 @@ class AgentCapabilityInvoker:
                 AgentCallOutcomeStatus.ABORTED,
                 safe_error_code="agent_invocation_projection_missing",
             )
+        if allow_result_reuse:
+            try:
+                reuse_receipt = await self._reuse_completed_result(
+                    run=run,
+                    call=call,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                )
+            except ValueError:
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.ABORTED,
+                    safe_error_code="agent_reused_tool_result_unavailable",
+                )
+            if reuse_receipt is not None:
+                await self._record_reused_result_projection(
+                    run=run,
+                    call_item=call_item,
+                    capability_id=capability_id,
+                    receipt=reuse_receipt,
+                )
+                return AgentCallExecution(
+                    AgentCallOutcomeStatus.COMPLETED,
+                    safe_result_payload=reuse_receipt,
+                )
         metadata = dict(self._load_metadata(run))
         metadata["agent_run_id"] = run.run_id
         if self._activate_delegated_skill is not None and capability_id.startswith(
@@ -541,6 +570,129 @@ class AgentCapabilityInvoker:
             ),
         )
 
+    async def _reuse_completed_result(
+        self,
+        *,
+        run: AgentRun,
+        call: AgentToolCall,
+        call_item: AgentItem,
+        capability_id: str,
+    ) -> dict[str, str] | None:
+        current_key = agent_tool_repeat_key(
+            capability_id=capability_id,
+            arguments_json=call.arguments_json,
+        )
+        if _call_repeat_key(call_item) != current_key:
+            raise ValueError("current_call_identity_invalid")
+        items = await self._runs.list_items(run.run_id)
+        by_id = {item.item_id: item for item in items}
+        results_by_call = {
+            item.source_call_item_id: item
+            for item in items
+            if item.kind is AgentItemKind.TOOL_RESULT
+            and item.source_call_item_id is not None
+        }
+        prior_calls = sorted(
+            (
+                item
+                for item in items
+                if item.kind is AgentItemKind.TOOL_CALL
+                and item.item_id != call_item.item_id
+                and item.sequence < call_item.sequence
+                and _call_repeat_key(item) == current_key
+            ),
+            key=lambda item: item.sequence,
+            reverse=True,
+        )
+        for prior_call in prior_calls:
+            candidate = results_by_call.get(prior_call.item_id)
+            if candidate is None or candidate.state is not AgentItemState.COMMITTED:
+                continue
+            candidate_payload = _committed_completed_result_payload(candidate)
+            if candidate_payload is None:
+                continue
+            receipt = parse_tool_result_reuse_receipt(
+                candidate_payload.get("safe_result")
+            )
+            root_result = candidate
+            if receipt is not None:
+                source_result_id, source_payload_sha = receipt
+                root_result = by_id.get(source_result_id)
+                if (
+                    root_result is None
+                    or root_result.kind is not AgentItemKind.TOOL_RESULT
+                    or root_result.state is not AgentItemState.COMMITTED
+                    or root_result.payload_sha256 != source_payload_sha
+                ):
+                    raise ValueError("reuse_root_invalid")
+            root_payload = _committed_completed_result_payload(root_result)
+            if root_payload is None:
+                raise ValueError("reuse_root_invalid")
+            if parse_tool_result_reuse_receipt(root_payload.get("safe_result")) is not None:
+                raise ValueError("reuse_receipt_chain_invalid")
+            root_call = by_id.get(str(root_result.source_call_item_id))
+            if (
+                root_call is None
+                or root_call.kind is not AgentItemKind.TOOL_CALL
+                or root_call.sequence >= root_result.sequence
+                or root_call.sequence >= call_item.sequence
+                or root_call.run_id != run.run_id
+                or root_result.run_id != run.run_id
+                or root_call.task_id != run.task_id
+                or root_result.task_id != run.task_id
+                or _call_repeat_key(root_call) != current_key
+            ):
+                raise ValueError("reuse_root_identity_invalid")
+            return build_tool_result_reuse_receipt(
+                source_result_item_id=root_result.item_id,
+                source_result_payload_sha256=root_result.payload_sha256,
+            )
+        return None
+
+    async def _record_reused_result_projection(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        capability_id: str,
+        receipt: Mapping[str, str],
+    ) -> None:
+        size_bytes = canonicalize_agent_payload(dict(receipt)).size_bytes
+        observation = AgentResultProjectionObservation(
+            capability_id=capability_id,
+            projection_mode="reused",
+            original_size_bytes=size_bytes,
+            projected_size_bytes=size_bytes,
+            raw_sha256=None,
+            artifact_count=0,
+            error_code=None,
+        )
+        if self._metrics is not None:
+            try:
+                self._metrics.record(
+                    "agent_result_projections_total",
+                    projection_mode="reused",
+                )
+                self._metrics.record(
+                    "agent_tool_calls_total",
+                    capability_kind=_capability_kind(capability_id),
+                    outcome="duplicate",
+                )
+            except Exception:
+                pass
+        if self._observe_result_projection is None:
+            return
+        try:
+            observed = self._observe_result_projection(
+                run=run,
+                call_item=call_item,
+                observation=observation,
+            )
+            if hasattr(observed, "__await__"):
+                await observed
+        except Exception:
+            pass
+
     async def _skill_projection_policy(
         self,
         *,
@@ -653,3 +805,59 @@ def _node_id(call_item) -> str:
 
     payload = json.loads(call_item.payload_json)
     return str(payload.get("node_id") or "")
+
+
+def _call_repeat_key(call_item: AgentItem) -> str:
+    try:
+        payload = json.loads(call_item.payload_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("agent_tool_repeat_identity_invalid") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("agent_tool_repeat_identity_invalid")
+    capability_id = payload.get("capability_id")
+    arguments_json = payload.get("arguments_json")
+    if not isinstance(capability_id, str) or not isinstance(arguments_json, str):
+        raise ValueError("agent_tool_repeat_identity_invalid")
+    return agent_tool_repeat_key(
+        capability_id=capability_id,
+        arguments_json=AgentToolCall(
+            call_id=str(payload.get("call_id") or call_item.item_id),
+            provider_safe_name=str(payload.get("provider_safe_name") or ""),
+            arguments_json=arguments_json,
+            ordinal=call_item.call_ordinal or 0,
+        ).arguments_json,
+    )
+
+
+def _committed_completed_result_payload(
+    result_item: AgentItem,
+) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(result_item.payload_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("agent_reused_tool_result_unavailable") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    if payload.get("outcome") != "completed" or payload.get("safe_error_code") is not None:
+        return None
+    if (
+        set(payload)
+        != {
+            "artifact_refs",
+            "call_item_id",
+            "outcome",
+            "safe_error_code",
+            "safe_result",
+        }
+        or payload.get("call_item_id") != result_item.source_call_item_id
+    ):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    return payload
+
+
+def _capability_kind(capability_id: str) -> str:
+    if capability_id == "mcp.dispatch":
+        return "mcp"
+    if capability_id.startswith("skill."):
+        return "skill"
+    return "internal"

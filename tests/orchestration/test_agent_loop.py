@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
+from src.core.contracts import CapabilityExecutionResult
+from src.core.enums import NodeStatus, TaskStatus
+from src.core.models import Task, TaskNode
+from src.orchestration.agent_loop.capability_invoker import AgentCapabilityInvoker
 from src.orchestration.agent_loop.context import AgentContextBuilder, AgentContextRules
 from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.context_preflight import AgentContextCandidateBuilder
 from src.orchestration.agent_loop.compaction import AgentCompactionService
+from src.orchestration.agent_loop.invocation import InvocationResult
 from src.orchestration.agent_loop.lease import AgentLeaseController
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeStatus,
@@ -41,7 +48,7 @@ from src.storage.sqlite import (
     create_sqlite_engine,
     create_sqlite_session_factory,
 )
-from src.storage.sqlite.models import TaskRow
+from src.storage.sqlite.models import TaskNodeRow, TaskRow
 
 
 def _policy(*, parallel_safe: bool) -> CapabilityInvocationPolicy:
@@ -646,6 +653,230 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         items = await self.repository.list_items("run-1")
         committed_results = [item for item in items if item.kind.value == "tool_result"]
         self.assertEqual([item.call_ordinal for item in committed_results], [0, 1, 2, 3])
+
+    async def test_same_batch_exact_calls_invoke_external_path_once(self) -> None:
+        await self._initialize_budgeted_run(100_000)
+        calls = (
+            AgentToolCall(
+                "duplicate-leader",
+                self.names["skill.safe_one"],
+                '{"query":"rice"}',
+                0,
+            ),
+            AgentToolCall(
+                "duplicate-follower",
+                self.names["skill.safe_one"],
+                '{"query":"rice"}',
+                1,
+            ),
+        )
+        model = _QueuedModel(
+            self.binding,
+            [("", calls), ("final answer", ())],
+        )
+
+        class Invocation:
+            def __init__(inner_self) -> None:
+                inner_self.calls = 0
+
+            async def invoke(inner_self, _request, node, **_kwargs):
+                inner_self.calls += 1
+                execution = CapabilityExecutionResult(
+                    capability_id="skill.safe_one",
+                    task_id="task-1",
+                    node_id=node.node_id,
+                    output_payload={"answer": "ROOT-RESULT"}
+                )
+                return InvocationResult(
+                    node=replace(node, status=NodeStatus.COMPLETED),
+                    output_payload=dict(execution.output_payload),
+                    execution_result=execution,
+                )
+
+        invocation = Invocation()
+
+        async def load_task(_task_id):
+            return Task(
+                "task-1",
+                "conv-1",
+                "message-1",
+                status=TaskStatus.RUNNING,
+            )
+
+        async def load_node(node_id):
+            return TaskNode(
+                node_id,
+                "task-1",
+                "skill.safe_one",
+                status=NodeStatus.PENDING,
+            )
+
+        invoker = AgentCapabilityInvoker(
+            invocation_service=invocation,
+            runs=self.repository,
+            task_loader=load_task,
+            node_loader=load_node,
+            request_metadata_loader=lambda _run: {},
+            current_user_input_loader=lambda _run: "",
+        )
+
+        class ResponseLostRepository:
+            def __init__(inner_self, repository) -> None:
+                inner_self.repository = repository
+                inner_self.commits = 0
+                inner_self.lost = False
+
+            def __getattr__(inner_self, name):
+                return getattr(inner_self.repository, name)
+
+            async def commit_agent_call_outcome(inner_self, commit):
+                committed = await inner_self.repository.commit_agent_call_outcome(
+                    commit
+                )
+                inner_self.commits += 1
+                if inner_self.commits == 2:
+                    inner_self.lost = True
+                    raise RuntimeError("receipt response lost")
+                return committed
+
+        repository = ResponseLostRepository(self.repository)
+
+        result = await self._runner(
+            model,
+            invoker,
+            repository=repository,
+        ).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertTrue(repository.lost)
+        items = await self.repository.list_items("run-1")
+        self.assertEqual(
+            invocation.calls,
+            1,
+            [
+                (item.sequence, item.kind.value, item.payload_json)
+                for item in items
+            ],
+        )
+        results = [
+            item
+            for item in items
+            if item.kind.value == "tool_result"
+            and item.state.value == "committed"
+        ]
+        self.assertEqual(len(results), 2)
+        root_payload = json.loads(results[0].payload_json)
+        follower_payload = json.loads(results[1].payload_json)
+        self.assertEqual(
+            root_payload["safe_result"]["model_view"]["answer"],
+            "ROOT-RESULT",
+        )
+        self.assertEqual(
+            follower_payload["safe_result"]["source_result_item_id"],
+            results[0].item_id,
+        )
+        by_id = {item.item_id: item for item in items}
+        follower_call = by_id[results[1].source_call_item_id]
+        follower_node_id = json.loads(follower_call.payload_json)["node_id"]
+        with self.sessions() as session:
+            follower_node = session.get(TaskNodeRow, follower_node_id)
+        self.assertEqual(follower_node.status, "completed")
+        self.assertIsNone(follower_node.assigned_instance_id)
+        self.assertIsNone(follower_node.started_at)
+
+    async def test_same_batch_waiting_leader_never_invokes_follower(self) -> None:
+        calls = (
+            AgentToolCall("leader", self.names["skill.safe_one"], "{}", 0),
+            AgentToolCall("follower", self.names["skill.safe_one"], "{}", 1),
+        )
+        model = _QueuedModel(self.binding, [("", calls)])
+        invoker = _RecordingInvoker(
+            {
+                "leader": AgentCallExecution(
+                    AgentCallOutcomeStatus.WAITING_FOR_INPUT,
+                    safe_result_payload={"leader": "waiting"},
+                )
+            }
+        )
+
+        result = await self._runner(model, invoker).run("run-1")
+
+        self.assertEqual(result.state, "waiting")
+        self.assertEqual(invoker.events, ["start:leader", "end:leader"])
+        items = await self.repository.list_items("run-1")
+        follower = next(
+            json.loads(item.payload_json)
+            for item in items
+            if item.kind.value == "tool_result" and item.call_ordinal == 1
+        )
+        self.assertEqual(
+            follower["safe_error_code"],
+            "duplicate_call_leader_waiting",
+        )
+
+    async def test_same_batch_aborted_leader_never_invokes_follower(self) -> None:
+        calls = (
+            AgentToolCall("leader", self.names["skill.safe_one"], "{}", 0),
+            AgentToolCall("follower", self.names["skill.safe_one"], "{}", 1),
+        )
+        model = _QueuedModel(
+            self.binding,
+            [("", calls), ("final answer", ())],
+        )
+        invoker = _RecordingInvoker(
+            {
+                "leader": AgentCallExecution(
+                    AgentCallOutcomeStatus.ABORTED,
+                    safe_error_code="leader_aborted",
+                )
+            }
+        )
+
+        result = await self._runner(model, invoker).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(invoker.events, ["start:leader", "end:leader"])
+        items = await self.repository.list_items("run-1")
+        follower = next(
+            json.loads(item.payload_json)
+            for item in items
+            if item.kind.value == "tool_result" and item.call_ordinal == 1
+        )
+        self.assertEqual(
+            follower["safe_error_code"],
+            "duplicate_call_leader_aborted",
+        )
+
+    async def test_same_batch_failed_leader_allows_sequential_follower(self) -> None:
+        calls = (
+            AgentToolCall("leader", self.names["skill.safe_one"], "{}", 0),
+            AgentToolCall("follower", self.names["skill.safe_one"], "{}", 1),
+        )
+        model = _QueuedModel(
+            self.binding,
+            [("", calls), ("final answer", ())],
+        )
+        invoker = _RecordingInvoker(
+            {
+                "leader": AgentCallExecution(
+                    AgentCallOutcomeStatus.FAILED,
+                    safe_error_code="leader_failed",
+                )
+            }
+        )
+
+        result = await self._runner(model, invoker).run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(
+            invoker.events,
+            [
+                "start:leader",
+                "end:leader",
+                "start:follower",
+                "end:follower",
+            ],
+        )
 
     async def test_outcome_response_loss_replays_exact_and_publishes_one_terminal_event(self) -> None:
         call = AgentToolCall(

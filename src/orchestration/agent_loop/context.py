@@ -17,6 +17,10 @@ from .models import (
     AgentToolChoice,
 )
 from .result_artifacts import skill_result_artifact_id_from_durable_payload
+from .result_projection import (
+    agent_tool_repeat_key,
+    parse_tool_result_reuse_receipt,
+)
 from .tool_catalog import AgentToolCatalog
 
 
@@ -124,7 +128,7 @@ class AgentContextBuilder:
             message = _message_from_item(
                 item,
                 run=run,
-                all_items=visible_items,
+                all_items=ordered_items,
                 transient_result_resolver=self._transient_result_resolver,
                 skill_result_artifact_resolver=(
                     self._skill_result_artifact_resolver
@@ -216,29 +220,84 @@ def _message_from_item(
             "safe_result": payload.get("safe_result"),
             "artifact_refs": payload.get("artifact_refs", []),
         }
-        if _contains_transient_receipt_marker(payload.get("safe_result")):
+        reused = resolve_reused_tool_result_source(
+            run=run,
+            current_call=source_call,
+            current_result=item,
+            all_items=all_items,
+        )
+        effective_call = source_call
+        effective_result = item
+        effective_payload = payload
+        if reused is not None:
+            effective_call, effective_result, effective_payload = reused
+            tool_payload = {
+                "outcome": effective_payload.get("outcome"),
+                "safe_error_code": effective_payload.get("safe_error_code"),
+                "safe_result": effective_payload.get("safe_result"),
+                "artifact_refs": effective_payload.get("artifact_refs", []),
+            }
+        if _contains_transient_receipt_marker(
+            effective_payload.get("safe_result")
+        ):
             if transient_result_resolver is None:
-                raise ValueError("agent_transient_skill_result_unavailable")
-            tool_payload = transient_result_resolver.resolve_tool_result(
-                run=run,
-                call_item=source_call,
-                result_item=item,
-                durable_payload=payload,
-            )
+                error = (
+                    "agent_reused_tool_result_unavailable"
+                    if reused is not None
+                    else "agent_transient_skill_result_unavailable"
+                )
+                raise ValueError(error)
+            try:
+                tool_payload = transient_result_resolver.resolve_tool_result(
+                    run=run,
+                    call_item=effective_call,
+                    result_item=effective_result,
+                    durable_payload=effective_payload,
+                )
+            except ValueError:
+                if (
+                    reused is not None
+                    and effective_result.sequence
+                    <= run.compacted_through_sequence
+                ):
+                    tool_payload = {
+                        "artifact_refs": [],
+                        "outcome": "completed",
+                        "safe_error_code": None,
+                        "safe_result": {
+                            "schema": (
+                                "maf.agent.duplicate_call_suppressed.v1"
+                            ),
+                            "reason": "context_summary_only",
+                        },
+                    }
+                elif reused is not None:
+                    raise ValueError(
+                        "agent_reused_tool_result_unavailable"
+                    ) from None
+                else:
+                    raise
         artifact_id = skill_result_artifact_id_from_durable_payload(
-            call_item_id=source_call.item_id,
-            durable_payload=payload,
+            call_item_id=effective_call.item_id,
+            durable_payload=effective_payload,
         )
         if artifact_id is not None and skill_result_artifacts is not None:
             if skill_result_artifact_resolver is None:
                 raise ValueError("agent_skill_result_artifact_unavailable")
-            tool_payload = skill_result_artifact_resolver.resolve_tool_result(
-                run=run,
-                call_item=source_call,
-                result_item=item,
-                durable_payload=payload,
-                artifact=skill_result_artifacts.get(artifact_id),
-            )
+            try:
+                tool_payload = skill_result_artifact_resolver.resolve_tool_result(
+                    run=run,
+                    call_item=effective_call,
+                    result_item=effective_result,
+                    durable_payload=effective_payload,
+                    artifact=skill_result_artifacts.get(artifact_id),
+                )
+            except ValueError:
+                if reused is not None:
+                    raise ValueError(
+                        "agent_reused_tool_result_unavailable"
+                    ) from None
+                raise
         return AgentMessage(
             role="tool",
             tool_call_id=provider_call_id,
@@ -300,6 +359,75 @@ def _hint_activation_message(item: AgentItem) -> AgentMessage:
 def _payload(item: AgentItem) -> dict[str, Any]:
     value = json.loads(item.payload_json)
     return value if isinstance(value, dict) else {}
+
+
+def resolve_reused_tool_result_source(
+    *,
+    run: AgentRun,
+    current_call: AgentItem,
+    current_result: AgentItem,
+    all_items: tuple[AgentItem, ...],
+) -> tuple[AgentItem, AgentItem, dict[str, Any]] | None:
+    current_payload = _payload(current_result)
+    receipt = parse_tool_result_reuse_receipt(
+        current_payload.get("safe_result")
+    )
+    if receipt is None:
+        return None
+    source_result_id, source_payload_sha = receipt
+    by_id = {item.item_id: item for item in all_items}
+    source_result = by_id.get(source_result_id)
+    if (
+        source_result is None
+        or source_result.kind is not AgentItemKind.TOOL_RESULT
+        or source_result.state.value != "committed"
+        or source_result.payload_sha256 != source_payload_sha
+        or source_result.run_id != run.run_id
+        or source_result.task_id != run.task_id
+    ):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    source_payload = _payload(source_result)
+    if (
+        source_payload.get("outcome") != "completed"
+        or source_payload.get("safe_error_code") is not None
+        or parse_tool_result_reuse_receipt(source_payload.get("safe_result"))
+        is not None
+    ):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    source_call = by_id.get(str(source_result.source_call_item_id))
+    if (
+        source_call is None
+        or source_call.kind is not AgentItemKind.TOOL_CALL
+        or source_call.sequence >= source_result.sequence
+        or source_call.sequence >= current_call.sequence
+        or source_call.run_id != run.run_id
+        or source_call.task_id != run.task_id
+        or _repeat_key_from_call(source_call)
+        != _repeat_key_from_call(current_call)
+    ):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    return source_call, source_result, source_payload
+
+
+def _repeat_key_from_call(call_item: AgentItem) -> str:
+    payload = _payload(call_item)
+    capability_id = payload.get("capability_id")
+    arguments_json = payload.get("arguments_json")
+    if not isinstance(capability_id, str) or not isinstance(arguments_json, str):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    try:
+        canonical_arguments = AgentToolCall(
+            call_id=str(payload.get("call_id") or call_item.item_id),
+            provider_safe_name=str(payload.get("provider_safe_name") or ""),
+            arguments_json=arguments_json,
+            ordinal=call_item.call_ordinal or 0,
+        ).arguments_json
+        return agent_tool_repeat_key(
+            capability_id=capability_id,
+            arguments_json=canonical_arguments,
+        )
+    except ValueError:
+        raise ValueError("agent_reused_tool_result_unavailable") from None
 
 
 def _tool_call(item: AgentItem) -> AgentToolCall:

@@ -66,6 +66,7 @@ _RESULT_PROJECTION_MODES = frozenset(
         "inline",
         "invalid",
         "projection_too_large",
+        "reused",
         "transient_staged",
         "transient_stage_failed",
     }
@@ -76,6 +77,7 @@ _RESULT_PROJECTION_ERRORS = {
     "inline": None,
     "invalid": "agent_result_invalid",
     "projection_too_large": "agent_result_projection_too_large",
+    "reused": None,
     "transient_staged": None,
     "transient_stage_failed": "agent_transient_skill_result_stage_failed",
 }

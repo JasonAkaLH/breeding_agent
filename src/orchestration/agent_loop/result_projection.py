@@ -20,6 +20,7 @@ MODEL_RESULT_MAX_BYTES = 80_000
 SKILL_RESULT_PROJECTION_REVISION = "skill-result-v1"
 MCP_RESULT_PROJECTION_REVISION = "mcp-result-v1"
 DELEGATED_RESULT_PROJECTION_REVISION = "delegated-skill-instruction-v1"
+TOOL_RESULT_REUSE_RECEIPT_SCHEMA = "maf.agent.tool_result_reuse_receipt.v1"
 SKILL_RESULT_PROJECTION_POLICY_LEGACY = "legacy"
 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY = (
     "full_inline_then_legacy"
@@ -92,6 +93,60 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(?:access[_-]?token|api[_-]?(?:key|token)|authorization|credential|"
     r"password|refresh[_-]?token|secret)\s*[:=]\s*[^\s,;]+"
 )
+
+
+def agent_tool_repeat_key(*, capability_id: str, arguments_json: str) -> str:
+    if not capability_id.strip() or not arguments_json:
+        raise ValueError("agent_tool_repeat_identity_invalid")
+    return f"{capability_id}\0{arguments_json}"
+
+
+def build_tool_result_reuse_receipt(
+    *,
+    source_result_item_id: str,
+    source_result_payload_sha256: str,
+) -> dict[str, str]:
+    if (
+        not source_result_item_id.strip()
+        or len(source_result_payload_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in source_result_payload_sha256
+        )
+    ):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    return {
+        "schema": TOOL_RESULT_REUSE_RECEIPT_SCHEMA,
+        "source_result_item_id": source_result_item_id,
+        "source_result_payload_sha256": source_result_payload_sha256,
+    }
+
+
+def parse_tool_result_reuse_receipt(
+    value: object,
+) -> tuple[str, str] | None:
+    if not isinstance(value, Mapping) or value.get("schema") != TOOL_RESULT_REUSE_RECEIPT_SCHEMA:
+        return None
+    if set(value) != {
+        "schema",
+        "source_result_item_id",
+        "source_result_payload_sha256",
+    }:
+        raise ValueError("agent_reused_tool_result_unavailable")
+    source_result_item_id = value.get("source_result_item_id")
+    source_result_payload_sha256 = value.get("source_result_payload_sha256")
+    if (
+        not isinstance(source_result_item_id, str)
+        or not source_result_item_id.strip()
+        or not isinstance(source_result_payload_sha256, str)
+        or len(source_result_payload_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in source_result_payload_sha256
+        )
+    ):
+        raise ValueError("agent_reused_tool_result_unavailable")
+    return source_result_item_id, source_result_payload_sha256
 
 
 @dataclass(frozen=True, slots=True)

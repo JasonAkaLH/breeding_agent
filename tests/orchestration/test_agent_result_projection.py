@@ -10,6 +10,8 @@ from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
     AgentCallResultProjector,
+    build_tool_result_reuse_receipt,
+    parse_tool_result_reuse_receipt,
 )
 from src.orchestration.agent_loop.skill_activation import (
     build_delegated_skill_instruction_result,
@@ -57,6 +59,31 @@ class AgentCallResultProjectorTest(unittest.TestCase):
             canonicalize_agent_payload(result).size_bytes,
         )
         self.assertEqual(first.original_size_bytes, len(first.canonical_raw_bytes or b""))
+
+    def test_reuse_receipt_has_exact_bounded_schema(self) -> None:
+        receipt = build_tool_result_reuse_receipt(
+            source_result_item_id="result-root",
+            source_result_payload_sha256="a" * 64,
+        )
+
+        self.assertEqual(
+            set(receipt),
+            {
+                "schema",
+                "source_result_item_id",
+                "source_result_payload_sha256",
+            },
+        )
+        self.assertEqual(
+            parse_tool_result_reuse_receipt(receipt),
+            ("result-root", "a" * 64),
+        )
+        with self.assertRaisesRegex(
+            ValueError, "agent_reused_tool_result_unavailable"
+        ):
+            parse_tool_result_reuse_receipt(
+                {**receipt, "artifact_refs": ["forbidden"]}
+            )
 
     def test_large_duplicate_articles_spill_once_with_small_priority_preview(self) -> None:
         articles = [

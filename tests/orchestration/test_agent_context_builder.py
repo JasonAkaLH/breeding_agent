@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from src.core.enums import ArtifactType
@@ -23,6 +24,7 @@ from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
     AgentCallResultProjector,
+    build_tool_result_reuse_receipt,
 )
 from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactResolver,
@@ -189,6 +191,72 @@ class AgentContextBuilderTest(unittest.TestCase):
                 items=(user, assistant, call, result),
                 catalog=AgentToolCatalog((), {}),
             )
+            store.delete_stage(
+                projection.transient_stage_ref,
+                expected_run_id=run.run_id,
+                expected_result_item_id=result.item_id,
+            )
+            summary = _item(
+                "summary",
+                5,
+                AgentItemKind.CONTEXT_SUMMARY,
+                {"covered_end_sequence": 4, "summary": "closed result"},
+            )
+            current_assistant = _item(
+                "assistant-current",
+                6,
+                AgentItemKind.ASSISTANT_MESSAGE,
+                {"text": ""},
+            )
+            current_call = _item(
+                "call-current",
+                7,
+                AgentItemKind.TOOL_CALL,
+                {
+                    "arguments_json": "{}",
+                    "call_id": "provider-current",
+                    "capability_id": "skill.lookup",
+                    "node_id": "node-current",
+                    "provider_safe_name": "skill_lookup",
+                },
+                parent_item_id=current_assistant.item_id,
+                call_ordinal=0,
+            )
+            current_result = _item(
+                "result-current",
+                8,
+                AgentItemKind.TOOL_RESULT,
+                {
+                    "artifact_refs": [],
+                    "call_item_id": current_call.item_id,
+                    "outcome": "completed",
+                    "safe_error_code": None,
+                    "safe_result": build_tool_result_reuse_receipt(
+                        source_result_item_id=result.item_id,
+                        source_result_payload_sha256=result.payload_sha256,
+                    ),
+                },
+                parent_item_id=current_assistant.item_id,
+                source_call_item_id=current_call.item_id,
+            )
+            summary_only = builder.build(
+                run=replace(
+                    run,
+                    next_item_sequence=9,
+                    compacted_through_sequence=4,
+                ),
+                items=(
+                    user,
+                    assistant,
+                    call,
+                    result,
+                    summary,
+                    current_assistant,
+                    current_call,
+                    current_result,
+                ),
+                catalog=AgentToolCatalog((), {}),
+            )
 
         self.assertEqual(first, replay)
         tool_content = next(
@@ -199,6 +267,14 @@ class AgentContextBuilderTest(unittest.TestCase):
         self.assertIn("maf.agent.skill_result_full.v1", tool_content or "")
         self.assertNotIn("stage_ref", tool_content or "")
         self.assertNotIn("pending_context_injection", tool_content or "")
+        summary_content = next(
+            message.content
+            for message in summary_only.messages
+            if message.role == "tool"
+        )
+        self.assertIn("duplicate_call_suppressed", summary_content or "")
+        self.assertIn("context_summary_only", summary_content or "")
+        self.assertNotIn("BEGIN-SENTINEL", summary_content or "")
 
     def test_artifact_backed_result_is_full_only_with_preloaded_authority(
         self,
@@ -313,6 +389,90 @@ class AgentContextBuilderTest(unittest.TestCase):
                 items=(user, assistant, call, result),
                 catalog=AgentToolCatalog((), {}),
             )
+            summary = _item(
+                "summary",
+                5,
+                AgentItemKind.CONTEXT_SUMMARY,
+                {"covered_end_sequence": 4, "summary": "closed history"},
+            )
+            current_assistant = _item(
+                "assistant-current",
+                6,
+                AgentItemKind.ASSISTANT_MESSAGE,
+                {"text": ""},
+            )
+            current_call = _item(
+                "call-current",
+                7,
+                AgentItemKind.TOOL_CALL,
+                {
+                    "arguments_json": "{}",
+                    "call_id": "provider-current",
+                    "capability_id": "skill.lookup",
+                    "node_id": "node-current",
+                    "provider_safe_name": "skill_lookup",
+                },
+                parent_item_id=current_assistant.item_id,
+                call_ordinal=0,
+            )
+            current_result = _item(
+                "result-current",
+                8,
+                AgentItemKind.TOOL_RESULT,
+                {
+                    "artifact_refs": [],
+                    "call_item_id": current_call.item_id,
+                    "outcome": "completed",
+                    "safe_error_code": None,
+                    "safe_result": build_tool_result_reuse_receipt(
+                        source_result_item_id=result.item_id,
+                        source_result_payload_sha256=result.payload_sha256,
+                    ),
+                },
+                parent_item_id=current_assistant.item_id,
+                source_call_item_id=current_call.item_id,
+            )
+            reused = builder.build(
+                run=replace(
+                    run,
+                    next_item_sequence=9,
+                    compacted_through_sequence=4,
+                ),
+                items=(
+                    user,
+                    assistant,
+                    call,
+                    result,
+                    summary,
+                    current_assistant,
+                    current_call,
+                    current_result,
+                ),
+                catalog=AgentToolCatalog((), {}),
+                skill_result_artifacts={staged.artifact_id: artifact},
+            )
+            with self.assertRaisesRegex(
+                ValueError, "agent_reused_tool_result_unavailable"
+            ):
+                builder.build(
+                    run=replace(
+                        run,
+                        next_item_sequence=9,
+                        compacted_through_sequence=4,
+                    ),
+                    items=(
+                        user,
+                        assistant,
+                        call,
+                        result,
+                        summary,
+                        current_assistant,
+                        current_call,
+                        current_result,
+                    ),
+                    catalog=AgentToolCatalog((), {}),
+                    skill_result_artifacts={staged.artifact_id: None},
+                )
 
         resolved_content = next(
             message.content
@@ -324,12 +484,121 @@ class AgentContextBuilderTest(unittest.TestCase):
             for message in legacy.messages
             if message.role == "tool"
         )
+        reused_content = next(
+            message.content
+            for message in reused.messages
+            if message.role == "tool"
+        )
         self.assertIn("BEGIN-ARTIFACT", resolved_content or "")
         self.assertIn("END-ARTIFACT", resolved_content or "")
         self.assertIn("business-artifact", resolved_content or "")
         self.assertIn(staged.artifact_id, resolved_content or "")
         self.assertNotIn("BEGIN-ARTIFACT", legacy_content or "")
         self.assertIn("skill_result_preview", legacy_content or "")
+        self.assertIn("BEGIN-ARTIFACT", reused_content or "")
+        self.assertIn("END-ARTIFACT", reused_content or "")
+        self.assertIn("business-artifact", reused_content or "")
+
+    def test_reuse_receipt_renders_root_payload_for_current_provider_call(
+        self,
+    ) -> None:
+        run = AgentRun(
+            "run-1",
+            "task-1",
+            "conv-1",
+            AgentRunStatus.RUNNING,
+            AgentModelBinding("edition-a"),
+            next_item_sequence=8,
+            revision=7,
+        )
+        first_assistant = _item(
+            "assistant-1", 1, AgentItemKind.ASSISTANT_MESSAGE, {"text": ""}
+        )
+        root_call = _item(
+            "call-root",
+            2,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": '{"query":"rice"}',
+                "call_id": "provider-root",
+                "capability_id": "skill.lookup",
+                "node_id": "node-root",
+                "provider_safe_name": "skill_lookup",
+            },
+            parent_item_id=first_assistant.item_id,
+            call_ordinal=0,
+        )
+        root_result = _item(
+            "result-root",
+            3,
+            AgentItemKind.TOOL_RESULT,
+            {
+                "artifact_refs": ["business-artifact"],
+                "call_item_id": root_call.item_id,
+                "outcome": "completed",
+                "safe_error_code": None,
+                "safe_result": {"answer": "ROOT-ANSWER"},
+            },
+            parent_item_id=first_assistant.item_id,
+            source_call_item_id=root_call.item_id,
+        )
+        second_assistant = _item(
+            "assistant-2", 4, AgentItemKind.ASSISTANT_MESSAGE, {"text": ""}
+        )
+        current_call = _item(
+            "call-current",
+            5,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": '{"query":"rice"}',
+                "call_id": "provider-current",
+                "capability_id": "skill.lookup",
+                "node_id": "node-current",
+                "provider_safe_name": "skill_lookup",
+            },
+            parent_item_id=second_assistant.item_id,
+            call_ordinal=0,
+        )
+        current_result = _item(
+            "result-current",
+            6,
+            AgentItemKind.TOOL_RESULT,
+            {
+                "artifact_refs": [],
+                "call_item_id": current_call.item_id,
+                "outcome": "completed",
+                "safe_error_code": None,
+                "safe_result": build_tool_result_reuse_receipt(
+                    source_result_item_id=root_result.item_id,
+                    source_result_payload_sha256=root_result.payload_sha256,
+                ),
+            },
+            parent_item_id=second_assistant.item_id,
+            source_call_item_id=current_call.item_id,
+        )
+
+        request = AgentContextBuilder(
+            AgentContextRules("stable", "tool rules", "final guard")
+        ).build(
+            run=run,
+            items=(
+                first_assistant,
+                root_call,
+                root_result,
+                second_assistant,
+                current_call,
+                current_result,
+            ),
+            catalog=AgentToolCatalog((), {}),
+        )
+
+        tool_messages = [
+            message for message in request.messages if message.role == "tool"
+        ]
+        self.assertEqual(tool_messages[-1].tool_call_id, "provider-current")
+        self.assertIn("ROOT-ANSWER", tool_messages[-1].content or "")
+        self.assertIn("business-artifact", tool_messages[-1].content or "")
+        self.assertNotIn("source_result_item_id", tool_messages[-1].content or "")
 
     def test_initial_hint_activation_renders_before_current_user_message(self) -> None:
         run = AgentRun(
