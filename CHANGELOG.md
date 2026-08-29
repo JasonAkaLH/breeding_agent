@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- Agent Tool结果交付与重复调用熔断实施计划已就绪：按四个可回滚Checkpoint先后修复MCP model-safe `text`、为带业务Artifact的大Skill结果增加严格model-only result Artifact resolver、在Executor前复用同Run精确等价成功root结果并将同batch改为leader/follower两阶段提交，最后运行Backend分层全量和两个新Task真实smoke。计划锁定先红测后最小实现，不扩张到语义去重、任意调用上限、通用Artifact读取、schema、API/前端/Rust、外部Skill/MCP或`prod`。License Requirement：复用现有Python、Agent Loop、MCP typed projection、Skill Result Artifact、private transient store与Artifact authority，无新增依赖或许可变化。
+
 - Agent Tool结果交付与重复调用熔断设计经document-perfectization第二轮以`100/100 Pass`通过：真实OCR MCP Task的9个不同call和文献Skill Task的5个不同call证明重复来自结果正文未进入Outer Agent上下文；方案A统一MCP model-safe `text`，通过现有owner-bound Skill Result Artifact的严格model-only resolver交付带业务Artifact的大结果，并以同一AgentRun内`capability_id + canonical arguments_json`复用root completed结果、阻止第二次Executor/外部副作用。同batch采用leader/follower两阶段提交，waiting/aborted followers零Executor；不同参数仍允许执行，真实Skill防循环由完整结果交付和本地smoke闭合。外部Skill/MCP Server、schema、前端和`prod`不在范围。License Requirement：复用现有Python、Agent Loop、MCP typed projection、Skill Result Artifact、private transient store与Artifact authority，无新增依赖或许可变化。
 
 - Agent Interrupt恢复Lease Handle最小修复已`implemented_local`：真实OCR授权Task证明“始终允许”已保存Grant且Tool已完成，但约44秒resume跨多次10秒heartbeat后用旧token/revision触发`agent_invocation_not_owned`。`503a590f`把Recovery Coordinator当前`AgentLeaseHandle`传入authority resolver、Interrupt/MCP recovery和`AgentCapabilityInvoker.resume()`，复用普通调用ownership lock；未放宽fencing或暂停heartbeat。红测精确复现两个缺口，修复后Lifecycle 48、Orchestration 181、受影响API 66项及compileall/Ruff/diff-check通过；只重建backend且healthy，frontend/Sidecar未重建，旧Task未修改。用户新Task真实授权smoke待执行，尚不标记完整完成。License Requirement：复用既有Python与Agent lease/recovery/invocation，无新增依赖或许可变化。
