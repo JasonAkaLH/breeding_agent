@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- main开发环境的受保护`docker_cmd.md`已接入外部Project Skill authority：固定使用`/data/peihai/vibe-breeding-dev/skills`作为宿主机根目录，以同版`backend-dev:0.1.24`镜像计算bundle digest，将该目录只读挂载到backend `/app/skill`并注入`MAF_PROJECT_SKILL_BUNDLE_DIGEST`；目录缺失或digest计算失败时在启动backend前停止。未挂载外部仓库根目录，未修改Skill内容、数据库、端口或其他环境参数；`docker_cmd.md`继续Git-ignored且未跟踪。License Requirement：仅本地部署命令与非敏感账本更新，无依赖或许可变化。
+
 - main开发环境的受保护`docker_cmd.md`已把旧`MAF_AUTH_TOKEN_HASH_SECRET`注入替换为专用主密钥文件：宿主机固定文件只读挂载到backend `/run/secrets/maf-master.key`，容器仅接收`MAF_MASTER_KEY_FILE`；部署命令在文件缺失时直接停止，不自动生成、覆盖或轮换密钥。旧auth secret文件不删除，保留旧版本回滚；`docker_cmd.md`继续Git-ignored且未跟踪。License Requirement：仅本地部署命令与非敏感账本更新，无依赖或许可变化。
 
 - 正式Docker镜像打包版本提升到`0.1.24`：基于`main@a14bf6d5`构建本机`linux/amd64`三镜像，Runtime Sidecar、backend、frontend分别为`registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-runtime-sidecar:0.1.24`、`registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.24`、`registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.24`，本地OCI digest依次为`sha256:c97e7323054bb351051e2221de35ff4f97cb4220bf66ee1999434913757f41e2`、`sha256:33197c15f83cae7a14eacb8f0853c7d718bc5eda73cb1c4908513726e5550cc2`、`sha256:1b106515ce2fbb4ef4916ea68e5572a8545c6870fa872ba648d318f193161eb7`。隔离smoke已通过Sidecar Unix probe、backend SQLite `/api-doc`、frontend `nginx -t`与`/seedpilot/`；main开发环境的本地backend-dev/frontend-dev别名与受保护`docker_cmd.md`已同步到`0.1.24`，文件继续保持Git-ignored且未跟踪。临时容器已清理，镜像未push、未部署。License Requirement：仅镜像构建与发布账本更新，无依赖或许可变化。
