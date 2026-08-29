@@ -58,6 +58,12 @@ services:
       - breeding-agent-runtime:/app/runtime
       - breeding-agent-runtime-sidecar-socket:/run/maf-runtime-sidecar:ro
       - ${MAF_MASTER_KEY_FILE_HOST:?MAF_MASTER_KEY_FILE_HOST is required}:/run/secrets/maf-master.key:ro
+      - type: bind
+        source: ${MAF_CONFIG_FILE_HOST:?MAF_CONFIG_FILE_HOST is required}
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
       - /data/peihai/vibe-breeding-dev/skills:/app/skill:ro
     ports:
       - "51888:8000"

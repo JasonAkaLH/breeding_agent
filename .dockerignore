@@ -13,6 +13,9 @@
 /*.md
 /本周工作周报.md
 
+# Local runtime configuration is mounted into backend containers, never built in.
+/config.yaml
+
 # Keep only the shipped static API document from docs/.
 docs/**
 !docs/api/

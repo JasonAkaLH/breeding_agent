@@ -109,20 +109,21 @@ python scripts/run_fullstack_dev.py
 
 直接运行 backend（包括 `--fake-backend`）也必须提供固定的 `MAF_MASTER_KEY_FILE`；该文件格式和权限与下文 Docker Compose 使用的根密钥相同。真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随独立 Skill 仓库 `/data/peihai/vibe-breeding-dev/skills/<skill-name>/` bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
 
-- Docker Compose 打包 / 启动（会把本地 git-ignored `config.yaml` 复制进 backend 镜像；该文件包含 provider / 数据库等敏感配置时只应在受控环境构建和分发镜像）：
+- Docker Compose 打包 / 启动（backend镜像不包含本地git-ignored `config.yaml`；该文件只在运行时只读挂载）：
 
 ```bash
 git clone git@gitee.com:wellionx/vibe-breeding.git /data/peihai/vibe-breeding-dev
 umask 177
 openssl rand -base64 32 > /absolute/path/to/maf-master.key
 export MAF_MASTER_KEY_FILE_HOST=/absolute/path/to/maf-master.key
+export MAF_CONFIG_FILE_HOST=/absolute/path/to/config.yaml
 docker compose build
 docker compose up
 ```
 
-Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sidecar:local`（Rust RuntimeSidecar，以 Unix socket 提供 Version/Compatibility/Readiness 和 SQLite 状态）、`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。`MAF_MASTER_KEY_FILE_HOST` 必须是宿主机固定在线根密钥文件的绝对路径，Compose 只读挂载到 backend 的 `/run/secrets/maf-master.key`，不复制进镜像，也不挂载给 frontend 或 Runtime Sidecar。该文件必须和 SQLite 数据分开备份；丢失后既有登录 token、MCP credential 与 recovery 私有数据无法恢复。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；backend runtime 数据和 Sidecar socket/SQLite 分别使用 named volume。Skill bundle 从独立仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录读取；Compose 默认使用 `/data/peihai/vibe-breeding-dev/skills:/app/skill:ro` 把开发环境 Skill 仓库的 `skills/` 子目录只读挂载到 backend 容器 `/app/skill`，backend 会扫描 `/app/skill/**/SKILL.md`；更新 Skill 时在宿主机执行 `cd /data/peihai/vibe-breeding-dev && git pull`，下一次 `GET /api/v1/capabilities` 会触发刷新。
+Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sidecar:local`（Rust RuntimeSidecar，以 Unix socket 提供 Version/Compatibility/Readiness 和 SQLite 状态）、`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。`MAF_MASTER_KEY_FILE_HOST` 必须是宿主机固定在线根密钥文件的绝对路径，Compose 只读挂载到 backend 的 `/run/secrets/maf-master.key`，不复制进镜像，也不挂载给 frontend 或 Runtime Sidecar。`MAF_CONFIG_FILE_HOST`必须是宿主机现有`config.yaml`的绝对路径；Compose禁止自动创建缺失源，并只读挂载到backend `/app/config.yaml`。main服务器固定使用`/data/peihai/config.yaml`，该文件应为非symlink普通文件、单link、非空且mode为`0600`。根密钥必须和 SQLite 数据分开备份；丢失后既有登录 token、MCP credential 与 recovery 私有数据无法恢复。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；backend runtime 数据和 Sidecar socket/SQLite 分别使用 named volume。Skill bundle 从独立仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录读取；Compose 默认使用 `/data/peihai/vibe-breeding-dev/skills:/app/skill:ro` 把开发环境 Skill 仓库的 `skills/` 子目录只读挂载到 backend 容器 `/app/skill`，backend 会扫描 `/app/skill/**/SKILL.md`；更新 Skill 时在宿主机执行 `cd /data/peihai/vibe-breeding-dev && git pull`，下一次 `GET /api/v1/capabilities` 会触发刷新。
 
-`.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
+`.dockerignore` 会把根`config.yaml`、`tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
 
 若通过远端域名对浏览器开放该 Compose 栈，应在反向代理 / LB 层提供 HTTPS；当前认证只通过 `Authorization: Bearer <access-token>` 传递，前端将登录返回的 token 保存在浏览器 localStorage 中并为 REST、multipart upload 与 SSE fetch-stream 注入 Authorization。
 

@@ -94,7 +94,6 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY src ./src
 COPY docs/api ./docs/api
-COPY config.yaml ./config.yaml
 
 RUN mkdir -p runtime skill \
     && chmod 755 runtime skill

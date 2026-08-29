@@ -12,6 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "docker-compose.yml"
 DOCKERFILE_PATH = ROOT / "Dockerfile"
+DOCKERIGNORE_PATH = ROOT / ".dockerignore"
 
 
 class UserMCPCP7ALeanComposeTest(unittest.TestCase):
@@ -77,29 +78,69 @@ class UserMCPCP7ALeanComposeTest(unittest.TestCase):
             "service_healthy",
         )
 
-    def test_compose_requires_host_master_key_path_and_renders_with_fixture(self) -> None:
+        config_mount = next(
+            volume
+            for volume in backend["volumes"]
+            if isinstance(volume, dict) and volume.get("target") == "/app/config.yaml"
+        )
+        self.assertEqual(config_mount["type"], "bind")
+        self.assertEqual(
+            config_mount["source"],
+            "${MAF_CONFIG_FILE_HOST:?MAF_CONFIG_FILE_HOST is required}",
+        )
+        self.assertIs(config_mount["read_only"], True)
+        self.assertIs(config_mount["bind"]["create_host_path"], False)
+
+    def test_compose_requires_host_secret_paths_and_renders_with_fixtures(self) -> None:
         if shutil.which("docker") is None:
             self.skipTest("Docker CLI is unavailable")
-        missing = subprocess.run(
+        base_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"MAF_MASTER_KEY_FILE_HOST", "MAF_CONFIG_FILE_HOST"}
+        }
+        missing_master_key = subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "--quiet"],
             cwd=ROOT,
-            env={key: value for key, value in os.environ.items() if key != "MAF_MASTER_KEY_FILE_HOST"},
+            env={**base_env, "MAF_CONFIG_FILE_HOST": "/tmp/cp7a-config.yaml"},
             capture_output=True,
             text=True,
             check=False,
         )
-        self.assertNotEqual(missing.returncode, 0)
-        self.assertIn("MAF_MASTER_KEY_FILE_HOST is required", missing.stderr)
+        self.assertNotEqual(missing_master_key.returncode, 0)
+        self.assertIn("MAF_MASTER_KEY_FILE_HOST is required", missing_master_key.stderr)
+
+        missing_config = subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "--quiet"],
+            cwd=ROOT,
+            env={**base_env, "MAF_MASTER_KEY_FILE_HOST": "/tmp/cp7a-test.key"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(missing_config.returncode, 0)
+        self.assertIn("MAF_CONFIG_FILE_HOST is required", missing_config.stderr)
 
         rendered = subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "--quiet"],
             cwd=ROOT,
-            env={**os.environ, "MAF_MASTER_KEY_FILE_HOST": "/tmp/cp7a-test.key"},
+            env={
+                **base_env,
+                "MAF_MASTER_KEY_FILE_HOST": "/tmp/cp7a-test.key",
+                "MAF_CONFIG_FILE_HOST": "/tmp/cp7a-config.yaml",
+            },
             capture_output=True,
             text=True,
             check=False,
         )
         self.assertEqual(rendered.returncode, 0, rendered.stderr)
+
+    def test_backend_image_excludes_local_config(self) -> None:
+        dockerignore = DOCKERIGNORE_PATH.read_text(encoding="utf-8").splitlines()
+        dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("/config.yaml", dockerignore)
+        self.assertNotIn("COPY config.yaml", dockerfile)
 
     def test_runtime_sidecar_target_is_minimal_and_semantically_probed(self) -> None:
         dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
