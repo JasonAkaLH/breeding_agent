@@ -2,7 +2,7 @@
 
 依据：`2026-08-29-agent-interrupt-resume-lease-handle-design.md`
 设计提交：`a2dccdd8`
-状态：`ready`
+状态：`implemented_automated`；等待用户新Task真实授权smoke
 目标分支：`main`
 
 ## 1. 完成声明
@@ -95,3 +95,15 @@ Final commit：`docs(agent): close interrupt resume lease fix`
 
 License Requirement：复用既有Python、Agent lease/recovery/invocation和MCP approval能力；
 无新增依赖或许可变化。
+
+## 7. 当前完成证据（2026-08-29）
+
+- `503a590f`完成三个生产文件与两个聚焦测试文件的最小修改。
+- 两条红测在旧代码上分别以resolver缺handle和`resume()`不接受handle精确失败，修复后转绿。
+- Lifecycle 48项、Orchestration 181项、受影响API 66项通过；compileall、Ruff与
+  `git diff --check`通过。
+- 只重建backend；backend healthy，capabilities API 200，frontend与Runtime Sidecar保持原
+  容器。
+- 运行镜像中`AgentCapabilityInvoker.resume`已要求`lease_handle`；旧
+  `task-19f493db9624`仍为Task running、Run waiting、Tool result reserved，未被修改。
+- Checkpoint D的新Task真实授权smoke等待用户执行；此前本计划不标记`complete`。

@@ -2,9 +2,9 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- 新增Agent Interrupt恢复Lease Handle最小修复设计：真实OCR授权Task证明“始终允许”已成功保存Grant且Tool已完成，但约44秒resume调用跨多次10秒heartbeat后仍用旧token/revision执行finish，触发`agent_invocation_not_owned`并留下answered Interrupt、reserved Tool result与waiting Run。批准方案只把Recovery Coordinator当前`AgentLeaseHandle`传入authority resolver和`AgentCapabilityInvoker.resume()`，复用普通调用已有ownership lock；不放宽fencing、不暂停heartbeat、不修改MCP/前端/数据库，也不修复当前卡住Task。当前仅设计，代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变化。
+- Agent Interrupt恢复Lease Handle最小修复已`implemented_local`：真实OCR授权Task证明“始终允许”已保存Grant且Tool已完成，但约44秒resume跨多次10秒heartbeat后用旧token/revision触发`agent_invocation_not_owned`。`503a590f`把Recovery Coordinator当前`AgentLeaseHandle`传入authority resolver、Interrupt/MCP recovery和`AgentCapabilityInvoker.resume()`，复用普通调用ownership lock；未放宽fencing或暂停heartbeat。红测精确复现两个缺口，修复后Lifecycle 48、Orchestration 181、受影响API 66项及compileall/Ruff/diff-check通过；只重建backend且healthy，frontend/Sidecar未重建，旧Task未修改。用户新Task真实授权smoke待执行，尚不标记完整完成。License Requirement：复用既有Python与Agent lease/recovery/invocation，无新增依赖或许可变化。
 
-- 新增Agent Interrupt恢复Lease Handle最小实施计划：以`a2dccdd8`设计为基线，先锁定resolver接收当前handle和`resume()`转交handle的红测，再只修改Recovery、Capability Invoker与API runtime三个生产文件；Lifecycle/Orchestration/API回归后只重建backend，并用新OCR Task跨heartbeat验收。禁止一参数resolver fallback、ownership放宽、heartbeat暂停、当前卡住Task修复及其他范围扩张。当前仅计划，代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变化。
+- Agent Interrupt恢复Lease Handle最小实施计划已完成自动化与本地部署部分：`a2dccdd8`设计、`1a6ddae8`计划和`503a590f`实现形成可回滚检查点；resolver合同、resume handle、相关全量与运行镜像均已验证。禁止的一参数fallback、ownership放宽、heartbeat暂停、旧Task修复及其他范围扩张均未发生；仅余用户新Task真实授权smoke。License Requirement：无新增依赖或许可变化。
 
 - MCP Server Profile模型可见性最小实现已完成：Outer Agent继续只看到公开Skill与单一`mcp.dispatch`，后者的Tool description现在追加当前用户安全Profile的`server_id + display_name/name + routing_description` canonical JSON，并明确标注为只用于能力选择的不可信路由元数据；现有`server_id` enum继续作为唯一执行authority。聚焦红测先证明旧description缺Profile JSON，实现后Tool Catalog/preflight/Agent Loop共19项、compileall、Ruff与diff-check通过。独立Server Tool、内部Tool展开、DTO/数据库/前端/Router/Selector/Gateway/授权/恢复/镜像和`prod`均未修改。License Requirement：复用既有Python、Agent Tool Catalog、JSON与context preflight，无新增依赖或许可变化。
 

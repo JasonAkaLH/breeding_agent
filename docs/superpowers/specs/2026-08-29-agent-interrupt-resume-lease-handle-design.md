@@ -1,6 +1,6 @@
 # Agent Interrupt 恢复 Lease Handle 最小修复设计
 
-状态：`approved`；待实施计划
+状态：`implemented_local`；等待新Task真实授权smoke
 日期：2026-08-29
 目标分支：`main`
 
@@ -85,6 +85,11 @@ Agent Tool result committed，Run继续或完成。现有卡住Task只作历史�
 
 回滚恢复旧resolver/resume签名及对应测试即可，不涉及数据回滚。只有跨heartbeat恢复回归和
 新Task本地验收均通过，且ownership/fencing规则零放宽，才可声明完成。
+
+本地实现提交：`503a590f`。红测分别证明旧Recovery resolver不传handle、旧`resume()`不接收
+handle；修复后Lifecycle 48项、Orchestration 181项、受影响API 66项、compileall、Ruff与
+`git diff --check`通过。backend已重建并healthy，运行镜像签名包含必填`lease_handle`；当前
+卡住Task保持原状态。用户新Task真实授权smoke尚未执行，不宣称完整验收通过。
 
 License Requirement：复用既有Python、Agent lease/recovery/invocation和MCP approval能力；
 无新增依赖或许可变化。
