@@ -2,7 +2,7 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- MCP磁盘清理生命周期设计与最小实施计划已按document-perfectization硬伤审查加固：除即时Call、Remote Task、startup candidate恢复和unknown no-replay四类terminal evidence外，补齐`continuation_of_call_ref → 原Call → pending_action_id → action`严格MRTR链，原Call继续保留`input_required`历史，只有continuation完整终态证据才退出保护；startup unknown只枚举当前intent的owner/Task/Node Call并仅认同Call projection；唯一cleanup Task固定为全部可等待startup步骤成功后的最后创建动作，启动失败不得遗留。其余SQLite/PostgreSQL fail-closed查询、24小时orphan、每小时周期、低敏重试、三implementation commits及排除范围不变。当前仅设计与计划，业务代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变化。
+- MCP磁盘清理生命周期最小修复已`implemented_automated`：`293661eb`新增SQLite/PostgreSQL共享的fail-closed受保护pending payload ref查询，`b662339e`在即时Call、Remote Task、startup candidate与unknown no-replay的durable terminal evidence后精确删除直接或严格MRTR continuation关联payload，`aff896a1`把临时结果与24小时pending orphan清理接入startup最后创建的唯一每小时Runtime Task并在shutdown收回。Core 54、Storage 554（14项环境性skip）、Integrations 764（2项环境性skip）、API 615项及compileall、变更面Ruff、diff-check通过；真实PostgreSQL聚焦模块因本机无独立DSN skip 1项，全仓Ruff仍有32个无关既存测试告警，均未扩散修复。未修改schema、配置、metric、Frontend、Rust、镜像、部署或`prod`。License Requirement：复用现有Python、SQLAlchemy、SQLite/PostgreSQL、pending payload加密store、临时结果janitor和ApiRuntime后台Task模式，无新增依赖或许可变化。
 
 - 新增MCP磁盘清理生命周期最小修复设计：确认当前临时结果orphan janitor仅在启动运行一次，pending action已有24小时orphan与terminal evidence精确删除实现但未接生产。批准方案只增加唯一Runtime后台Task、每小时周期、terminal commit后best-effort精确删除和一个opaque保护ref窄查询；waiting approval、input-required、recovery、durable manifest与managed Artifact继续保留，失败低敏fail-open重试。不新增schema、配置、metric、通用清理框架、Frontend、Rust或外部服务改造，当前状态`written_review_pending`，尚未实施。License Requirement：仅设计、索引与非敏感账本更新，无依赖或许可变化。
 

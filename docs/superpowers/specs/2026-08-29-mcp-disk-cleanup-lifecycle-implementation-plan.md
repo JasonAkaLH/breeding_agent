@@ -2,7 +2,7 @@
 
 依据：`2026-08-29-mcp-disk-cleanup-lifecycle-design.md`
 设计基线：`main@bb0ecddb`及其已批准document-perfectization修订
-状态：`planned`；document-perfectization第二轮`100/100 Pass`
+状态：`implemented_automated`；document-perfectization第二轮`100/100 Pass`
 目标分支：`main`
 
 ## 1. 完成声明与边界
@@ -238,6 +238,20 @@ git diff --check
 5. 不构建、不push、不部署镜像，不修改`prod`。
 
 Final commit：`docs(mcp): close disk cleanup lifecycle fix`
+
+### 5.1 实施证据（2026-08-29）
+
+- Checkpoint A：`293661eb fix(storage): protect live MCP pending payloads`；聚焦Core/SQLite 46项通过，新增真实
+  PostgreSQL模块本机因未配置`MAF_POSTGRES_MCP_CLEANUP_TEST_DSN`或`MAF_POSTGRES_TEST_DSN`明确skip 1项；
+- Checkpoint B：`b662339e fix(mcp): delete terminal pending payloads`；四类终态、直接Call、严格MRTR continuation、
+  startup unknown同Call projection及文件实际删除相关73项通过；
+- Checkpoint C：`aff896a1 fix(runtime): schedule MCP disk cleanup`；唯一Task、startup最后创建、立即首轮、3600秒
+  周期、异常隔离和shutdown相关58项通过；
+- Checkpoint D：`compileall`通过；Core 54项通过；Storage 554项通过、14项环境性skip；Integrations 764项通过、
+  2项环境性skip；API 615项通过；`git diff --check`通过；
+- 变更面Ruff通过。全仓`ruff check src tests`仍报告32个既存测试告警，均不在本次生产改动中，本轮未扩散清理；
+- 未新增schema、migration、配置、metric、依赖或许可变化；未运行Frontend、Rust、镜像、部署、真实外部MCP或
+  `prod`。真实PostgreSQL聚焦模块仍须在提供独立DSN的环境执行零skip门禁，因此状态不升级为`complete_local`。
 
 ## 6. 回滚
 
