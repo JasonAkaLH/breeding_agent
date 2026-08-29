@@ -1,6 +1,6 @@
 # MCP 磁盘清理生命周期最小修复设计
 
-状态：`written_review_pending`
+状态：`approved`；document-perfectization第三轮`100/100 Pass`
 日期：2026-08-29
 目标分支：`main`
 
@@ -64,18 +64,40 @@ durable raw result继续由既有60秒reconciler在Artifact ownership持久化�
 `delete_with_terminal_evidence()`。删除发生在durable terminal commit之后；失败不回滚Task、Call、receipt或
 projection，只记录低敏错误并等待周期清理。
 
-`input_required`不属于terminal evidence，必须保留payload。
+精确删除必须覆盖即时Call终态提交、Remote Task终态提交、startup terminal candidate恢复提交和
+`unknown` no-replay projection持久化四类入口。即时Call仍持有原始payload snapshot时直接使用；Remote
+Task、startup恢复或其他不再持有原始snapshot的入口，根据已持久化action重建payload identity，并通过
+`open_validated()`取得当前snapshot后再调用`delete_with_terminal_evidence()`。action、Call、receipt、
+projection或payload的绑定缺失、不一致或无法验证时不得删除，保留文件等待周期清理。
+
+MRTR continuation沿用原Call绑定的action和payload：原Call保持`input_required`且直接持有
+`pending_action_id`，continuation Call以`continuation_of_call_ref`指向原Call且自身不持有
+`pending_action_id`。只有这条关系以及owner、Task、Node、Server、Tool、参数摘要、配置版本、安全版本和input
+schema全部严格一致，且continuation已持久化ordinary receipt或unknown projection时，才可使用continuation
+终态作为该action的删除证据。continuation仍可恢复、证据不完整或链路冲突时必须继续保护payload，不修改原Call
+的`input_required`历史状态。
+
+`input_required`本身不属于terminal evidence；没有上述严格terminal continuation证据时必须保留payload。
 
 ### 4.3 Pending payload保护集合
 
 新增一个窄存储查询，只返回仍需保护的`arguments_payload_ref`：
 
 - action为`proposed`、`waiting_approval`或`approved`；
-- action为`consumed`，但关联Call仍为active、input-required或其他可恢复非终态；
+- action为`consumed`，但直接关联Call仍为reserved、active、remote-pending或其他可恢复非终态；
 - action为`consumed`且Call已声明终态，但对应receipt或unknown projection尚未完整持久化。
+- action绑定的原Call为`input_required`时，没有严格匹配的terminal MRTR continuation，或continuation的
+  receipt/unknown projection尚未完整持久化。
 
 `denied`、`invalidated`以及已有完整terminal evidence的consumed action不进入保护集合。查询只返回opaque ref，
 不返回参数、路径、owner或正文。
+
+保护查询必须fail closed：所有有效payload ref默认受保护，只有上述`denied`、`invalidated`，或action、Call与
+receipt/unknown projection严格绑定且terminal evidence完整的`consumed` action才能退出保护集合。关联Call、
+receipt或projection缺失，任一identity不匹配，出现未知状态，或无法完整判断时必须继续保护；查询失败时本轮
+不得调用pending payload `cleanup_orphans()`。startup unknown收敛只允许枚举当前intent的owner、Task与Node
+内Call，并按稳定顺序验证直接action绑定或上述MRTR链；只有存在同Call projection的记录可退出保护，其他同时
+标记为`unknown`但没有projection的Call继续保护。
 
 周期任务把该集合交给现有`cleanup_orphans()`；后者只删除不受保护、超过24小时且通过既有文件类型、mode、
 owner与ref校验的文件。这样正常终态后的删除崩溃窗口也会最终收敛。
@@ -84,8 +106,8 @@ owner与ref校验的文件。这样正常终态后的删除崩溃窗口也会最
 
 `ApiRuntime`只增加一个后台Task和一个固定3600秒sleep seam：
 
-1. startup恢复与现有MCP authority reconciliation完成；
-2. 创建后台Task；Task进入后立即执行首轮，不阻塞API readiness；
+1. startup恢复、现有MCP authority reconciliation及其余可等待启动步骤全部完成；
+2. 把创建后台Task作为`start()`返回前最后一个动作；Task进入后立即执行首轮，不阻塞API readiness；
 3. 每轮分别执行临时结果cleanup和pending payload cleanup；
 4. 两类cleanup各自捕获异常，一类失败不阻止另一类；
 5. 每轮结束后等待3600秒；
@@ -114,14 +136,17 @@ owner与ref校验的文件。这样正常终态后的删除崩溃窗口也会最
 
 - waiting approval、approved、input-required与recoverable refs均受保护；
 - terminal evidence不完整时保留；
-- ordinary terminal与unknown terminal完整后正常路径精确删除；
+- 即时Call、Remote Task、startup恢复与unknown no-replay四类终态证据完整后正常路径精确删除；
+- MRTR原Call保持`input_required`，但严格匹配的continuation终态证据完整后正常路径精确删除；
+- startup同时把多个Call标记为`unknown`时，只删除具有同Call projection的payload，其他继续保护；
+- action、Call、receipt或projection缺失、绑定冲突、状态未知及保护查询失败时保留；
 - 模拟terminal commit后删除前崩溃，24小时内保留，满24小时后周期删除；
 - SQLite与PostgreSQL保护集合语义一致；
 - 文件校验失败只记录低敏失败，不删除。
 
 ### 7.3 Runtime
 
-- startup只创建一个cleanup Task；
+- startup全部可等待步骤成功后只创建一个cleanup Task；此前任一步骤失败时不得创建或遗留该Task；
 - shutdown准确取消并等待；
 - cleanup不产生LLM、MCP网络或外部服务调用；
 - 现有durable result reconciler、Artifact与audit保留回归保持green。
