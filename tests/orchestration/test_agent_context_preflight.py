@@ -4,8 +4,11 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
+from src.core.enums import ArtifactType
+from src.core.models import Artifact
 from src.orchestration.agent_loop.context import (
     AgentContextBuilder,
     AgentContextRules,
@@ -26,6 +29,7 @@ from src.orchestration.agent_loop.models import (
     AgentToolDescriptor,
 )
 from src.orchestration.agent_loop.result_projection import (
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
     AgentCallResultProjector,
 )
@@ -260,3 +264,147 @@ class AgentContextPreflightTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("BEGIN", rendered)
         self.assertIn("END", rendered)
         self.assertNotIn("stage_ref", rendered)
+
+    async def test_unconsumed_artifact_backed_result_is_preloaded_and_required_once(
+        self,
+    ) -> None:
+        run = _run(5)
+        user = _user(300_000, "question")
+        assistant = _item(
+            "assistant-1", 2, AgentItemKind.ASSISTANT_MESSAGE, {"text": ""}
+        )
+        call = _item(
+            "call-1",
+            3,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": "{}",
+                "call_id": "provider-call-1",
+                "capability_id": "skill.lookup",
+                "node_id": "node-1",
+                "provider_safe_name": "skill_lookup",
+            },
+            parent_item_id=assistant.item_id,
+            call_ordinal=0,
+        )
+        raw_payload = {"records": ["BEGIN", "x" * 150_000, "END"]}
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.lookup",
+            output_payload=raw_payload,
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+            artifact_ids=("business-artifact",),
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
+            ),
+        )
+        result = _item(
+            "result-1",
+            4,
+            AgentItemKind.TOOL_RESULT,
+            {
+                "artifact_refs": [
+                    "business-artifact",
+                    projection.spill_artifact_id,
+                ],
+                "call_item_id": call.item_id,
+                "outcome": "completed",
+                "safe_error_code": None,
+                "safe_result": projection.safe_result_payload,
+            },
+            parent_item_id=assistant.item_id,
+            source_call_item_id=call.item_id,
+        )
+        artifact = Artifact(
+            artifact_id=projection.spill_artifact_id,
+            task_id=run.task_id,
+            producer_node_id="node-1",
+            artifact_type=ArtifactType.FILE,
+            storage_ref="{}",
+            is_complete=True,
+        )
+        loaded: list[str] = []
+
+        async def load_artifact(artifact_id: str):
+            loaded.append(artifact_id)
+            return artifact
+
+        class Resolver:
+            @staticmethod
+            def resolve_tool_result(**_kwargs):
+                return {
+                    "artifact_refs": [
+                        "business-artifact",
+                        projection.spill_artifact_id,
+                    ],
+                    "outcome": "completed",
+                    "safe_error_code": None,
+                    "safe_result": {
+                        "schema": "maf.agent.skill_result_full.v1",
+                        "result": raw_payload,
+                    },
+                }
+
+        candidate = await AgentContextCandidateBuilder(
+            context_builder=AgentContextBuilder(
+                AgentContextRules("stable", "safe", "final"),
+                skill_result_artifact_resolver=Resolver(),
+            ),
+            token_counter=_count_characters,
+            skill_result_artifact_loader=load_artifact,
+        ).build(
+            run=run,
+            items=(user, assistant, call, result),
+            catalog=AgentToolCatalog((), {}),
+        )
+
+        self.assertEqual(loaded, [projection.spill_artifact_id])
+        self.assertEqual(candidate.preflight.history_tokens, 0)
+        self.assertGreater(candidate.preflight.transient_tokens, 150_000)
+        rendered = "\n".join(
+            message.content or "" for message in candidate.request.messages
+        )
+        self.assertIn("BEGIN", rendered)
+        self.assertIn("END", rendered)
+        self.assertIn("business-artifact", rendered)
+
+        with self.assertRaisesRegex(
+            ValueError, "agent_skill_result_artifact_unavailable"
+        ):
+            await AgentContextCandidateBuilder(
+                context_builder=AgentContextBuilder(
+                    AgentContextRules("stable", "safe", "final"),
+                    skill_result_artifact_resolver=Resolver(),
+                ),
+                token_counter=_count_characters,
+            ).build(
+                run=run,
+                items=(user, assistant, call, result),
+                catalog=AgentToolCatalog((), {}),
+            )
+
+        loaded.clear()
+        summary = _item(
+            "summary-1",
+            5,
+            AgentItemKind.CONTEXT_SUMMARY,
+            {"covered_end_sequence": 4, "summary": "closed history"},
+        )
+        await AgentContextCandidateBuilder(
+            context_builder=AgentContextBuilder(
+                AgentContextRules("stable", "safe", "final"),
+                skill_result_artifact_resolver=Resolver(),
+            ),
+            token_counter=_count_characters,
+            skill_result_artifact_loader=load_artifact,
+        ).build(
+            run=replace(
+                run,
+                next_item_sequence=6,
+                compacted_through_sequence=4,
+            ),
+            items=(user, assistant, call, result, summary),
+            catalog=AgentToolCatalog((), {}),
+        )
+        self.assertEqual(loaded, [])

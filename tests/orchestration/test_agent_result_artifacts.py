@@ -7,6 +7,7 @@ import stat
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -22,11 +23,14 @@ from src.orchestration.agent_loop.models import (
 )
 from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactJanitor,
+    AgentSkillResultArtifactResolver,
     AgentSkillResultArtifactStager,
     parse_skill_result_storage_ref,
 )
 from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_REVISION,
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
+    AgentCallResultProjector,
     skill_result_artifact_id,
 )
 from src.storage.artifact_files import LocalArtifactFileStore
@@ -180,6 +184,204 @@ class AgentSkillResultArtifactStagerTest(unittest.TestCase):
         self.assertFalse(
             self.file_store.open_path(str(manifest["storage_key"])).exists()
         )
+
+
+class AgentSkillResultArtifactResolverTest(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmpdir.name)
+        self.file_store = LocalArtifactFileStore(self.root / "artifacts")
+        self.run = AgentRun(
+            run_id="run-resolve",
+            task_id="task-resolve",
+            conversation_id="conv-resolve",
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding("edition-a"),
+        )
+        call_payload = {
+            "arguments_json": "{}",
+            "call_id": "provider-resolve",
+            "capability_id": "skill.lookup",
+            "node_id": "node-resolve",
+            "provider_safe_name": "skill_lookup",
+        }
+        call_text = json.dumps(
+            call_payload, sort_keys=True, separators=(",", ":")
+        ) + "\n"
+        self.call = AgentItem(
+            item_id="call-resolve",
+            run_id=self.run.run_id,
+            task_id=self.run.task_id,
+            sequence=3,
+            kind=AgentItemKind.TOOL_CALL,
+            state=AgentItemState.COMMITTED,
+            payload_json=call_text,
+            payload_sha256=hashlib.sha256(call_text.encode()).hexdigest(),
+        )
+        self.raw_payload = {
+            "records": ["BEGIN-ARTIFACT", "x" * 150_000, "END-ARTIFACT"]
+        }
+        self.projection = AgentCallResultProjector().project(
+            capability_id="skill.lookup",
+            output_payload=self.raw_payload,
+            call_item_id=self.call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+            artifact_ids=("business-artifact",),
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
+            ),
+        )
+        staged = AgentSkillResultArtifactStager(
+            file_store=self.file_store,
+            manifest_root=self.root / "manifests",
+        ).stage(
+            run=self.run,
+            call_item=self.call,
+            node_id="node-resolve",
+            canonical_raw_bytes=self.projection.canonical_raw_bytes,
+            raw_sha256=self.projection.raw_sha256,
+            projection_revision=self.projection.projection_revision,
+            expected_artifact_id=self.projection.spill_artifact_id,
+        )
+        self.artifact = Artifact(
+            artifact_id=staged.artifact_id,
+            task_id=self.run.task_id,
+            producer_node_id="node-resolve",
+            artifact_type=ArtifactType.FILE,
+            storage_ref=staged.storage_ref,
+            summary=staged.summary,
+            is_complete=True,
+        )
+        self.durable_payload = {
+            "artifact_refs": ["business-artifact", staged.artifact_id],
+            "call_item_id": self.call.item_id,
+            "outcome": "completed",
+            "safe_error_code": None,
+            "safe_result": self.projection.safe_result_payload,
+        }
+        result_text = json.dumps(
+            self.durable_payload, sort_keys=True, separators=(",", ":")
+        ) + "\n"
+        self.result = AgentItem(
+            item_id="result-resolve",
+            run_id=self.run.run_id,
+            task_id=self.run.task_id,
+            sequence=4,
+            kind=AgentItemKind.TOOL_RESULT,
+            state=AgentItemState.COMMITTED,
+            payload_json=result_text,
+            payload_sha256=hashlib.sha256(result_text.encode()).hexdigest(),
+            source_call_item_id=self.call.item_id,
+        )
+        self.resolver = AgentSkillResultArtifactResolver(self.file_store)
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+        super().tearDown()
+
+    def test_resolve_returns_full_canonical_result_and_preserves_artifact_ids(
+        self,
+    ) -> None:
+        resolved = self.resolver.resolve_tool_result(
+            run=self.run,
+            call_item=self.call,
+            result_item=self.result,
+            durable_payload=self.durable_payload,
+            artifact=self.artifact,
+        )
+
+        self.assertEqual(
+            resolved["artifact_refs"], self.durable_payload["artifact_refs"]
+        )
+        self.assertEqual(
+            resolved["safe_result"],
+            {
+                "schema": "maf.agent.skill_result_full.v1",
+                "result": self.raw_payload,
+            },
+        )
+
+    def test_missing_incomplete_or_identity_drift_fails_closed(self) -> None:
+        invalid = (
+            None,
+            replace(self.artifact, is_complete=False),
+            replace(self.artifact, task_id="other-task"),
+            replace(self.artifact, producer_node_id="other-node"),
+            replace(self.artifact, artifact_id="other-artifact"),
+        )
+        for artifact in invalid:
+            with self.subTest(artifact=artifact):
+                with self.assertRaisesRegex(
+                    ValueError, "agent_skill_result_artifact_unavailable"
+                ):
+                    self.resolver.resolve_tool_result(
+                        run=self.run,
+                        call_item=self.call,
+                        result_item=self.result,
+                        durable_payload=self.durable_payload,
+                        artifact=artifact,
+                    )
+
+    def test_inactive_or_metadata_drift_fails_closed(self) -> None:
+        for key, value in (
+            ("retention_status", "inactive"),
+            ("conversation_id", "other-conversation"),
+            ("call_item_id", "other-call"),
+            ("node_id", "other-node"),
+            ("size_bytes", 1),
+            ("sha256", "f" * 64),
+        ):
+            metadata = json.loads(self.artifact.storage_ref)
+            metadata[key] = value
+            drifted = replace(
+                self.artifact,
+                storage_ref=json.dumps(
+                    metadata, sort_keys=True, separators=(",", ":")
+                ),
+            )
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(
+                    ValueError, "agent_skill_result_artifact_unavailable"
+                ):
+                    self.resolver.resolve_tool_result(
+                        run=self.run,
+                        call_item=self.call,
+                        result_item=self.result,
+                        durable_payload=self.durable_payload,
+                        artifact=drifted,
+                    )
+
+    def test_file_content_or_mode_drift_fails_closed(self) -> None:
+        metadata = parse_skill_result_storage_ref(self.artifact.storage_ref)
+        assert metadata is not None
+        raw_path = self.file_store.open_path(str(metadata["storage_key"]))
+        raw_path.write_bytes(b'{"records":[]}\n')
+        raw_path.chmod(0o600)
+        with self.assertRaisesRegex(
+            ValueError, "agent_skill_result_artifact_unavailable"
+        ):
+            self.resolver.resolve_tool_result(
+                run=self.run,
+                call_item=self.call,
+                result_item=self.result,
+                durable_payload=self.durable_payload,
+                artifact=self.artifact,
+            )
+
+        raw_path.write_bytes(self.projection.canonical_raw_bytes)
+        raw_path.chmod(0o644)
+        with self.assertRaisesRegex(
+            ValueError, "agent_skill_result_artifact_unavailable"
+        ):
+            self.resolver.resolve_tool_result(
+                run=self.run,
+                call_item=self.call,
+                result_item=self.result,
+                durable_payload=self.durable_payload,
+                artifact=self.artifact,
+            )
 
 
 class AgentSkillResultArtifactJanitorTest(unittest.IsolatedAsyncioTestCase):

@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from src.core.enums import ArtifactType
+from src.core.models import Artifact
 from src.orchestration.agent_loop.context import AgentContextBuilder, AgentContextRules
 from src.orchestration.agent_loop.models import (
     AgentItem,
@@ -18,13 +20,19 @@ from src.orchestration.agent_loop.models import (
 )
 from src.orchestration.agent_loop.tool_catalog import AgentToolCatalog
 from src.orchestration.agent_loop.result_projection import (
+    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
     AgentCallResultProjector,
+)
+from src.orchestration.agent_loop.result_artifacts import (
+    AgentSkillResultArtifactResolver,
+    AgentSkillResultArtifactStager,
 )
 from src.orchestration.agent_loop.transient_results import (
     AgentTransientSkillResultResolver,
     AgentTransientSkillResultStore,
 )
+from src.storage.artifact_files import LocalArtifactFileStore
 
 
 def _item(
@@ -191,6 +199,137 @@ class AgentContextBuilderTest(unittest.TestCase):
         self.assertIn("maf.agent.skill_result_full.v1", tool_content or "")
         self.assertNotIn("stage_ref", tool_content or "")
         self.assertNotIn("pending_context_injection", tool_content or "")
+
+    def test_artifact_backed_result_is_full_only_with_preloaded_authority(
+        self,
+    ) -> None:
+        run = AgentRun(
+            "run-1",
+            "task-1",
+            "conv-1",
+            AgentRunStatus.RUNNING,
+            AgentModelBinding("edition-a"),
+            next_item_sequence=5,
+            revision=4,
+        )
+        user = _item(
+            "user",
+            1,
+            AgentItemKind.USER_MESSAGE,
+            {
+                "context_budget": {
+                    "compact_threshold_percent": 90,
+                    "model_context_window_tokens": 450_000,
+                    "policy_revision": "maf.agent.total_context_budget.v1",
+                    "total_context_limit_tokens": 405_000,
+                },
+                "text": "question",
+            },
+        )
+        assistant = _item(
+            "assistant", 2, AgentItemKind.ASSISTANT_MESSAGE, {"text": ""}
+        )
+        call = _item(
+            "call-1",
+            3,
+            AgentItemKind.TOOL_CALL,
+            {
+                "arguments_json": "{}",
+                "call_id": "provider-call-1",
+                "capability_id": "skill.lookup",
+                "node_id": "node-1",
+                "provider_safe_name": "skill_lookup",
+            },
+            parent_item_id=assistant.item_id,
+            call_ordinal=0,
+        )
+        raw_payload = {
+            "records": ["BEGIN-ARTIFACT", "x" * 150_000, "END-ARTIFACT"]
+        }
+        projection = AgentCallResultProjector().project(
+            capability_id="skill.lookup",
+            output_payload=raw_payload,
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+            artifact_ids=("business-artifact",),
+            skill_projection_policy=(
+                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            file_store = LocalArtifactFileStore(Path(directory) / "artifacts")
+            staged = AgentSkillResultArtifactStager(
+                file_store=file_store,
+                manifest_root=Path(directory) / "manifests",
+            ).stage(
+                run=run,
+                call_item=call,
+                node_id="node-1",
+                canonical_raw_bytes=projection.canonical_raw_bytes,
+                raw_sha256=projection.raw_sha256,
+                projection_revision=projection.projection_revision,
+                expected_artifact_id=projection.spill_artifact_id,
+            )
+            artifact = Artifact(
+                artifact_id=staged.artifact_id,
+                task_id=run.task_id,
+                producer_node_id="node-1",
+                artifact_type=ArtifactType.FILE,
+                storage_ref=staged.storage_ref,
+                is_complete=True,
+            )
+            result = _item(
+                "result-1",
+                4,
+                AgentItemKind.TOOL_RESULT,
+                {
+                    "artifact_refs": [
+                        "business-artifact",
+                        staged.artifact_id,
+                    ],
+                    "call_item_id": call.item_id,
+                    "outcome": "completed",
+                    "safe_error_code": None,
+                    "safe_result": projection.safe_result_payload,
+                },
+                parent_item_id=assistant.item_id,
+                source_call_item_id=call.item_id,
+            )
+            builder = AgentContextBuilder(
+                AgentContextRules("stable", "tool rules", "final guard"),
+                skill_result_artifact_resolver=(
+                    AgentSkillResultArtifactResolver(file_store)
+                ),
+            )
+            resolved = builder.build(
+                run=run,
+                items=(user, assistant, call, result),
+                catalog=AgentToolCatalog((), {}),
+                skill_result_artifacts={staged.artifact_id: artifact},
+            )
+            legacy = builder.build(
+                run=run,
+                items=(user, assistant, call, result),
+                catalog=AgentToolCatalog((), {}),
+            )
+
+        resolved_content = next(
+            message.content
+            for message in resolved.messages
+            if message.role == "tool"
+        )
+        legacy_content = next(
+            message.content
+            for message in legacy.messages
+            if message.role == "tool"
+        )
+        self.assertIn("BEGIN-ARTIFACT", resolved_content or "")
+        self.assertIn("END-ARTIFACT", resolved_content or "")
+        self.assertIn("business-artifact", resolved_content or "")
+        self.assertIn(staged.artifact_id, resolved_content or "")
+        self.assertNotIn("BEGIN-ARTIFACT", legacy_content or "")
+        self.assertIn("skill_result_preview", legacy_content or "")
 
     def test_initial_hint_activation_renders_before_current_user_message(self) -> None:
         run = AgentRun(

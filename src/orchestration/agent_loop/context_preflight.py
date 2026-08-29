@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from src.core.models import Artifact
+
 from .context import AgentContextBuilder
 from .context_budget import AgentContextBudget
 from .models import (
@@ -21,6 +23,7 @@ from .models import (
     AgentToolDescriptor,
 )
 from .observability import AgentMetricsRecorder
+from .result_artifacts import skill_result_artifact_id_from_durable_payload
 from .tool_catalog import AgentToolCatalog
 
 
@@ -51,6 +54,7 @@ class AgentContextCandidate:
 TokenCounter = Callable[
     [Sequence[str], AgentModelBinding], int | Awaitable[int]
 ]
+ArtifactLoader = Callable[[str], Artifact | None | Awaitable[Artifact | None]]
 
 
 class AgentContextCandidateBuilder:
@@ -62,10 +66,12 @@ class AgentContextCandidateBuilder:
         context_builder: AgentContextBuilder,
         token_counter: TokenCounter | None = None,
         metrics_recorder: AgentMetricsRecorder | None = None,
+        skill_result_artifact_loader: ArtifactLoader | None = None,
     ) -> None:
         self._context_builder = context_builder
         self._count = token_counter or _count_with_bound_model
         self._metrics = metrics_recorder
+        self._load_skill_result_artifact = skill_result_artifact_loader
 
     async def build(
         self,
@@ -78,6 +84,9 @@ class AgentContextCandidateBuilder:
         tool_choice: AgentToolChoice | None = None,
     ) -> AgentContextCandidate:
         budget = _run_context_budget(items)
+        skill_result_artifacts = await self._preload_skill_result_artifacts(
+            run, items
+        )
         request = self._context_builder.build(
             run=run,
             items=items,
@@ -85,14 +94,15 @@ class AgentContextCandidateBuilder:
             trusted_facts=trusted_facts,
             current_user_input=current_user_input,
             tool_choice=tool_choice,
+            skill_result_artifacts=skill_result_artifacts,
         )
-        required_call_ids = _unconsumed_transient_provider_call_ids(items)
+        required_call_ids = _unconsumed_full_result_provider_call_ids(items)
         required_fragments: list[str] = [_framing_fragment()]
         history_fragments: list[str] = []
         transient_fragments: list[str] = []
         for message in request.messages:
             fragment = _message_fragment(message)
-            is_transient = _message_contains_full_transient_result(message)
+            is_transient = _message_contains_full_skill_result(message)
             if _message_is_required(message, required_call_ids):
                 required_fragments.append(fragment)
             else:
@@ -160,6 +170,50 @@ class AgentContextCandidateBuilder:
                 }[decision],
             )
         return AgentContextCandidate(request=request, preflight=preflight)
+
+    async def _preload_skill_result_artifacts(
+        self,
+        run: AgentRun,
+        items: tuple[AgentItem, ...],
+    ) -> dict[str, Artifact | None]:
+        calls = {
+            item.item_id: item
+            for item in items
+            if item.kind is AgentItemKind.TOOL_CALL
+        }
+        artifact_ids: set[str] = set()
+        for result in items:
+            if (
+                result.kind is not AgentItemKind.TOOL_RESULT
+                or result.state is not AgentItemState.COMMITTED
+                or result.sequence <= run.compacted_through_sequence
+            ):
+                continue
+            call = calls.get(str(result.source_call_item_id))
+            if call is None:
+                continue
+            payload = json.loads(result.payload_json)
+            if not isinstance(payload, Mapping):
+                raise ValueError("agent_skill_result_artifact_unavailable")
+            artifact_id = skill_result_artifact_id_from_durable_payload(
+                call_item_id=call.item_id,
+                durable_payload=payload,
+            )
+            if artifact_id is not None:
+                artifact_ids.add(artifact_id)
+        if not artifact_ids:
+            return {}
+        if self._load_skill_result_artifact is None:
+            raise ValueError("agent_skill_result_artifact_unavailable")
+        loaded: dict[str, Artifact | None] = {}
+        for artifact_id in sorted(artifact_ids):
+            value = self._load_skill_result_artifact(artifact_id)
+            if inspect.isawaitable(value):
+                value = await value
+            if value is not None and not isinstance(value, Artifact):
+                raise ValueError("agent_skill_result_artifact_unavailable")
+            loaded[artifact_id] = value
+        return loaded
 
     async def count_request(self, request: AgentModelRequest) -> int:
         fragments = [
@@ -232,7 +286,7 @@ def _run_context_budget(items: tuple[AgentItem, ...]) -> AgentContextBudget:
     return budget
 
 
-def _unconsumed_transient_provider_call_ids(
+def _unconsumed_full_result_provider_call_ids(
     items: tuple[AgentItem, ...],
 ) -> frozenset[str]:
     ordered = tuple(sorted(items, key=lambda value: value.sequence))
@@ -246,7 +300,7 @@ def _unconsumed_transient_provider_call_ids(
         if (
             result.kind is not AgentItemKind.TOOL_RESULT
             or result.state is not AgentItemState.COMMITTED
-            or not _item_is_transient_result(result)
+            or not _item_is_full_result_transport(result)
             or any(
                 candidate.kind is AgentItemKind.ASSISTANT_MESSAGE
                 and candidate.sequence > result.sequence
@@ -269,13 +323,18 @@ def _unconsumed_transient_provider_call_ids(
     return frozenset(required)
 
 
-def _item_is_transient_result(item: AgentItem) -> bool:
+def _item_is_full_result_transport(item: AgentItem) -> bool:
     payload = json.loads(item.payload_json)
     safe_result = payload.get("safe_result") if isinstance(payload, Mapping) else None
     return bool(
         isinstance(safe_result, Mapping)
-        and safe_result.get("projection_revision") == "skill-result-v2"
-        and safe_result.get("projection_mode") == "transient_staged"
+        and (
+            (
+                safe_result.get("projection_revision") == "skill-result-v2"
+                and safe_result.get("projection_mode") == "transient_staged"
+            )
+            or safe_result.get("projection_mode") == "artifact_backed"
+        )
     )
 
 
@@ -290,7 +349,7 @@ def _message_is_required(
     return any(call.call_id in required_call_ids for call in message.tool_calls)
 
 
-def _message_contains_full_transient_result(message: AgentMessage) -> bool:
+def _message_contains_full_skill_result(message: AgentMessage) -> bool:
     if message.role != "tool" or not isinstance(message.content, str):
         return False
     try:

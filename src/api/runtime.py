@@ -368,6 +368,9 @@ from src.orchestration.agent_loop import (
     default_agent_invocation_policy,
 )
 from src.orchestration.agent_loop.lease import AgentLeaseController
+from src.orchestration.agent_loop.result_artifacts import (
+    AgentSkillResultArtifactResolver,
+)
 from src.orchestration.agent_loop.capability_invoker import (
     AgentCapabilityInvoker,
     AgentInvocationContextStore,
@@ -15290,6 +15293,9 @@ def build_api_runtime(
     agent_transient_result_resolver = AgentTransientSkillResultResolver(
         agent_transient_skill_result_store
     )
+    agent_skill_result_artifact_resolver = AgentSkillResultArtifactResolver(
+        artifact_file_store
+    )
     agent_context_builder = AgentContextBuilder(
         AgentContextRules(
             stable_rules=(
@@ -15307,6 +15313,7 @@ def build_api_runtime(
             final_guard="最终回答必须面向用户，且不得包含隐藏推理或原始敏感结果。",
         ),
         transient_result_resolver=agent_transient_result_resolver,
+        skill_result_artifact_resolver=agent_skill_result_artifact_resolver,
     )
 
     async def count_agent_context_tokens(fragments, binding):
@@ -15321,6 +15328,7 @@ def build_api_runtime(
     agent_context_candidate_builder = AgentContextCandidateBuilder(
         context_builder=agent_context_builder,
         token_counter=count_agent_context_tokens,
+        skill_result_artifact_loader=storage.get_artifact,
     )
     agent_compaction_service = AgentCompactionService(
         runs=agent_repository,

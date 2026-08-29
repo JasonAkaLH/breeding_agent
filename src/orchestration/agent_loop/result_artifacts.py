@@ -11,12 +11,14 @@ from typing import Callable, Mapping
 
 from src.core.enums import ArtifactType
 from src.core.enums import TaskStatus
+from src.core.models import Artifact
 from src.storage.artifact_files import (
     LocalArtifactFileStore,
     build_file_storage_ref,
     parse_file_storage_ref,
     sanitize_storage_component,
 )
+from src.storage.agent_payload import canonicalize_agent_payload
 
 from .models import (
     AgentItem,
@@ -207,6 +209,164 @@ class AgentSkillResultArtifactStager:
         finally:
             fcntl.flock(root_descriptor, fcntl.LOCK_UN)
             os.close(root_descriptor)
+
+
+class AgentSkillResultArtifactResolver:
+    """Resolve only the deterministic Skill result Artifact for model context."""
+
+    def __init__(self, file_store: LocalArtifactFileStore) -> None:
+        self._file_store = file_store
+
+    def resolve_tool_result(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        result_item: AgentItem,
+        durable_payload: Mapping[str, object],
+        artifact: Artifact | None,
+    ) -> dict[str, object]:
+        try:
+            return self._resolve_tool_result(
+                run=run,
+                call_item=call_item,
+                result_item=result_item,
+                durable_payload=durable_payload,
+                artifact=artifact,
+            )
+        except (OSError, TypeError, ValueError):
+            raise ValueError(
+                "agent_skill_result_artifact_unavailable"
+            ) from None
+
+    def _resolve_tool_result(
+        self,
+        *,
+        run: AgentRun,
+        call_item: AgentItem,
+        result_item: AgentItem,
+        durable_payload: Mapping[str, object],
+        artifact: Artifact | None,
+    ) -> dict[str, object]:
+        safe_result = durable_payload.get("safe_result")
+        artifact_refs = durable_payload.get("artifact_refs")
+        if (
+            artifact is None
+            or not artifact.is_complete
+            or artifact.artifact_type != ArtifactType.FILE
+            or not isinstance(safe_result, Mapping)
+            or set(safe_result)
+            != {
+                "schema",
+                "projection_revision",
+                "projection_mode",
+                "model_view",
+                "original_size_bytes",
+                "projected_size_bytes",
+                "raw_sha256",
+                "projection_truncated",
+            }
+            or safe_result.get("schema") != "maf.agent.model_result.v1"
+            or safe_result.get("projection_mode") != "artifact_backed"
+            or safe_result.get("projection_truncated") is not True
+            or durable_payload.get("outcome") != "completed"
+            or durable_payload.get("safe_error_code") is not None
+            or durable_payload.get("call_item_id") != call_item.item_id
+            or not isinstance(artifact_refs, list)
+            or not artifact_refs
+            or any(not isinstance(value, str) for value in artifact_refs)
+            or len(artifact_refs) != len(set(artifact_refs))
+            or result_item.kind is not AgentItemKind.TOOL_RESULT
+            or result_item.state is not AgentItemState.COMMITTED
+            or result_item.source_call_item_id != call_item.item_id
+            or result_item.run_id != run.run_id
+            or result_item.task_id != run.task_id
+            or call_item.kind is not AgentItemKind.TOOL_CALL
+            or call_item.state is not AgentItemState.COMMITTED
+            or call_item.run_id != run.run_id
+            or call_item.task_id != run.task_id
+        ):
+            raise ValueError("result_identity_invalid")
+        raw_sha256 = safe_result.get("raw_sha256")
+        projection_revision = safe_result.get("projection_revision")
+        original_size = safe_result.get("original_size_bytes")
+        projected_size = safe_result.get("projected_size_bytes")
+        if (
+            not isinstance(raw_sha256, str)
+            or len(raw_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in raw_sha256)
+            or not isinstance(projection_revision, str)
+            or not projection_revision
+            or isinstance(original_size, bool)
+            or not isinstance(original_size, int)
+            or original_size <= 0
+            or isinstance(projected_size, bool)
+            or not isinstance(projected_size, int)
+            or projected_size <= 0
+            or canonicalize_agent_payload(dict(safe_result)).size_bytes
+            != projected_size
+        ):
+            raise ValueError("result_projection_invalid")
+        expected_artifact_id = skill_result_artifact_id(
+            call_item_id=call_item.item_id,
+            raw_sha256=raw_sha256,
+            projection_revision=projection_revision,
+        )
+        if (
+            artifact.artifact_id != expected_artifact_id
+            or artifact_refs.count(expected_artifact_id) != 1
+            or artifact.task_id != run.task_id
+        ):
+            raise ValueError("artifact_identity_invalid")
+        call_payload = json.loads(call_item.payload_json)
+        if not isinstance(call_payload, Mapping):
+            raise ValueError("call_payload_invalid")
+        node_id = call_payload.get("node_id")
+        metadata = parse_skill_result_storage_ref(artifact.storage_ref)
+        if (
+            not isinstance(node_id, str)
+            or not node_id
+            or artifact.producer_node_id != node_id
+            or metadata is None
+            or metadata.get("task_id") != run.task_id
+            or metadata.get("conversation_id") != run.conversation_id
+            or metadata.get("node_id") != node_id
+            or metadata.get("call_item_id") != call_item.item_id
+            or metadata.get("raw_sha256") != raw_sha256
+            or metadata.get("projection_revision") != projection_revision
+            or metadata.get("sha256") != raw_sha256
+            or metadata.get("size_bytes") != original_size
+            or not isinstance(metadata.get("storage_key"), str)
+        ):
+            raise ValueError("artifact_metadata_invalid")
+        raw_text = self._file_store.read_utf8(
+            str(metadata["storage_key"]),
+            expected_size_bytes=original_size,
+            expected_sha256=raw_sha256,
+        )
+        raw_value = json.loads(raw_text)
+        if (
+            not isinstance(raw_value, dict)
+            or json.dumps(
+                raw_value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+            != raw_text
+        ):
+            raise ValueError("artifact_raw_invalid")
+        return {
+            "artifact_refs": list(artifact_refs),
+            "outcome": "completed",
+            "safe_error_code": None,
+            "safe_result": {
+                "schema": "maf.agent.skill_result_full.v1",
+                "result": raw_value,
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,6 +573,43 @@ def parse_skill_result_storage_ref(storage_ref: str) -> dict[str, object] | None
     ):
         return None
     return value
+
+
+def skill_result_artifact_id_from_durable_payload(
+    *,
+    call_item_id: str,
+    durable_payload: Mapping[str, object],
+) -> str | None:
+    safe_result = durable_payload.get("safe_result")
+    if (
+        not isinstance(safe_result, Mapping)
+        or safe_result.get("projection_mode") != "artifact_backed"
+    ):
+        return None
+    raw_sha256 = safe_result.get("raw_sha256")
+    projection_revision = safe_result.get("projection_revision")
+    artifact_refs = durable_payload.get("artifact_refs")
+    try:
+        expected = skill_result_artifact_id(
+            call_item_id=call_item_id,
+            raw_sha256=str(raw_sha256),
+            projection_revision=str(projection_revision),
+        )
+    except (AttributeError, UnicodeEncodeError):
+        raise ValueError("agent_skill_result_artifact_unavailable") from None
+    if (
+        safe_result.get("schema") != "maf.agent.model_result.v1"
+        or safe_result.get("projection_truncated") is not True
+        or not isinstance(raw_sha256, str)
+        or len(raw_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in raw_sha256)
+        or not isinstance(projection_revision, str)
+        or not projection_revision
+        or not isinstance(artifact_refs, list)
+        or artifact_refs.count(expected) != 1
+    ):
+        raise ValueError("agent_skill_result_artifact_unavailable")
+    return expected
 
 
 def validate_skill_result_staged_artifact(

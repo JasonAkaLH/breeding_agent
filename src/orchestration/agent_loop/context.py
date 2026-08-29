@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from src.core.models import Artifact
 
 from .models import (
     AgentItem,
@@ -13,6 +16,7 @@ from .models import (
     AgentToolCall,
     AgentToolChoice,
 )
+from .result_artifacts import skill_result_artifact_id_from_durable_payload
 from .tool_catalog import AgentToolCatalog
 
 
@@ -29,9 +33,11 @@ class AgentContextBuilder:
         rules: AgentContextRules,
         *,
         transient_result_resolver: Any | None = None,
+        skill_result_artifact_resolver: Any | None = None,
     ) -> None:
         self._rules = rules
         self._transient_result_resolver = transient_result_resolver
+        self._skill_result_artifact_resolver = skill_result_artifact_resolver
 
     def build(
         self,
@@ -42,6 +48,7 @@ class AgentContextBuilder:
         trusted_facts: tuple[str, ...] = (),
         current_user_input: str | None = None,
         tool_choice: AgentToolChoice | None = None,
+        skill_result_artifacts: Mapping[str, Artifact | None] | None = None,
     ) -> AgentModelRequest:
         messages: list[AgentMessage] = [
             AgentMessage(role="system", content=self._rules.stable_rules),
@@ -119,6 +126,10 @@ class AgentContextBuilder:
                 run=run,
                 all_items=visible_items,
                 transient_result_resolver=self._transient_result_resolver,
+                skill_result_artifact_resolver=(
+                    self._skill_result_artifact_resolver
+                ),
+                skill_result_artifacts=skill_result_artifacts,
             )
             if message is not None:
                 messages.append(message)
@@ -157,6 +168,8 @@ def _message_from_item(
     run: AgentRun,
     all_items: tuple[AgentItem, ...],
     transient_result_resolver: Any | None,
+    skill_result_artifact_resolver: Any | None,
+    skill_result_artifacts: Mapping[str, Artifact | None] | None,
 ) -> AgentMessage | None:
     payload = _payload(item)
     if item.kind is AgentItemKind.USER_MESSAGE:
@@ -211,6 +224,20 @@ def _message_from_item(
                 call_item=source_call,
                 result_item=item,
                 durable_payload=payload,
+            )
+        artifact_id = skill_result_artifact_id_from_durable_payload(
+            call_item_id=source_call.item_id,
+            durable_payload=payload,
+        )
+        if artifact_id is not None and skill_result_artifacts is not None:
+            if skill_result_artifact_resolver is None:
+                raise ValueError("agent_skill_result_artifact_unavailable")
+            tool_payload = skill_result_artifact_resolver.resolve_tool_result(
+                run=run,
+                call_item=source_call,
+                result_item=item,
+                durable_payload=payload,
+                artifact=skill_result_artifacts.get(artifact_id),
             )
         return AgentMessage(
             role="tool",

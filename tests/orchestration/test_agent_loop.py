@@ -165,6 +165,11 @@ class _RecordingInvoker:
         )
 
 
+class _UnavailableSkillResultCandidateBuilder:
+    async def build(self, **_kwargs):
+        raise ValueError("agent_skill_result_artifact_unavailable")
+
+
 class _LogicalTraceRepository:
     _RECORDED = frozenset(
         {
@@ -259,12 +264,13 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         terminal_event_recorder=None,
         enable_preflight: bool = False,
         token_counter=None,
+        candidate_builder_override=None,
     ):
         repository = repository or self.repository
         context_builder = AgentContextBuilder(
             AgentContextRules("stable", "tool rules", "final guard")
         )
-        candidate_builder = (
+        candidate_builder = candidate_builder_override or (
             AgentContextCandidateBuilder(
                 context_builder=context_builder,
                 token_counter=token_counter,
@@ -441,6 +447,32 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result.run.terminal_reason_code,
             "agent_context_required_segments_too_large",
+        )
+        self.assertEqual(model.requests, [])
+        self.assertEqual(invoker.events, [])
+
+    async def test_unavailable_skill_result_artifact_fails_before_model_or_skill(
+        self,
+    ) -> None:
+        await self._initialize_budgeted_run(100_000)
+        model = _ContextAwareQueuedModel(
+            self.binding,
+            [("must not run", ())],
+        )
+        invoker = _RecordingInvoker()
+
+        result = await self._runner(
+            model,
+            invoker,
+            candidate_builder_override=(
+                _UnavailableSkillResultCandidateBuilder()
+            ),
+        ).run("run-1")
+
+        self.assertEqual(result.state, "failed")
+        self.assertEqual(
+            result.run.terminal_reason_code,
+            "agent_skill_result_artifact_unavailable",
         )
         self.assertEqual(model.requests, [])
         self.assertEqual(invoker.events, [])

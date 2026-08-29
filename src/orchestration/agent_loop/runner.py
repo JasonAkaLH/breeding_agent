@@ -216,7 +216,16 @@ class AgentLoopRunner:
                         tool_choice=choice,
                     )
 
-                candidate = await build_candidate(run, items)
+                try:
+                    candidate = await build_candidate(run, items)
+                except ValueError as exc:
+                    if str(exc) == "agent_skill_result_artifact_unavailable":
+                        return await self._fail_context_run(
+                            run_id,
+                            handle,
+                            safe_error_code=str(exc),
+                        )
+                    raise
                 if (
                     candidate.preflight.decision
                     is AgentContextPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE
@@ -235,7 +244,13 @@ class AgentLoopRunner:
                             candidate=candidate,
                             repreflight=build_candidate,
                         )
-                    except RuntimeError as exc:
+                    except (RuntimeError, ValueError) as exc:
+                        if str(exc) == "agent_skill_result_artifact_unavailable":
+                            return await self._fail_context_run(
+                                run_id,
+                                handle,
+                                safe_error_code=str(exc),
+                            )
                         if str(exc) == "agent_context_required_segments_too_large":
                             return await self._fail_context_run(run_id, handle)
                         raise
@@ -328,7 +343,18 @@ class AgentLoopRunner:
                     return await self._fail_context_run(run_id, handle)
                 latest = await self._require_active_run(run_id)
                 latest_items = await self._runs.list_items(run_id)
-                retry_candidate = await build_candidate(latest, latest_items)
+                try:
+                    retry_candidate = await build_candidate(
+                        latest, latest_items
+                    )
+                except ValueError as exc:
+                    if str(exc) == "agent_skill_result_artifact_unavailable":
+                        return await self._fail_context_run(
+                            run_id,
+                            handle,
+                            safe_error_code=str(exc),
+                        )
+                    raise
                 if not retry_candidate.preflight.eligible_closed_history:
                     return await self._fail_context_run(run_id, handle)
                 try:
@@ -339,7 +365,13 @@ class AgentLoopRunner:
                         repreflight=build_candidate,
                         force=True,
                     )
-                except RuntimeError as exc:
+                except (RuntimeError, ValueError) as exc:
+                    if str(exc) == "agent_skill_result_artifact_unavailable":
+                        return await self._fail_context_run(
+                            run_id,
+                            handle,
+                            safe_error_code=str(exc),
+                        )
                     if str(exc) == "agent_context_required_segments_too_large":
                         return await self._fail_context_run(run_id, handle)
                     raise
@@ -384,13 +416,15 @@ class AgentLoopRunner:
         self,
         run_id: str,
         handle: AgentLeaseHandle,
+        *,
+        safe_error_code: str = "agent_context_required_segments_too_large",
     ) -> AgentLoopRunResult:
         latest = await self._require_active_run(run_id)
         failed = await self._writer.fail_agent_run(
             run_id,
             expected_revision=latest.revision,
             expected_claim_token=handle.current.token,
-            safe_error_code="agent_context_required_segments_too_large",
+            safe_error_code=safe_error_code,
         )
         return AgentLoopRunResult(
             run=failed,

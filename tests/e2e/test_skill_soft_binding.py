@@ -305,12 +305,14 @@ print(json.dumps({{
             1,
         )
 
-    async def test_same_large_result_with_business_artifact_stays_legacy(self) -> None:
+    async def test_same_large_result_with_business_artifact_is_full_model_only(
+        self,
+    ) -> None:
         skill_root, network_marker = self._write_bioinfo_skill(answer_mode="direct")
 
         def agent_fixture(prompt: str, **_kwargs) -> str:
-            if '"outcome":"completed"' in prompt:
-                return "检索已完成，请查看现有 Artifact。"
+            if "maf.agent.skill_result_full.v1" in prompt:
+                return "检索已完成；第28条标记是 UNIQUE-ARTICLE-28-SENTINEL。"
             return json.dumps(
                 {
                     "tool_calls": [
@@ -332,6 +334,15 @@ print(json.dumps({{
             main_agent_stream_generator=agent_fixture,
             enable_conversation_memory=False,
         )
+        model_requests = []
+        model = self.runtime.agent_loop_orchestrator._runner._model  # noqa: SLF001
+        original_sample = model.sample_agent
+
+        async def capture_model_request(request):
+            model_requests.append(request)
+            return await original_sample(request)
+
+        model.sample_agent = capture_model_request
         response = await self.client.post(
             "/api/v1/conversations/chat-messages",
             json={
@@ -344,13 +355,20 @@ print(json.dumps({{
         )
         self.assertEqual(response.status_code, 202, response.text)
         task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
         self.assertEqual(
-            (await self.wait_for_terminal_task(task_id))["status"],
+            terminal["status"],
             "completed",
+            (
+                run.status if run is not None else None,
+                run.terminal_reason_code if run is not None else None,
+                [(event.event_type, event.payload) for event in events],
+            ),
         )
         self.assertEqual(network_marker.read_text(encoding="utf-8"), "1")
 
-        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
         assert run is not None
         items = await self.runtime.agent_run_repository.list_items(run.run_id)
         result_item = next(
@@ -382,6 +400,40 @@ print(json.dumps({{
         downloaded = await self.client.get(result_artifact["download_url"])
         self.assertEqual(downloaded.status_code, 200)
         self.assertEqual(len(downloaded.json()["articles"]), 28)
+
+        resolved_requests = [
+            request
+            for request in model_requests
+            if any(
+                message.role == "tool"
+                and "maf.agent.skill_result_full.v1" in (message.content or "")
+                for message in request.messages
+            )
+        ]
+        self.assertEqual(len(resolved_requests), 1)
+        tool_content = next(
+            message.content
+            for message in resolved_requests[0].messages
+            if message.role == "tool"
+        )
+        tool_payload = json.loads(tool_content)
+        self.assertEqual(
+            tool_payload["artifact_refs"], result_payload["artifact_refs"]
+        )
+        self.assertEqual(
+            tool_payload["safe_result"]["result"]["articles"][27]["sentinel"],
+            "UNIQUE-ARTICLE-28-SENTINEL",
+        )
+        self.assertNotIn("storage_ref", tool_content)
+        history = await self.client.get(
+            "/api/v1/conversations/conv-bioinfo-legacy-artifact/messages"
+        )
+        assistant = next(
+            message
+            for message in history.json()["messages"]
+            if message["role"] == "assistant"
+        )
+        self.assertIn("UNIQUE-ARTICLE-28-SENTINEL", assistant["content"])
 
 if __name__ == "__main__":
     import unittest
