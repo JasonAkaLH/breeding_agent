@@ -1,6 +1,6 @@
 # Agent Tool 结果交付与重复调用熔断设计
 
-状态：`approved_design`；document-perfectization第二轮`100/100 Pass`
+状态：`approved_design`；document-perfectization第三轮`100/100 Pass`
 日期：2026-08-29
 目标分支：`main`
 
@@ -152,6 +152,9 @@ payload SHA冲突或receipt-of-receipt未解引用均fail closed。
 ### 5.2 执行前熔断与模型结果复用
 
 `AgentCapabilityInvoker`在进入`CapabilityInvocationService/Executor`前查找最新等价成功结果。
+该查询只适用于Runner提交的新鲜reserved non-waiting call；`resume()`处理的是已经建立
+Interrupt/remote/waiting authority的同一逻辑调用，必须显式绕过reuse lookup并继续原authority，不能被更早
+的等价成功结果截断。
 命中后：
 
 1. 该路径是Agent Tool call resolution，复用现有delegated activation不进入Capability Invocation的
@@ -161,14 +164,18 @@ payload SHA冲突或receipt-of-receipt未解引用均fail closed。
    `source_result_payload_sha256`，其中source始终是root executed result，不保存参数或source正文。
 3. Context Builder渲染当前Tool message时，严格校验source result仍属于同一Run、早于当前call、
    committed/completed且identity等价；随后复用source result的model-effective payload：inline直接
-   使用，active artifact-backed通过第4节resolver解析，未清理transient通过现有resolver解析。
+   使用，active artifact-backed通过第4节resolver解析，未清理transient通过现有resolver解析。Context
+   authority lookup使用完整有序Run items而不是仅使用compaction后的visible items；当前model-only消息保留
+   source result的Artifact IDs，但当前durable reuse receipt的`artifact_refs`保持为空。
 4. 当前Tool message使用新的provider call ID，满足四角色Tool协议；模型看到的是既有有效结果，
    不是伪造的新执行结果。
 5. Agent outcome CAS把当前pending TaskNode直接置为completed并产生唯一既有terminal event；因为没有
    Capability execution，`assigned_instance_id`和`started_at`保持空。
-6. 观测复用现有`agent.result_projected`，新增closed `projection_mode=reused`；Tool call metric复用
-   现有`outcome=duplicate`。不增加新事件类型；event payload和metric labels不记录参数、正文、
-   Artifact ref、业务ID或digest，沿用EventRecord现有Task/Node envelope。
+6. 运行时观测复用现有`agent.result_projected`，新增closed `projection_mode=reused`，这是本范围内必需的
+   runtime证据。已有`AgentMetricsRecorder`被调用方配置时，Tool call metric复用closed
+   `outcome=duplicate`；当前API runtime没有配置该recorder，本设计不新增生产metric sink或wiring。
+   不增加新事件类型；event payload和可选metric labels不记录参数、正文、Artifact ref、业务ID或digest，
+   沿用EventRecord现有Task/Node envelope。
 
 Reuse receipt本身不得复制private stage ref、raw正文、Artifact storage ref或外部结果。若source
 authority或transient payload已不可用，返回typed `agent_reused_tool_result_unavailable`并禁止外部
@@ -237,8 +244,9 @@ authority或transient payload已不可用，返回typed `agent_reused_tool_resul
    leader waiting时followers typed aborted且不创建第二个Interrupt、remote Task或外部调用。
 5. receipt提交后的response-loss exact replay；提交前restart沿现有no-replay abort且零Executor调用；
    source authority漂移返回typed unavailable。
-6. 新增观测payload/metric labels不包含参数、正文、业务ID、digest或Artifact ref，并继续使用现有
-   EventRecord Task/Node envelope。
+6. 新增`agent.result_projected`观测payload不包含参数、正文、业务ID、digest或Artifact ref，并继续使用
+   现有EventRecord Task/Node envelope；可选`AgentMetricsRecorder`配置存在时，`outcome=duplicate`只使用
+   closed labels且同样不含上述内容。不新增生产metric sink或wiring。
 7. 连续三次等价调用的两个reuse receipts都直接绑定同一root executed result；循环、后向引用和
    receipt链被拒绝。
 

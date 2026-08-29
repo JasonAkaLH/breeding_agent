@@ -2,7 +2,7 @@
 
 依据：`2026-08-29-agent-tool-result-delivery-and-repeat-guard-design.md`
 设计提交：`7c097cf0`；审查加固提交：`c03c14f2`
-状态：`ready_for_implementation`
+状态：`ready_for_implementation`；document-perfectization第二轮`100/100 Pass`
 目标分支：`main`
 
 ## 1. 完成声明
@@ -28,14 +28,17 @@
 
 - `tests/integrations/mcp/test_dispatch_coordinator.py`
 - `tests/orchestration/test_agent_result_projection.py`
+- `tests/e2e/test_mcp_server_explicit_agent_loop.py`
 
 红测锁定：
 
 1. 现有OCR workflow完成结果必须把首尾sentinel放在`output_payload["text"]`，不再依赖`content`；
 2. Coordinator输出经过`AgentCallResultProjector.project()`后，`model_view.text`仍含同一sentinel；
-3. ordinary MCP completed branch把Selector生成的`safe_summary`放入`text`；
-4. raw result、structured result、storage ref、projection path和credential不进入model view；
-5. 现有20,000 code points、80,000 bytes与128 KiB Tool-result门禁不变。
+3. 在现有显式MCP Agent Loop E2E中捕获下一次model request，证明committed Tool result的
+   `model_view.text`进入当前provider call对应的Tool message，且fake Gateway实际Tool调用数为1；
+4. ordinary MCP completed branch把Selector生成的`safe_summary`放入`text`；
+5. raw result、structured result、storage ref、projection path和credential不进入model view；
+6. 现有20,000 code points、80,000 bytes与128 KiB Tool-result门禁不变。
 
 ### 2.2 最小实现
 
@@ -58,11 +61,13 @@
 ```bash
 conda run -n multi_agent python -m unittest \
   tests.integrations.mcp.test_dispatch_coordinator \
-  tests.orchestration.test_agent_result_projection
+  tests.orchestration.test_agent_result_projection \
+  tests.e2e.test_mcp_server_explicit_agent_loop
 conda run -n multi_agent ruff check \
   src/integrations/mcp/dispatch_coordinator.py \
   tests/integrations/mcp/test_dispatch_coordinator.py \
-  tests/orchestration/test_agent_result_projection.py
+  tests/orchestration/test_agent_result_projection.py \
+  tests/e2e/test_mcp_server_explicit_agent_loop.py
 git diff --check
 ```
 
@@ -121,17 +126,17 @@ Implementation commit：`fix(mcp): deliver model-safe result text`
 
 ### 3.3 Candidate/Context/Preflight接入
 
-1. `AgentContextCandidateBuilder`从当前candidate items识别artifact-backed结果，只对其中精确引用的
+1. `AgentContextCandidateBuilder`从当前candidate items识别直接artifact-backed结果，只对其中精确引用的
    deterministic result Artifact ID调用现有Storage `get_artifact()`；查询结果形成一次build内的有界map；
-2. 对reuse receipt只先解引用到其root结果，再按root `artifact_refs`预加载；不得扫描Run外authority；
-3. `AgentContextBuilder.build()`只在provider-bound Tool message中调用resolver，把合法preview替换为full
+   Checkpoint B不得解析尚未定义的reuse receipt；
+2. `AgentContextBuilder.build()`只在provider-bound Tool message中调用resolver，把合法preview替换为full
    envelope并保留Artifact IDs；durable AgentItem和API/history投影保持原样；
-4. `AgentContextCandidateBuilder`以同一份已解析request做token preflight，避免resolver二次读取和重复计数；
-5. `context_preflight`把最新未被后续assistant sample消费的full artifact-backed结果按现有transient
+3. `AgentContextCandidateBuilder`以同一份已解析request做token preflight，避免resolver二次读取和重复计数；
+4. `context_preflight`把最新未被后续assistant sample消费的full artifact-backed结果按现有transient
    required-context规则计入一次；legacy preview不进入该新规则；
-6. Runner在model sample前收敛resolver的typed unavailable错误，以同一safe error失败当前Run；不得调用
+5. Runner在model sample前收敛resolver的typed unavailable错误，以同一safe error失败当前Run；不得调用
    provider、不得回到pending call执行，也不得把错误误报成context-too-large；
-7. `src/api/runtime.py`只把现有`storage.get_artifact`和`LocalArtifactFileStore`注入resolver/Candidate
+6. `src/api/runtime.py`只把现有`storage.get_artifact`和`LocalArtifactFileStore`注入resolver/Candidate
    Builder，不新增runtime、配置或后台任务。
 
 ### 3.4 门禁与提交
@@ -181,19 +186,26 @@ Implementation commit：`fix(agent): inject validated skill result artifacts`
 
 1. 同Run、同`capability_id + NUL + canonical arguments_json`的第二次成功call零Executor调用；
 2. 不同参数、不同Run、先前failed/waiting/reserved/aborted结果仍不复用；
-3. receipt exact keys只有`schema/source_result_item_id/source_result_payload_sha256`，不包含参数、正文、
+3. 当前call已经处于waiting并由`resume()`继续时，即使更早存在等价成功result，也必须继续当前
+   continuation authority且不得生成reuse receipt；
+4. receipt exact keys只有`schema/source_result_item_id/source_result_payload_sha256`，不包含参数、正文、
    Artifact ref、storage ref或private stage ref；
-4. inline、active artifact-backed、live transient和legacy source均生成正确的当前provider call Tool message；
-5. covered且已清理transient source只返回bounded
+5. inline、active artifact-backed、live transient和legacy source均生成正确的当前provider call Tool message；
+   active artifact-backed root无论visible或已被compaction覆盖都必须完整解析。model-only消息保留source
+   Artifact IDs，当前durable receipt的`artifact_refs`仍为空；
+6. covered且已清理transient source只返回bounded
    `duplicate_call_suppressed/context_summary_only`，不触发外部补偿调用；
-6. 连续三个等价call的两个receipt都直接指向root executed result；循环、forward ref、receipt chain和
+7. reuse source的Artifact authority失效时返回`agent_reused_tool_result_unavailable`，而直接
+   artifact-backed结果失效仍返回`agent_skill_result_artifact_unavailable`；两者均发生在provider前；
+8. 连续三个等价call的两个receipt都直接指向root executed result；循环、forward ref、receipt chain和
    payload SHA漂移fail closed；
-7. receipt提交后的response loss exact replay；receipt提交前crash继续沿现有reserved non-waiting
+9. receipt提交后的response loss exact replay；receipt提交前crash继续沿现有reserved non-waiting
    no-replay abort，Executor调用数为0；不改Recovery Coordinator；
-8. 当前duplicate call的pending TaskNode由现有outcome CAS完成，`assigned_instance_id/started_at`为空，
+10. 当前duplicate call的pending TaskNode由现有outcome CAS完成，`assigned_instance_id/started_at`为空，
    terminal event仍唯一；
-9. 观测只增加closed `projection_mode=reused`和既有`outcome=duplicate`，不写参数、正文、业务ID、
-   Artifact ref或digest。
+11. 运行时观测只增加现有`agent.result_projected`的closed `projection_mode=reused`；已有可选
+    `AgentMetricsRecorder`被配置时验证`outcome=duplicate` closed label。两者均不写参数、正文、业务ID、
+    Artifact ref或digest，不新增生产metric sink或wiring。
 
 ### 4.2 Invoker执行前复用
 
@@ -208,18 +220,30 @@ Implementation commit：`fix(agent): inject validated skill result artifacts`
 具体步骤：
 
 1. 在现有结果合同模块集中定义repeat key、receipt exact schema和严格parser；不新建通用缓存/registry；
-2. `AgentCapabilityInvoker.invoke()`在delegated activation与`CapabilityInvocationService/Executor`之前，
-   从同Run已加载items查找更早的committed completed无safe error候选；
-3. 若候选是reuse receipt，严格解引用到更早root executed result；新receipt始终直接保存root result item ID
+2. repeat lookup只允许Runner的新鲜reserved non-waiting call路径；`AgentCapabilityInvoker.resume()`必须
+   显式绕过lookup并继续当前waiting/continuation authority。实现使用一个明确的内部fresh-call开关即可，
+   不新增第二套Invoker或恢复协议；
+3. fresh `AgentCapabilityInvoker.invoke()`在delegated activation与
+   `CapabilityInvocationService/Executor`之前，从同Run已加载items查找更早的committed completed无
+   safe error候选；
+4. 若候选是reuse receipt，严格解引用到更早root executed result；新receipt始终直接保存root result item ID
    和root payload SHA；authority冲突返回`agent_reused_tool_result_unavailable`且零Executor；
-4. 命中时返回普通`AgentCallExecution(COMPLETED)`承载bounded receipt，让现有
+5. 命中时返回普通`AgentCallExecution(COMPLETED)`承载bounded receipt，让现有
    `commit_agent_call_outcome()`完成当前result和TaskNode；不调用Invocation Service/Executor，不复制业务
    Artifact，也不改atomic writer；
-5. Context Builder验证当前call与root identity后复用root model-effective payload：inline直接使用、
-   artifact-backed调用Checkpoint B resolver、transient调用现有resolver、已清理transient使用summary-only；
-6. reuse结果是否为required context沿当前未消费Tool result规则计算一次，不新增独立compaction语义；
-7. `observability.py`只扩展closed枚举`reused -> error_code None`；reused observation的raw digest为空，
-   metric label只使用既有closed值。
+6. reuse receipt合同就绪后，`AgentContextCandidateBuilder`才识别当前visible receipt并严格解引用到完整有序
+   Run items中的root；只对root精确引用的deterministic result Artifact ID预加载，仍不得扫描Task或Run外
+   authority；
+7. Context Builder把`visible_items`仅用于决定输出消息，把完整`ordered_items`作为source/root authority；
+   验证当前call与root identity后复用root model-effective payload：inline直接使用、artifact-backed调用
+   Checkpoint B resolver、transient调用现有resolver、已清理transient使用summary-only。当前model-only
+   Tool message保留source `artifact_refs`，当前durable receipt不复制这些refs；
+8. reuse路径捕获Checkpoint B resolver/source authority失败并转换为
+   `agent_reused_tool_result_unavailable`；直接artifact-backed路径继续使用原错误码；
+9. reuse结果是否为required context沿当前未消费Tool result规则计算一次，不新增独立compaction语义；
+10. `observability.py`只扩展closed枚举`reused -> error_code None`；reused observation的raw digest为空。
+    现有observer继续生成runtime audit event；仅在调用方已配置`AgentMetricsRecorder`时记录closed
+    `outcome=duplicate`，不修改`src/api/runtime.py`增加生产metric sink或wiring。
 
 ### 4.3 Runner同batch两阶段调度
 
