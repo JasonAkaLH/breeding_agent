@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 新增已批准的Agent Tool结果交付与重复调用熔断设计：真实OCR MCP Task的9个不同call和文献Skill Task的5个不同call证明重复来自结果正文未进入Outer Agent上下文；方案A统一MCP model-safe `text`，让带业务Artifact的大Skill也走private transient full-result注入，并以同一AgentRun内`capability_id + canonical arguments_json`复用已完成结果、阻止第二次Executor/外部副作用。失败、waiting、不同参数和不同Run不熔断；外部Skill/MCP Server、schema、前端和`prod`不在范围。License Requirement：复用现有Python、Agent Loop、MCP typed projection、private transient store与Artifact authority，无新增依赖或许可变化。
+
 - Agent Interrupt恢复Lease Handle最小修复已`implemented_local`：真实OCR授权Task证明“始终允许”已保存Grant且Tool已完成，但约44秒resume跨多次10秒heartbeat后用旧token/revision触发`agent_invocation_not_owned`。`503a590f`把Recovery Coordinator当前`AgentLeaseHandle`传入authority resolver、Interrupt/MCP recovery和`AgentCapabilityInvoker.resume()`，复用普通调用ownership lock；未放宽fencing或暂停heartbeat。红测精确复现两个缺口，修复后Lifecycle 48、Orchestration 181、受影响API 66项及compileall/Ruff/diff-check通过；只重建backend且healthy，frontend/Sidecar未重建，旧Task未修改。用户新Task真实授权smoke待执行，尚不标记完整完成。License Requirement：复用既有Python与Agent lease/recovery/invocation，无新增依赖或许可变化。
 
 - Agent Interrupt恢复Lease Handle最小实施计划已完成自动化与本地部署部分：`a2dccdd8`设计、`1a6ddae8`计划和`503a590f`实现形成可回滚检查点；resolver合同、resume handle、相关全量与运行镜像均已验证。禁止的一参数fallback、ownership放宽、heartbeat暂停、旧Task修复及其他范围扩张均未发生；仅余用户新Task真实授权smoke。License Requirement：无新增依赖或许可变化。
