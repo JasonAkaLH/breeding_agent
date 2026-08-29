@@ -142,6 +142,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "get_mcp_no_server_intent": "(self, intent_id: 'str') -> 'MCPNoServerIntent | None'",
   "get_mcp_pending_tool_action": "(self, action_id: 'str') -> 'MCPPendingToolAction | None'",
   "get_mcp_pending_tool_action_for_interrupt": "(self, interrupt_id: 'str') -> 'MCPPendingToolAction | None'",
+  "list_protected_mcp_pending_action_payload_refs": "(self) -> 'tuple[str, ...]'",
   "get_mcp_remote_task_binding": "(self, owner_user_id: 'str', task_id: 'str', safe_remote_task_ref: 'str') -> 'MCPRemoteTaskBinding | None'",
   "get_mcp_remote_task_binding_for_call": "(self, owner_user_id: 'str', task_id: 'str', call_ref: 'str') -> 'MCPRemoteTaskBinding | None'",
   "get_mcp_remote_task_outbox": "(self, outbox_id: 'str') -> 'MCPRemoteTaskOutbox | None'",
@@ -329,7 +330,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 279)
+        self.assertEqual(len(actual), 280)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(

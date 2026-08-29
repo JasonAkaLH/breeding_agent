@@ -59,7 +59,9 @@ from src.storage.sqlite.models import (
     MCPCallRecordRow,
     MCPDispatchResumeOutboxRow,
     MCPDurableResultLifecycleRow,
+    MCPExecutionTerminalProjectionRow,
     MCPPendingToolActionRow,
+    MCPTerminalResultReceiptRow,
     MCPTerminalCandidateLifecycleRow,
     UserMCPToolGrantRow,
 )
@@ -322,6 +324,78 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             pending_action_id=action_id,
             created_at=NOW,
             updated_at=NOW,
+        )
+
+    def _failed_receipt_row(
+        self,
+        call_ref: str,
+        *,
+        suffix: str,
+    ) -> MCPTerminalResultReceiptRow:
+        return MCPTerminalResultReceiptRow(
+            result_receipt_id=f"receipt-{suffix}",
+            candidate_id=f"candidate-{suffix}",
+            owner_user_id="alice",
+            conversation_id=self.task.conversation_id,
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            intent_id=self.intent_id,
+            call_id=call_ref,
+            server_id=self.server.server_id,
+            server_config_version=self.server.config_version,
+            server_security_version=self.server.security_version,
+            terminal_state="failed",
+            result_payload_sha256="sha256:" + "1" * 64,
+            safe_result_ref=None,
+            safe_result_ref_sha256=None,
+            safe_error_code="remote_failed",
+            safe_result_content_sha256=None,
+            safe_result_size_bytes=None,
+            safe_result_store_kind=None,
+            result_parser_revision=None,
+            validated_checkpoint_sha256=None,
+            parsed_model_sha256=None,
+            completion_mode="normal_terminal_projection",
+            committed_at=NOW + timedelta(seconds=1),
+        )
+
+    def _unknown_projection_row(
+        self,
+        call_ref: str,
+        *,
+        suffix: str,
+    ) -> MCPExecutionTerminalProjectionRow:
+        return MCPExecutionTerminalProjectionRow(
+            projection_id=f"projection-{suffix}",
+            owner_user_id="alice",
+            conversation_id=self.task.conversation_id,
+            intent_id=self.intent_id,
+            call_id=call_ref,
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            status="unknown",
+            revision=0,
+            no_replay=True,
+            reason_code="trusted_terminal_result_absent",
+            unknown_intent_revision=1,
+            unknown_event_id=f"unknown-{suffix}",
+            task_failed_event_id=f"failed-{suffix}",
+            unknown_terminal_at=NOW + timedelta(seconds=1),
+            task_terminal_status="failed",
+            node_terminal_status="failed",
+            result_receipt_id=None,
+            result_payload_sha256=None,
+            resolved_terminal_state=None,
+            safe_result_ref=None,
+            safe_result_ref_sha256=None,
+            safe_error_code=None,
+            resolved_intent_revision=None,
+            resolution_event_id=None,
+            correction_event_id=None,
+            result_committed_at=None,
+            resolved_at=None,
+            created_at=NOW + timedelta(seconds=1),
+            updated_at=NOW + timedelta(seconds=1),
         )
 
     async def _admit(self):
@@ -998,6 +1072,158 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.claim_token, "token")
         self.assertEqual(str(intent.status), "dispatched")
         self.assertEqual(self.reader.calls, 1)
+
+    async def test_pending_payload_protection_requires_exact_terminal_evidence(
+        self,
+    ) -> None:
+        self.assertEqual(
+            await self.storage.list_protected_mcp_pending_action_payload_refs(),
+            ("mcp-action-payload-1",),
+        )
+        await self._admit()
+        self.assertEqual(
+            await self.storage.list_protected_mcp_pending_action_payload_refs(),
+            ("mcp-action-payload-1",),
+        )
+
+        with self.sessions() as session:
+            call = session.get(MCPCallRecordRow, "call-1")
+            call.status = "failed"
+            call.safe_error_code = "remote_failed"
+            call.terminal_at = NOW + timedelta(seconds=1)
+            call.updated_at = NOW + timedelta(seconds=1)
+            session.add(self._failed_receipt_row("call-1", suffix="call-1"))
+            session.commit()
+
+        self.assertEqual(
+            await self.storage.list_protected_mcp_pending_action_payload_refs(),
+            (),
+        )
+
+    async def test_pending_payload_protection_follows_exact_mrtr_continuation(
+        self,
+    ) -> None:
+        await self._admit()
+        with self.sessions() as session:
+            original = session.get(MCPCallRecordRow, "call-1")
+            original.status = "input_required"
+            original.updated_at = NOW + timedelta(seconds=1)
+            session.add(
+                MCPCallRecordRow(
+                    call_ref="call-2",
+                    branch_id=original.branch_id,
+                    owner_user_id=original.owner_user_id,
+                    task_id=original.task_id,
+                    node_id=original.node_id,
+                    server_id=original.server_id,
+                    tool_name=original.tool_name,
+                    status="failed",
+                    call_sequence=2,
+                    arguments_sha256=original.arguments_sha256,
+                    server_security_version=original.server_security_version,
+                    server_config_version=original.server_config_version,
+                    input_schema_sha256=original.input_schema_sha256,
+                    protocol_version=original.protocol_version,
+                    output_schema=original.output_schema,
+                    output_schema_sha256=original.output_schema_sha256,
+                    may_have_dispatched=True,
+                    safe_error_code="remote_failed",
+                    pending_action_id=None,
+                    continuation_of_call_ref=original.call_ref,
+                    created_at=NOW + timedelta(seconds=1),
+                    updated_at=NOW + timedelta(seconds=2),
+                    terminal_at=NOW + timedelta(seconds=2),
+                )
+            )
+            session.commit()
+
+        self.assertEqual(
+            await self.storage.list_protected_mcp_pending_action_payload_refs(),
+            ("mcp-action-payload-1",),
+        )
+        with self.sessions() as session:
+            session.add(self._failed_receipt_row("call-2", suffix="call-2"))
+            session.commit()
+        self.assertEqual(
+            await self.storage.list_protected_mcp_pending_action_payload_refs(),
+            (),
+        )
+
+        with self.sessions() as session:
+            continuation = session.get(MCPCallRecordRow, "call-2")
+            continuation.arguments_sha256 = "sha256:drift"
+            session.commit()
+        self.assertEqual(
+            await self.storage.list_protected_mcp_pending_action_payload_refs(),
+            ("mcp-action-payload-1",),
+        )
+
+    async def test_pending_payload_unknown_requires_same_call_projection(
+        self,
+    ) -> None:
+        await self._admit()
+        with self.sessions() as session:
+            first = session.get(MCPCallRecordRow, "call-1")
+            first.status = "unknown"
+            first.safe_error_code = "execution_status_unknown"
+            first.terminal_at = NOW + timedelta(seconds=1)
+            first.updated_at = NOW + timedelta(seconds=1)
+            session.add(
+                MCPPendingToolActionRow(
+                    action_id="action-2",
+                    owner_user_id="alice",
+                    conversation_id=self.task.conversation_id,
+                    task_id=self.task.task_id,
+                    node_id=self.node.node_id,
+                    server_id=self.server.server_id,
+                    tool_name="lookup",
+                    arguments_sha256="sha256:arguments-2",
+                    approval_fingerprint="sha256:approval-2",
+                    arguments_payload_ref="mcp-action-payload-2",
+                    payload_file_sha256="sha256:file-2",
+                    payload_size_bytes=124,
+                    encryption_version=1,
+                    server_config_version=self.server.config_version,
+                    server_security_version=self.server.security_version,
+                    input_schema_sha256="sha256:schema",
+                    status="consumed",
+                    revision=2,
+                    approved_at=NOW,
+                    consumed_at=NOW,
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+            session.add(
+                MCPCallRecordRow(
+                    call_ref="call-2",
+                    branch_id="branch-1",
+                    owner_user_id="alice",
+                    task_id=self.task.task_id,
+                    node_id=self.node.node_id,
+                    server_id=self.server.server_id,
+                    tool_name="lookup",
+                    status="unknown",
+                    call_sequence=2,
+                    arguments_sha256="sha256:arguments-2",
+                    server_security_version=self.server.security_version,
+                    server_config_version=self.server.config_version,
+                    input_schema_sha256="sha256:schema",
+                    may_have_dispatched=True,
+                    safe_error_code="execution_status_unknown",
+                    pending_action_id="action-2",
+                    created_at=NOW,
+                    updated_at=NOW + timedelta(seconds=1),
+                    terminal_at=NOW + timedelta(seconds=1),
+                )
+            )
+            session.add(self._unknown_projection_row("call-1", suffix="call-1"))
+            session.commit()
+
+        self.assertEqual(
+            await self.storage.list_protected_mcp_pending_action_payload_refs(),
+            ("mcp-action-payload-2",),
+        )
 
     async def test_valid_grant_admits_exact_action_candidate_without_prior_row(self) -> None:
         with self.sessions() as session:

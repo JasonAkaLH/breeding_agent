@@ -412,6 +412,10 @@ class MCPDispatchStoragePort(Protocol):
         self, interrupt_id: str
     ) -> MCPPendingToolAction | None: ...
 
+    async def list_protected_mcp_pending_action_payload_refs(
+        self,
+    ) -> tuple[str, ...]: ...
+
     async def list_mcp_dispatch_resume_outboxes(
         self,
         *,

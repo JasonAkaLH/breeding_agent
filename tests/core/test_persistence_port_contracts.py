@@ -64,6 +64,7 @@ EXPECTED_METHODS_BY_PORT = {
         "get_mcp_pending_tool_action",
         "get_latest_approved_mcp_tool_action",
         "get_mcp_pending_tool_action_for_interrupt",
+        "list_protected_mcp_pending_action_payload_refs",
         "list_mcp_dispatch_resume_outboxes",
         "claim_mcp_dispatch_resume_outbox",
         "reclaim_mcp_dispatch_resume_outbox",
@@ -356,8 +357,8 @@ class PersistencePortContractsTest(unittest.TestCase):
             self.assertTrue(getattr(port, "_is_runtime_protocol", False), port_name)
             actual_names.extend(direct)
 
-        self.assertEqual(len(actual_names), 279)
-        self.assertEqual(len(set(actual_names)), 279)
+        self.assertEqual(len(actual_names), 280)
+        self.assertEqual(len(set(actual_names)), 280)
         self.assertEqual(set(actual_names), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
 
     def test_aggregate_is_thin_and_preserves_exact_inherited_surface(self) -> None:

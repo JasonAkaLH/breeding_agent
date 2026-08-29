@@ -15,7 +15,7 @@ from typing import Any, NoReturn, cast
 from sqlalchemy import and_, delete, func, null, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
 from src.auth.postgres_invalidation_bus import auth_generation_notify_sql
@@ -1650,6 +1650,84 @@ def _mcp_pending_action_values(action: MCPPendingToolAction) -> dict[str, Any]:
         "created_at": action.created_at,
         "updated_at": action.updated_at,
     }
+
+
+def _pending_action_call_identity_matches(
+    action: MCPPendingToolActionRow,
+    call: MCPCallRecordRow | None,
+) -> bool:
+    return bool(
+        call is not None
+        and call.pending_action_id == action.action_id
+        and call.owner_user_id == action.owner_user_id
+        and call.task_id == action.task_id
+        and call.node_id == action.node_id
+        and call.server_id == action.server_id
+        and call.tool_name == action.tool_name
+        and call.arguments_sha256 == action.arguments_sha256
+        and call.server_config_version == action.server_config_version
+        and call.server_security_version == action.server_security_version
+        and call.input_schema_sha256 == action.input_schema_sha256
+    )
+
+
+def _pending_action_continuation_identity_matches(
+    original: MCPCallRecordRow,
+    continuation: MCPCallRecordRow | None,
+) -> bool:
+    return bool(
+        continuation is not None
+        and continuation.pending_action_id is None
+        and continuation.continuation_of_call_ref == original.call_ref
+        and continuation.branch_id == original.branch_id
+        and continuation.owner_user_id == original.owner_user_id
+        and continuation.task_id == original.task_id
+        and continuation.node_id == original.node_id
+        and continuation.server_id == original.server_id
+        and continuation.tool_name == original.tool_name
+        and continuation.arguments_sha256 == original.arguments_sha256
+        and continuation.server_config_version == original.server_config_version
+        and continuation.server_security_version == original.server_security_version
+        and continuation.input_schema_sha256 == original.input_schema_sha256
+    )
+
+
+def _pending_action_receipt_identity_matches(
+    action: MCPPendingToolActionRow,
+    call: MCPCallRecordRow,
+    receipt: MCPTerminalResultReceiptRow | None,
+) -> bool:
+    return bool(
+        receipt is not None
+        and call.status in {"completed", "failed", "cancelled"}
+        and receipt.terminal_state == call.status
+        and receipt.owner_user_id == action.owner_user_id
+        and receipt.conversation_id == action.conversation_id
+        and receipt.task_id == action.task_id
+        and receipt.node_id == action.node_id
+        and receipt.call_id == call.call_ref
+        and receipt.server_id == action.server_id
+        and receipt.server_config_version == action.server_config_version
+        and receipt.server_security_version == action.server_security_version
+    )
+
+
+def _pending_action_projection_identity_matches(
+    action: MCPPendingToolActionRow,
+    call: MCPCallRecordRow,
+    projection: MCPExecutionTerminalProjectionRow | None,
+) -> bool:
+    return bool(
+        projection is not None
+        and call.status == "unknown"
+        and projection.status in {"unknown", "late_result_resolved"}
+        and projection.no_replay
+        and projection.owner_user_id == action.owner_user_id
+        and projection.conversation_id == action.conversation_id
+        and projection.task_id == action.task_id
+        and projection.node_id == action.node_id
+        and projection.call_id == call.call_ref
+    )
 
 
 def _mcp_approval_interrupt_values(interrupt: Interrupt) -> dict[str, Any]:
@@ -6664,6 +6742,92 @@ class SQLiteStateRepository:
         if len(rows) > 1:
             raise RuntimeError("mcp_approval_interrupt_action_ambiguous")
         return None if not rows else _row_to_mcp_pending_action(rows[0])
+
+    def list_protected_mcp_pending_action_payload_refs(self) -> tuple[str, ...]:
+        direct_call = aliased(MCPCallRecordRow)
+        continuation_call = aliased(MCPCallRecordRow)
+        direct_receipt = aliased(MCPTerminalResultReceiptRow)
+        continuation_receipt = aliased(MCPTerminalResultReceiptRow)
+        direct_projection = aliased(MCPExecutionTerminalProjectionRow)
+        continuation_projection = aliased(MCPExecutionTerminalProjectionRow)
+        rows = self._session.execute(
+            select(
+                MCPPendingToolActionRow,
+                direct_call,
+                continuation_call,
+                direct_receipt,
+                continuation_receipt,
+                direct_projection,
+                continuation_projection,
+            )
+            .outerjoin(
+                direct_call,
+                direct_call.pending_action_id == MCPPendingToolActionRow.action_id,
+            )
+            .outerjoin(
+                continuation_call,
+                continuation_call.continuation_of_call_ref == direct_call.call_ref,
+            )
+            .outerjoin(
+                direct_receipt,
+                direct_receipt.call_id == direct_call.call_ref,
+            )
+            .outerjoin(
+                continuation_receipt,
+                continuation_receipt.call_id == continuation_call.call_ref,
+            )
+            .outerjoin(
+                direct_projection,
+                direct_projection.call_id == direct_call.call_ref,
+            )
+            .outerjoin(
+                continuation_projection,
+                continuation_projection.call_id == continuation_call.call_ref,
+            )
+            .order_by(MCPPendingToolActionRow.arguments_payload_ref)
+        ).all()
+        protected: list[str] = []
+        for (
+            action,
+            direct,
+            continuation,
+            direct_terminal_receipt,
+            continuation_terminal_receipt,
+            direct_unknown_projection,
+            continuation_unknown_projection,
+        ) in rows:
+            if action.status in {"denied", "invalidated"}:
+                continue
+            deletable = False
+            if action.status == "consumed" and _pending_action_call_identity_matches(
+                action, direct
+            ):
+                assert direct is not None
+                deletable = _pending_action_receipt_identity_matches(
+                    action, direct, direct_terminal_receipt
+                ) or _pending_action_projection_identity_matches(
+                    action, direct, direct_unknown_projection
+                )
+                if (
+                    not deletable
+                    and direct.status == "input_required"
+                    and _pending_action_continuation_identity_matches(
+                        direct, continuation
+                    )
+                ):
+                    assert continuation is not None
+                    deletable = _pending_action_receipt_identity_matches(
+                        action,
+                        continuation,
+                        continuation_terminal_receipt,
+                    ) or _pending_action_projection_identity_matches(
+                        action,
+                        continuation,
+                        continuation_unknown_projection,
+                    )
+            if not deletable:
+                protected.append(action.arguments_payload_ref)
+        return tuple(protected)
 
     def list_mcp_dispatch_resume_outboxes(
         self,
@@ -15401,6 +15565,15 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.get_mcp_pending_tool_action_for_interrupt(
                 interrupt_id
+            )
+        )
+
+    async def list_protected_mcp_pending_action_payload_refs(
+        self,
+    ) -> tuple[str, ...]:
+        return await self._run(
+            lambda state, collab: (
+                state.list_protected_mcp_pending_action_payload_refs()
             )
         )
 
