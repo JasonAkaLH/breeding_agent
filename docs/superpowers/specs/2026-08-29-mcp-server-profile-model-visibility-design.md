@@ -1,6 +1,6 @@
 # MCP Server Profile 模型可见性最小设计
 
-状态：`approved`；待实施计划
+状态：`implemented`
 日期：2026-08-29
 目标分支：`main`
 
@@ -123,6 +123,10 @@ Outer Agent 的模型请求，多个 Server 时模型无法按业务语义可靠
   配置回滚。
 - 只有模型请求中的 `mcp.dispatch` Tool description经测试包含全部安全 Profile名称和路由
   描述，且现有schema/执行边界不变，才可声明完成。
+
+实现提交：`2444f196`。聚焦红测先证明旧description缺少Profile JSON；实现后相关Tool
+Catalog、preflight与Agent Loop共19项通过，compileall、Ruff和`git diff --check`通过。
+未修改或部署`prod`。
 
 License Requirement：复用现有Python、Agent Tool Catalog、JSON与context preflight能力；
 无新增依赖或许可变化。

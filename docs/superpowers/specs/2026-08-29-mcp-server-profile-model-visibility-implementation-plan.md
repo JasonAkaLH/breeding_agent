@@ -2,7 +2,7 @@
 
 依据：`2026-08-29-mcp-server-profile-model-visibility-design.md`
 设计提交：`ceed9aab`
-状态：`ready`
+状态：`complete`
 目标分支：`main`
 
 ## 1. 完成声明
@@ -103,3 +103,13 @@ git diff --check
 
 License Requirement：复用现有Python、Agent Tool Catalog、JSON与context preflight能力；
 无新增依赖或许可变化。
+
+## 8. 完成证据（2026-08-29）
+
+- 红测在旧代码上以`mcp.dispatch` description缺少换行后的Profile JSON精确失败。
+- `2444f196`只修改`tool_catalog.py`和`test_agent_tool_catalog.py`：动态description包含排序后的
+  `server_id/name/routing_description`与untrusted notice，现有Schema enum和Skill description
+  保持不变。
+- Tool Catalog、Catalog preflight和Agent Loop共19项通过；compileall、Ruff与
+  `git diff --check`通过。
+- DTO、数据库、MCP执行链、前端、Rust、配置、镜像和`prod`零变更；未发起网络调用或部署。
