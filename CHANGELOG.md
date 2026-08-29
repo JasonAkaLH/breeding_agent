@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- main开发环境的受保护`docker_cmd.md`已加入首次Runtime Sidecar部署命令：拉取`runtime-sidecar:0.1.24`，创建独立持久socket/data volume，精确替换`breeding-agent-runtime-sidecar-dev`并在60秒内等待镜像healthcheck通过；backend随后以只读方式挂载Unix socket，设置`MAF_RUNTIME_SIDECAR_ENDPOINT`，并显式保持runtime store/event log/task dispatcher三项authority模式为`off`。未启用shadow/enforce，未修改PostgreSQL、端口、Skill或主密钥合同；命令已通过bash语法检查，远端启动待镜像push后执行。`docker_cmd.md`继续Git-ignored且未跟踪。License Requirement：仅本地部署命令与非敏感账本更新，无依赖或许可变化。
+
 - main开发环境的受保护`docker_cmd.md`已接入外部Project Skill authority：固定使用`/data/peihai/vibe-breeding-dev/skills`作为宿主机根目录，以同版`backend-dev:0.1.24`镜像计算bundle digest，将该目录只读挂载到backend `/app/skill`并注入`MAF_PROJECT_SKILL_BUNDLE_DIGEST`；目录缺失或digest计算失败时在启动backend前停止。未挂载外部仓库根目录，未修改Skill内容、数据库、端口或其他环境参数；`docker_cmd.md`继续Git-ignored且未跟踪。License Requirement：仅本地部署命令与非敏感账本更新，无依赖或许可变化。
 
 - main开发环境的受保护`docker_cmd.md`已把旧`MAF_AUTH_TOKEN_HASH_SECRET`注入替换为专用主密钥文件：宿主机固定文件只读挂载到backend `/run/secrets/maf-master.key`，容器仅接收`MAF_MASTER_KEY_FILE`；部署命令在文件缺失时直接停止，不自动生成、覆盖或轮换密钥。旧auth secret文件不删除，保留旧版本回滚；`docker_cmd.md`继续Git-ignored且未跟踪。License Requirement：仅本地部署命令与非敏感账本更新，无依赖或许可变化。
