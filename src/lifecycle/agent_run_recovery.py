@@ -76,7 +76,7 @@ class AgentClaimedRunResumer(Protocol):
 
 
 AuthorityResolver = Callable[
-    [AgentContinuationLocator],
+    [AgentContinuationLocator, AgentLeaseHandle],
     AgentAuthorityResolution | Awaitable[AgentAuthorityResolution],
 ]
 Acknowledger = Callable[[], Any | Awaitable[Any]]
@@ -173,7 +173,10 @@ class AgentRunRecoveryCoordinator:
         authority_digest: str,
         safe_reason_code: str = "side_effect_unknown_no_replay",
     ) -> AgentRecoveryResult:
-        async def no_replay(_locator: AgentContinuationLocator) -> AgentAuthorityResolution:
+        async def no_replay(
+            _locator: AgentContinuationLocator,
+            _handle: AgentLeaseHandle,
+        ) -> AgentAuthorityResolution:
             return AgentAuthorityResolution(
                 authority_digest=authority_digest,
                 status=AgentCallOutcomeStatus.ABORTED,
@@ -368,7 +371,11 @@ class AgentRunRecoveryCoordinator:
         resolution = await self._leases.run_active_phase(
             "capability_wave",
             handle,
-            lambda _handle: _resolve(resolve_authority, locator),
+            lambda current_handle: _resolve(
+                resolve_authority,
+                locator,
+                current_handle,
+            ),
         )
         self._validate_resolution(locator, resolution, authority_digest)
         run, call, result = await self._load_and_validate(
@@ -511,8 +518,9 @@ class AgentRunRecoveryCoordinator:
 async def _resolve(
     resolver: AuthorityResolver,
     locator: AgentContinuationLocator,
+    handle: AgentLeaseHandle,
 ) -> AgentAuthorityResolution:
-    value = resolver(locator)
+    value = resolver(locator, handle)
     resolved = await value if inspect.isawaitable(value) else value
     if not isinstance(resolved, AgentAuthorityResolution):
         raise AgentStorageConflict("agent_continuation_authority_invalid")

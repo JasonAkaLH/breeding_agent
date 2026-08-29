@@ -396,7 +396,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                     resumer_state=resumer_state,
                 )
 
-                async def resolve(_locator):
+                async def resolve(_locator, _handle):
                     trace.append("authority.resolve")
                     return AgentAuthorityResolution(
                         locator.authority_digest,
@@ -420,6 +420,45 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(trace, expected_prefix + expected_tail)
                 self.assertEqual(resumer.calls, 0 if extra_waiting else 1)
 
+    async def test_authority_resolver_receives_current_renewable_lease_handle(self) -> None:
+        locator, _, _ = await self._seed_waiting(
+            "resolver-lease-handle",
+            AgentResumeKind.MCP_APPROVAL,
+        )
+        observed: dict[str, object] = {}
+
+        async def resolve(_locator, handle):
+            original = handle.current
+            renewed = await self.repository.renew_task_lease(
+                original.run_id,
+                owner_id=original.owner_id,
+                token=original.token,
+                ttl_seconds=30,
+            )
+            handle.current = renewed
+            observed.update(
+                original_token=original.token,
+                renewed_token=renewed.token,
+                renewed_revision=renewed.revision,
+            )
+            return AgentAuthorityResolution(
+                locator.authority_digest,
+                AgentCallOutcomeStatus.COMPLETED,
+                {"answer": "safe"},
+                {"answer_digest": "d" * 64},
+            )
+
+        result = await self.coordinator.continue_waiting_call(
+            locator,
+            owner_scope="owner-1",
+            authority_digest=locator.authority_digest,
+            resolve_authority=resolve,
+        )
+
+        self.assertEqual(result.state, AgentRecoveryState.RESUMED)
+        self.assertNotEqual(observed["original_token"], observed["renewed_token"])
+        self.assertGreater(observed["renewed_revision"], 0)
+
     async def test_duplicate_and_terminal_preload_ack_before_lease_acquire(self) -> None:
         cases = []
         duplicate_locator, _, _ = await self._seed_waiting(
@@ -430,7 +469,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             duplicate_locator,
             owner_scope="owner-1",
             authority_digest=duplicate_locator.authority_digest,
-            resolve_authority=lambda _locator: AgentAuthorityResolution(
+            resolve_authority=lambda _locator, _handle: AgentAuthorityResolution(
                 duplicate_locator.authority_digest,
                 AgentCallOutcomeStatus.COMPLETED,
                 {"answer": "safe"},
@@ -470,7 +509,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                     locator,
                     owner_scope="owner-1",
                     authority_digest=locator.authority_digest,
-                    resolve_authority=lambda _locator: (_ for _ in ()).throw(
+                    resolve_authority=lambda _locator, _handle: (_ for _ in ()).throw(
                         AssertionError("preload branch must not resolve")
                     ),
                     acknowledge=acknowledge,
@@ -509,7 +548,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 trace: list[str] = []
                 coordinator, resumer = self._tracing_coordinator(trace)
 
-                async def resolve(_locator):
+                async def resolve(_locator, _handle):
                     trace.append("authority.resolve")
                     current = await self.repository.get_run(locator.run_id)
                     assert current is not None
@@ -571,7 +610,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         resolver_calls = 0
         ack_observations = []
 
-        async def resolve(_locator):
+        async def resolve(_locator, _handle):
             nonlocal resolver_calls
             resolver_calls += 1
             return AgentAuthorityResolution(
@@ -612,7 +651,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             locator,
             owner_scope="owner-1",
             authority_digest=locator.authority_digest,
-            resolve_authority=lambda _locator: (_ for _ in ()).throw(
+            resolve_authority=lambda _locator, _handle: (_ for _ in ()).throw(
                 AssertionError("duplicate must not resolve authority again")
             ),
             acknowledge=acknowledge,
@@ -649,7 +688,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                     locator,
                     owner_scope="owner-1",
                     authority_digest=locator.authority_digest,
-                    resolve_authority=lambda current, snapshot=snapshot: adapter.project(
+                    resolve_authority=lambda current, _handle, snapshot=snapshot: adapter.project(
                         current, snapshot
                     ),
                 )
@@ -1030,7 +1069,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         trace: list[str] = []
         coordinator, resumer = self._tracing_coordinator(trace)
 
-        def resolve_authority(_locator):
+        def resolve_authority(_locator, _handle):
             trace.append("authority.resolve")
             return resolution
 
@@ -1055,7 +1094,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             locator,
             owner_scope="owner-1",
             authority_digest=locator.authority_digest,
-            resolve_authority=lambda _locator: (_ for _ in ()).throw(
+            resolve_authority=lambda _locator, _handle: (_ for _ in ()).throw(
                 AssertionError("durable result must not be recovered twice")
             ),
             acknowledge=acknowledge_retry,
@@ -1118,7 +1157,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 locator,
                 owner_scope="owner-1",
                 authority_digest=locator.authority_digest,
-                resolve_authority=lambda _locator: AgentAuthorityResolution(
+                resolve_authority=lambda _locator, _handle: AgentAuthorityResolution(
                     locator.authority_digest,
                     AgentCallOutcomeStatus.COMPLETED,
                     {"projection": "hidden"},
@@ -1143,7 +1182,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         )
         resolver_calls = 0
 
-        async def resolve(_locator):
+        async def resolve(_locator, _handle):
             nonlocal resolver_calls
             resolver_calls += 1
 
@@ -1170,7 +1209,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                         locator,
                         owner_scope=owner,
                         authority_digest=digest,
-                        resolve_authority=lambda _locator: None,
+                        resolve_authority=lambda _locator, _handle: None,
                     )
                 current = await self.repository.get_run(locator.run_id)
                 self.assertEqual(current.waiting_call_item_ids, before.waiting_call_item_ids)
@@ -1186,7 +1225,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         cancelled_task = await cancellation.cancel_task_context(locator.task_id)
         resolver_calls = 0
 
-        async def resolve(_locator):
+        async def resolve(_locator, _handle):
             nonlocal resolver_calls
             resolver_calls += 1
             return AgentAuthorityResolution(
@@ -1214,7 +1253,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def resolve(_locator):
+        async def resolve(_locator, _handle):
             entered.set()
             await release.wait()
             return AgentAuthorityResolution(

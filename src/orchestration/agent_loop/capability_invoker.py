@@ -121,6 +121,7 @@ class AgentCapabilityInvoker:
         self,
         locator: AgentContinuationLocator,
         *,
+        lease_handle: AgentLeaseHandle,
         cancellation=None,
     ) -> AgentCallExecution:
         run = await self._runs.get_run(locator.run_id)
@@ -174,7 +175,7 @@ class AgentCapabilityInvoker:
             capability_id=capability_id,
             effective_payload=effective_payload,
             cancellation=cancellation,
-            lease_handle=None,
+            lease_handle=lease_handle,
         )
 
     async def invoke(

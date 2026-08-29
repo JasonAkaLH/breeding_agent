@@ -6009,8 +6009,11 @@ class ApiRuntime(
             current_user_input=self._format_answer_message(answer_payload),
         )
 
-        async def resolve(_locator):
-            execution = await self._agent_capability_invoker.resume(locator)
+        async def resolve(_locator, lease_handle):
+            execution = await self._agent_capability_invoker.resume(
+                locator,
+                lease_handle=lease_handle,
+            )
             return AgentAuthorityResolution(
                 authority_digest=locator.authority_digest,
                 status=execution.status,
@@ -6085,7 +6088,7 @@ class ApiRuntime(
             ),
         )
 
-        async def resolve(_locator):
+        async def resolve(_locator, lease_handle):
             if authoritative_payload is not None:
                 return AgentAuthorityResolution(
                     authority_digest=locator.authority_digest,
@@ -6093,7 +6096,10 @@ class ApiRuntime(
                     safe_result_payload=dict(authoritative_payload),
                     safe_continuation_facts={"mcp_recovery": "authoritative_result"},
                 )
-            execution = await self._agent_capability_invoker.resume(locator)
+            execution = await self._agent_capability_invoker.resume(
+                locator,
+                lease_handle=lease_handle,
+            )
             return AgentAuthorityResolution(
                 authority_digest=locator.authority_digest,
                 status=execution.status,
@@ -10115,7 +10121,7 @@ class ApiRuntime(
         if continuation_projection is None:
             raise RuntimeError("mcp_continuation_projection_missing")
 
-        async def resolve_authority(_locator):
+        async def resolve_authority(_locator, _lease_handle):
             return AgentAuthorityResolution(
                 authority_digest=locator.authority_digest,
                 status=AgentCallOutcomeStatus.COMPLETED,

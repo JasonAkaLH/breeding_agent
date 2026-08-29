@@ -21,6 +21,10 @@ from src.orchestration.agent_loop.invocation import (
 )
 from src.orchestration.agent_loop.lease import AgentLeaseHandle
 from src.orchestration.agent_loop.capability_invoker import AgentCapabilityInvoker
+from src.orchestration.agent_loop.continuation import (
+    AgentContinuationLocator,
+    AgentResumeKind,
+)
 from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
@@ -478,6 +482,98 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
         self.assertEqual(port.tokens, [(3, "claim-1"), (4, "claim-2")])
+
+    async def test_resume_forwards_recovery_lease_handle_to_invoke(self) -> None:
+        run = AgentRun(
+            "run-1",
+            "task-1",
+            "conv-1",
+            AgentRunStatus.WAITING_FOR_INPUT,
+            AgentModelBinding("edition-a"),
+            active_sample_item_id="sample-1",
+            waiting_call_item_ids=("call-item-1",),
+            claim_token="claim-1",
+            revision=3,
+        )
+        call_item = AgentItem(
+            "call-item-1",
+            run.run_id,
+            run.task_id,
+            2,
+            AgentItemKind.TOOL_CALL,
+            AgentItemState.COMMITTED,
+            json.dumps(
+                {
+                    "arguments_json": '{"server_id":"server-1"}',
+                    "call_id": "provider-call-1",
+                    "capability_id": "mcp.dispatch",
+                    "node_id": "node-1",
+                    "provider_safe_name": "mcp_dispatch",
+                },
+                sort_keys=True,
+            ),
+            "a" * 64,
+            parent_item_id="sample-1",
+        )
+        reservation = AgentItem(
+            "result-item-1",
+            run.run_id,
+            run.task_id,
+            3,
+            AgentItemKind.TOOL_RESULT,
+            AgentItemState.RESERVED,
+            "{}",
+            "b" * 64,
+            source_call_item_id=call_item.item_id,
+        )
+
+        class Runs:
+            async def get_run(self, _run_id):
+                return run
+
+            async def list_items(self, _run_id):
+                return (call_item, reservation)
+
+        invoker = AgentCapabilityInvoker(
+            invocation_service=AsyncMock(),
+            runs=Runs(),
+            task_loader=AsyncMock(),
+            node_loader=AsyncMock(),
+            request_metadata_loader=lambda _run: {"mcp_dispatch_server_id": "server-1"},
+            current_user_input_loader=lambda _run: "",
+        )
+        invoker.invoke = AsyncMock(
+            return_value=SimpleNamespace(status=AgentCallOutcomeStatus.COMPLETED)
+        )
+        handle = AgentLeaseHandle(
+            AgentTaskLease(
+                "run-1",
+                "task-1",
+                "worker-1",
+                "claim-1",
+                3,
+                datetime.now(timezone.utc) + timedelta(seconds=30),
+            )
+        )
+        locator = AgentContinuationLocator(
+            run_id=run.run_id,
+            sample_item_id="sample-1",
+            call_item_id=call_item.item_id,
+            provider_call_id="provider-call-1",
+            capability_id="mcp.dispatch",
+            task_id=run.task_id,
+            node_id="node-1",
+            owner_scope="owner-1",
+            conversation_id=run.conversation_id,
+            resume_kind=AgentResumeKind.MCP_APPROVAL,
+            authority_digest="c" * 64,
+            pinned_bundle_revision=None,
+            model_binding=run.binding,
+        )
+
+        await invoker.resume(locator, lease_handle=handle)
+
+        self.assertIs(invoker.invoke.await_args.kwargs["lease_handle"], handle)
 
     async def test_waiting_branches_keep_execution_revalidation_and_semantic_commit_order(
         self,
