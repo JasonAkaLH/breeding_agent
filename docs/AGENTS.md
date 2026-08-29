@@ -12,7 +12,6 @@
 - `checkpoint/`：checkpoint、time-travel、thread event 等设计与实施计划。
 - `superpowers/specs/`：本地设计草案、spec 与阶段性方案。
 - `superpowers/specs/2026-07-15-docker-cmd-local-only-protection-design.md`：`docker_cmd.md` 本地保留、Git 历史清理与防止重新跟踪的安全边界。
-- `superpowers/specs/2026-08-29-docker-cmd-prod-profile-switch-design.md`：在不切换 Git 分支、不输出敏感值的前提下，将本地受保护 `docker_cmd.md` 从 main 开发 profile 安全切换到 prod profile，并保留 `0600` 回滚副本。
 - `superpowers/specs/2026-08-12-user-scoped-mcp-routing-execution-design.md`：用户级 MCP 两级路由、授权、执行账本、在线租约与前端闭环实施设计。
 - `superpowers/specs/2026-08-13-user-mcp-cp7-manual-retirement-design.md`：仅在 `main` 执行的 CP7-A assembly-off 候选、人工验收门禁与获批后 CP7-B 物理退役设计；不修改或宣称完成 `prod`。
 - `superpowers/specs/2026-08-14-maf-master-key-domain-derivation-design.md`：首次部署使用单一固定在线根密钥，通过五个闭合 HKDF 领域标签隔离 MCP credential/recovery、Auth token、audit reference 与 sentinel；不包含根密钥轮换或旧密文迁移。
