@@ -59,7 +59,7 @@ backend `/api-doc` 200、`git diff --check`和干净工作树。
   `sha256:c1664088e23d5879fb1dc85c898e3e2d0a9f4cde5ffe4f1640d99944982e8e34`；
 - 未挂载镜像确认不存在`/app/config.yaml`；本地配置的临时`0600`副本只读挂载后严格bootstrap无输出通过，
   隔离SQLite backend健康且`/api-doc`返回200；临时容器、配置副本和主密钥已删除；
-- 后续用户明确授权发布三个main镜像；Runtime Sidecar、backend-dev、frontend-dev `0.1.25`远端digest分别为
+- 后续用户明确授权发布三个main镜像；runtime-sidecar-dev、backend-dev、frontend-dev `0.1.25`远端digest分别为
   `sha256:346622b598649553936b5453afca8d1c1f69b5a4b3a3d6fa17cc3d525c632162`、
   `sha256:c1664088e23d5879fb1dc85c898e3e2d0a9f4cde5ffe4f1640d99944982e8e34`和
   `sha256:6f80c176ce8462fb7059bec6e6e4328a8cfa947d41bc4e191d0bd72d3193c721`，均含`linux/amd64`；
