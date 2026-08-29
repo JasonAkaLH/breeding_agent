@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 新增MCP磁盘清理生命周期最小修复设计：确认当前临时结果orphan janitor仅在启动运行一次，pending action已有24小时orphan与terminal evidence精确删除实现但未接生产。批准方案只增加唯一Runtime后台Task、每小时周期、terminal commit后best-effort精确删除和一个opaque保护ref窄查询；waiting approval、input-required、recovery、durable manifest与managed Artifact继续保留，失败低敏fail-open重试。不新增schema、配置、metric、通用清理框架、Frontend、Rust或外部服务改造，当前状态`written_review_pending`，尚未实施。License Requirement：仅设计、索引与非敏感账本更新，无依赖或许可变化。
+
 - main开发环境的受保护`docker_cmd.md`部署审计硬伤已修复：backend补齐user-scoped MCP gateway、enforce routing、legacy-off、100% rollout、稳定hash salt、最大并发和临时磁盘低水位七项必需变量，并显式关闭state-platform config bridge；部署顺序调整为先完成主密钥/Skill digest与PostgreSQL `pg_isready`预检，再精确删除旧frontend/backend/Sidecar并启动新栈，避免预检失败造成无谓停机。未加入自动备份、restart policy或其他范围扩张；MCP cohort保持默认空集，Sidecar三项authority模式继续为`off`。完整命令bash语法、变量唯一性与顺序检查通过；远端执行仍等待镜像push。`docker_cmd.md`继续Git-ignored且未跟踪。License Requirement：仅本地部署命令与非敏感账本更新，无依赖或许可变化。
 
 - main开发环境的受保护`docker_cmd.md`已加入首次Runtime Sidecar部署命令：拉取`runtime-sidecar:0.1.24`，创建独立持久socket/data volume，精确替换`breeding-agent-runtime-sidecar-dev`并在60秒内等待镜像healthcheck通过；backend随后以只读方式挂载Unix socket，设置`MAF_RUNTIME_SIDECAR_ENDPOINT`，并显式保持runtime store/event log/task dispatcher三项authority模式为`off`。未启用shadow/enforce，未修改PostgreSQL、端口、Skill或主密钥合同；命令已通过bash语法检查，远端启动待镜像push后执行。`docker_cmd.md`继续Git-ignored且未跟踪。License Requirement：仅本地部署命令与非敏感账本更新，无依赖或许可变化。
