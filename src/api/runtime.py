@@ -951,6 +951,8 @@ class ApiRuntime(
         self._mcp_result_artifact_reconciler_task: asyncio.Task[None] | None = None
         self._mcp_result_artifact_reconciler_error: BaseException | None = None
         self._mcp_result_artifact_reconciler_sleep = asyncio.sleep
+        self._mcp_disk_cleanup_task: asyncio.Task[None] | None = None
+        self._mcp_disk_cleanup_sleep = asyncio.sleep
         self._mcp_continuation_consumer_id = f"api-continuation:{uuid4().hex}"
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
@@ -10288,10 +10290,6 @@ class ApiRuntime(
                 await self.user_mcp_health_runner.start()
             if self.user_mcp_gateway is not None:
                 await self.storage.expire_user_mcp_scope_leases(now=self._utcnow_naive())
-            if self.user_mcp_result_janitor is not None and self.user_mcp_result_store is not None:
-                await self.user_mcp_result_janitor.cleanup_orphans(
-                    active_task_keys=self.user_mcp_result_store.active_task_keys()
-                )
             if self.user_mcp_config_service is not None:
                 await self.user_mcp_config_service.start()
             if self.postgres_mcp_invalidation_bus is not None:
@@ -10336,6 +10334,23 @@ class ApiRuntime(
                 )
                 self._mcp_result_artifact_reconciler_task.add_done_callback(
                     self._handle_mcp_result_artifact_reconciler_exit
+                )
+            if (
+                (
+                    self._mcp_pending_action_payload_store is not None
+                    or (
+                        self.user_mcp_result_janitor is not None
+                        and self.user_mcp_result_store is not None
+                    )
+                )
+                and (
+                    self._mcp_disk_cleanup_task is None
+                    or self._mcp_disk_cleanup_task.done()
+                )
+            ):
+                self._mcp_disk_cleanup_task = asyncio.create_task(
+                    self._run_mcp_disk_cleanup_forever(),
+                    name="mcp-disk-cleanup",
                 )
         except BaseException:
             await self._cancel_agent_run_lease_retries()
@@ -10991,6 +11006,40 @@ class ApiRuntime(
                             "mcp_result_artifact_projection_observation_failed"
                         )
             await self._mcp_result_artifact_reconciler_sleep(60)
+
+    async def _run_mcp_disk_cleanup_once(self) -> None:
+        if (
+            self.user_mcp_result_janitor is not None
+            and self.user_mcp_result_store is not None
+        ):
+            try:
+                await self.user_mcp_result_janitor.cleanup_orphans(
+                    active_task_keys=self.user_mcp_result_store.active_task_keys()
+                )
+            except Exception:
+                logger.warning("mcp_temporary_result_cleanup_failed")
+        pending_store = getattr(self, "_mcp_pending_action_payload_store", None)
+        if pending_store is None:
+            return
+        try:
+            protected_refs = (
+                await self.storage.list_protected_mcp_pending_action_payload_refs()
+            )
+        except Exception:
+            logger.warning("mcp_pending_action_payload_protection_query_failed")
+            return
+        try:
+            await pending_store.cleanup_orphans(
+                referenced_payload_refs=protected_refs,
+                now=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.warning("mcp_pending_action_payload_cleanup_failed")
+
+    async def _run_mcp_disk_cleanup_forever(self) -> None:
+        while True:
+            await self._run_mcp_disk_cleanup_once()
+            await self._mcp_disk_cleanup_sleep(3600)
 
     async def _reconcile_cp7_mcp_authority(self) -> None:
         """Compatibility entry point for focused recovery tests and operators."""
@@ -12200,6 +12249,14 @@ class ApiRuntime(
         finally:
             await self._cancel_agent_run_lease_retries()
         await self._quiesce_cp7_for_shutdown()
+        if self._mcp_disk_cleanup_task is not None:
+            if not self._mcp_disk_cleanup_task.done():
+                self._mcp_disk_cleanup_task.cancel()
+            await asyncio.gather(
+                self._mcp_disk_cleanup_task,
+                return_exceptions=True,
+            )
+            self._mcp_disk_cleanup_task = None
         if self._mcp_result_artifact_reconciler_task is not None:
             if not self._mcp_result_artifact_reconciler_task.done():
                 self._mcp_result_artifact_reconciler_task.cancel()

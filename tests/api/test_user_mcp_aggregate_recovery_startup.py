@@ -33,10 +33,12 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             "await self._reconcile_mcp_dispatch_recovery()",
             "await self._recover_agent_runs()",
             "self._mcp_post_ready_recovery_task = asyncio.create_task",
+            "self._mcp_result_artifact_reconciler_task = asyncio.create_task",
+            "self._mcp_disk_cleanup_task = asyncio.create_task",
         )
         self.assertEqual(
             [startup_source.count(marker) for marker in startup_markers],
-            [1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1],
         )
         startup_positions = [startup_source.index(marker) for marker in startup_markers]
         self.assertEqual(startup_positions, sorted(startup_positions))
@@ -44,6 +46,7 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         shutdown_source = inspect.getsource(ApiRuntime.shutdown)
         shutdown_markers = (
             "await self._quiesce_cp7_for_shutdown()",
+            "self._mcp_disk_cleanup_task.cancel()",
             "self._mcp_result_artifact_reconciler_task.cancel()",
             "self._mcp_post_ready_recovery_task.cancel()",
             "await self._close_cp7_safety()",
@@ -52,10 +55,70 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [shutdown_source.count(marker) for marker in shutdown_markers],
-            [1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1],
         )
         shutdown_positions = [shutdown_source.index(marker) for marker in shutdown_markers]
         self.assertEqual(shutdown_positions, sorted(shutdown_positions))
+
+    async def test_mcp_disk_cleanup_cycle_is_fail_open_and_uses_aware_time(
+        self,
+    ) -> None:
+        runtime = object.__new__(ApiRuntime)
+        runtime.user_mcp_result_janitor = AsyncMock(
+            side_effect=RuntimeError("temporary cleanup failed")
+        )
+        runtime.user_mcp_result_store = Mock()
+        runtime.user_mcp_result_store.active_task_keys.return_value = {
+            "task-active"
+        }
+        runtime._mcp_pending_action_payload_store = AsyncMock()
+        runtime.storage = AsyncMock()
+        runtime.storage.list_protected_mcp_pending_action_payload_refs.return_value = (
+            "protected-ref",
+        )
+
+        await runtime._run_mcp_disk_cleanup_once()
+
+        runtime.user_mcp_result_janitor.cleanup_orphans.assert_awaited_once_with(
+            active_task_keys={"task-active"}
+        )
+        runtime._mcp_pending_action_payload_store.cleanup_orphans.assert_awaited_once()
+        cleanup_call = (
+            runtime._mcp_pending_action_payload_store.cleanup_orphans.await_args
+        )
+        self.assertEqual(
+            cleanup_call.kwargs["referenced_payload_refs"],
+            ("protected-ref",),
+        )
+        self.assertIsNotNone(cleanup_call.kwargs["now"].utcoffset())
+
+        runtime.user_mcp_result_janitor.cleanup_orphans.side_effect = None
+        runtime._mcp_pending_action_payload_store.cleanup_orphans.reset_mock()
+        runtime.storage.list_protected_mcp_pending_action_payload_refs.side_effect = (
+            RuntimeError("protection query failed")
+        )
+
+        await runtime._run_mcp_disk_cleanup_once()
+
+        runtime.user_mcp_result_janitor.cleanup_orphans.assert_awaited()
+        runtime._mcp_pending_action_payload_store.cleanup_orphans.assert_not_awaited()
+
+    async def test_mcp_disk_cleanup_loop_runs_before_hourly_sleep(self) -> None:
+        runtime = object.__new__(ApiRuntime)
+        runtime._run_mcp_disk_cleanup_once = AsyncMock()
+        delays: list[int] = []
+
+        async def sleep(delay: int) -> None:
+            delays.append(delay)
+            raise asyncio.CancelledError
+
+        runtime._mcp_disk_cleanup_sleep = sleep
+
+        with self.assertRaises(asyncio.CancelledError):
+            await runtime._run_mcp_disk_cleanup_forever()
+
+        runtime._run_mcp_disk_cleanup_once.assert_awaited_once_with()
+        self.assertEqual(delays, [3600])
 
     async def test_partial_startup_and_first_shutdown_error_keep_current_cleanup_gap(self) -> None:
         runtime = object.__new__(ApiRuntime)
@@ -125,14 +188,18 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(started.wait(), timeout=1)
             self.assertFalse(start_task.done())
             self.assertIsNone(runtime._mcp_result_artifact_reconciler_task)
+            self.assertIsNone(runtime._mcp_disk_cleanup_task)
 
             release.set()
             await asyncio.wait_for(start_task, timeout=2)
             self.assertIsNotNone(runtime._mcp_result_artifact_reconciler_task)
             self.assertFalse(runtime._mcp_result_artifact_reconciler_task.done())
+            self.assertIsNotNone(runtime._mcp_disk_cleanup_task)
+            self.assertFalse(runtime._mcp_disk_cleanup_task.done())
 
             await runtime.shutdown()
             self.assertIsNone(runtime._mcp_result_artifact_reconciler_task)
+            self.assertIsNone(runtime._mcp_disk_cleanup_task)
 
     async def test_result_artifact_reconciler_runs_serial_cycles_every_sixty_seconds(
         self,
