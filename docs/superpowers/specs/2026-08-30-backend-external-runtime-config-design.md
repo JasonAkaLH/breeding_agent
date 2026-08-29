@@ -1,6 +1,6 @@
 # Backend 外部运行时配置最小设计
 
-状态：`approved`；document-perfectization第二轮`100/100 Pass`
+状态：`implemented_local`；document-perfectization第二轮`100/100 Pass`
 日期：2026-08-30
 目标分支：`main`
 

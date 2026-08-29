@@ -1,7 +1,7 @@
 # Backend 外部运行时配置最小实施计划
 
 依据：`2026-08-30-backend-external-runtime-config-design.md`
-状态：`planned`
+状态：`implemented_local`
 目标分支：`main`
 镜像版本：`0.1.25`
 
@@ -38,8 +38,8 @@
 2. 只对main backend相关命令做结构化修改：在任何停止/替换旧backend前验证
    `/data/peihai/config.yaml`非symlink、普通文件、单link、mode `0600`且非空，再用待发布backend镜像执行
    无输出的严格`bootstrap_config_env()`；启动命令增加只读挂载到`/app/config.yaml`；
-3. 运行`bash -n docker_cmd.md`和`scripts/check_docker_cmd_policy.sh`，确认文件仍存在、忽略且未跟踪；验证失败时
-   从外部备份恢复；
+3. 对`docker_cmd.md`实际命令区运行`bash -n`并运行`scripts/check_docker_cmd_policy.sh`，确认文件仍存在、忽略且
+   未跟踪；验证失败时从外部备份恢复；
 4. 构建`registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.25`，固定
    `--platform linux/amd64 --target backend`；
 5. 验证未挂载镜像不存在`/app/config.yaml`；把本地配置复制到明确临时目录并设为`0600`，仅作为运行时只读
@@ -49,7 +49,19 @@
 最终门禁：deployment目录相关测试、镜像`linux/amd64`检查、镜像内配置缺失检查、严格外部配置bootstrap、
 backend `/api-doc` 200、`git diff --check`和干净工作树。
 
-## 4. 已知边界
+## 4. 实施证据（2026-08-30）
+
+- `4259464a fix(docker): externalize backend runtime config`闭合`.dockerignore`、Dockerfile、Compose、README和
+  部署合同；聚焦红测先以2 failure/1 error证明三个缺口，修改后deployment 4项及Ruff通过；
+- 受保护`docker_cmd.md`在仓库外建立`0600`备份，只增加首次容器删除前的配置identity/0600/严格bootstrap预检
+  和backend只读挂载；实际命令区语法、local-only policy、忽略/未跟踪状态通过；文件未加入Git；
+- 重新构建本地`linux/amd64` backend `0.1.25`，OCI digest为
+  `sha256:c1664088e23d5879fb1dc85c898e3e2d0a9f4cde5ffe4f1640d99944982e8e34`；
+- 未挂载镜像确认不存在`/app/config.yaml`；本地配置的临时`0600`副本只读挂载后严格bootstrap无输出通过，
+  隔离SQLite backend健康且`/api-doc`返回200；临时容器、配置副本和主密钥已删除；
+- backend未推送、未部署；Frontend、Runtime Sidecar、配置加载业务代码、schema、依赖、外部服务器和`prod`未改。
+
+## 5. 已知边界
 
 此前中止推送可能遗留未引用blob，按已批准设计记录为用户接受的私有registry风险；本计划不执行registry GC、
 凭据轮换、远端tag删除、推送或部署。外部`/data/peihai/config.yaml`只由远端执行时预检，本地实施不连接服务器。
