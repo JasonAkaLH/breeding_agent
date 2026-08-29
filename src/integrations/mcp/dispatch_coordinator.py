@@ -1289,7 +1289,7 @@ class UserMCPDispatchCoordinator:
                             result_ref=outcome.result_ref,
                             events=events,
                             extra_output={
-                                "content": external_text or None,
+                                "text": external_text or None,
                                 "mcp_tool": tool_name,
                                 "output_size_bytes": outcome.byte_size,
                             },
@@ -3107,6 +3107,8 @@ class UserMCPDispatchCoordinator:
             "result_ref": saved.result_ref,
             "external_content_notice": EXTERNAL_CONTENT_NOTICE,
         }
+        if status == "completed":
+            output["text"] = saved.safe_summary
         if extra_output:
             output.update({key: value for key, value in extra_output.items() if value is not None})
         return MCPDispatchOutcome(

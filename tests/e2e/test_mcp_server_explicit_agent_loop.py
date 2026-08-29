@@ -18,17 +18,21 @@ from src.integrations.mcp.cp7_artifacts import (
 from src.integrations.mcp.resume_envelope import (
     MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2,
 )
-from src.integrations.mcp.gateway_models import MCPTaskServerScope, ToolCatalogSnapshot
+from src.integrations.mcp.gateway_models import (
+    MCPTaskServerScope,
+    ToolCatalogSnapshot,
+)
 from tests.api.support import APITestCase
 
 
 class _FinishSelector:
-    def __init__(self) -> None:
+    def __init__(self, reason: str = "discovery is sufficient") -> None:
         self.contexts = []
+        self.reason = reason
 
     async def select(self, context):
         self.contexts.append(context)
-        return MCPSelectorAction(MCPSelectorActionType.FINISH, reason="discovery is sufficient")
+        return MCPSelectorAction(MCPSelectorActionType.FINISH, reason=self.reason)
 
 
 class _FixedGateway:
@@ -69,6 +73,10 @@ class MCPServerExplicitAgentLoopE2ETest(APITestCase):
             "main_agent_stream_generator",
             lambda _prompt, **_options: '{"action":"finish","reason":"done"}',
         )
+        if kwargs.get("enable_user_mcp") is None:
+            kwargs["enable_user_mcp"] = True
+        if kwargs.get("enable_user_mcp_routing") is None:
+            kwargs["enable_user_mcp_routing"] = True
         with patch.dict(
             os.environ,
             {
@@ -77,11 +85,7 @@ class MCPServerExplicitAgentLoopE2ETest(APITestCase):
             },
             clear=False,
         ):
-            return super().build_runtime(
-                **kwargs,
-                enable_user_mcp=True,
-                enable_user_mcp_routing=True,
-            )
+            return super().build_runtime(**kwargs)
 
     async def test_fixed_server_discovery_finish_agent_final_and_history(self) -> None:
         now = datetime(2026, 8, 17, 10, 0, 0)
@@ -173,6 +177,68 @@ class MCPServerExplicitAgentLoopE2ETest(APITestCase):
         user_message = next(item for item in history.json()["messages"] if item["role"] == "user")
         self.assertEqual(user_message["metadata"]["mcp_server_badge"]["command"], "$OCR服务")
         self.assertNotIn("mcp_server_binding_context", user_message["metadata"])
+
+    async def test_completed_summary_reaches_next_agent_model_request_once(self) -> None:
+        sentinel = "MCP_RESULT_TEXT_SENTINEL"
+        prompts: list[str] = []
+
+        def agent_fixture(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            return "已根据MCP结果完成。"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=agent_fixture)
+        now = datetime(2026, 8, 29, 10, 0, 0)
+        await self.runtime.storage.create_user_mcp_server(
+            UserMCPServer(
+                server_id="mcp-summary",
+                owner_user_id="acc-1",
+                display_name="Summary服务",
+                routing_description="查询摘要",
+                endpoint_url="https://mcp.example.test/rpc",
+                transport=UserMCPTransport.STREAMABLE_HTTP,
+                health_status=UserMCPHealthStatus.AVAILABLE,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        executor = next(
+            item
+            for item in self.runtime._agent_capability_invoker._invocation._executor._executors
+            if isinstance(item, MCPDispatchExecutor)
+        )
+        coordinator = executor._coordinator
+        gateway = _FixedGateway()
+        coordinator._gateway = gateway
+        coordinator._selector = _FinishSelector(reason=sentinel)
+        coordinator._server_router = _ForbiddenRouter()
+
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-mcp-result-text",
+                "content": "查询rice并给出结果",
+                "routing_mode": "force_capability",
+                "capability_id": "mcp.dispatch",
+                "metadata": {
+                    "mcp_server_binding": {"server_id": "mcp-summary"},
+                    "deep_thinking": False,
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        terminal = await self.wait_for_terminal_task(response.json()["task_id"])
+        events = await self.runtime.storage.list_events_for_task(
+            response.json()["task_id"]
+        )
+        self.assertEqual(
+            terminal["status"],
+            "completed",
+            [(event.event_type, event.payload) for event in events],
+        )
+        self.assertEqual(gateway.calls, [])
+        matching_prompts = [prompt for prompt in prompts if sentinel in prompt]
+        self.assertEqual(len(matching_prompts), 1)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -61,6 +62,7 @@ from src.integrations.mcp.rollout_evidence import (
 from src.integrations.mcp.temporary_results import MCPResultTooLargeError
 from src.integrations.mcp.selector_context import MCPSelectorContextAuthorityError
 from src.orchestration.models import UserMCPServerProfile
+from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
 
 
 NOW = datetime(2026, 8, 12, 12, 0, 0)
@@ -771,6 +773,7 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             [event.payload["selector_action"] for event in selector_events],
             ["call_tool", "finish"],
         )
+        self.assertEqual(outcome.output_payload["text"], "done")
         finished = next(
             event
             for event in outcome.events
@@ -885,7 +888,30 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(selector.contexts), 1)
         self.assertEqual(outcome.output_payload["mcp_status"], "completed")
-        self.assertIn("助力双方交往", outcome.output_payload["content"])
+        self.assertIn("助力双方交往", outcome.output_payload["text"])
+        projected = AgentCallResultProjector().project(
+            capability_id="mcp.dispatch",
+            output_payload=outcome.output_payload,
+            call_item_id="call-item-ocr",
+            outcome="completed",
+            safe_error_code=None,
+        )
+        self.assertTrue(projected.accepted)
+        self.assertIn(
+            "助力双方交往",
+            projected.safe_result_payload["model_view"]["text"],
+        )
+        serialized = json.dumps(
+            projected.safe_result_payload["model_view"], ensure_ascii=False
+        )
+        for forbidden in (
+            "structured_content",
+            "raw_result",
+            "result_ref",
+            "storage_ref",
+            "credential",
+        ):
+            self.assertNotIn(forbidden, serialized)
 
     async def test_resumes_accepted_always_allow_and_persists_exact_grant_and_call_barriers(self) -> None:
         storage = _FakeStorage()
