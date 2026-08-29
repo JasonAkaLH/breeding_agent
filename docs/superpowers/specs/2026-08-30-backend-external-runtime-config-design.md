@@ -1,13 +1,13 @@
 # Backend 外部运行时配置最小设计
 
-状态：`implemented_local`；document-perfectization第二轮`100/100 Pass`
+状态：`published_main_not_deployed`；document-perfectization第二轮`100/100 Pass`
 日期：2026-08-30
 目标分支：`main`
 
 ## 1. 目标
 
 正式backend镜像不得包含仓库根目录本地`config.yaml`。服务器使用
-`/data/peihai/config.yaml`作为配置authority，并在容器启动时只读挂载到现有默认路径`/app/config.yaml`。
+`/data/peihai/seedpilot_config_dev.yaml`作为配置authority，并在容器启动时只读挂载到现有默认路径`/app/config.yaml`。
 
 ## 2. 最小方案
 
@@ -18,11 +18,11 @@
 3. `docker-compose.yml`通过必填`MAF_CONFIG_FILE_HOST`把配置以long bind syntax只读挂载到
    `/app/config.yaml`，并固定`bind.create_host_path: false`；
 4. main环境的受保护`docker_cmd.md`必须在backend停止或替换前验证
-   `/data/peihai/config.yaml`是非symlink普通文件、link count为1、mode精确为`0600`且非空，再使用待发布backend
+   `/data/peihai/seedpilot_config_dev.yaml`是非symlink普通文件、link count为1、mode精确为`0600`且非空，再使用待发布backend
    镜像执行无输出的`bootstrap_config_env("/app/config.yaml", override=True, strict=True)`；验证成功后才把该文件
    只读挂载到`/app/config.yaml`；
 5. README同步说明镜像不含配置、Compose必填变量，以及main服务器固定挂载源为
-   `/data/peihai/config.yaml`。
+   `/data/peihai/seedpilot_config_dev.yaml`。
 
 不采用构建期secret，因为最终镜像仍可能包含配置；不改成全环境变量注入，因为会扩大配置管理范围。
 
@@ -33,7 +33,7 @@
   `bind.create_host_path: false`挂载到`/app/config.yaml`；
 - main `docker_cmd.md`在任何backend停止/替换动作前完成上述文件identity、权限和严格配置加载预检；任一失败
   都必须停止部署，且不得输出配置正文；backend启动命令包含
-  `/data/peihai/config.yaml:/app/config.yaml:ro`等价只读bind；
+  `/data/peihai/seedpilot_config_dev.yaml:/app/config.yaml:ro`等价只读bind；
 - `linux/amd64` backend `0.1.25`可成功构建；
 - 不挂载配置时镜像文件系统不存在`/app/config.yaml`；
 - 挂载`0600`、普通且非symlink的临时外部配置后，严格bootstrap成功，隔离SQLite backend `/api-doc`返回200；
@@ -46,6 +46,9 @@
 registry范围内残留风险记录为接受；不声明“旧配置从未上传”，不扩展到凭据轮换、registry GC或仓库删除。新的
 backend镜像必须以重新构建后的本地digest覆盖同一tag，并在任何后续推送前重新验证镜像内不存在
 `/app/config.yaml`。
+
+后续用户已明确授权发布三个main镜像；远端`backend-dev:0.1.25`指向重新构建且不含`/app/config.yaml`的
+`sha256:c1664088e23d5879fb1dc85c898e3e2d0a9f4cde5ffe4f1640d99944982e8e34`，尚未部署。
 
 ## 5. 回滚
 

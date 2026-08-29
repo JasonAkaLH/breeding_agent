@@ -1,7 +1,7 @@
 # Backend 外部运行时配置最小实施计划
 
 依据：`2026-08-30-backend-external-runtime-config-design.md`
-状态：`implemented_local`
+状态：`published_main_not_deployed`
 目标分支：`main`
 镜像版本：`0.1.25`
 
@@ -36,7 +36,7 @@
 
 1. 在仓库外创建权限不宽于`0600`的`docker_cmd.md`备份；不得输出文件内容；
 2. 只对main backend相关命令做结构化修改：在任何停止/替换旧backend前验证
-   `/data/peihai/config.yaml`非symlink、普通文件、单link、mode `0600`且非空，再用待发布backend镜像执行
+   `/data/peihai/seedpilot_config_dev.yaml`非symlink、普通文件、单link、mode `0600`且非空，再用待发布backend镜像执行
    无输出的严格`bootstrap_config_env()`；启动命令增加只读挂载到`/app/config.yaml`；
 3. 对`docker_cmd.md`实际命令区运行`bash -n`并运行`scripts/check_docker_cmd_policy.sh`，确认文件仍存在、忽略且
    未跟踪；验证失败时从外部备份恢复；
@@ -59,11 +59,17 @@ backend `/api-doc` 200、`git diff --check`和干净工作树。
   `sha256:c1664088e23d5879fb1dc85c898e3e2d0a9f4cde5ffe4f1640d99944982e8e34`；
 - 未挂载镜像确认不存在`/app/config.yaml`；本地配置的临时`0600`副本只读挂载后严格bootstrap无输出通过，
   隔离SQLite backend健康且`/api-doc`返回200；临时容器、配置副本和主密钥已删除；
-- backend未推送、未部署；Frontend、Runtime Sidecar、配置加载业务代码、schema、依赖、外部服务器和`prod`未改。
+- 后续用户明确授权发布三个main镜像；Runtime Sidecar、backend-dev、frontend-dev `0.1.25`远端digest分别为
+  `sha256:346622b598649553936b5453afca8d1c1f69b5a4b3a3d6fa17cc3d525c632162`、
+  `sha256:c1664088e23d5879fb1dc85c898e3e2d0a9f4cde5ffe4f1640d99944982e8e34`和
+  `sha256:6f80c176ce8462fb7059bec6e6e4328a8cfa947d41bc4e191d0bd72d3193c721`，均含`linux/amd64`；
+  `docker_cmd.md`三镜像tag已更新为`0.1.25`且外部配置路径更正为
+  `/data/peihai/seedpilot_config_dev.yaml`；尚未部署，配置加载业务代码、schema、依赖、外部服务器和`prod`未改。
 
 ## 5. 已知边界
 
-此前中止推送可能遗留未引用blob，按已批准设计记录为用户接受的私有registry风险；本计划不执行registry GC、
-凭据轮换、远端tag删除、推送或部署。外部`/data/peihai/config.yaml`只由远端执行时预检，本地实施不连接服务器。
+此前中止推送可能遗留未引用blob，按已批准设计记录为用户接受的私有registry风险；后续发布授权只增加三个新
+main tag，不执行registry GC、凭据轮换、远端tag删除或部署。外部`/data/peihai/seedpilot_config_dev.yaml`只由
+远端执行时预检，本地实施不连接服务器。
 
 License Requirement：复用既有Docker、Compose、Python配置bootstrap与部署测试；无新增依赖或许可变化。
