@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 新增Agent Interrupt恢复Lease Handle最小修复设计：真实OCR授权Task证明“始终允许”已成功保存Grant且Tool已完成，但约44秒resume调用跨多次10秒heartbeat后仍用旧token/revision执行finish，触发`agent_invocation_not_owned`并留下answered Interrupt、reserved Tool result与waiting Run。批准方案只把Recovery Coordinator当前`AgentLeaseHandle`传入authority resolver和`AgentCapabilityInvoker.resume()`，复用普通调用已有ownership lock；不放宽fencing、不暂停heartbeat、不修改MCP/前端/数据库，也不修复当前卡住Task。当前仅设计，代码尚未实施。License Requirement：仅文档变更，无新增依赖或许可变化。
+
 - MCP Server Profile模型可见性最小实现已完成：Outer Agent继续只看到公开Skill与单一`mcp.dispatch`，后者的Tool description现在追加当前用户安全Profile的`server_id + display_name/name + routing_description` canonical JSON，并明确标注为只用于能力选择的不可信路由元数据；现有`server_id` enum继续作为唯一执行authority。聚焦红测先证明旧description缺Profile JSON，实现后Tool Catalog/preflight/Agent Loop共19项、compileall、Ruff与diff-check通过。独立Server Tool、内部Tool展开、DTO/数据库/前端/Router/Selector/Gateway/授权/恢复/镜像和`prod`均未修改。License Requirement：复用既有Python、Agent Tool Catalog、JSON与context preflight，无新增依赖或许可变化。
 
 - MCP Server Profile模型可见性最小实施计划已`complete`：`ceed9aab`设计、`c508f6ad`计划与`2444f196`实现形成可回滚检查点；业务源码严格限定`tool_catalog.py`，回归严格限定`test_agent_tool_catalog.py`，现有Schema enum、Skill与MCP执行边界保持不变。License Requirement：无新增依赖或许可变化。
