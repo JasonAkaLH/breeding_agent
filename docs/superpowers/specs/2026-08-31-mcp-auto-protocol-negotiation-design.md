@@ -2,9 +2,9 @@
 
 ## 状态
 
-`written_review_pending`
+`approved_planned`
 
-对话中的目标、范围和方案 A 已获批准；本文等待用户复核后再生成实施计划。当前没有业务代码变更。
+对话中的目标、范围和方案 A 已获批准；document-perfectization 硬伤复审以 `100/100 Pass` 通过，实施计划已生成。当前没有业务代码变更。
 
 ## 问题与证据
 
