@@ -16,7 +16,7 @@
 
 - 新建 MCP Server 时必须提交 `routing_description`，trim 后必须非空。
 - PATCH 可以省略 `routing_description`，省略表示保留原值。
-- PATCH 显式提交 `routing_description` 时，trim 后必须非空。
+- PATCH 显式提交 `routing_description` 时，`null`、空串或 trim 后为空均无效。
 - 存量空描述不迁移；省略该字段的其他配置更新不受影响。
 - 最大长度继续为 2000 个字符，现有控制字符限制保持不变。
 
@@ -28,7 +28,7 @@
 
 - `CreateUserMCPServerRequest.routing_description` 删除空字符串默认值，成为必填字段。
 - 现有规范化 validator 在 trim 后增加非空判断。
-- `PatchUserMCPServerRequest.routing_description` 保持可选；validator 仅在字段非 `None` 时执行相同的 trim、非空和控制字符校验。
+- `PatchUserMCPServerRequest.routing_description` 保持可省略；省略时沿用默认值且 validator 不运行，显式提交 `None` 时 validator 返回校验错误，字符串则执行相同的 trim、非空和控制字符校验。
 
 FastAPI/Pydantic 继续在进入配置 Service 前返回标准 422。配置 Service、Core model、数据库、Repository 和运行时路由不增加重复校验；这与当前 `display_name` 等外部输入由 DTO 负责校验的分层一致。
 
@@ -40,14 +40,14 @@ FastAPI/Pydantic 继续在进入配置 Service 前返回标准 422。配置 Serv
 
 ## 数据流与错误行为
 
-合法的新建或显式更新值在 DTO 中 trim 后进入现有 Service 和持久化链路。缺失的新建字段，以及新建或 PATCH 中的空串、纯空白值，在任何配置副作用前返回 422。PATCH 省略字段时继续由现有 `exclude_unset`/增量更新语义保留原值。
+合法的新建或显式更新值在 DTO 中 trim 后进入现有 Service 和持久化链路。缺失的新建字段，以及新建或 PATCH 中的 `null`、空串、纯空白值，在任何配置副作用前返回 422。PATCH 省略字段时继续由现有 `exclude_unset`/增量更新语义保留原值。
 
 前端表单在调用 API 前阻止空白提交；后端校验仍是外部契约 authority，不依赖前端正确性。
 
 ## 验证
 
-- DTO 回归：创建缺失、空串和纯空白均失败；合法值被 trim；PATCH 省略成功，显式空串和纯空白失败。
-- API 回归：创建请求缺失 `routing_description` 返回 422，且不创建 Server。
+- DTO 回归：创建缺失、`null`、空串和纯空白均失败；合法值被 trim；PATCH 省略成功，显式 `null`、空串和纯空白失败。
+- API 回归：创建请求缺失 `routing_description` 返回 422；PATCH 显式提交 `null` 返回 422；两者均不产生配置副作用。
 - 前端回归：空白描述显示校验错误且不调用保存 API；合法描述仍可创建和编辑。
 - 更新因创建契约变更而缺少描述的现有测试 fixture。
 - 运行聚焦后端测试、聚焦前端组件测试、前端 typecheck，并检查最终 diff。
