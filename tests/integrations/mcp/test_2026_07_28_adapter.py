@@ -23,12 +23,10 @@ from src.integrations.mcp.adapter_2026 import (
     MCP2026Adapter,
     MCPCompletedOutcome,
     MCPInputRequiredOutcome,
-    MCPMethodNotFoundError,
     MCPTaskCreatedOutcome,
     MCPUnsupportedProtocolVersionError,
-    safe_auto_downgrade_version,
 )
-from src.integrations.mcp.client import MCPAuthRequiredError, MCPClientError, MCPProtocolError
+from src.integrations.mcp.client import MCPProtocolError
 from src.integrations.mcp.credentials import (
     CredentialSecurityError,
     EncryptedCredential,
@@ -845,46 +843,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
                 poll_interval_ms=1000,
             )
 
-    def test_safe_auto_downgrade_requires_explicit_unsupported_evidence(self) -> None:
-        self.assertEqual(
-            safe_auto_downgrade_version(
-                MCPUnsupportedProtocolVersionError(
-                    supported_versions=("2025-06-18", "2025-11-25"),
-                    requested_version="2026-07-28",
-                    request_method="server/discover",
-                ),
-                auto_mode=True,
-            ),
-            "2025-11-25",
-        )
-        self.assertEqual(
-            safe_auto_downgrade_version(
-                MCPMethodNotFoundError("missing", request_method="server/discover"),
-                auto_mode=True,
-            ),
-            "2025-11-25",
-        )
-        self.assertIsNone(
-            safe_auto_downgrade_version(
-                MCPMethodNotFoundError("missing", request_method="tools/call"),
-                auto_mode=True,
-            )
-        )
-        for error in (
-            MCPAuthRequiredError(),
-            MCPClientError("network", code="mcp_transport_error", retriable=True),
-            MCPProtocolError("malformed"),
-        ):
-            with self.subTest(error=type(error).__name__):
-                self.assertIsNone(safe_auto_downgrade_version(error, auto_mode=True))
-        self.assertIsNone(
-            safe_auto_downgrade_version(
-                MCPMethodNotFoundError("missing", request_method="server/discover"),
-                auto_mode=False,
-            )
-        )
-
-    async def test_http_400_structured_unsupported_error_is_available_to_auto_negotiation(self) -> None:
+    async def test_http_400_structured_unsupported_error_remains_typed(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.headers["MCP-Protocol-Version"], "2026-07-28")
             return httpx.Response(400, json=fixture("unsupported_protocol_error.json"))
@@ -895,7 +854,11 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
         try:
             with self.assertRaises(MCPUnsupportedProtocolVersionError) as raised:
                 await adapter.discover()
-            self.assertEqual(safe_auto_downgrade_version(raised.exception, auto_mode=True), "2025-11-25")
+            self.assertEqual(raised.exception.request_method, "server/discover")
+            self.assertEqual(
+                raised.exception.supported_versions,
+                ("2025-11-25", "2025-06-18"),
+            )
         finally:
             await http_client.aclose()
 

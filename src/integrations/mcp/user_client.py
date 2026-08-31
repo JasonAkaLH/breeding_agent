@@ -10,8 +10,8 @@ from src.core.models import UserMCPServer
 
 from .adapter import PythonLegacyMCPClientAdapter
 from .adapter_2025_tasks import MCP2025TaskRecoveryClient, MCP2025TasksAdapter
-from .adapter_2026 import MCP2026Adapter, safe_auto_downgrade_version
-from .client import MCPClient, MCPProtocolError
+from .adapter_2026 import MCP2026Adapter
+from .client import MCPClient, MCPProtocolError, MCPRemoteError
 from .credentials import MCPCredentialCipher, CredentialSecurityError, MCPRecoveryService
 from .endpoint_policy import EndpointPolicy, EndpointPolicyError, ValidatedEndpoint
 from .policy_connection import build_policy_bound_http_connection
@@ -129,7 +129,17 @@ class UserMCPClientFactory:
             return _AutoNegotiatingAdapter(
                 initial=self._adapter_2026(server, headers, endpoint),
                 legacy_factory=lambda version: self._legacy_adapter(
-                    server, headers, endpoint, version
+                    server,
+                    headers,
+                    endpoint,
+                    version,
+                    pinned_protocol_version=False,
+                    wrap_2025_tasks=False,
+                ),
+                tasks_adapter_factory=lambda adapter: MCP2025TasksAdapter(
+                    adapter,
+                    server_id=server.server_id,
+                    recovery_service=self._recovery_service,
                 ),
             )
         version = str(server.protocol_preference)
@@ -220,7 +230,14 @@ class UserMCPClientFactory:
         )
 
     def _legacy_adapter(
-        self, server: UserMCPServer, headers: Mapping[str, str], endpoint, version: str
+        self,
+        server: UserMCPServer,
+        headers: Mapping[str, str],
+        endpoint,
+        version: str,
+        *,
+        pinned_protocol_version: bool = True,
+        wrap_2025_tasks: bool = True,
     ):
         if server.transport is UserMCPTransport.LEGACY_HTTP_SSE:
             transport = LegacyHTTPSSETransport(
@@ -238,11 +255,11 @@ class UserMCPClientFactory:
                 transport=transport,
                 protocol_version=version,
                 timeout_seconds=60,
-                pinned_protocol_version=True,
+                pinned_protocol_version=pinned_protocol_version,
                 transport_family=family,
             )
         )
-        if version == MCP_PROTOCOL_VERSION_2025_11_25:
+        if wrap_2025_tasks and version == MCP_PROTOCOL_VERSION_2025_11_25:
             return MCP2025TasksAdapter(
                 adapter,
                 server_id=server.server_id,
@@ -252,9 +269,16 @@ class UserMCPClientFactory:
 
 
 class _AutoNegotiatingAdapter:
-    def __init__(self, *, initial: Any, legacy_factory: Any) -> None:
+    def __init__(
+        self,
+        *,
+        initial: Any,
+        legacy_factory: Any,
+        tasks_adapter_factory: Any,
+    ) -> None:
         self._active = initial
         self._legacy_factory = legacy_factory
+        self._tasks_adapter_factory = tasks_adapter_factory
 
     @property
     def server_capabilities(self):
@@ -273,13 +297,17 @@ class _AutoNegotiatingAdapter:
     async def initialize(self):
         try:
             return await self._active.initialize()
-        except Exception as exc:
-            version = safe_auto_downgrade_version(exc, auto_mode=True)
-            if version is None:
-                raise
+        except (MCPProtocolError, MCPRemoteError):
             await self._active.close()
-            self._active = self._legacy_factory(version)
-            return await self._active.initialize()
+            legacy = self._legacy_factory(MCP_PROTOCOL_VERSION_2025_11_25)
+            self._active = legacy
+            session = await legacy.initialize()
+            if (
+                session.negotiated_protocol_version
+                == MCP_PROTOCOL_VERSION_2025_11_25
+            ):
+                self._active = self._tasks_adapter_factory(legacy)
+            return session
 
     async def list_tools(self):
         return await self._active.list_tools()

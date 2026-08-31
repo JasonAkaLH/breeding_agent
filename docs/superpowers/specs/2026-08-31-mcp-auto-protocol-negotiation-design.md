@@ -2,9 +2,9 @@
 
 ## 状态
 
-`approved_planned`
+`implemented_verified`
 
-对话中的目标、范围和方案 A 已获批准；document-perfectization 硬伤复审以 `100/100 Pass` 通过，实施计划已生成。当前没有业务代码变更。
+对话中的目标、范围和方案 A 已获批准，document-perfectization 硬伤复审以 `100/100 Pass` 通过；仓库最小实现、自动回归和脱敏真实连接 smoke 已完成。外部 QA 的连接结果及未闭合环境差异见实施账本。
 
 ## 问题与证据
 

@@ -4,7 +4,7 @@
 
 设计提交：`33b1dba2`；硬伤审查提交：`51535242`
 
-状态：`planned`
+状态：`complete`
 
 目标分支：`main`
 
@@ -167,5 +167,14 @@ git diff --check
 ## 7. 回滚
 
 回退实现检查点即可恢复原错误内容映射和 pinned legacy fallback；没有数据库、数据、缓存、schema、配置、镜像、部署或外部服务回滚步骤。QA 服务不参与自动验证，无需环境回滚。
+
+## 8. 完成证据（2026-08-31）
+
+- 旧实现聚焦红测共运行 24 项：新 auto 合同出现 8 个 error 和 1 个 failure，精确证明普通 typed protocol/remote error 不 fallback、close 未进入切换路径、缺少按实际版本包裹 Tasks，以及 factory 仍构造 pinned candidate；同次运行另发现 1 个既有 fixture 期望写窄，按 fixture 实际两个支持版本修正后未改变产品合同。
+- 新增 `test_user_mcp_auto_negotiation.py`，以 fake adapter/factory 锁定一次切换、typed 异常边界、关闭顺序、无第三候选、Tool 阶段不切换、显式 pin、legacy SSE auto 和 Tasks 包裹；并以真实 `MCPClient` + fake transport 证明 unpinned `2025-11-25` initialize 接受 `2025-06-18`/`2025-03-26`，后续 notification 使用实际协商版本。
+- 最小实现只修改 `user_client.py`、`adapter_2026.py` 和 MCP package/2026 adapter export；删除 `safe_auto_downgrade_version` 后，业务源码与测试零引用，package import 成功。
+- 聚焦 auto + 2026 adapter 25/25、Tasks/recovery/version/Gateway/Health 相关回归 72/72、MCP integrations 554 项通过（2 项按既有环境条件跳过）。compileall、变更面 Ruff、package import、旧 helper 零引用和 `git diff --check` 通过。
+- 用户提供的 `germQA`、`nruseryQA`、`darbQA`、`doeQA`、`gwsQA` 与 OCR 真实目标仅用于进程内脱敏 smoke，Endpoint、Header、凭据和响应正文均未写入仓库：5 个 legacy SSE QA 目标的鉴权原始 GET 可达并返回标准 endpoint event，但现有 policy-bound legacy client 均返回 `legacy_sse_connect_failed`，因此不记为连接通过，也不在本目标内修改 transport；Streamable HTTP OCR 目标在 modern initialize 返回 typed `MCPAuthRequiredError`（401），active adapter 保持 modern 且没有 fallback，验证了认证失败停止规则，但因缺少授权未形成正向协议协商证据。
+- 未修改 DTO、数据库、schema、配置、Endpoint Policy、认证、Gateway、Health Runner、Router/Selector、Frontend、Rust、镜像、部署、外部 MCP Server 或 `prod`；无新增依赖、持久化字段或跨会话缓存。
 
 License Requirement：复用现有 Python、MCP adapters、typed errors、Gateway scope 与 unittest；无新增依赖或许可变化。

@@ -22,7 +22,6 @@ from .protocol import (
     MCPRequestScopedTransport,
     MCPTransportResponse,
     MCP_TRANSPORT_STREAMABLE_HTTP,
-    SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
     json_rpc_message_kind,
 )
 
@@ -761,25 +760,6 @@ def encode_mcp_header_value(value: str) -> str:
     return f"=?base64?{encoded}?="
 
 
-def safe_auto_downgrade_version(error: BaseException, *, auto_mode: bool) -> str | None:
-    """Return the highest supported legacy version only for explicit evidence."""
-
-    if not auto_mode:
-        return None
-    supported: Sequence[str] | None = None
-    if isinstance(error, MCPUnsupportedProtocolVersionError) and error.request_method == "server/discover":
-        supported = error.supported_versions
-    elif isinstance(error, MCPMethodNotFoundError) and error.request_method == "server/discover":
-        supported = SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]
-    if supported is None:
-        return None
-    supported_set = set(supported)
-    return next(
-        (version for version in reversed(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]) if version in supported_set),
-        None,
-    )
-
-
 def _normalize_tool(raw_tool: Any) -> Mapping[str, Any] | None:
     if not isinstance(raw_tool, Mapping):
         raise MCPProtocolError("tools/list tool entries must be objects.")
@@ -954,5 +934,4 @@ __all__ = [
     "MCPToolCatalogPage",
     "MCPUnsupportedProtocolVersionError",
     "encode_mcp_header_value",
-    "safe_auto_downgrade_version",
 ]

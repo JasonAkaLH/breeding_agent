@@ -20,7 +20,6 @@ from .adapter_2026 import (
     MCPToolCatalogPage,
     MCPUnsupportedProtocolVersionError,
     encode_mcp_header_value,
-    safe_auto_downgrade_version,
 )
 from .client import MCPAuthRequiredError, MCPClient, MCPClientError, MCPProtocolError, MCPRemoteError
 from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig, load_mcp_server_config
@@ -86,7 +85,6 @@ __all__ = [
     "MCPToolCatalogPage",
     "MCPUnsupportedProtocolVersionError",
     "encode_mcp_header_value",
-    "safe_auto_downgrade_version",
     "MCPClientAdapter",
     "PythonLegacyMCPClientAdapter",
     "MCPNegotiatedSession",
