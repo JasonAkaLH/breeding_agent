@@ -46,6 +46,20 @@ _MCP_AGGREGATE_CONTROLLED_CUTOVER_TABLES = frozenset(
 _MCP_CALL_ADDITIVE_RESULT_AUTHORITY_COLUMNS = frozenset(
     {"output_schema", "output_schema_sha256", "terminal_result_source"}
 )
+AGENT_SCHEMA_CUTOVER_REASON_PREFIX = "agent_schema_cutover_required:"
+_LEGACY_AGENT_SCHEMA_TABLES = frozenset({"task_edge"})
+_LEGACY_AGENT_SCHEMA_COLUMNS = {
+    "task": frozenset({"root_node_id"}),
+    "task_node": frozenset(
+        {
+            "criticality",
+            "dependency_type",
+            "resource_class",
+            "retry_policy",
+            "timeout_policy",
+        }
+    ),
+}
 
 
 class ForbiddenPostgresSchemaActionError(ValueError):
@@ -131,6 +145,17 @@ def plan_postgres_schema_reconciliation(
         for statement in _split_sql(build_schema_ddl(guarded=True)):
             if statement.strip():
                 actions.append(SchemaAction("create_state_schema", statement, None))
+
+    for table_name in sorted(_LEGACY_AGENT_SCHEMA_TABLES & set(inspection.tables)):
+        operator_only_actions.append(
+            f"{AGENT_SCHEMA_CUTOVER_REASON_PREFIX}{table_name}"
+        )
+    for table_name, legacy_columns in _LEGACY_AGENT_SCHEMA_COLUMNS.items():
+        actual_columns = inspection.tables.get(table_name, {})
+        for column_name in sorted(legacy_columns & set(actual_columns)):
+            operator_only_actions.append(
+                f"{AGENT_SCHEMA_CUTOVER_REASON_PREFIX}{table_name}.{column_name}"
+            )
 
     for table_name in manifest.runtime_table_names:
         expected_columns = manifest.table_columns[table_name]

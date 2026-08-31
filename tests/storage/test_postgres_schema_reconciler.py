@@ -233,6 +233,59 @@ class PostgresSchemaReconcilerTest(unittest.TestCase):
             plan.sql_script(),
         )
 
+    def test_legacy_agent_schema_requires_controlled_cutover(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        cases = (
+            ("task.root_node_id", "task", "root_node_id"),
+            ("task_node.criticality", "task_node", "criticality"),
+            ("task_node.dependency_type", "task_node", "dependency_type"),
+            ("task_node.retry_policy", "task_node", "retry_policy"),
+            ("task_node.timeout_policy", "task_node", "timeout_policy"),
+            ("task_node.resource_class", "task_node", "resource_class"),
+        )
+
+        for reason_suffix, table_name, column_name in cases:
+            with self.subTest(reason_suffix=reason_suffix):
+                tables = {
+                    name: dict(columns)
+                    for name, columns in inspection.tables.items()
+                }
+                tables[table_name][column_name] = "text"
+                legacy = SchemaInspection(
+                    tables=tables,
+                    enum_types=inspection.enum_types,
+                    check_constraints=inspection.check_constraints,
+                    triggers=inspection.triggers,
+                )
+
+                plan = plan_postgres_schema_reconciliation(manifest, legacy)
+
+                self.assertIn(
+                    f"agent_schema_cutover_required:{reason_suffix}",
+                    plan.operator_only_actions,
+                )
+                self.assertNotIn(column_name, plan.sql_script())
+
+        tables = {
+            name: dict(columns) for name, columns in inspection.tables.items()
+        }
+        tables["task_edge"] = {"edge_id": "text"}
+        legacy = SchemaInspection(
+            tables=tables,
+            enum_types=inspection.enum_types,
+            check_constraints=inspection.check_constraints,
+            triggers=inspection.triggers,
+        )
+
+        plan = plan_postgres_schema_reconciliation(manifest, legacy)
+
+        self.assertIn(
+            "agent_schema_cutover_required:task_edge",
+            plan.operator_only_actions,
+        )
+        self.assertNotIn("DROP TABLE", plan.sql_script())
+
     def test_result_authority_columns_are_safe_additive_reconciliation(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
         inspection = SchemaInspection.from_manifest(manifest)
@@ -344,6 +397,51 @@ class PostgresSchemaReconcilerTest(unittest.TestCase):
         ), self.assertRaisesRegex(
             PostgresSchemaDriftError,
             "mcp_dispatch_aggregate_migration_required",
+        ):
+            bootstrap_postgres_database(engine)
+
+        self.assertFalse(
+            any("CREATE TABLE" in statement for statement in engine.connection.statements)
+        )
+
+    def test_postgres_bootstrap_prioritizes_agent_schema_cutover(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        tables = {
+            name: dict(columns) for name, columns in inspection.tables.items()
+        }
+        tables["task_node"]["criticality"] = "text"
+        tables["mcp_dispatch_resume_outbox"].pop("resume_reason")
+        legacy = SchemaInspection(
+            tables=tables,
+            enum_types=inspection.enum_types,
+            check_constraints=inspection.check_constraints,
+            triggers=inspection.triggers,
+        )
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+
+            def execute(self, statement):
+                self.statements.append(str(statement))
+                return object()
+
+        class FakeEngine:
+            def __init__(self) -> None:
+                self.connection = FakeConnection()
+
+            @contextmanager
+            def begin(self):
+                yield self.connection
+
+        engine = FakeEngine()
+        with patch(
+            "src.storage.postgres.bootstrap._inspect_current_schema",
+            return_value=legacy,
+        ), self.assertRaisesRegex(
+            PostgresSchemaDriftError,
+            "agent_schema_migration_required",
         ):
             bootstrap_postgres_database(engine)
 

@@ -4,7 +4,7 @@
 
 设计提交：`bfb8a223`；首轮硬伤修订提交：`86fddc2b`
 
-状态：`planned`
+状态：`in_progress`
 
 目标分支：`main`
 

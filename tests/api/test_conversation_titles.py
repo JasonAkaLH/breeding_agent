@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.api.conversation_titles import normalize_generated_conversation_title
 from tests.api.support import APITestCase
 
 
@@ -27,6 +28,67 @@ def _agent_capabilities() -> dict:
 
 
 class ConversationTitleAPITest(APITestCase):
+    async def test_generated_control_tag_titles_are_rejected_without_blocking_retry(self) -> None:
+        invalid_titles = (
+            "<ds_safety>用户询问模型身份，属于正常技术问题",
+            "ds_safety>用户询问模型身份，属于正常技术问题",
+        )
+        calls: list[str] = []
+
+        for index, invalid_title in enumerate(invalid_titles):
+            async def title_generator(message: str, *, _title=invalid_title) -> str:
+                calls.append(message)
+                return _title
+
+            await self.reconfigure_runtime(
+                conversation_title_generator=title_generator,
+                main_agent_stream_generator=lambda _prompt: ["已收到。"],
+            )
+            conversation_id = f"conv-invalid-title-{index}"
+            response = await self.submit_message(
+                conversation_id=conversation_id,
+                content="你是谁？",
+                capability_id=None,
+            )
+            self.assertEqual(response.status_code, 202)
+            await self.wait_for_terminal_task(response.json()["task_id"])
+
+            async def title_attempt_finished() -> bool:
+                return len(calls) == index + 1
+
+            await self.wait_for_condition(title_attempt_finished)
+            conversation = await self.runtime.storage.get_conversation(conversation_id)
+            self.assertIsNotNone(conversation)
+            self.assertIsNone(conversation.title)
+
+        self.assertEqual(
+            normalize_generated_conversation_title("标题：龙粳33品种查询"),
+            "龙粳33品种查询",
+        )
+
+        async def valid_title_generator(message: str) -> str:
+            calls.append(message)
+            return "身份介绍"
+
+        await self.reconfigure_runtime(
+            conversation_title_generator=valid_title_generator,
+            main_agent_stream_generator=lambda _prompt: ["已收到。"],
+        )
+        response = await self.submit_message(
+            conversation_id="conv-invalid-title-1",
+            content="请重新概括",
+            capability_id=None,
+        )
+        self.assertEqual(response.status_code, 202)
+
+        async def valid_title_generated() -> bool:
+            conversation = await self.runtime.storage.get_conversation(
+                "conv-invalid-title-1"
+            )
+            return conversation is not None and conversation.title == "身份介绍"
+
+        await self.wait_for_condition(valid_title_generated)
+
     async def test_new_conversation_generates_title_with_minimal_non_thinking_llm(self) -> None:
         calls: list[dict[str, object]] = []
 

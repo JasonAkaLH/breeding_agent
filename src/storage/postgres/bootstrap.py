@@ -11,6 +11,7 @@ from src.state.postgres.runtime_schema import (
     build_runtime_table_schema_ddl,
 )
 from src.state.postgres.schema_reconciler import (
+    AGENT_SCHEMA_CUTOVER_REASON_PREFIX,
     PostgresSchemaDriftError,
     SchemaInspection,
     assert_no_forbidden_schema_sql,
@@ -36,6 +37,13 @@ def bootstrap_postgres_database(engine: Engine) -> None:
             _inspect_current_schema(connection),
         )
         if initial_plan.operator_only_actions:
+            if any(
+                reason.startswith(AGENT_SCHEMA_CUTOVER_REASON_PREFIX)
+                for reason in initial_plan.operator_only_actions
+            ):
+                raise PostgresSchemaDriftError(
+                    "agent_schema_migration_required"
+                )
             raise PostgresSchemaDriftError(
                 "mcp_dispatch_aggregate_migration_required"
             )

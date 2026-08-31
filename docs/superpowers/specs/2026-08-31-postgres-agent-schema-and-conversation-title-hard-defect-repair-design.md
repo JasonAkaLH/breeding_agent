@@ -1,7 +1,7 @@
 # PostgreSQL Agent Schema 与会话标题硬伤修复设计
 
 - 日期：2026-08-31
-- 状态：`reviewed_ready`
+- 状态：`implemented_automated_pending_hard_cut`
 - 目标分支：`main`
 - 目标环境：main 开发环境；不涉及 `prod`
 
