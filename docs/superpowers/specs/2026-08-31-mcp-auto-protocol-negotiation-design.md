@@ -96,6 +96,10 @@
 
 新策略不再消费 `safe_auto_downgrade_version()`。删除该函数、对应 export 与只验证旧错误内容映射的测试，避免仓库同时保留两套 auto authority。
 
+### `src/integrations/mcp/__init__.py`
+
+同步删除 `safe_auto_downgrade_version` 的 package import 与 `__all__` 项，保证删除 helper 后公共包入口仍可正常导入。
+
 ## 错误行为
 
 候选切换只依据现有异常类型，不检查异常字符串或 response metadata：
@@ -129,6 +133,7 @@
 9. 显式协议仍 pinned 且不降级；
 10. `legacy_http_sse + auto` 仍为 `2024-11-05`；
 11. Gateway/Health 使用同一 factory 时能够取得正确 `negotiated_session` 和 catalog协议版本。
+12. `import src.integrations.mcp` 成功，且业务源码与测试中 `safe_auto_downgrade_version` 零引用。
 
 自动测试使用确定性 fake adapter/transport，不访问 QA 服务，不保存 Endpoint、Header、凭据或响应正文。
 
@@ -137,6 +142,7 @@
 - 新增/更新 auto client聚焦单元测试；
 - 运行 2026 adapter、2025 Tasks、task recovery、Gateway 与 Health相关回归；
 - 运行 compileall、变更面 Ruff 和 `git diff --check`；
+- 验证 MCP package入口可导入，并以静态搜索确认旧 helper 零引用；
 - 最终 diff确认无 DTO、数据库、schema、配置、Frontend、Rust、镜像、部署或 `prod` 变化。
 
 ## 风险与回滚
