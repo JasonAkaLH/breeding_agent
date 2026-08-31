@@ -42,9 +42,40 @@ class UserMCPDTOTest(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "configured auth requires a credential"):
             CreateUserMCPServerRequest(
                 display_name="Demo",
+                routing_description="Demo routing",
                 endpoint_url="https://mcp.example.test/rpc",
                 auth_type="bearer",
             )
+
+    def test_routing_description_is_required_for_create_and_when_present_on_patch(self) -> None:
+        create_payload = {
+            "display_name": "Demo",
+            "endpoint_url": "https://mcp.example.test/rpc",
+        }
+        for invalid_fields in (
+            {},
+            {"routing_description": None},
+            {"routing_description": ""},
+            {"routing_description": " \t\n "},
+        ):
+            with self.subTest(create_fields=invalid_fields), self.assertRaises(ValidationError):
+                CreateUserMCPServerRequest.model_validate(
+                    {**create_payload, **invalid_fields}
+                )
+
+        created = CreateUserMCPServerRequest.model_validate(
+            {**create_payload, "routing_description": "  Query breeding data  "}
+        )
+        self.assertEqual(created.routing_description, "Query breeding data")
+
+        omitted = PatchUserMCPServerRequest(display_name="Renamed")
+        self.assertNotIn("routing_description", omitted.model_dump(exclude_unset=True))
+        for invalid in (None, "", " \t\n "):
+            with self.subTest(patch_value=invalid), self.assertRaises(ValidationError):
+                PatchUserMCPServerRequest(routing_description=invalid)
+
+        patched = PatchUserMCPServerRequest(routing_description="  Updated route  ")
+        self.assertEqual(patched.routing_description, "Updated route")
 
     def test_secret_values_are_masked_in_repr_and_dump(self) -> None:
         canary = "mcp-secret-canary"
@@ -74,11 +105,13 @@ class UserMCPDTOTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             CreateUserMCPServerRequest(
                 display_name="x" * 101,
+                routing_description="route",
                 endpoint_url="https://mcp.example.test/rpc",
             )
         with self.assertRaises(ValidationError):
             CreateUserMCPServerRequest(
                 display_name="Demo",
+                routing_description="route",
                 endpoint_url="https://mcp.example.test/" + "a" * 2048,
             )
 

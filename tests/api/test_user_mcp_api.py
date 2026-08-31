@@ -44,11 +44,51 @@ class UserMCPApiTest(APITestCase):
             now_fn=lambda: datetime(2026, 8, 12, 12, 0, 0),
         )
 
+    async def test_create_requires_routing_description_without_side_effects(self) -> None:
+        response = await self.client.post(
+            "/api/v1/mcp/servers",
+            json={
+                "display_name": "Missing route",
+                "endpoint_url": "https://example.com/mcp",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(
+            (await self.client.get("/api/v1/mcp/servers")).json(),
+            {"servers": []},
+        )
+
+    async def test_patch_rejects_explicit_null_routing_description_without_changes(self) -> None:
+        created = await self.client.post(
+            "/api/v1/mcp/servers",
+            json={
+                "display_name": "Existing server",
+                "routing_description": "Existing route",
+                "endpoint_url": "https://example.com/mcp",
+            },
+        )
+        self.assertEqual(created.status_code, 202, created.text)
+        before = created.json()
+
+        response = await self.client.patch(
+            f"/api/v1/mcp/servers/{before['server_id']}",
+            json={"routing_description": None},
+        )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        after = (
+            await self.client.get(f"/api/v1/mcp/servers/{before['server_id']}")
+        ).json()
+        self.assertEqual(after["routing_description"], "Existing route")
+        self.assertEqual(after["config_version"], before["config_version"])
+
     async def test_crud_is_owner_scoped_and_response_never_contains_credential(self) -> None:
         created = await self.client.post(
             "/api/v1/mcp/servers",
             json={
                 "display_name": "Private server",
+                "routing_description": "Private server route",
                 "endpoint_url": "https://example.com/mcp",
                 "auth_type": "bearer",
                 "credential": {"secret_value": "never-return-this"},
@@ -76,6 +116,7 @@ class UserMCPApiTest(APITestCase):
             "/api/v1/mcp/servers",
             json={
                 "display_name": "bad",
+                "routing_description": "bad route",
                 "endpoint_url": "https://example.com/mcp",
                 "owner_user_id": "bob",
             },
@@ -84,14 +125,22 @@ class UserMCPApiTest(APITestCase):
 
         unsafe = await self.client.post(
             "/api/v1/mcp/servers",
-            json={"display_name": "loopback", "endpoint_url": "http://127.0.0.1/mcp"},
+            json={
+                "display_name": "loopback",
+                "routing_description": "loopback route",
+                "endpoint_url": "http://127.0.0.1/mcp",
+            },
         )
         self.assertEqual(unsafe.status_code, 422)
         self.assertEqual(unsafe.json()["detail"]["code"], "mcp_endpoint_ip_forbidden")
 
         private = await self.client.post(
             "/api/v1/mcp/servers",
-            json={"display_name": "private", "endpoint_url": "https://10.2.3.4/mcp"},
+            json={
+                "display_name": "private",
+                "routing_description": "private route",
+                "endpoint_url": "https://10.2.3.4/mcp",
+            },
         )
         self.assertEqual(private.status_code, 422)
         self.assertEqual(
@@ -104,6 +153,7 @@ class UserMCPApiTest(APITestCase):
             "/api/v1/mcp/servers",
             json={
                 "display_name": "Public HTTP",
+                "routing_description": "Public HTTP route",
                 "endpoint_url": "http://example.com:51789/mcp",
                 "transport": "streamable_http",
                 "protocol_preference": "2025-11-25",

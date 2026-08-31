@@ -104,6 +104,7 @@ describe('MCPSettingsPanel', () => {
     await openCreateForm();
 
     fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'OCR' } });
+    fireEvent.change(screen.getByLabelText('路由描述'), { target: { value: '识别图片和 PDF' } });
     fireEvent.change(screen.getByLabelText('Endpoint URL'), {
       target: { value: 'http://175.6.25.109:51789/mcp' },
     });
@@ -127,6 +128,7 @@ describe('MCPSettingsPanel', () => {
     await openCreateForm();
 
     fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'Secure MCP' } });
+    fireEvent.change(screen.getByLabelText('路由描述'), { target: { value: '查询安全数据' } });
     fireEvent.change(screen.getByLabelText('Endpoint URL'), {
       target: { value: 'https://mcp.example.test/mcp' },
     });
@@ -134,6 +136,23 @@ describe('MCPSettingsPanel', () => {
 
     await waitFor(() => expect(createMCPServer).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('确认使用明文 HTTP')).not.toBeInTheDocument();
+  });
+
+  it('rejects a blank routing description before creating a server', async () => {
+    const createMCPServer = vi.fn(async () => ({} as never));
+    const api = emptySettingsApi({ createMCPServer });
+    render(<MCPSettingsPanel api={api} />);
+    await openCreateForm();
+
+    fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'Missing route' } });
+    fireEvent.change(screen.getByLabelText('路由描述'), { target: { value: '   ' } });
+    fireEvent.change(screen.getByLabelText('Endpoint URL'), {
+      target: { value: 'https://mcp.example.test/mcp' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+
+    expect(await screen.findByText('请输入路由描述')).toBeInTheDocument();
+    expect(createMCPServer).not.toHaveBeenCalled();
   });
 
   it('keeps the form open and maps endpoint policy errors inside the modal', async () => {
@@ -149,6 +168,7 @@ describe('MCPSettingsPanel', () => {
     await openCreateForm();
 
     fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'Private MCP' } });
+    fireEvent.change(screen.getByLabelText('路由描述'), { target: { value: '查询私有数据' } });
     fireEvent.change(screen.getByLabelText('Endpoint URL'), {
       target: { value: 'https://10.2.3.4/mcp' },
     });

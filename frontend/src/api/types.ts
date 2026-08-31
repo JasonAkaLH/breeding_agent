@@ -333,7 +333,7 @@ export interface MCPCredentialInput {
 
 export interface CreateMCPServerRequest {
   display_name: string;
-  routing_description?: string;
+  routing_description: string;
   endpoint_url: string;
   transport?: MCPTransport;
   protocol_preference?: string;

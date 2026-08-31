@@ -310,7 +310,11 @@ export function MCPSettingsPanel({ api, onError, onServersChanged }: Props) {
           <Form.Item name="display_name" label="显示名称" rules={[{ required: true, message: '请输入显示名称' }]}>
             <Input autoFocus maxLength={100} />
           </Form.Item>
-          <Form.Item name="routing_description" label="路由描述">
+          <Form.Item
+            name="routing_description"
+            label="路由描述"
+            rules={[{ required: true, whitespace: true, message: '请输入路由描述' }]}
+          >
             <Input.TextArea maxLength={2000} rows={3} />
           </Form.Item>
           <Form.Item name="endpoint_url" label="Endpoint URL" rules={[{ required: true, message: '请输入 Endpoint URL' }]}>

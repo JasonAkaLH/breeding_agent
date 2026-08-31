@@ -66,6 +66,7 @@ class UserMCPConfigServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_create_encrypts_credentials_and_isolates_owner(self) -> None:
         request = CreateUserMCPServerRequest(
             display_name="Shared",
+            routing_description="Shared server route",
             endpoint_url="https://public.example/mcp",
             auth_type="bearer",
             credential={"secret_value": "secret-token"},
@@ -89,6 +90,7 @@ class UserMCPConfigServiceTest(unittest.IsolatedAsyncioTestCase):
             "alice",
             CreateUserMCPServerRequest(
                 display_name="Server",
+                routing_description="Server route",
                 endpoint_url="https://public.example/mcp",
                 auth_type="bearer",
                 credential={"secret_value": "old"},
@@ -115,6 +117,7 @@ class UserMCPConfigServiceTest(unittest.IsolatedAsyncioTestCase):
             "alice",
             CreateUserMCPServerRequest(
                 display_name="No auth",
+                routing_description="No auth route",
                 endpoint_url="https://public.example/mcp",
             ).model_dump(),
         )
@@ -126,6 +129,7 @@ class UserMCPConfigServiceTest(unittest.IsolatedAsyncioTestCase):
             "alice",
             CreateUserMCPServerRequest(
                 display_name="Before",
+                routing_description="Before route",
                 endpoint_url="https://public.example/mcp",
             ).model_dump(),
         )

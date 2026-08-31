@@ -638,7 +638,7 @@ class UserMCPCredentialInput(StrictRequestModel):
 
 class CreateUserMCPServerRequest(StrictRequestModel):
     display_name: str = Field(min_length=1, max_length=100)
-    routing_description: str = Field(default="", max_length=2000)
+    routing_description: str = Field(max_length=2000)
     endpoint_url: str
     transport: Literal["streamable_http", "legacy_http_sse"] = "streamable_http"
     protocol_preference: str = "auto"
@@ -659,6 +659,8 @@ class CreateUserMCPServerRequest(StrictRequestModel):
     @classmethod
     def normalize_routing_description(cls, value: str) -> str:
         normalized = value.strip()
+        if not normalized:
+            raise ValueError("routing_description must be non-empty")
         if any(ord(char) < 32 and char not in "\n\t" for char in normalized):
             raise ValueError("routing_description contains unsupported control characters")
         return normalized
@@ -711,8 +713,10 @@ class PatchUserMCPServerRequest(StrictRequestModel):
     @classmethod
     def normalize_routing_description(cls, value: str | None) -> str | None:
         if value is None:
-            return None
+            raise ValueError("routing_description must be non-empty when provided")
         normalized = value.strip()
+        if not normalized:
+            raise ValueError("routing_description must be non-empty when provided")
         if any(ord(char) < 32 and char not in "\n\t" for char in normalized):
             raise ValueError("routing_description contains unsupported control characters")
         return normalized

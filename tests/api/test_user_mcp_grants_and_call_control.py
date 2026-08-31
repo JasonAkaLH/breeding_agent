@@ -20,6 +20,7 @@ class UserMCPGrantApiTest(UserMCPApiTest):
             "/api/v1/mcp/servers",
             json={
                 "display_name": "Grant server",
+                "routing_description": "Grant server route",
                 "endpoint_url": "https://example.com/mcp",
                 "auth_type": "none",
             },

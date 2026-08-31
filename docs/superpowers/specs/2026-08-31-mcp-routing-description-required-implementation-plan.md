@@ -4,7 +4,7 @@
 
 设计提交：`b365fe89`；硬伤审查提交：`89197f7b`
 
-状态：`planned`
+状态：`complete`
 
 目标分支：`main`
 
@@ -118,5 +118,14 @@ git diff --check
 ## 6. 回滚
 
 回退实现检查点即可恢复旧 DTO 默认值、前端可选类型和表单行为。没有数据库、数据、配置、镜像或部署回滚步骤。
+
+## 7. 完成证据（2026-08-31）
+
+- 旧实现红测精确证明：Create 缺失/空白描述未报错、POST 返回 202、PATCH 显式 `null` 返回 200，前端空白描述实际调用保存 API。
+- 最小实现只修改 `src/api/dto.py`、`frontend/src/api/types.ts` 和 `frontend/src/components/MCPSettingsPanel.tsx` 三个生产文件。
+- 新合同转绿：后端聚焦 3 项、前端聚焦 1 项通过；相关后端 38 项、前端 2 文件 39 项通过。
+- 前端 typecheck、production build、Python compileall、变更面 Ruff 与 `git diff --check` 通过；build 仅保留既有的大 chunk 警告。
+- 只为 5 个实际走 Create DTO/POST 的旧合法 fixture 补充描述；直接构造存量/Core Profile 的空描述兼容测试未修改。
+- 未修改 schema、迁移、Service、Repository、MCP Router/Selector/Gateway、执行链、配置、依赖、镜像、部署或 `prod`。
 
 License Requirement：复用现有 Python、Pydantic、FastAPI、React、TypeScript、Ant Design、unittest 和 Vitest；无新增依赖或许可变化。
