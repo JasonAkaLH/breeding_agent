@@ -4,7 +4,7 @@
 
 设计基线：`main@e19a19f4`
 
-状态：`planned`；业务代码尚未修改
+状态：`complete`；仓库实现、相关全量回归与隔离 PostgreSQL 零跳过回归已通过
 
 目标分支：`main`
 
@@ -14,7 +14,7 @@
 
 1. 收紧普通 `DateTimeText` 为 UTC-naive 写入/读取合同；
 2. 新增内部 `AwareUTCDateTimeText`，并精确迁移已批准的 31 个安全/证据字段；
-3. 修复 PostgreSQL owner mutation guard 已确认的 aware 普通字段写入；
+3. 修复 owner mutation guard 及实施回归实际复现的普通/严格 writer awareness 冲突；
 4. 用真实 PostgreSQL submission admission → route materialization → Event 写入回归证明原
    503 根因已消失。
 
@@ -131,6 +131,13 @@ Checkpoint A 不单独提交失败状态；红测证据确认后直接进入 Che
 
 不改同文件 rollout raw SQL 路径；那些字段属于 approved aware 集合。
 
+实施门禁另外直接复现并修复三个必要边界：
+
+- `src/storage/sqlite/repositories.py`：message identity sidecar 毫秒时间转 UTC-naive Message 时间；
+- `src/storage/sqlite/agent_repository.py`：PostgreSQL storage clock 转 UTC-naive Agent/lease 时间；
+- `src/integrations/mcp/legacy_migration_apply.py`：普通 server 时钟保持 naive，legacy evidence
+  时间显式附加 UTC。
+
 ### 3.4 必要 fixture 修正
 
 先运行聚焦测试，只修复实际违反新普通合同的 fixture。已知候选包括：
@@ -201,13 +208,24 @@ git diff --check
 
 最终检查：
 
-1. 生产 diff 只包含设计批准的三个文件；
+1. 生产 diff 包含设计批准的三个文件，以及全量/真实 PostgreSQL 门禁直接复现的三个必要
+   writer 边界文件；
 2. 测试 diff 只包含新合同、原故障回归和实际失败 fixture；
 3. PostgreSQL schema manifest 无变化；
 4. 真实 submission 回归写入两条 Event，PostgreSQL 模块零 skip；
 5. 无 API/SSE、Frontend、schema、migration、配置、依赖或当前失败任务修改；
 6. `docker_cmd.md` 仍存在、被忽略且未被读取、跟踪或修改；
 7. 更新设计/计划状态、`docs/AGENTS.md` 和 `CHANGELOG.md`，只记录实际执行结果与 skip。
+
+### 4.1 执行结果
+
+- 聚焦类型/声明测试 9 项通过；Storage 560 项通过（14 项既有环境性 skip）。
+- Lifecycle 48、Orchestration 195、Integrations 764（2 项既有环境性 skip）、API 615 项通过。
+- PostgreSQL schema manifest/reconciler 24 项通过，无 schema diff。
+- 四个独立 PostgreSQL 17 测试库执行 submission、preparation、Agent、conversation file 模块，
+  19/19 通过且零 skip；新增 submission materialize 回归通过并写入两类 Event。
+- compileall、变更面 Ruff 与 `git diff --check` 通过；API 测试文件仅保留本次修改前已有的
+  `E402`/`F841`，未在本目标内清理。
 
 文档闭合提交：
 

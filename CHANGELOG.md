@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- `DateTimeText`跨后端时间合同修复已`implemented_verified`：普通46 Row/138字段严格统一为UTC-naive，15 Row/31个rollout、CP7、master-key与legacy migration安全证据字段改用独立aware-UTC类型，PostgreSQL naive bind显式按UTC解释且读取统一去除tzinfo；同时修复owner guard、message identity sidecar解码、Agent PostgreSQL storage clock与legacy evidence四类实际writer冲突。新增真实submission admission→`materialize_route_decision`→两类Event回归；Storage 560、Lifecycle 48、Orchestration 195、Integrations 764、API 615、schema 24项通过，四个独立PostgreSQL 17测试库19/19零skip，compileall、变更面Ruff与diff-check通过。未修改数据库schema/data、API/SSE、Frontend、当前失败任务、部署或`prod`；一次性测试容器已删除。License Requirement：复用现有Python、SQLAlchemy、SQLite/PostgreSQL和unittest，无新增依赖或许可变化。
+
 - `DateTimeText`跨后端时间合同修复实施计划已成文：按类型红测、61 Row/169字段精确声明门、真实PostgreSQL admission→`materialize_route_decision`→两条Event回归、最小实现和相关Backend全量五类证据推进；代码只允许修改共享时间类型、31个aware字段声明、一个owner guard生产写入及实际失败fixture，并在green后形成单一代码检查点。API/SSE、Frontend、数据库schema/data、migration、通用比较、历史任务、镜像、部署和`prod`继续排除。当前状态`planned`，业务代码尚未实施。License Requirement：仅计划、索引与非敏感账本更新，无新增依赖或许可变化。
 
 - `DateTimeText`跨后端时间合同修复设计已逐节确认并完成书面收敛，document-perfectization只读硬伤审查以`100/100 Pass`通过：61个SQLAlchemy Row的169个时间字段已完整分类，普通运行时46个Row/138字段固定为UTC-naive，rollout、CP7、master-key和legacy migration等15个Row/31字段改用独立aware-UTC类型；实现只允许修改共享类型、字段声明、一个已确认的PostgreSQL owner guard写入及聚焦测试。PostgreSQL/SQLite物理schema、已有数据、API/SSE/Frontend代码、摘要协议代码、通用比较逻辑、当前失败任务和`prod`均不修改；现有序列化器接收UTC-naive结果属于存储合同修复的直接表现。当前状态`approved_planned`，业务代码尚未实施。License Requirement：仅设计、索引与非敏感账本更新，无新增依赖或许可变化。

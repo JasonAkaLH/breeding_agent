@@ -4,7 +4,8 @@
 
 - 日期：2026-08-31
 - 分支与环境：`main` 开发环境；不适用于 `prod`
-- 状态：设计已批准；document-perfectization 只读硬伤审查 `100/100 Pass`；业务代码尚未修改
+- 状态：`implemented_verified`；document-perfectization 只读硬伤审查 `100/100 Pass`；
+  仓库实现、相关全量回归与隔离 PostgreSQL 零跳过回归已通过
 - 目标：修复 SQLAlchemy `DateTimeText` 在 SQLite 与 PostgreSQL 返回不同
   awareness 的问题，同时保留 rollout、CP7 和密钥证据现有的 aware-UTC 合同
 
@@ -191,7 +192,7 @@ AST 盘点覆盖 `src/storage/sqlalchemy_models.py` 的全部 61 个 Row、169 �
 
 ## 直接代码修改
 
-生产代码只修改三个文件：
+批准时确认的三个生产修改点：
 
 1. `src/storage/sqlalchemy_base.py`
    - 收紧 `DateTimeText`；
@@ -202,10 +203,19 @@ AST 盘点覆盖 `src/storage/sqlalchemy_models.py` 的全部 61 个 Row、169 �
    - 将 owner mutation guard 已确认的 aware `updated_at` 写入改为项目现有的
      UTC-naive 时钟形式。
 
+实施回归又直接复现出三个同合同 writer 边界，并做了最小修复：
+
+4. `src/storage/sqlite/repositories.py`
+   - 将 message identity sidecar 的 UTC 毫秒结果解码为普通 Message 所需的 UTC-naive。
+5. `src/storage/sqlite/agent_repository.py`
+   - 将 PostgreSQL `CURRENT_TIMESTAMP` 存储时钟转为 UTC-naive 后再写普通 Agent/lease 字段。
+6. `src/integrations/mcp/legacy_migration_apply.py`
+   - 普通 server 时钟继续 naive，仅在生成 legacy migration 证据时间时附加 UTC。
+
 已盘点的 Python 时间比较、排序、算术和序列化主要分布在 API Runtime、submission
 admission、conversation memory、Agent orchestrator、task state machine、SQLite repository
-和 Agent repository。普通字段在写入前与读取后都统一为 naive，严格字段始终为 aware UTC，
-因此这些 consumer 不需要逐点打补丁。
+和 Agent repository。除上述由真实回归复现的三个 writer 边界外，其余 consumer 无需修改；
+普通字段在写入前与读取后统一为 naive，严格字段始终为 aware UTC。
 
 ## 数据库与兼容性
 
@@ -248,6 +258,10 @@ preparation callback、rollout ledger、shadow evidence、CP7 safety ledger、ma
 repository，以及相关 Storage/API 测试集。因严格输入合同实际失败的旧测试 fixture 才改为
 对应 naive 或 aware 时间，不提前批量重写。
 
+最终结果：类型/声明聚焦 9 项、Storage 560 项、Lifecycle 48 项、Orchestration 195 项、
+Integrations 764 项、API 615 项、PostgreSQL schema 24 项全部通过；四个模块在四个隔离
+PostgreSQL 17 测试库中 19/19 通过且零 skip，其中 submission materialize 成功写入两类 Event。
+
 ## 验收标准
 
 1. 169 个字段全部且仅落入上述一个合同。
@@ -259,5 +273,5 @@ repository，以及相关 Storage/API 测试集。因严格输入合同实际失
 
 ## 回滚
 
-本设计不修改数据库结构或数据。若代码回归，回滚上述类型、字段声明和 owner guard 写入修改
-即可，不需要数据库回滚。
+本设计不修改数据库结构或数据。若代码回归，回滚上述六个生产边界修改即可，不需要数据库
+回滚。
