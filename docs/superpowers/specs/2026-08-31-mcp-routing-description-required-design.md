@@ -2,9 +2,9 @@
 
 ## 状态
 
-`written_review_pending`
+`approved_planned`
 
-对话中的需求边界和方案已经获批；本文等待用户复核后再生成实施计划。当前没有业务代码变更。
+对话中的需求边界和方案已经获批，document-perfectization 两轮审查以 `100/100 Pass` 通过，实施计划已经生成。当前没有业务代码变更。
 
 ## 背景
 

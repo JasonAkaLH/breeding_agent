@@ -2,7 +2,7 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- MCP `routing_description`必填最小设计已成文：新建请求必须提交trim后非空、最长2000字符的描述；PATCH继续允许省略以保留存量值，但显式提交空串或纯空白时返回422；前端新建/编辑共用表单同步必填和纯空白校验。存量空描述不迁移，也不影响省略该字段的其他更新；Service、数据库、Repository、Router/Selector/Gateway、运行时执行、镜像、部署和`prod`均不在范围。当前状态`written_review_pending`，业务代码尚未实施。License Requirement：仅设计、索引与非敏感账本更新，无新增依赖或许可变化。
+- MCP `routing_description`必填最小设计已通过document-perfectization两轮审查并形成实施计划：新建请求必须提交trim后非空、最长2000字符的描述；PATCH继续允许省略以保留存量值，但显式提交`null`、空串或纯空白时返回422；前端新建/编辑共用表单同步必填和纯空白校验。计划严格限定DTO、前端请求类型和表单三个生产文件，以DTO/API/前端红测及聚焦门禁验证；存量空描述不迁移，Service、数据库、Repository、Router/Selector/Gateway、运行时执行、镜像、部署和`prod`均不在范围。当前状态`planned`，业务代码尚未实施。License Requirement：仅设计、计划、索引与非敏感账本更新，无新增依赖或许可变化。
 
 - `DateTimeText`跨后端时间合同修复已`implemented_verified`：普通46 Row/138字段严格统一为UTC-naive，15 Row/31个rollout、CP7、master-key与legacy migration安全证据字段改用独立aware-UTC类型，PostgreSQL naive bind显式按UTC解释且读取统一去除tzinfo；同时修复owner guard、message identity sidecar解码、Agent PostgreSQL storage clock与legacy evidence四类实际writer冲突。新增真实submission admission→`materialize_route_decision`→两类Event回归；Storage 560、Lifecycle 48、Orchestration 195、Integrations 764、API 615、schema 24项通过，四个独立PostgreSQL 17测试库19/19零skip，compileall、变更面Ruff与diff-check通过。未修改数据库schema/data、API/SSE、Frontend、当前失败任务、部署或`prod`；一次性测试容器已删除。License Requirement：复用现有Python、SQLAlchemy、SQLite/PostgreSQL和unittest，无新增依赖或许可变化。
 
