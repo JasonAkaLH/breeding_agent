@@ -384,6 +384,12 @@ def _normalize_check(definition: str) -> str:
         normalized,
         flags=re.DOTALL,
     )
+    normalized = re.sub(
+        r"([a-z_][a-z0-9_]*)\s*<>\s*all\s*\(\s*array\[(.*?)\]\s*\)",
+        r"\1 not in (\2)",
+        normalized,
+        flags=re.DOTALL,
+    )
     normalized = re.sub(r'[()\s"]+', "", normalized)
     return normalized
 

@@ -18,12 +18,24 @@ from src.state.postgres.schema_reconciler import (
     ForbiddenPostgresSchemaActionError,
     PostgresSchemaDriftError,
     SchemaInspection,
+    _normalize_check,
     assert_no_forbidden_schema_sql,
     plan_postgres_schema_reconciliation,
 )
 
 
 class PostgresSchemaReconcilerTest(unittest.TestCase):
+    def test_normalizes_postgres_not_in_array_rewrite(self) -> None:
+        expected = "status NOT IN ('claimed', 'active')"
+        inspected = (
+            "status <> ALL (ARRAY['claimed'::text, 'active'::text])"
+        )
+
+        self.assertEqual(
+            _normalize_check(inspected),
+            _normalize_check(expected),
+        )
+
     def test_empty_db_plan_creates_objects_without_destructive_sql(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
         plan = plan_postgres_schema_reconciliation(manifest, SchemaInspection.empty())

@@ -10,13 +10,16 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from scripts import migrate_mcp_dispatch_aggregate as migration_script
 from scripts.migrate_mcp_dispatch_aggregate import main, run_apply, run_report
 from src.storage.mcp_dispatch_aggregate_migration import (
     MCPDispatchAggregateAuthorityConflictError,
     MCPDispatchAggregateMigrationError,
+    _normalize_contract_sql,
+    _postgres_schema_inspection,
+    _postgres_table_contract_matches,
     apply_sqlite_dispatch_aggregate,
     build_postgres_aggregate_cutover_plan,
     create_or_adopt_sqlite_aggregate_backup,
@@ -28,9 +31,133 @@ from src.state.postgres.runtime_schema import (
 )
 from src.state.postgres.schema_reconciler import SchemaInspection
 from src.storage.sqlite import bootstrap_sqlite_database, create_sqlite_engine
+from src.storage.sqlalchemy_base import SQLiteBase
 
 
 class MCPDispatchAggregateMigrationScriptTest(unittest.TestCase):
+    def test_postgres_schema_inspection_reads_only_aggregate_tables(self) -> None:
+        inspector = Mock()
+        inspector.get_table_names.return_value = [
+            "conversation",
+            "mcp_call_record",
+            "mcp_dispatch_resume_outbox",
+        ]
+        inspector.get_columns.return_value = []
+        inspector.get_check_constraints.return_value = []
+        connection = Mock()
+        connection.execute.return_value.all.return_value = []
+
+        with patch(
+            "src.storage.mcp_dispatch_aggregate_migration.inspect",
+            return_value=inspector,
+        ):
+            inspection = _postgres_schema_inspection(connection)
+
+        self.assertEqual(
+            inspector.get_columns.call_args_list,
+            [
+                call("mcp_call_record"),
+                call("mcp_dispatch_resume_outbox"),
+            ],
+        )
+        self.assertEqual(
+            set(inspection.tables),
+            {"mcp_call_record", "mcp_dispatch_resume_outbox"},
+        )
+
+    def test_postgres_contract_accepts_declared_unique_constraint_indexes(
+        self,
+    ) -> None:
+        table = SQLiteBase.metadata.tables["mcp_dispatch_resume_outbox"]
+        inspected_claim_shape = (
+            "(status = ANY (ARRAY['claimed'::text, 'active'::text])) "
+            "AND claim_owner IS NOT NULL AND claim_token IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL OR "
+            "(status <> ALL (ARRAY['claimed'::text, 'active'::text])) "
+            "AND claim_owner IS NULL AND claim_token IS NULL "
+            "AND lease_expires_at IS NULL"
+        )
+
+        class Inspector:
+            def get_check_constraints(self, _table_name):
+                return [
+                    {
+                        "sqltext": (
+                            inspected_claim_shape
+                            if "status NOT IN ('claimed', 'active')"
+                            in str(constraint.sqltext)
+                            else str(constraint.sqltext)
+                        )
+                    }
+                    for constraint in table.constraints
+                    if constraint.__class__.__name__ == "CheckConstraint"
+                ]
+
+            def get_indexes(self, _table_name):
+                names = {index.name for index in table.indexes}
+                names.update(
+                    constraint.name
+                    for constraint in table.constraints
+                    if constraint.__class__.__name__ == "UniqueConstraint"
+                )
+                return [{"name": name} for name in sorted(names)]
+
+        self.assertTrue(
+            _postgres_table_contract_matches(
+                Inspector(),
+                "mcp_dispatch_resume_outbox",
+            )
+        )
+
+    def test_postgres_plan_keeps_semantically_matching_inspected_check(
+        self,
+    ) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        checks = {
+            table: dict(constraints)
+            for table, constraints in inspection.check_constraints.items()
+        }
+        constraint_name = next(
+            name
+            for name, definition in checks[
+                "mcp_dispatch_resume_outbox"
+            ].items()
+            if "status NOT IN ('claimed', 'active')" in definition
+        )
+        checks["mcp_dispatch_resume_outbox"][constraint_name] = (
+            "(status = ANY (ARRAY['claimed'::text, 'active'::text])) "
+            "AND claim_owner IS NOT NULL AND claim_token IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL OR "
+            "(status <> ALL (ARRAY['claimed'::text, 'active'::text])) "
+            "AND claim_owner IS NULL AND claim_token IS NULL "
+            "AND lease_expires_at IS NULL"
+        )
+        inspection = SchemaInspection(
+            tables=inspection.tables,
+            enum_types=inspection.enum_types,
+            check_constraints=checks,
+            triggers=inspection.triggers,
+        )
+
+        plan = build_postgres_aggregate_cutover_plan(inspection)
+
+        self.assertNotIn(constraint_name, "\n".join(plan.statements))
+
+    def test_contract_normalizer_accepts_postgres_not_in_array_rewrite(
+        self,
+    ) -> None:
+        expected = "status NOT IN ('completed', 'aborted')"
+        inspected = (
+            "status <> ALL "
+            "(ARRAY['completed'::text, 'aborted'::text])"
+        )
+
+        self.assertEqual(
+            _normalize_contract_sql(inspected),
+            _normalize_contract_sql(expected),
+        )
+
     class _TrackingEnvironment:
         def __init__(self, values: dict[str, str], events: list[str]) -> None:
             self._values = values

@@ -20,7 +20,10 @@ from src.state.postgres.runtime_schema import POSTGRES_RUNTIME_SCHEMA_VERSION
 from src.state.postgres.runtime_schema import (
     build_postgres_fresh_cutover_schema_manifest,
 )
-from src.state.postgres.schema_reconciler import SchemaInspection
+from src.state.postgres.schema_reconciler import (
+    SchemaInspection,
+    _normalize_check as _normalize_postgres_check,
+)
 from src.storage.sqlalchemy_base import SQLiteBase
 
 
@@ -194,8 +197,8 @@ def build_postgres_aggregate_cutover_plan(
         for constraint_name, definition in sorted(expected_checks.items()):
             if (
                 constraint_name in actual_checks
-                and _normalize_contract_sql(actual_checks[constraint_name])
-                == _normalize_contract_sql(definition)
+                and _normalize_postgres_check(actual_checks[constraint_name])
+                == _normalize_postgres_check(definition)
             ):
                 continue
             temporary_name = (
@@ -946,7 +949,13 @@ def _postgres_schema_inspection(connection) -> SchemaInspection:
     inspector = inspect(connection)
     tables: dict[str, dict[str, str]] = {}
     checks: dict[str, dict[str, str]] = {}
-    for table_name in inspector.get_table_names():
+    available_tables = set(inspector.get_table_names())
+    for table_name in (
+        "mcp_call_record",
+        "mcp_dispatch_resume_outbox",
+    ):
+        if table_name not in available_tables:
+            continue
         tables[table_name] = {
             str(column["name"]): _postgres_column_type(column)
             for column in inspector.get_columns(table_name)
@@ -1045,15 +1054,23 @@ def _sqlite_table_contract_matches(
 def _postgres_table_contract_matches(inspector, table_name: str) -> bool:
     table = SQLiteBase.metadata.tables[table_name]
     expected_checks = {
-        _normalize_contract_sql(str(constraint.sqltext))
+        _normalize_postgres_check(str(constraint.sqltext))
         for constraint in table.constraints
         if constraint.__class__.__name__ == "CheckConstraint"
     }
     actual_checks = {
-        _normalize_contract_sql(str(item.get("sqltext") or ""))
+        _normalize_postgres_check(str(item.get("sqltext") or ""))
         for item in inspector.get_check_constraints(table_name)
     }
-    expected_indexes = {index.name for index in table.indexes}
+    expected_indexes = {
+        str(index.name) for index in table.indexes if index.name
+    }
+    expected_indexes.update(
+        str(constraint.name)
+        for constraint in table.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+        and constraint.name
+    )
     actual_indexes = {
         str(item.get("name") or "")
         for item in inspector.get_indexes(table_name)
@@ -1074,6 +1091,12 @@ def _normalize_contract_sql(value: str) -> str:
     normalized = re.sub(
         r"([a-z_][a-z0-9_]*)\s*=\s*any\s*\(\s*array\[(.*?)\]\s*\)",
         r"\1 in (\2)",
+        normalized,
+        flags=re.DOTALL,
+    )
+    normalized = re.sub(
+        r"([a-z_][a-z0-9_]*)\s*<>\s*all\s*\(\s*array\[(.*?)\]\s*\)",
+        r"\1 not in (\2)",
         normalized,
         flags=re.DOTALL,
     )
