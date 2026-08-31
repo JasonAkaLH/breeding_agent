@@ -2,7 +2,9 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- `DateTimeText`跨后端时间合同修复设计已逐节确认并完成书面收敛：61个SQLAlchemy Row的169个时间字段已完整分类，普通运行时46个Row/138字段固定为UTC-naive，rollout、CP7、master-key和legacy migration等15个Row/31字段改用独立aware-UTC类型；实现只允许修改共享类型、字段声明、一个已确认的PostgreSQL owner guard写入及聚焦测试。PostgreSQL/SQLite物理schema、已有数据、API/SSE/Frontend代码、摘要协议代码、通用比较逻辑、当前失败任务和`prod`均不修改；现有序列化器接收UTC-naive结果属于存储合同修复的直接表现。当前状态`written_review_pending`，业务代码尚未实施。License Requirement：仅设计、索引与非敏感账本更新，无新增依赖或许可变化。
+- `DateTimeText`跨后端时间合同修复实施计划已成文：按类型红测、61 Row/169字段精确声明门、真实PostgreSQL admission→`materialize_route_decision`→两条Event回归、最小实现和相关Backend全量五类证据推进；代码只允许修改共享时间类型、31个aware字段声明、一个owner guard生产写入及实际失败fixture，并在green后形成单一代码检查点。API/SSE、Frontend、数据库schema/data、migration、通用比较、历史任务、镜像、部署和`prod`继续排除。当前状态`planned`，业务代码尚未实施。License Requirement：仅计划、索引与非敏感账本更新，无新增依赖或许可变化。
+
+- `DateTimeText`跨后端时间合同修复设计已逐节确认并完成书面收敛，document-perfectization只读硬伤审查以`100/100 Pass`通过：61个SQLAlchemy Row的169个时间字段已完整分类，普通运行时46个Row/138字段固定为UTC-naive，rollout、CP7、master-key和legacy migration等15个Row/31字段改用独立aware-UTC类型；实现只允许修改共享类型、字段声明、一个已确认的PostgreSQL owner guard写入及聚焦测试。PostgreSQL/SQLite物理schema、已有数据、API/SSE/Frontend代码、摘要协议代码、通用比较逻辑、当前失败任务和`prod`均不修改；现有序列化器接收UTC-naive结果属于存储合同修复的直接表现。当前状态`approved_planned`，业务代码尚未实施。License Requirement：仅设计、索引与非敏感账本更新，无新增依赖或许可变化。
 
 - main开发三镜像`0.1.25`已推送：runtime-sidecar-dev、backend-dev、frontend-dev的远端OCI digest分别为`sha256:346622b598649553936b5453afca8d1c1f69b5a4b3a3d6fa17cc3d525c632162`、`sha256:c1664088e23d5879fb1dc85c898e3e2d0a9f4cde5ffe4f1640d99944982e8e34`和`sha256:6f80c176ce8462fb7059bec6e6e4328a8cfa947d41bc4e191d0bd72d3193c721`，均含`linux/amd64`；backend推送前再次确认镜像内无`/app/config.yaml`。受保护`docker_cmd.md`三镜像仓库均使用`-dev`后缀且tag为`0.1.25`，main外部配置固定为`/data/peihai/seedpilot_config_dev.yaml:/app/config.yaml:ro`并保留停旧backend前的0600/identity/严格bootstrap预检；命令区语法与local-only policy通过。镜像尚未部署，`prod`未改。License Requirement：镜像发布与本地部署命令/非敏感账本更新，无新增依赖或许可变化。
 

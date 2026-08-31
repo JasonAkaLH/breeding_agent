@@ -4,7 +4,7 @@
 
 - 日期：2026-08-31
 - 分支与环境：`main` 开发环境；不适用于 `prod`
-- 状态：设计已逐节确认，完整文档待最终审阅；业务代码尚未修改
+- 状态：设计已批准；document-perfectization 只读硬伤审查 `100/100 Pass`；业务代码尚未修改
 - 目标：修复 SQLAlchemy `DateTimeText` 在 SQLite 与 PostgreSQL 返回不同
   awareness 的问题，同时保留 rollout、CP7 和密钥证据现有的 aware-UTC 合同
 
