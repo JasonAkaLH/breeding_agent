@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import fields
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import inspect, text
@@ -86,7 +86,7 @@ class CP7SQLiteSchemaContractTest(unittest.TestCase):
     def test_dispatch_outbox_status_claim_cursor_and_completion_contracts_are_closed(
         self,
     ) -> None:
-        now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 18)
         base = {
             "outbox_id": "outbox-1",
             "intent_id": "intent-1",

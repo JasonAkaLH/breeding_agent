@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import DateTime, MetaData, Text
@@ -59,13 +59,38 @@ class DateTimeText(TypeDecorator):
     def process_bind_param(self, value: datetime | None, dialect: Any) -> Any:
         if value is None:
             return None
+        if value.utcoffset() is not None:
+            raise ValueError("DateTimeText requires a UTC-naive datetime")
         if dialect.name == "postgresql":
-            return value
+            return value.replace(tzinfo=timezone.utc)
         return value.isoformat()
 
     def process_result_value(self, value: Any, dialect: Any) -> datetime | None:
         if value is None:
             return None
-        if isinstance(value, datetime):
-            return value
-        return datetime.fromisoformat(value)
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        if parsed.utcoffset() is None:
+            return parsed
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+class AwareUTCDateTimeText(DateTimeText):
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Any) -> Any:
+        if value is None:
+            return None
+        if value.utcoffset() is None:
+            raise ValueError("AwareUTCDateTimeText requires a timezone-aware datetime")
+        normalized = value.astimezone(timezone.utc)
+        if dialect.name == "postgresql":
+            return normalized
+        return normalized.isoformat()
+
+    def process_result_value(self, value: Any, dialect: Any) -> datetime | None:
+        if value is None:
+            return None
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        if parsed.utcoffset() is None:
+            raise ValueError("AwareUTCDateTimeText requires a timezone-aware datetime")
+        return parsed.astimezone(timezone.utc)

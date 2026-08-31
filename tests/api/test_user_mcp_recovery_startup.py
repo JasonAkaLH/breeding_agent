@@ -2126,7 +2126,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 Path(directory),
                 main_agent_stream_generator=main_agent_stream_generator,
             )
-            now = datetime(2026, 8, 13, 12, 2, 30, tzinfo=timezone.utc)
+            metric_now = datetime(2026, 8, 13, 12, 2, 30, tzinfo=timezone.utc)
+            state_now = metric_now.replace(tzinfo=None)
             await runtime.storage.save_conversation(Conversation("conv-a", "alice"))
             await runtime.storage.save_task(
                 Task(
@@ -2148,8 +2149,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     routing_description="private",
                     endpoint_url="https://example.test/mcp",
                     transport=UserMCPTransport.STREAMABLE_HTTP,
-                    created_at=now,
-                    updated_at=now,
+                    created_at=state_now,
+                    updated_at=state_now,
                 ),
                 None,
             )
@@ -2160,8 +2161,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     task_id="task-a",
                     node_id="node-a",
                     status="running",
-                    created_at=now - timedelta(minutes=2),
-                    updated_at=now - timedelta(minutes=2),
+                    created_at=state_now - timedelta(minutes=2),
+                    updated_at=state_now - timedelta(minutes=2),
                 )
             )
             call = MCPCallRecord(
@@ -2179,8 +2180,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 input_schema_sha256="schema-hash",
                 protocol_version="2026-07-28",
                 may_have_dispatched=True,
-                created_at=now - timedelta(minutes=2),
-                updated_at=now - timedelta(minutes=2),
+                created_at=state_now - timedelta(minutes=2),
+                updated_at=state_now - timedelta(minutes=2),
             )
             self.assertTrue(await runtime.storage.reserve_mcp_call(call))
             binding = MCPRemoteTaskBinding(
@@ -2195,9 +2196,9 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 remote_task_nonce=b"private",
                 encryption_version=1,
                 last_status="completed",
-                created_at=now - timedelta(minutes=2),
-                updated_at=now,
-                terminal_at=now,
+                created_at=state_now - timedelta(minutes=2),
+                updated_at=state_now,
+                terminal_at=state_now,
             )
             sink = runtime.mcp_remote_task_recovery_worker._terminal_metric_sink
             self.assertIsNotNone(sink)
@@ -2207,7 +2208,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     result_category=MCPMetricResultCategory.SUCCEEDED,
                     error_category=MCPMetricErrorCategory.NONE,
                     duration_seconds=120.0,
-                    terminal_at=now,
+                    terminal_at=metric_now,
                 )
             )
             await sink(
@@ -2216,7 +2217,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     result_category=MCPMetricResultCategory.UNKNOWN,
                     error_category=MCPMetricErrorCategory.UNKNOWN,
                     duration_seconds=120.0,
-                    terminal_at=now,
+                    terminal_at=metric_now,
                 )
             )
 
@@ -2224,8 +2225,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 "test-environment",
                 "test-deployment",
                 "full_enforce",
-                window_started_at=now.replace(second=0, microsecond=0),
-                window_ended_at=now.replace(second=0, microsecond=0)
+                window_started_at=metric_now.replace(second=0, microsecond=0),
+                window_ended_at=metric_now.replace(second=0, microsecond=0)
                 + timedelta(minutes=1),
             )
             self.assertEqual(
@@ -2254,7 +2255,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             active_binding = replace(
                 binding,
                 last_status="working",
-                next_poll_at=now.replace(tzinfo=None),
+                next_poll_at=state_now,
                 terminal_at=None,
             )
             await runtime.storage.save_mcp_remote_task_binding(active_binding)
@@ -2283,8 +2284,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             claimed = await runtime.storage.claim_due_mcp_remote_task_bindings(
                 claim_owner="test-worker",
                 claim_token="test-claim",
-                now=now.replace(tzinfo=None),
-                lease_expires_at=now.replace(tzinfo=None) + timedelta(seconds=30),
+                now=state_now,
+                lease_expires_at=state_now + timedelta(seconds=30),
             )
             self.assertEqual(len(claimed), 1)
             finished = await runtime.storage.finish_mcp_remote_task_binding(
@@ -2296,7 +2297,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 expected_revision=claimed[0].revision,
                 remote_status="completed",
                 call_status="completed",
-                terminal_at=now.replace(tzinfo=None),
+                terminal_at=state_now,
                 result_ref=active_binding.safe_remote_task_ref,
             )
             self.assertIsNotNone(finished)
@@ -2334,8 +2335,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     task_id="task-security-mismatch",
                     node_id="node-security-mismatch",
                     status="running",
-                    created_at=now,
-                    updated_at=now,
+                    created_at=state_now,
+                    updated_at=state_now,
                 )
             )
             self.assertTrue(

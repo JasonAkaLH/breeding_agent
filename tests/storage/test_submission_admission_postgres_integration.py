@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import threading
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from sqlalchemy import delete, select
 
+from src.api.runtime import ApiRuntime
 from src.core.enums import ConversationStatus
 from src.core.models import (
     Conversation,
@@ -20,7 +22,12 @@ from src.storage.postgres import (
     create_postgres_session_factory,
 )
 from src.storage.postgres.repositories import PostgreSQLStorage
-from src.storage.sqlalchemy_models import ConversationRow, MessageRow, TaskRow
+from src.storage.sqlalchemy_models import (
+    ConversationRow,
+    EventRecordRow,
+    MessageRow,
+    TaskRow,
+)
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 from tests.storage.test_submission_admission_sqlite import (
@@ -60,6 +67,9 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
     async def asyncTearDown(self) -> None:
         with self.session_factory() as session:
             session.execute(
+                delete(EventRecordRow).where(EventRecordRow.task_id.like(f"{self.task_id}%"))
+            )
+            session.execute(
                 delete(TaskRow).where(TaskRow.task_id.like(f"{self.task_id}%"))
             )
             session.execute(
@@ -75,6 +85,38 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
                 )
             )
             session.commit()
+
+    async def test_route_materialization_uses_naive_postgres_task_time(self) -> None:
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        admitted = await self.storage.admit_submission(request)
+        self.assertIsNotNone(admitted.record)
+        assert admitted.record is not None
+
+        task = await self.storage.get_task(self.task_id)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertIsNone(task.created_at.tzinfo)
+        self.assertEqual(task.created_at, admitted.record.created_at)
+
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = self.storage
+        runtime.event_broker = SimpleNamespace(publish=AsyncMock())
+        runtime._mcp_audit_reference_signer = SimpleNamespace(
+            safe_owner_reference=lambda *_args, **_kwargs: "safe-owner"
+        )
+        runtime._mcp_rollout_metric_recorder = None
+
+        await runtime.materialize_route_decision(admitted.record, b"{}")
+
+        events = await self.storage.list_events_for_task(self.task_id)
+        self.assertEqual(
+            {event.event_type for event in events},
+            {"task.accepted", "mcp.rollout.route_assigned"},
+        )
 
     async def test_same_request_two_connections_converge_created_and_replay(self) -> None:
         request = _request(

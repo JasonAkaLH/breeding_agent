@@ -150,7 +150,7 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.engine = create_sqlite_engine(Path(self._tmpdir.name) / "handoff.sqlite3")
         self.sessions = create_sqlite_session_factory(self.engine)
         bootstrap_sqlite_database(self.engine)
-        self.created_at = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
+        self.created_at = datetime(2026, 8, 26, 8, 0)
         with self.sessions.begin() as session:
             session.add_all(
                 [

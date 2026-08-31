@@ -74,7 +74,7 @@ class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.run_id = f"agent-pg-run-{suffix}"
         self.conversation_id = f"agent-pg-conv-{suffix}"
         self.repository = PostgreSQLAgentRepository(self.session_factory)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.session_factory() as session:
             session.add(
                 TaskRow(
@@ -116,7 +116,10 @@ class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
         lease = await self.repository.acquire_task_lease(
             self.run_id, owner_id="worker-a", ttl_seconds=30
         )
-        self.assertGreater(lease.expires_at, datetime.now(timezone.utc))
+        self.assertGreater(
+            lease.expires_at,
+            datetime.now(timezone.utc).replace(tzinfo=None),
+        )
         sample = AgentSample(
             "sample-pg",
             binding,

@@ -306,7 +306,6 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
             0,
             0,
             123456,
-            tzinfo=timezone.utc,
         )
         message = replace(_message(), created_at=created_at)
 
@@ -351,7 +350,7 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
         self.assertIsNone(asyncio.run(self.storage.get_message(message.message_id)))
 
     def test_file_upload_first_insert_reserves_and_update_skips_rpc(self) -> None:
-        created_at = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
+        created_at = datetime(2026, 8, 26, 8, 0)
         projection = FileUploadMessageProjection(
             upload_id="upload-1",
             conversation_id="conversation-1",
@@ -389,7 +388,7 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
         self.assertEqual(identity["task_id"], None)
 
     def test_file_upload_rechecks_owner_in_sql_transaction(self) -> None:
-        now = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 26, 8, 0)
         projection = FileUploadMessageProjection(
             upload_id="upload-owner-race",
             conversation_id="conversation-1",
@@ -418,7 +417,7 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
         )
 
     def test_existing_file_upload_immutable_tuple_conflicts_without_mutation(self) -> None:
-        now = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 26, 8, 0)
         message_id = file_upload_message_id("upload-immutable")
         original = Message(
             message_id=message_id,
@@ -456,7 +455,7 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
         self.assertEqual(self.sidecar.requests, [])
 
     def test_existing_file_upload_explicit_created_at_drift_conflicts(self) -> None:
-        now = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 26, 8, 0)
         projection = FileUploadMessageProjection(
             upload_id="upload-created-at",
             conversation_id="conversation-1",
@@ -497,7 +496,7 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
             sha256="a" * 64,
             storage_key="conversation-1/upload-composite/original",
             status="active",
-            created_at=datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 8, 26, 8, 0),
         )
 
         saved = asyncio.run(
@@ -530,7 +529,7 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
             sha256="b" * 64,
             storage_key="conversation-1/upload-conflict/original",
             status="active",
-            created_at=datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 8, 26, 8, 0),
         )
 
         with self.assertRaises(MessageIdentityConflictError):
@@ -565,7 +564,7 @@ class MessageIdentityReservationTest(SQLiteStorageTestCase):
             sha256="c" * 64,
             storage_key="conversation-1/upload-composite-race/original",
             status="active",
-            created_at=datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 8, 26, 8, 0),
         )
         self.sidecar.after_reserve = lambda: self._mutate_conversation(
             status=ConversationStatus.DELETING
@@ -603,7 +602,7 @@ def _message(*, role: MessageRole = MessageRole.ASSISTANT) -> Message:
         content="hello",
         task_id="task-1",
         stream_status="streaming",
-        created_at=datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 26, 8, 0),
     )
 
 
@@ -640,6 +639,10 @@ class _MessageIdentitySidecar:
         canonical_created_at = self.canonical_created_at
         canonical_identity = dict(identity)
         if canonical_created_at is not None:
+            if canonical_created_at.tzinfo is None:
+                canonical_created_at = canonical_created_at.replace(
+                    tzinfo=timezone.utc
+                )
             canonical_identity["message_created_at_ms"] = int(
                 canonical_created_at.timestamp() * 1000
             )

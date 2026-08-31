@@ -5,7 +5,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from sqlalchemy import inspect as inspect_schema
@@ -42,7 +42,7 @@ from tests.storage.support import SQLiteStorageTestCase
 class SubmissionPreparationReceiptSQLiteTest(SQLiteStorageTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.now = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 8, 26, 8, 0)
         self.storage = SQLiteStorage(self.session_factory)
         asyncio.run(
             self.storage.save_conversation(

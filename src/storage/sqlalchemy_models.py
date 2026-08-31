@@ -15,7 +15,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .sqlalchemy_base import DateTimeText, JSONText, SQLiteBase
+from .sqlalchemy_base import (
+    AwareUTCDateTimeText,
+    DateTimeText,
+    JSONText,
+    SQLiteBase,
+)
 
 
 class UserMCPServerRow(SQLiteBase):
@@ -315,9 +320,11 @@ class MCPLegacyMigrationRecordRow(SQLiteBase):
     )
     credential_digest: Mapped[str] = mapped_column(Text, nullable=False)
     disposition: Mapped[str] = mapped_column(Text, nullable=False)
-    occurred_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    occurred_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
     evidence_expires_at: Mapped[object] = mapped_column(
-        DateTimeText(), nullable=False
+        AwareUTCDateTimeText(), nullable=False
     )
 
 
@@ -332,7 +339,9 @@ class MCPRolloutGateScopeRow(SQLiteBase):
 
     environment_id: Mapped[str] = mapped_column(Text, primary_key=True)
     rollout_program: Mapped[str] = mapped_column(Text, primary_key=True)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPRolloutDrillObservationRow(SQLiteBase):
@@ -382,9 +391,15 @@ class MCPRolloutDrillObservationRow(SQLiteBase):
     config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     drill: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
-    observed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    observed_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    recorded_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    expires_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
     payload_digest: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -502,8 +517,12 @@ class MCPRolloutMetricBucketRow(SQLiteBase):
     stage: Mapped[str] = mapped_column(Text, nullable=False)
     config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     metric_name: Mapped[str] = mapped_column(Text, nullable=False)
-    bucket_started_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    bucket_ended_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    bucket_started_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    bucket_ended_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
     execution_path: Mapped[str] = mapped_column(Text, nullable=False)
     routing_mode: Mapped[str] = mapped_column(Text, nullable=False)
     transport: Mapped[str] = mapped_column(Text, nullable=False)
@@ -517,8 +536,12 @@ class MCPRolloutMetricBucketRow(SQLiteBase):
     )
     latency_bucket: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    updated_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPRolloutEvidenceSnapshotRow(SQLiteBase):
@@ -574,9 +597,15 @@ class MCPRolloutEvidenceSnapshotRow(SQLiteBase):
     deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
     stage: Mapped[str] = mapped_column(Text, nullable=False)
     config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
-    window_started_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    window_ended_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    window_started_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    window_ended_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    recorded_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
     producer: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     snapshot_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -642,9 +671,15 @@ class MCPShadowAuditSampleRow(SQLiteBase):
     comparison: Mapped[str] = mapped_column(Text, nullable=False)
     blockers: Mapped[list] = mapped_column(JSONText(), nullable=False)
     payload_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    observed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    observed_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    recorded_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    expires_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPRolloutStageApprovalRow(SQLiteBase):
@@ -678,7 +713,9 @@ class MCPRolloutStageApprovalRow(SQLiteBase):
     evidence_id: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     approver: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPRolloutDeploymentActivationRow(SQLiteBase):
@@ -720,7 +757,9 @@ class MCPRolloutDeploymentActivationRow(SQLiteBase):
     previous_activation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     operator_reason: Mapped[str] = mapped_column(Text, nullable=False)
     is_rollback: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPRolloutPromotionBlockRow(SQLiteBase):
@@ -772,7 +811,9 @@ class MCPRolloutPromotionBlockRow(SQLiteBase):
     config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_id: Mapped[str] = mapped_column(Text, nullable=False)
     reason_code: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPRolloutBlockResolutionRow(SQLiteBase):
@@ -788,7 +829,9 @@ class MCPRolloutBlockResolutionRow(SQLiteBase):
     evidence_id: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     approver: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPRolloutInstanceConfigRow(SQLiteBase):
@@ -825,9 +868,15 @@ class MCPRolloutInstanceConfigRow(SQLiteBase):
     stage: Mapped[str] = mapped_column(Text, nullable=False)
     config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     activation_id: Mapped[str] = mapped_column(Text, nullable=False)
-    lease_expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    lease_expires_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    updated_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class UserMCPHealthAttemptRow(SQLiteBase):
@@ -878,7 +927,9 @@ class MAFMasterKeyValidationRow(SQLiteBase):
     validation_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     validation_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     derivation_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class ConversationRow(SQLiteBase):
@@ -1792,13 +1843,19 @@ class MCPCP7SafetyLedgerRow(SQLiteBase):
     record_kind: Mapped[str] = mapped_column(Text, nullable=False)
     red_line: Mapped[str | None] = mapped_column(Text, nullable=True)
     hook_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    bucket_started_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
-    bucket_ended_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    bucket_started_at: Mapped[object | None] = mapped_column(
+        AwareUTCDateTimeText(), nullable=True
+    )
+    bucket_ended_at: Mapped[object | None] = mapped_column(
+        AwareUTCDateTimeText(), nullable=True
+    )
     reason_code: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[int] = mapped_column(Integer, nullable=False)
     boundary_source_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    recorded_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class MCPCP7ReadyEpochEventRow(SQLiteBase):
@@ -1823,7 +1880,9 @@ class MCPCP7ReadyEpochEventRow(SQLiteBase):
     container_id: Mapped[str] = mapped_column(Text, nullable=False)
     image_id: Mapped[str] = mapped_column(Text, nullable=False)
     config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
-    boundary_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    boundary_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
     audit_device: Mapped[str] = mapped_column(Text, nullable=False)
     audit_inode: Mapped[int] = mapped_column(BigInteger, nullable=False)
     audit_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -1849,9 +1908,15 @@ class MCPCP7CandidateGuardRow(SQLiteBase):
     invalid_latched: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     first_invalid_record_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_invalid_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    first_invalid_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
-    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
-    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    first_invalid_at: Mapped[object | None] = mapped_column(
+        AwareUTCDateTimeText(), nullable=True
+    )
+    created_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
+    updated_at: Mapped[object] = mapped_column(
+        AwareUTCDateTimeText(), nullable=False
+    )
 
 
 class TaskRow(SQLiteBase):

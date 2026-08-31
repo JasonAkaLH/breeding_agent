@@ -386,7 +386,9 @@ class PostgreSQLStorage(SQLiteStorage):
                     _mcp_owner_server_set_fingerprint(owner_servers)
                 )
                 owner_guard.revision = int(owner_guard.revision) + 1
-                owner_guard.updated_at = datetime.now(timezone.utc)
+                owner_guard.updated_at = datetime.now(timezone.utc).replace(
+                    tzinfo=None
+                )
                 session.flush()
             if intent_id is not None:
                 session.scalar(

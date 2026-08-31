@@ -1199,6 +1199,8 @@ class SQLiteAgentRepository:
             value = session.scalar(select(func.current_timestamp()))
             if not isinstance(value, datetime):
                 raise AgentStorageConflict("agent_storage_clock_unavailable")
+            if value.utcoffset() is not None:
+                return value.astimezone(timezone.utc).replace(tzinfo=None)
             return value
         return self._now()
 

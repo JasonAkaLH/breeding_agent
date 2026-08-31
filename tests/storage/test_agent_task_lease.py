@@ -33,7 +33,7 @@ class SQLiteAgentTaskLeaseTest(unittest.IsolatedAsyncioTestCase):
         self.engine = create_sqlite_engine(Path(self._tmpdir.name) / "lease.sqlite3")
         self.session_factory = create_sqlite_session_factory(self.engine)
         bootstrap_sqlite_database(self.engine)
-        self.now = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 8, 22, 8, 0)
         tokens = iter(("token-1", "token-2", "token-3", "token-4"))
         self.repository = SQLiteAgentRepository(
             self.session_factory,

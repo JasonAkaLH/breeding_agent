@@ -557,7 +557,7 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
             message,
             content="streamed",
             stream_status="streaming",
-            updated_at=request.message_created_at + timedelta(seconds=1),
+            updated_at=message.updated_at + timedelta(seconds=1),
         )
         saved = asyncio.run(self.storage.save_message(updated))
 

@@ -20231,7 +20231,9 @@ def _message_identity_result_from_sidecar(
         message_created_at=(
             None
             if identity.get("message_created_at_ms") is None
-            else _epoch_ms_datetime(int(identity["message_created_at_ms"]))
+            else _epoch_ms_datetime(
+                int(identity["message_created_at_ms"])
+            ).replace(tzinfo=None)
         ),
         task_id=identity.get("task_id"),
     )

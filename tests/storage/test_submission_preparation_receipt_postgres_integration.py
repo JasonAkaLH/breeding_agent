@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import delete, select
@@ -58,7 +58,7 @@ class SubmissionPreparationReceiptPostgresIntegrationTest(
         self.conversation_id = f"preparation-pg-conversation-{suffix}"
         self.task_id = f"preparation-pg-task-{suffix}"
         self.username = f"preparation-pg-owner-{suffix}"
-        self.now = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 8, 26, 8, 0)
         self.storage = PostgreSQLStorage(self.session_factory)
         await self.storage.save_conversation(
             Conversation(

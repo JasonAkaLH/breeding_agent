@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import delete
@@ -52,7 +52,7 @@ class ConversationFileSheetSelectionPostgresIntegrationTest(
         self.conversation_id = f"sheet-selection-pg-conversation-{suffix}"
         self.upload_id = f"sheet-selection-pg-upload-{suffix}"
         self.username = f"sheet-selection-pg-owner-{suffix}"
-        self.now = datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 8, 27, 8, 0)
         self.storage = PostgreSQLStorage(self.session_factory)
         await self.storage.save_conversation(
             Conversation(

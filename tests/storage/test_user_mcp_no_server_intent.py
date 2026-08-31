@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
@@ -345,6 +345,7 @@ class UserMCPNoServerIntentTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_cp7_guard_latch_between_precheck_and_admit_writes_no_call(self) -> None:
+        evidence_at = self.at.replace(tzinfo=timezone.utc)
         await self.storage.create_user_mcp_server(self._available_server())
         await self.storage.save_task(Task(
             task_id="task-race", conversation_id="conv-1", root_message_id="message-race",
@@ -372,13 +373,13 @@ class UserMCPNoServerIntentTest(unittest.IsolatedAsyncioTestCase):
             red_line=None, hook_id=None, bucket_started_at=None, bucket_ended_at=None,
             reason_code="producer_interval_missed", value=1,
             boundary_source_sha256=canonical_sha256({"gap": 1}),
-            payload_sha256=canonical_sha256({"record": 1}), recorded_at=self.at,
+            payload_sha256=canonical_sha256({"record": 1}), recorded_at=evidence_at,
         ))
         await self.storage.append_mcp_cp7_ready_epoch_event(MCPCP7ReadyEpochEvent(
             event_id="ready-race", candidate_id="candidate-race", epoch_id="epoch-race",
             predecessor_epoch_id=None, event_kind=MCPCP7ReadyEpochEventKind.READY,
             container_id="container", image_id="image", config_fingerprint="config",
-            boundary_at=self.at, audit_device="device", audit_inode=1, audit_offset=1,
+            boundary_at=evidence_at, audit_device="device", audit_inode=1, audit_offset=1,
             ledger_record_count=1, inflight_state_sha256=canonical_sha256({"inflight": 1}),
             payload_sha256=canonical_sha256({"ready": 1}),
         ))

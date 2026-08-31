@@ -640,6 +640,8 @@ class LocalLegacyMigrationApplier:
         observed_at = self._now()
         timeout_seconds = LEGACY_MIGRATION_HEALTH_POLICY.total_timeout_seconds
         expires_at = observed_at + timedelta(seconds=timeout_seconds)
+        evidence_observed_at = observed_at.replace(tzinfo=timezone.utc)
+        evidence_expires_at = expires_at.replace(tzinfo=timezone.utc)
         request = LegacyMigrationLiveHealthRequest(
             source_server_id=source_server_id,
             source_fingerprint=desired.source_fingerprint,
@@ -656,8 +658,8 @@ class LocalLegacyMigrationApplier:
             target_consumer_set_digest=self._impact_for(
                 source_server_id
             ).target_consumer_set_digest,
-            observed_at=observed_at.isoformat(),
-            expires_at=expires_at.isoformat(),
+            observed_at=evidence_observed_at.isoformat(),
+            expires_at=evidence_expires_at.isoformat(),
         )
 
         async def invoke() -> LegacyMigrationHealthResult:
