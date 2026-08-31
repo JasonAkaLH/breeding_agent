@@ -41,7 +41,7 @@ ds_safety>用户询问模型身份，属于正常技
 
 本次只修复两个已确认硬伤：
 
-1. 旧 Unified Agent Schema 不再允许新 backend 启动，并通过既有受控迁移使开发库与当前
+1. 旧 Unified Agent Schema 不再允许新 backend 启动，并通过一次性硬切使开发库与当前
    Agent-only Schema 对齐。
 2. 标题模型返回标签式控制内容时，不再把控制标签或其解释文本写入 conversation title。
 
@@ -55,17 +55,17 @@ ds_safety>用户询问模型身份，属于正常技
 
 ## 3. 方案决策
 
-采用“PostgreSQL 单库受控迁移 + 启动 fail-fast + 标题控制标记整条拒绝”。
+采用“PostgreSQL 旧 DAG Schema 单事务硬切 + 启动 fail-fast + 标题控制标记整条拒绝”。
 
 不采用以下替代方案：
 
 - 不给旧 `criticality` / `dependency_type` 增加默认值，也不把已删除字段重新加入 ORM；
   这会恢复已退役 DAG 持久化合同。
-- 不在 bootstrap 中自动执行 `DROP TABLE` 或 `DROP COLUMN`；破坏性变更必须继续由 operator
-  在备份和恢复验证后执行。
+- 不在 bootstrap 中自动执行 `DROP TABLE` 或 `DROP COLUMN`；一次性破坏性 DDL 只在停写维护
+  窗口内人工执行。
 - 不剥离 `<ds_safety>` 后继续使用剩余文本；标签后的内容仍是分类解释，不是可靠标题。
-- 不强行调用现有三 backend Unified Agent migration；当前服务器没有该 operator 所需的仓库
-  checkout、本地 SQLite/Sidecar 文件、Git revision 和 PostgreSQL client 工具。
+- 不调用或扩展现有三 backend Unified Agent migration，不为本次开发库硬切新增
+  report/receipt/operator框架。
 - 不增加第二次 LLM 调用、备用模型、通用内容审核或基于用户消息的另一套标题生成器。
 
 ## 4. PostgreSQL Schema 修复
@@ -97,37 +97,26 @@ PostgreSQL schema inspection 增加 Unified Agent Loop Phase 7 旧物理合同�
 镜像也不包含 `scripts/`、`.git`、`pg_dump` 或 `pg_restore`，因此本次不得把三 backend closed
 operator 写成部署前置命令。
 
-新增一个只服务于本次旧 PostgreSQL Agent schema 的单库 operator，从本地、与待发布 commit
-一致的仓库 checkout 执行。它必须复用现有 `src/storage/agent_schema_migration.py` 中的
-PostgreSQL inventory、DAG object 定义、advisory lock 和 drop SQL 语义，不自行定义第二套字段
-集合。operator 只提供以下三个动作：
+用户已确认完全舍弃旧 DAG physical schema，但保留 conversation、message、Task、Agent ledger、
+Artifact、Event、MCP配置及其他业务数据；不重建数据库，也不清空保留表。
 
-- `report`：只读输出 legacy object inventory、Agent表行数/digest、全表行数和内容寻址的
-  report SHA；
-- `apply`：要求原 report SHA 和已验证的 restore receipt，在同一 PostgreSQL advisory lock 与
-  事务内重新核对源库 inventory，删除旧对象，验证保留表行数及 Agent digest 后提交；
-- `verify`：apply 后生成独立 post report，要求旧对象集合为空且保留数据不漂移。
+本次不新增migration operator。执行顺序固定为：
 
-该 operator 不读取、不备份、不修改 SQLite 或 Sidecar，不进入 backend 请求或启动路径，也不要求
-服务器安装 Git、Conda 或 PostgreSQL client。
+1. 确认目标为 `biobin_dev` 开发库并停止 backend 与其他 writer；
+2. 记录保留表行数以及 `agent_run/agent_item/agent_final_receipt` digest；
+3. 使用官方 PostgreSQL 17 client容器创建custom-format完整`pg_dump`，备份目录`0700`、文件
+   `0600`，并用`pg_restore --list`确认归档可读；
+4. 在本地DBeaver已连接的目标库中开启单一事务，取得既有 Agent migration advisory lock；
+5. 在事务内重新核对数据库名和旧对象集合，然后只执行：删除`task_edge`、删除
+   `task.root_node_id`、删除5个`task_node`旧字段；
+6. 在提交前查询`information_schema`确认旧对象为空，并确认保留表行数及Agent ledger digest
+   不变；任一断言失败立即rollback；
+7. commit后用新backend执行严格bootstrap预检，通过后才替换旧backend并创建新conversation
+   smoke。
 
-执行顺序固定为：
-
-1. 确认本地 checkout 为待发布 `main` commit，并确认目标为开发库；
-2. 停止 backend 和其他 PostgreSQL writer；
-3. 从本地 operator 对远端数据库运行只读 `report`；
-4. 使用官方 PostgreSQL 17 client 容器对远端数据库执行 custom-format `pg_dump`，备份目录
-   `0700`、文件 `0600`；
-5. 把 dump 恢复到一次性本地 PostgreSQL 17 隔离实例，对恢复库运行同一只读 inventory，并由
-   operator 生成 source/restore exact-match receipt；
-6. 只有 restore receipt、原 report SHA 和源库当前 inventory 三者一致时运行 `apply`；
-7. 运行 `verify`，确认旧对象为空、保留表行数和 Agent digest 与原 report 一致；
-8. 启动新 backend，确认 bootstrap 通过；隔离实例只在证据记录完成后删除。
-
-任一备份、恢复、inventory、lock、事务或 postcondition 失败都停止部署；apply 未提交时源库保持
-原状，apply 已提交但验证失败时使用已验证 dump 恢复并回到旧镜像。迁移不得输出或提交 DSN、
-凭据、dump 或敏感路径。根目录 `docker_cmd.md` 继续为 Git-ignored 本地文件；只记录从 operator
-工作站完成迁移的硬前置、服务器侧启动检查和 smoke，不伪装成服务器内可执行的脚本路径。
+旧schema切换成功后不重新创建、不兼容读取，也不保留双写。备份只用于硬切异常后的整库恢复，
+不建设receipt、report文件协议、exact replay或通用迁移框架。不得输出或提交DSN、凭据、dump或
+敏感路径。根目录`docker_cmd.md`继续为Git-ignored本地文件，只增加硬切完成和bootstrap成功门禁。
 
 ## 5. 会话标题修复
 
@@ -170,8 +159,8 @@ LLM raw title
        no: existing normalize / truncate / validate / CAS write
 ```
 
-Migration失败时保持 writers 停止，不启动不匹配 binary；按既有 operator receipt 和已验证备份
-恢复。标题校验失败是既有 fail-open 辅助能力边界，不影响主 Task 执行。
+Schema硬切失败时保持writers停止：commit前直接rollback，commit后发现异常则使用完整dump恢复；
+不启动不匹配binary。标题校验失败是既有fail-open辅助能力边界，不影响主Task执行。
 
 ## 7. 测试与验收
 
@@ -187,21 +176,13 @@ Migration失败时保持 writers 停止，不启动不匹配 binary；按既有 
   - 旧 `task_edge` 或 `task.root_node_id` 同样被拒绝；
   - MCP aggregate drift 的既有错误码不变；
   - fresh/current Schema 无新 action。
-- `tests/storage/test_agent_schema_destructive_migration.py`
-  - 继续锁定共享 PostgreSQL inventory 和 drop SQL 语义。
-- 新 PostgreSQL 单库 operator 聚焦测试
-  - report 不写库且绑定 SHA；
-  - restore inventory 不一致时拒绝 apply；
-  - apply 前源库漂移时拒绝；
-  - transaction/lock/drop/postcondition 和 exact replay 行为通过；
-  - 不访问 SQLite 或 Sidecar。
 - 运行相关 API、Storage 测试、compileall、Ruff 和 `git diff --check`。
 
 ### 7.2 远端开发环境
 
-1. 迁移前只读报告必须精确显示 `task.root_node_id`、5 个 `task_node` 字段和 `task_edge`。
-2. PostgreSQL dump、隔离恢复和 source/restore exact-match receipt 必须成功后才能 apply。
-3. apply 后 `task_node` 不再包含 5 个旧字段，`task.root_node_id` 和 `task_edge` 也不存在。
+1. 硬切前只读检查必须精确显示 `task.root_node_id`、5 个 `task_node` 字段和 `task_edge`。
+2. 完整PostgreSQL dump成功且`pg_restore --list`可读后才能执行DDL。
+3. commit后`task_node`不再包含5个旧字段，`task.root_node_id`和`task_edge`也不存在。
 4. backend bootstrap 成功。
 5. 使用新 conversation 发送“你是谁？”：Task 完成、assistant message 可见、无
    `execution_crash`。
@@ -219,8 +200,8 @@ Migration失败时保持 writers 停止，不启动不匹配 binary；按既有 
 回滚分两类：
 
 - 代码回滚：恢复前一镜像；若数据库已经完成 Phase 7 migration，不重新创建旧 DAG 字段。
-- 迁移回滚：仅在迁移失败或验证失败时，使用 operator 已验证备份和对应旧代码整体恢复；
-  不手写反向字段猜测。
+- Schema硬切回滚：事务提交前直接rollback；提交后若验证失败，使用完整dump恢复开发库；不手写
+  `ADD COLUMN`猜测旧schema。
 
 标题校验回滚只需撤销窄拒绝规则，不涉及数据迁移。历史错误标题不在任何回滚步骤中修改。
 
@@ -233,5 +214,5 @@ Migration失败时保持 writers 停止，不启动不匹配 binary；按既有 
 - 新数据库字段、配置项、依赖、Frontend 或 Rust 协议改造；
 - `prod` 数据库、镜像或部署变更。
 
-License Requirement：复用现有 Python、SQLAlchemy、PostgreSQL migration primitives 与 unittest，
+License Requirement：复用现有 Python、SQLAlchemy、PostgreSQL、DBeaver、Docker 与 unittest，
 无新增依赖或许可变化。
