@@ -1,7 +1,7 @@
 # PostgreSQL Agent Schema 与会话标题硬伤修复设计
 
 - 日期：2026-08-31
-- 状态：`written_review_pending`
+- 状态：`reviewed_ready`
 - 目标分支：`main`
 - 目标环境：main 开发环境；不涉及 `prod`
 
@@ -32,8 +32,10 @@ ds_safety>用户询问模型身份，属于正常技
 ```
 
 当前标题归一化会取模型输出第一条非空行，剥除两端标点后截断至 24 个字符。输入
-`<ds_safety>用户询问模型身份，属于正常技术问题` 会精确产生上述标题，说明模型控制标签
-被误当作普通标题写入。标题任务独立异步执行，因此其写入与主 Task 成败没有因果关系。
+`<ds_safety>用户询问模型身份，属于正常技术问题` 或
+`ds_safety>用户询问模型身份，属于正常技术问题` 都会精确产生上述标题。数据库不保存模型原始
+标题，因此无法确认实际返回属于哪一种形态；已确认事实只限于控制标记经过归一化后进入了标题。
+标题任务独立异步执行，因此其写入与主 Task 成败没有因果关系。
 
 ## 2. 目标与成功标准
 
@@ -48,12 +50,12 @@ ds_safety>用户询问模型身份，属于正常技
 - 新普通聊天能够生成并持久化最终 assistant message，Task 正常完成；
 - 旧 DAG physical contracts 存在时，backend 启动直接报告
   `agent_schema_migration_required`；
-- `<ds_safety>...` 不产生标题；正常中文标题行为不变；
+- `<ds_safety>...` 和 `ds_safety>...` 都不产生标题；正常中文标题行为不变；
 - 不修改任何既有 conversation、消息、Task、Run、Artifact 或 Event 数据。
 
 ## 3. 方案决策
 
-采用“既有迁移 authority + 启动 fail-fast + 标题控制标签整条拒绝”。
+采用“PostgreSQL 单库受控迁移 + 启动 fail-fast + 标题控制标记整条拒绝”。
 
 不采用以下替代方案：
 
@@ -62,6 +64,8 @@ ds_safety>用户询问模型身份，属于正常技
 - 不在 bootstrap 中自动执行 `DROP TABLE` 或 `DROP COLUMN`；破坏性变更必须继续由 operator
   在备份和恢复验证后执行。
 - 不剥离 `<ds_safety>` 后继续使用剩余文本；标签后的内容仍是分类解释，不是可靠标题。
+- 不强行调用现有三 backend Unified Agent migration；当前服务器没有该 operator 所需的仓库
+  checkout、本地 SQLite/Sidecar 文件、Git revision 和 PostgreSQL client 工具。
 - 不增加第二次 LLM 调用、备用模型、通用内容审核或基于用户消息的另一套标题生成器。
 
 ## 4. PostgreSQL Schema 修复
@@ -88,33 +92,56 @@ PostgreSQL schema inspection 增加 Unified Agent Loop Phase 7 旧物理合同�
 
 ### 4.2 受控迁移
 
-复用 `scripts/migrate_unified_agent_loop_schema.py` 和
-`src/storage/agent_schema_migration.py`，不新增第二个 PostgreSQL-only drop 脚本。执行顺序固定为：
+当前故障只来自远端 PostgreSQL physical schema；远端只读检查确认它同时存在
+`task.root_node_id`、5 个 `task_node` 旧字段和 `task_edge`。服务器没有仓库 checkout，backend
+镜像也不包含 `scripts/`、`.git`、`pg_dump` 或 `pg_restore`，因此本次不得把三 backend closed
+operator 写成部署前置命令。
 
-1. 确认 `main` 与开发环境，停止 backend/Sidecar 等相关 writer；
-2. 在仓库外准备权限受限的 state、backup、restore 目录；
-3. 运行只读 `report` 并核对 blocker 和待删除 inventory；
-4. 运行 `backup`；
-5. 在隔离目标运行 `restore-check`；
-6. 运行 `apply`；
-7. 重新生成 report，确认三个 backend 的旧 DAG 字段均为空集合；
-8. 启动新 backend，确认 bootstrap 通过。
+新增一个只服务于本次旧 PostgreSQL Agent schema 的单库 operator，从本地、与待发布 commit
+一致的仓库 checkout 执行。它必须复用现有 `src/storage/agent_schema_migration.py` 中的
+PostgreSQL inventory、DAG object 定义、advisory lock 和 drop SQL 语义，不自行定义第二套字段
+集合。operator 只提供以下三个动作：
 
-迁移不得输出或提交 DSN、凭据、备份路径中的敏感数据。根目录 `docker_cmd.md` 继续为
-Git-ignored 本地文件；只补充上述迁移前置和启动后 smoke，不进入 Git。
+- `report`：只读输出 legacy object inventory、Agent表行数/digest、全表行数和内容寻址的
+  report SHA；
+- `apply`：要求原 report SHA 和已验证的 restore receipt，在同一 PostgreSQL advisory lock 与
+  事务内重新核对源库 inventory，删除旧对象，验证保留表行数及 Agent digest 后提交；
+- `verify`：apply 后生成独立 post report，要求旧对象集合为空且保留数据不漂移。
+
+该 operator 不读取、不备份、不修改 SQLite 或 Sidecar，不进入 backend 请求或启动路径，也不要求
+服务器安装 Git、Conda 或 PostgreSQL client。
+
+执行顺序固定为：
+
+1. 确认本地 checkout 为待发布 `main` commit，并确认目标为开发库；
+2. 停止 backend 和其他 PostgreSQL writer；
+3. 从本地 operator 对远端数据库运行只读 `report`；
+4. 使用官方 PostgreSQL 17 client 容器对远端数据库执行 custom-format `pg_dump`，备份目录
+   `0700`、文件 `0600`；
+5. 把 dump 恢复到一次性本地 PostgreSQL 17 隔离实例，对恢复库运行同一只读 inventory，并由
+   operator 生成 source/restore exact-match receipt；
+6. 只有 restore receipt、原 report SHA 和源库当前 inventory 三者一致时运行 `apply`；
+7. 运行 `verify`，确认旧对象为空、保留表行数和 Agent digest 与原 report 一致；
+8. 启动新 backend，确认 bootstrap 通过；隔离实例只在证据记录完成后删除。
+
+任一备份、恢复、inventory、lock、事务或 postcondition 失败都停止部署；apply 未提交时源库保持
+原状，apply 已提交但验证失败时使用已验证 dump 恢复并回到旧镜像。迁移不得输出或提交 DSN、
+凭据、dump 或敏感路径。根目录 `docker_cmd.md` 继续为 Git-ignored 本地文件；只记录从 operator
+工作站完成迁移的硬前置、服务器侧启动检查和 smoke，不伪装成服务器内可执行的脚本路径。
 
 ## 5. 会话标题修复
 
 在 `normalize_generated_conversation_title` 取得第一条非空行后、执行 label stripping、字符
-trim 和长度截断前，增加一个窄拒绝规则：若该行以 XML-like ASCII 标签开头，则返回
-`None`。标签形状固定为：
+trim 和长度截断前，增加两个窄拒绝规则：
 
 ```regex
 ^<[A-Za-z_][A-Za-z0-9_.:-]*>
+^ds_safety>
 ```
 
-这会覆盖已出现的 `<ds_safety>`，也符合提示词“只输出名称本身”的既有合同。规则不扫描
-标题中部、不解析 XML、不维护 provider 标签列表，也不评价普通标题语义。
+第一条拒绝规范的开头 XML-like ASCII 标签，第二条只补齐本次已观察到但无法从数据库反推左尖
+括号是否存在的 `ds_safety>` 形态。这符合提示词“只输出名称本身”的既有合同。规则不扫描标题
+中部、不解析 XML、不维护通用 provider 标签列表，也不评价普通标题语义。
 
 无效结果继续走现有失败语义：本轮不写标题；如果 conversation 后续仍无标题，下一轮用户
 消息可触发既有重试。不会将无效标签写入 audit payload，也不记录模型原始标题。
@@ -152,6 +179,7 @@ Migration失败时保持 writers 停止，不启动不匹配 binary；按既有 
 
 - `tests/api/test_conversation_titles.py`
   - 精确输入 `<ds_safety>用户询问模型身份，属于正常技术问题`，断言不写标题；
+  - 精确输入 `ds_safety>用户询问模型身份，属于正常技术问题`，同样断言不写标题；
   - 普通中文标题继续通过；
   - 现有生成失败后下一轮重试行为不变。
 - `tests/storage/test_postgres_schema_reconciler.py`
@@ -160,19 +188,25 @@ Migration失败时保持 writers 停止，不启动不匹配 binary；按既有 
   - MCP aggregate drift 的既有错误码不变；
   - fresh/current Schema 无新 action。
 - `tests/storage/test_agent_schema_destructive_migration.py`
-  - 复验迁移后旧字段为空集合，Agent 数据 inventory 保持。
+  - 继续锁定共享 PostgreSQL inventory 和 drop SQL 语义。
+- 新 PostgreSQL 单库 operator 聚焦测试
+  - report 不写库且绑定 SHA；
+  - restore inventory 不一致时拒绝 apply；
+  - apply 前源库漂移时拒绝；
+  - transaction/lock/drop/postcondition 和 exact replay 行为通过；
+  - 不访问 SQLite 或 Sidecar。
 - 运行相关 API、Storage 测试、compileall、Ruff 和 `git diff --check`。
 
 ### 7.2 远端开发环境
 
-1. 迁移前只读报告必须精确显示当前旧字段。
-2. backup 与隔离 restore-check 必须成功后才能 apply。
+1. 迁移前只读报告必须精确显示 `task.root_node_id`、5 个 `task_node` 字段和 `task_edge`。
+2. PostgreSQL dump、隔离恢复和 source/restore exact-match receipt 必须成功后才能 apply。
 3. apply 后 `task_node` 不再包含 5 个旧字段，`task.root_node_id` 和 `task_edge` 也不存在。
 4. backend bootstrap 成功。
 5. 使用新 conversation 发送“你是谁？”：Task 完成、assistant message 可见、无
    `execution_crash`。
-6. 标题允许为正常标题或暂时为空，但不得包含 `<ds_safety>`、`ds_safety>` 或其他开头控制
-   标签。
+6. 标题允许为正常标题或暂时为空，但不得包含 `<ds_safety>`、`ds_safety>` 或规范的开头
+   XML-like 控制标签。
 
 旧失败 Task 不复活、不重放、不补写 assistant message。远端验证只面向 `main` 开发环境，
 不代表 `prod` 已发布。
@@ -199,5 +233,5 @@ Migration失败时保持 writers 停止，不启动不匹配 binary；按既有 
 - 新数据库字段、配置项、依赖、Frontend 或 Rust 协议改造；
 - `prod` 数据库、镜像或部署变更。
 
-License Requirement：复用现有 Python、SQLAlchemy、PostgreSQL migration operator 与 unittest，
+License Requirement：复用现有 Python、SQLAlchemy、PostgreSQL migration primitives 与 unittest，
 无新增依赖或许可变化。
