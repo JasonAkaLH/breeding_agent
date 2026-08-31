@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- MCP `protocol_preference=auto`新策略最小设计已成文：transport继续显式，Streamable HTTP先尝试`2026-07-28` modern adapter；若服务端已经响应但初始化产生typed `MCPProtocolError`/`MCPRemoteError`，关闭candidate后只执行一次请求`2025-11-25`的unpin legacy initialize并接受共同版本。认证、Endpoint、网络、timeout、取消及握手后的Tool错误不触发降级；成功后复用既有`_active + MCPNegotiatedSession + Gateway scope`固定会话，不增加数据库字段或跨会话缓存。真实QA只读探测仅作为非标准协议响应证据，不保存Endpoint/凭据、不进入自动回归。当前状态`written_review_pending`，业务代码尚未实施。License Requirement：仅设计、索引与非敏感账本更新，无新增依赖或许可变化。
+
 - MCP `routing_description`必填最小实现已`implemented_verified`：Create DTO移除空串默认值并拒绝缺失、`null`、空串和纯空白；PATCH继续允许省略以保留原值，但显式`null`、空串或纯空白返回422；合法值继续trim并保持2000字符/控制字符限制。前端Create类型和新建/编辑共用表单同步必填。旧实现后端/前端红测均精确失败，修复后相关后端38项、前端39项、typecheck、production build、compileall、Ruff和diff-check通过；只补5个合法新建fixture。存量空描述不迁移，Service、数据库、Repository、Router/Selector/Gateway、运行时执行、配置、依赖、镜像、部署和`prod`均未修改。License Requirement：复用现有Python、Pydantic、FastAPI、React、TypeScript、Ant Design、unittest与Vitest，无新增依赖或许可变化。
 
 - `DateTimeText`跨后端时间合同修复已`implemented_verified`：普通46 Row/138字段严格统一为UTC-naive，15 Row/31个rollout、CP7、master-key与legacy migration安全证据字段改用独立aware-UTC类型，PostgreSQL naive bind显式按UTC解释且读取统一去除tzinfo；同时修复owner guard、message identity sidecar解码、Agent PostgreSQL storage clock与legacy evidence四类实际writer冲突。新增真实submission admission→`materialize_route_decision`→两类Event回归；Storage 560、Lifecycle 48、Orchestration 195、Integrations 764、API 615、schema 24项通过，四个独立PostgreSQL 17测试库19/19零skip，compileall、变更面Ruff与diff-check通过。未修改数据库schema/data、API/SSE、Frontend、当前失败任务、部署或`prod`；一次性测试容器已删除。License Requirement：复用现有Python、SQLAlchemy、SQLite/PostgreSQL和unittest，无新增依赖或许可变化。
