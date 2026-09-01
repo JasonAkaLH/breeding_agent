@@ -16,7 +16,7 @@
 2. 字符串 expected 只接受类型精确同值字符串 response，不新增反向兼容；
 3. bool、float、null、leading-zero、plus、whitespace、decimal、exponent、Unicode digit和真实 mismatch 全部拒绝；
 4. 2024 Legacy direct/persistent/streaming、2025 JSON/SSE/base/recovery 与2026 stateless JSON/SSE均使用唯一规则；
-5. Legacy exact-first 并发不串线，result-before-id 使用64 MiB有界匿名provisional spool，所有失败/取消/关闭路径清理；
+5. Legacy exact-first 并发不串线，显式区分unknown、buffered匹配与streaming匹配，所有无sink result使用64 MiB有界匿名provisional spool，所有失败/取消/关闭路径清理；
 6. transport/version gate、请求body、原始response bytes、业务ID、schema、配置和外部Server不变；
 7. 自动门禁通过，真实 `/sse` 只读smoke协商2024并发现9个Tool，既有OCR auto继续协商2025。
 
@@ -115,6 +115,7 @@ conda run -n multi_agent python -m unittest \
 - direct POST JSON response字符串alias；
 - response message和`sse_events`中的ID均被规范为expected整数；
 - 同时pending整数`1`与字符串`"1"`，两类response乱序时exact各自胜出；
+- 字符串exact buffered pending与整数alias streaming pending同时存在时，字符串response保留buffered result且不写入streaming sink；
 - bool/float/非规范字符串/unknown不命中，unknown count与timeout保持；
 - 整数原样响应及现有并发乱序测试不退化。
 
@@ -127,16 +128,17 @@ conda run -n multi_agent python -m unittest \
 1. 无await地扫描pending，先用shared normalizer寻找返回原mapping的exact；
 2. exact不存在时再寻找返回副本的单向alias；
 3. 返回真实pending key、pending对象和normalized message；
-4. `_handle_sse_event()` 用真实pending key完成future与remove，并构造normalized `MCPStreamEvent`副本；
-5. direct POST由transport或base final gate规范化，但response message与events必须保持一致。
+4. result selector把匹配结果转换为显式私有target，至少携带normalized response ID和可空result sink；只有完全未匹配才返回`None`；
+5. `_handle_sse_event()` 用真实pending key完成future与remove，并构造normalized `MCPStreamEvent`副本；
+6. direct POST由transport或base final gate规范化，但response message与events必须保持一致。
 
-不得直接依赖`dict.get()`处理type-aware exact，不得改pending key、request body或unknown计数规则。
+不得以“sink为`None`”表示unknown，不得直接依赖`dict.get()`处理type-aware exact，不得改pending key、request body或unknown计数规则。
 
 ### 绿门禁
 
 运行Legacy transport/persistent reader聚焦模块与Ruff。
 
-## Checkpoint D：Legacy late-ID 有界 provisional spool
+## Checkpoint D：Legacy 无 sink result 有界 provisional spool
 
 ### 红测
 
@@ -145,14 +147,15 @@ conda run -n multi_agent python -m unittest \
 
 确定性fixture必须把顶层JSON字段排成`jsonrpc -> result -> id`，并覆盖：
 
-1. ID-before-result继续直接写入目标sink；
+1. ID-before-result且匹配target有sink时继续直接写入目标sink；
 2. result-before-ID且字符串alias时先进入provisional spool，ID解析后分块写入正确sink并形成正常`_mcpResultRef`；
 3. 使用内部test seam把hard cap收窄，精确证明超限抛既有`MCPResultTooLargeError`；runtime默认仍固定64 MiB，不新增公共配置；
 4. unknown/mismatch关闭provisional但不abort其他pending；
 5. 已关联后的write/finalize failure abort目标sink；
 6. parse failure、reader cancel和close关闭provisional并经既有fail-pending清理受影响sink；
 7. provisional raw不进入message、event、metadata、manifest、公开ref或异常文本；
-8. 同时存在buffered/streaming pending时，late-ID结果只写入最终ID匹配的sink。
+8. known buffered pending在ID前置和后置两种成员顺序下都从有界spool恢复原业务result，不计为unknown；
+9. 字符串exact buffered pending与整数alias streaming pending同时存在时，字符串response命中buffered pending且不触碰streaming sink。
 
 ### 最小实现
 
@@ -164,9 +167,11 @@ conda run -n multi_agent python -m unittest \
 - 以`tempfile.TemporaryFile()`持有匿名provisional bytes；
 - 内部构造参数默认`MAX_DURABLE_MCP_RESULT_BYTES`，仅测试可传较小值，不暴露应用配置；
 - 每次write累计size并在越界前抛`MCPResultTooLargeError`；
-- finish解析完整envelope后以raw/normalized ID重新调用selector；
-- selector命中时64 KiB分块replay到目标sink，并复用现有control materialize/durable finalize；
-- selector未命中时关闭provisional，返回足以让Legacy记录unknown的有界response envelope，不保留业务result；
+- selector返回显式私有target；target存在但sink为空表示known buffered pending，`None`只表示unknown；
+- prefix尚无顶层`id`字段时保持unresolved，不调用selector或提前计为unknown；
+- 开始result时未取得sink就写provisional，不论ID成员位于result之前还是之后；finish解析完整envelope后以shared normalizer取得或复验target；
+- streaming target以64 KiB分块replay到目标sink并复用现有control materialize/durable finalize；buffered target从有界spool解析并恢复原业务result；
+- 只有selector真正未匹配时才关闭provisional并返回足以让Legacy记录unknown的有界response envelope，不保留业务result；
 - abort/finally对provisional close幂等，目标sink继续复用既有abort authority；
 - OSError映射到既有temporary-storage typed failure，不暴露路径。
 

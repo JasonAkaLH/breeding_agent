@@ -4,7 +4,7 @@
 
 `approved_planned`
 
-用户已批准全协议、单向兼容方案；有界硬伤复审发现的 1 个 Blocking 和 2 个 Major 已修正，详细步骤见同日 implementation plan，当前尚未修改生产代码。
+用户已批准全协议、单向兼容方案；两轮有界硬伤复审累计发现的 2 个 Blocking 和 2 个 Major 已修正，详细步骤见同日 implementation plan，当前尚未修改生产代码。
 
 ## 问题与证据
 
@@ -121,24 +121,26 @@ server request、notification 和 unsupported client request 路径不变。
 
 ### `src/integrations/mcp/streaming_response.py`
 
-JSON object 成员顺序没有语义。Legacy persistent response 可能在顶层 `id` 之前先发送 `result`，因此 parser 不得假设 sink selection 时 prefix 已含 ID：
+JSON object 成员顺序没有语义。Legacy persistent response 可能在顶层 `id` 之前先发送 `result`，而已匹配的普通 buffered pending 本身也没有 result sink；因此 parser 不得把“没有 sink”解释为“没有匹配”：
 
-- ID 已在 `result` 前出现时，继续使用现有 sink fast path；
-- ID 尚未出现时，result 必须写入 parser-owned、匿名且有界的 provisional spool，不得继续使用无上限 `bytearray`；
+- result selector 必须返回显式私有 target：匹配时携带 normalized response ID 和可空 sink，未匹配才返回 `None`；不得用 sink 是否为空表达匹配状态；
+- prefix 尚无顶层 `id` 字段时不得调用 selector或提前判为unknown，只记录为unresolved并写入provisional spool，完整envelope解析后再选择一次；
+- ID 已在 `result` 前出现且 target 有 sink 时，继续使用现有 sink fast path；
+- ID 尚未出现、target 为已匹配 buffered pending或尚未匹配时，result 必须写入 parser-owned、匿名且有界的 provisional spool，不得继续使用无上限 `bytearray`；
 - provisional spool 的 hard cap 复用 `MAX_DURABLE_MCP_RESULT_BYTES`（64 MiB），超过时使用既有 `MCPResultTooLargeError`；临时存储失败沿用既有 temporary-storage typed failure；
-- 完整 envelope 解析出 response ID 后，先按 shared helper 做 exact/单向规范化，再关联正确 pending sink，并把 provisional bytes 分块写入该 sink；
-- 关联成功后按现有 control-result/materialize 或 durable-result/finalize 规则完成，不能形成第二套 result authority；
+- 完整 envelope 解析出 response ID 后，先按 shared helper 做 exact/单向规范化并取得显式 target；target 有 sink时把 provisional bytes分块写入该sink，target 为buffered pending时从有界spool解析并恢复原业务result；
+- 关联成功后按现有 buffered materialize、control-result/materialize 或 durable-result/finalize 规则完成，不能形成第二套 result authority；
 - unknown/mismatch 必须关闭 provisional spool且不得触碰任何未关联 pending；已关联后的 parse/write/finalize failure 必须 abort 目标 sink；reader cancel/close 继续通过既有 fail-pending 路径 abort 受影响 sink；所有分支都不得暴露临时路径；
 - provisional spool 不新增数据库、manifest、公开 ref、配置项或后台清理任务。
 
-该规则只修复 selector 在 ID 尚不可见时的有界承接，不改变 ID-before-result 的现有流式快路径。
+该规则保留 ID-before-result 且有 sink 的现有流式快路径，同时把所有无 sink result 有界化；已匹配 buffered pending 与 unknown response 的终态必须不同。
 
 ### `src/integrations/mcp/transport_legacy_http_sse.py`
 
 Legacy persistent reader 必须在三处复用 shared helper/规则：
 
 1. pending response correlation：exact key 优先，之后才尝试规范整数别名；
-2. result sink selection：字符串化 ID 必须选中对应整数 pending 的 sink；ID 位于 result 后时使用上述唯一有界 provisional spool，避免大结果绕过 sink 或无界驻留内存；
+2. result target selection：字符串化 ID 必须选中对应整数 pending；匹配结果以“normalized ID + 可空 sink”的显式私有 target表达，使buffered pending不会与unknown混淆；无sink时使用上述唯一有界provisional spool；
 3. 返回 response/event：别名命中时构造 normalized message 和 event 副本，使后续 `MCPClient`、`sse_events` 与最终 message 看到同一整数 ID。
 
 Legacy direct POST response 也必须在返回上层前或由 base client 唯一 final gate 完成相同规范化。不得修改原始 SSE bytes、pending key 或 request body。
@@ -154,6 +156,7 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 | request `1`, response `"01"`/`"+1"`/`"1.0"` | 保持 mismatch/unknown |
 | request `1`, response `true`/`1.0`/`null` | 保持 mismatch/unknown |
 | response ID 无 pending | 保持 unknown count/timeout 或 protocol error |
+| response ID 命中 buffered pending | 从有界 spool 恢复业务 result，不按 unknown 丢弃 |
 | 同时 pending `1` 与 `"1"`，response `"1"` | exact string pending 胜出 |
 | 同时 pending `1` 与 `"1"`，response `1` | integer pending 胜出 |
 | server-to-client request ID 为 `"1"` | 不规范化 |
@@ -173,9 +176,10 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 - 服务端字符串化整数 ID 时 initialize + list 通过；
 - direct POST JSON response 与 persistent SSE response均覆盖；
 - streaming result sink 在字符串化 ID 下仍形成正常 result ref；
+- ID前置/后置的known buffered response均从有界spool恢复原业务result；
 - `result` 位于 `id` 前且超过内存阈值时使用 provisional spool 后写入正确 sink，进程内存不随 result 全量增长；
 - late-ID provisional spool 超过 64 MiB、unknown/mismatch、parse failure、cancel 和 close 时 typed failure/cleanup 闭合；
-- integer/string 双 pending 乱序响应保持 exact-first；
+- integer/string 双 pending 乱序响应保持 exact-first，尤其 exact buffered string pending不得串到alias integer streaming sink；
 - 非规范/未知 ID 继续 ignored + timeout，不串线。
 
 ### 2025 Streamable HTTP
@@ -220,7 +224,7 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 
 主要风险是错误地把业务字符串 ID 当成整数别名，导致并发响应串线。规范十进制单向规则、类型精确的 exact-first 和整数 expected 限制共同收窄该风险；非规范字符串保持原失败语义。
 
-第二个风险是 JSON member order 使 ID 在 result 后出现，导致 sink selection 前无法关联 pending。唯一有界 provisional spool、64 MiB hard cap、关联后写入既有 sink和全异常清理共同闭合该风险，不新增持久化 authority。
+第二个风险是无 sink 同时可能表示ID尚不可见、已匹配buffered pending或unknown response。显式私有target、唯一有界provisional spool、64 MiB hard cap、streaming replay/buffered restore分流和全异常清理共同闭合该风险，不新增持久化authority。
 
 回滚时恢复 shared helper 和本文列出的消费点旧严格比较即可；没有数据、schema、缓存、外部服务或部署回滚。
 
@@ -235,8 +239,9 @@ License Requirement：复用现有 Python、MCP protocol helpers、adapters、st
 
 ## 硬伤复审记录
 
-- 审计轮次：1 轮发现，1 轮批准修订与复审。
-- 已修复 Blocking：Legacy `result-before-id` 绕过 sink并进入无界内存 materialization；现改为64 MiB有界 provisional spool并在ID解析后写入唯一现有sink。
+- 审计轮次：2轮发现，2轮批准修订与复审。
+- 已修复 Blocking：Legacy `result-before-id` 绕过 sink并进入无界内存 materialization；现将无sink result写入64 MiB有界provisional spool，关联后按streaming replay或buffered restore完成。
 - 已修复 Major：独立 `MCP2025TaskRecoveryClient` 未进入全协议消费面；现已纳入组件和测试。
 - 已修复 Major：普通 Python 相等会让 `True == 1`、`1.0 == 1` 绕过批准规则；现将 exact 固定为类型和值均相同，并要求Legacy pending type-aware lookup。
+- 已修复 Blocking：旧 selector 的 `None` 同时表示known buffered pending和unknown response，原计划会丢弃initialize/tools/list等正常结果；现以显式私有target区分未匹配、buffered匹配与streaming匹配，并补齐exact buffered优先级测试。
 - 修订后硬伤结论：0 Blocking，0 Major；Minor 按用户要求未审计。
