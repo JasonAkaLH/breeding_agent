@@ -172,7 +172,7 @@ class AutoNegotiatingAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_unpinned_2025_11_initialize_accepts_supported_earlier_version(
         self,
     ) -> None:
-        for version in ("2025-06-18", "2025-03-26"):
+        for version in ("2025-06-18", "2025-03-26", "2024-11-05"):
             with self.subTest(version=version):
                 transport = _InitializeTransport(version)
                 client = MCPClient(
@@ -457,7 +457,7 @@ class AutoNegotiatingAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wrapped.close_count, 1)
 
     async def test_earlier_negotiated_session_keeps_base_adapter(self) -> None:
-        for version in ("2025-06-18", "2025-03-26"):
+        for version in ("2025-06-18", "2025-03-26", "2024-11-05"):
             with self.subTest(version=version):
                 modern = _FakeAdapter(
                     initialize_error=MCPRemoteError("modern initialize failed")

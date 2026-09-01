@@ -145,6 +145,39 @@ class UserMCPConfigServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.security_version, server.security_version)
         self.assertGreater(updated.config_version, server.config_version)
 
+    async def test_create_and_patch_allow_2024_over_streamable_http(self) -> None:
+        created = await self.service.create_server(
+            "alice",
+            CreateUserMCPServerRequest(
+                display_name="Legacy direct HTTP",
+                routing_description="Legacy protocol over direct HTTP",
+                endpoint_url="https://public.example/mcp",
+                transport="streamable_http",
+                protocol_preference="2024-11-05",
+            ).model_dump(),
+        )
+        self.assertEqual(created.transport.value, "streamable_http")
+        self.assertEqual(created.protocol_preference.value, "2024-11-05")
+
+        auto = await self.service.create_server(
+            "alice",
+            CreateUserMCPServerRequest(
+                display_name="Auto direct HTTP",
+                routing_description="Auto protocol over direct HTTP",
+                endpoint_url="https://public.example/auto-mcp",
+                transport="streamable_http",
+            ).model_dump(),
+        )
+        patched = await self.service.patch_server(
+            "alice",
+            auto.server_id,
+            PatchUserMCPServerRequest(
+                protocol_preference="2024-11-05",
+            ).model_dump(exclude_unset=True),
+        )
+        self.assertEqual(patched.transport.value, "streamable_http")
+        self.assertEqual(patched.protocol_preference.value, "2024-11-05")
+
     async def test_deletion_coordinator_survives_transient_storage_error(self) -> None:
         calls = 0
 

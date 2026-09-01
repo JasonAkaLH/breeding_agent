@@ -14,6 +14,7 @@ from src.integrations.mcp.protocol import (
     SUPPORTED_MCP_PROTOCOL_VERSIONS,
     is_mcp_transport_family_allowed,
     mcp_feature_status,
+    mcp_remote_transport_family_for_protocol_version,
     normalize_json_rpc_response_id,
     validate_mcp_protocol_version,
 )
@@ -110,8 +111,12 @@ class MCPProtocolVersionNegotiationTests(unittest.TestCase):
 
     def test_transport_family_gate_matches_protocol_generation(self) -> None:
         self.assertTrue(is_mcp_transport_family_allowed("2024-11-05", "legacy_http_sse"))
+        self.assertTrue(is_mcp_transport_family_allowed("2024-11-05", "streamable_http"))
         self.assertTrue(is_mcp_transport_family_allowed("2024-11-05", "stdio"))
-        self.assertFalse(is_mcp_transport_family_allowed("2024-11-05", "streamable_http"))
+        self.assertEqual(
+            mcp_remote_transport_family_for_protocol_version("2024-11-05"),
+            "legacy_http_sse",
+        )
 
         for version in ("2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"):
             with self.subTest(version=version):
@@ -166,15 +171,15 @@ class MCPProtocolVersionNegotiationTests(unittest.TestCase):
         self.assertTrue(pinned_legacy.protocol_version_pinned)
         self.assertEqual(pinned_legacy.validation_error(), "")
 
-        legacy_over_streamable = MCPServerConfig.from_mapping(
+        legacy_direct_http = MCPServerConfig.from_mapping(
             {
-                "server_id": "bad1",
+                "server_id": "legacy-direct-http",
                 "transport": "streamable_http",
                 "endpoint": "https://mcp.example.com/rpc",
                 "protocol_version": "2024-11-05",
             }
         )
-        self.assertIn("incompatible", legacy_over_streamable.validation_error())
+        self.assertEqual(legacy_direct_http.validation_error(), "")
 
         streamable_over_legacy = MCPServerConfig.from_mapping(
             {

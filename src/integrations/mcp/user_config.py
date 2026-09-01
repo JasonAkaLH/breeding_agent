@@ -362,8 +362,6 @@ def _validate_transport_protocol(
             UserMCPProtocolPreference.V2024_11_05,
         }:
             raise UserMCPConfigError("mcp_transport_protocol_invalid")
-    elif normalized_protocol is UserMCPProtocolPreference.V2024_11_05:
-        raise UserMCPConfigError("mcp_transport_protocol_invalid")
     return normalized_transport, normalized_protocol
 
 

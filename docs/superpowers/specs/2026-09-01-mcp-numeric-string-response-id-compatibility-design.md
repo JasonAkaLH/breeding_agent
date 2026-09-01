@@ -31,7 +31,8 @@ Endpoint、API key、动态 endpoint UUID、Session/connection identity 和原�
 
 ## 非目标
 
-- 不允许 `2024-11-05 + streamable_http` 非标准组合；现有 transport/version gate 不变。
+- 本设计实施时不修改 `2024-11-05 + streamable_http` transport/version gate；该边界后来由
+  `2026-09-02-mcp-2024-streamable-http-compatibility-design.md` 的独立批准变更接管。
 - 不自动切换 `/mcp` 与 `/sse` Endpoint，也不改变 transport auto detection。
 - 不把所有 response ID 转成字符串或把所有 request ID 改成字符串。
 - 不使用 `str(response_id) == str(request_id)` 全局宽松比较。

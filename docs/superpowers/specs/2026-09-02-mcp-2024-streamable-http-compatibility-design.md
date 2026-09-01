@@ -1,6 +1,6 @@
 # MCP 2024-11-05 + Streamable HTTP 最小兼容设计
 
-状态：已批准，待书面复核
+状态：`implemented_verified`
 
 目标分支：`main`
 
@@ -80,3 +80,12 @@
 
 恢复配置层和共享矩阵的两处拒绝规则，并恢复相应测试即可。无需迁移数据库；已经保存的该组合配置
 在回滚版本中会重新被运行时拒绝。
+
+## 8. 实施证据
+
+- 生产修改严格限定为共享协议矩阵和用户配置校验两处；factory、transport、adapter、DTO、schema、
+  Frontend、Rust 与部署配置均未修改。
+- 红测精确出现共享矩阵/全局配置、用户配置、显式 direct HTTP 和 auto 协商到 2024 的预期失败；
+  最小修复后聚焦 41 项通过。
+- 用户 MCP API 6 项通过；MCP integrations 569 项通过，其中 2 项为既有环境 skip。
+- `compileall`、变更面 Ruff 和 `git diff --check` 通过。

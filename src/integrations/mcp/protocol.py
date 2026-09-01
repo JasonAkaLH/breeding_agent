@@ -124,7 +124,7 @@ def is_mcp_transport_family_allowed(protocol_version: str, transport_family: str
     if family == MCP_TRANSPORT_LEGACY_HTTP_SSE:
         return version == MCP_PROTOCOL_VERSION_2024_11_05
     if family == MCP_TRANSPORT_STREAMABLE_HTTP:
-        return version != MCP_PROTOCOL_VERSION_2024_11_05
+        return True
     return False
 
 

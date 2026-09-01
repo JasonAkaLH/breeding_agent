@@ -31,6 +31,7 @@ class Streamable2025FakeServer:
         tool_call_404_once: bool = False,
         tools_response_id: str | int | None = None,
         stringify_response_ids: bool = False,
+        use_session: bool = True,
     ) -> None:
         self.version = version
         self.session_id = f"sess-{version}"
@@ -39,6 +40,7 @@ class Streamable2025FakeServer:
         self.tool_call_404_once = tool_call_404_once
         self.tools_response_id = tools_response_id
         self.stringify_response_ids = stringify_response_ids
+        self.use_session = use_session
         self.requests: list[dict[str, Any]] = []
         self._tool_call_404_sent = False
 
@@ -58,13 +60,13 @@ class Streamable2025FakeServer:
         if method != "initialize" and "mcp-protocol-version" not in headers:
             if not (self.version == "2025-03-26" and self.missing_header_compatible):
                 return httpx.Response(400, json={"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32600, "message": "missing protocol header"}})
-        if method != "initialize" and "mcp-session-id" not in headers:
+        if self.use_session and method != "initialize" and "mcp-session-id" not in headers:
             return httpx.Response(400, json={"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32600, "message": "missing session"}})
         if method == "initialize":
             response_id = str(payload["id"]) if self.stringify_response_ids else payload["id"]
             return httpx.Response(
                 200,
-                headers={"MCP-Session-Id": self.session_id},
+                headers={"MCP-Session-Id": self.session_id} if self.use_session else {},
                 json={
                     "jsonrpc": "2.0",
                     "id": response_id,
@@ -193,6 +195,43 @@ class StreamableHTTPVersionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(initialized["protocolVersion"], version)
                 self.assertEqual([tool["name"] for tool in tools], ["search_customer"])
                 self.assertEqual(called["structuredContent"], {"ok": True})
+
+    async def test_2024_direct_http_supports_json_sse_202_and_string_ids_without_session(self) -> None:
+        for tools_list_as_sse in (False, True):
+            with self.subTest(tools_list_as_sse=tools_list_as_sse):
+                fake = Streamable2025FakeServer(
+                    version="2024-11-05",
+                    tools_list_as_sse=tools_list_as_sse,
+                    stringify_response_ids=True,
+                    use_session=False,
+                )
+                async_client = httpx.AsyncClient(
+                    transport=httpx.MockTransport(fake.handler)
+                )
+                client = MCPClient(
+                    server_id="srv_2024_direct_http",
+                    transport=StreamableHTTPTransport(
+                        endpoint="https://mcp.example.com/2024-direct",
+                        client=async_client,
+                    ),
+                    protocol_version="2024-11-05",
+                    transport_family="streamable_http",
+                )
+
+                initialized = await client.initialize()
+                tools = await client.list_tools()
+                called = await client.call_tool("search_customer", {"keyword": "rice"})
+                await async_client.aclose()
+
+                self.assertEqual(initialized["protocolVersion"], "2024-11-05")
+                self.assertEqual([tool["name"] for tool in tools], ["search_customer"])
+                self.assertEqual(called["structuredContent"], {"ok": True})
+                self.assertTrue(
+                    all(
+                        "mcp-session-id" not in headers
+                        for headers in fake.post_request_headers()
+                    )
+                )
 
     async def test_2025_03_client_still_sends_header_even_when_server_tolerates_missing_header(self) -> None:
         fake = Streamable2025FakeServer(version="2025-03-26", missing_header_compatible=True)

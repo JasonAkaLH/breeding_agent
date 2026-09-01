@@ -2,7 +2,7 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
-- MCP `2024-11-05 + streamable_http`最小兼容设计已获用户批准：只在共享transport/version矩阵和用户配置校验层取消该组合阻断，显式路径复用既有Legacy client + Streamable HTTP direct POST，auto仍只沿现有单次2026→unpin 2025 fallback并允许Server协商到2024；canonical 2024 transport继续为legacy HTTP+SSE，2024不获得Tasks等新能力。计划覆盖JSON/SSE、notification HTTP 202、数字字符串响应ID和全局配置回归，不修改DTO、schema、凭据、Endpoint policy、Frontend、Rust或部署。当前仅完成设计，尚未实施。License Requirement：复用现有Python MCP transport/client和unittest，无新增依赖或许可变化。
+- MCP `2024-11-05 + streamable_http`最小兼容已`implemented_verified`：共享transport/version矩阵和用户配置校验层取消该组合阻断，用户级create/patch与旧全局配置均放行；显式路径复用既有Legacy client + Streamable HTTP direct POST，auto仍只沿现有单次2026→unpin 2025 fallback并可协商到2024，canonical 2024 transport继续为legacy HTTP+SSE且不获得Tasks等新能力。红测精确出现6个预期失败；修复后聚焦41项、用户MCP API 6项、MCP integrations 569项（2项既有环境skip）、compileall、变更面Ruff和diff-check通过，覆盖无Session JSON/SSE、notification HTTP 202及数字字符串响应ID。生产代码仅2文件，未修改factory、adapter、DTO、schema、凭据、Endpoint policy、Frontend、Rust或部署。License Requirement：复用现有Python MCP transport/client和unittest，无新增依赖或许可变化。
 
 - main开发环境`docker_cmd.md`过期人工验证门禁删除设计已获批准：用户确认开发库切换和候选backend严格PostgreSQL bootstrap已经完成，后续只删除两个临时`*_VERIFIED` Shell门禁；master key、Skill、PostgreSQL readiness、外部配置、Sidecar health、容器替换顺序及子Shell fail-fast全部保持不变，不新增数据库检查、迁移或持久化确认机制。当前仅完成设计，尚未修改受保护部署命令。License Requirement：仅设计、索引与变更记录，无新增依赖或许可变化。
 
