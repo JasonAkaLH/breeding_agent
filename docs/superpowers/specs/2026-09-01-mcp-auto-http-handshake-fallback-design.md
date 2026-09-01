@@ -2,9 +2,9 @@
 
 ## 状态
 
-`approved_written_review_pending`
+`approved_planned`
 
-用户已批准采用初始化阶段状态码白名单方案；本文等待用户复核后再生成实施计划，当前尚未修改生产代码。
+用户已复核本文并批准实施；详细步骤见同日 implementation plan，当前尚未修改生产代码。
 
 ## 问题与证据
 
