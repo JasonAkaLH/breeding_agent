@@ -4,7 +4,18 @@
 
 初始设计提交：`2b05c065`；首轮硬伤修订提交：`6d0de294`；后续设计/计划硬伤修订以本文档提交历史为准
 
-状态：`planned`
+状态：`implemented_automated_pending_publish`
+
+自动化实施证据（2026-09-01）：
+
+- 生产代码严格限于第1节列出的3个文件，测试严格限于对应3个既有文件；未修改依赖、API/DTO、schema、
+  migration、Runtime Sidecar、Rust、Skill或`prod`；
+- 后端聚焦门禁分别通过20项API recovery/continuation测试与71项aggregate/coordinator测试；
+- 前端聚焦门禁通过3个文件193项测试，typecheck与production build通过；
+- 受影响范围门禁通过`tests/api`全量628项、Frontend全量24个文件347项、compileall、变更面Ruff、
+  typecheck、production build和`git diff --check`；无测试失败或skip，仅保留既有Frontend大chunk提示；
+- 源码双远端、镜像、`docker_cmd.md`、开发服务器和真实MCP smoke尚未执行，因此不得标记为
+  `published_pending_deploy`、`deployed_pending_smoke`或`complete_dev`。
 
 目标分支：`main`
 
