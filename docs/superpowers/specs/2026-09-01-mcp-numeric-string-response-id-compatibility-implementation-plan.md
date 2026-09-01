@@ -4,7 +4,7 @@
 
 ## 状态
 
-`complete_with_external_smoke_gap`
+`published_not_deployed_with_external_smoke_gap`
 
 用户已批准实施；生产代码、测试和自动门禁已闭合，真实smoke的两个外部缺口按原计划如实记录。
 
@@ -275,4 +275,5 @@ License Requirement：复用现有Python、MCP protocol/adapters、temporary res
 - 自动验证：8个聚焦模块88项、Gateway/Health/auto相关61项、MCP integrations 567项通过（2项既有环境skip）；compileall、变更面Ruff、package import、shared rule唯一性、敏感内容扫描和`git diff --check`通过。
 - 真实Legacy smoke：修改后的实际`UserMCPClientFactory`使用`legacy_http_sse + auto`和用户提供的header完成initialize，成功即证明requested/negotiated均为`2024-11-05`且字符串化整数response ID已关联；随后外部Server在tools/list前发送仅含`jsonrpc + result`、不含`id`的非法envelope，现有fail-closed校验拒绝并最终`legacy_response_timeout`，因此未取得9个Tool，不扩大范围吞掉该独立服务端错误。
 - OCR smoke：现有输入只有占位Bearer，未发送无效凭据或误报`2025-11-25`通过；自动auto/2025回归已闭合，但真实OCR仍是外部凭据缺口。
-- 未修改transport/version gate、request body、原始response bytes、业务ID、配置、DTO、schema、数据库、Frontend、Rust、依赖、镜像、部署、外部Server或`prod`；未读取或暂存范围外`test.json`。
+- 镜像发布：用户明确批准保持版本号后，基于源码commit `85d22f1c`只重建并覆盖推送`registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.29`；本地及远端OCI index digest均为`sha256:6956c93d1f6b1f8cc2eb620ac22675a706d8c55f94c2590b3a13536042e8f267`，远端包含`linux/amd64` manifest `sha256:5ddb53b6b1f70fbb1638b903c9581f3bb01b686ae692f6400f015300a690d5d6`和attestation。推送前验证镜像不含`/app/config.yaml`、MCP package可导入且数字字符串ID断言通过；Frontend、Runtime Sidecar未重建，`docker_cmd.md`因tag不变未修改，镜像尚未部署。
+- 未修改transport/version gate、request body、原始response bytes、业务ID、配置、DTO、schema、数据库、Frontend、Rust、依赖、部署、外部Server或`prod`；未读取或暂存范围外`test.json`。

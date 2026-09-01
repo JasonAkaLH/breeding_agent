@@ -2,9 +2,9 @@
 
 ## 状态
 
-`implemented_verified_with_external_smoke_gap`
+`published_not_deployed_with_external_smoke_gap`
 
-用户已批准的全协议、单向兼容方案已完成仓库实现与自动验证；两轮有界硬伤复审累计发现的2个Blocking和2个Major均已闭合。真实Legacy factory initialize成功，tools/list受外部Server额外发送的无ID JSON-RPC result envelope阻断；OCR仅有占位凭据，两个外部缺口均未误报通过，详见同日implementation plan。
+用户已批准的全协议、单向兼容方案已完成仓库实现与自动验证，并基于源码commit `85d22f1c`覆盖发布既有backend-dev `0.1.29`；未部署。两轮有界硬伤复审累计发现的2个Blocking和2个Major均已闭合。真实Legacy factory initialize成功，tools/list受外部Server额外发送的无ID JSON-RPC result envelope阻断；OCR仅有占位凭据，两个外部缺口均未误报通过，详见同日implementation plan。
 
 ## 问题与证据
 
