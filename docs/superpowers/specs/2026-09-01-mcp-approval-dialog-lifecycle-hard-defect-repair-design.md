@@ -43,6 +43,7 @@ Agent continuation结束。本次现场等待约69秒，破坏了原前端修复
 
 - 授权状态首次成功转换后，立即产生durable frontend `mcp.tool_approval_decided`事件；
 - authority转换成功但首次Event append失败时，exact answer replay必须补齐同一个决定事件且不得生成重复账本记录；
+- 同一approval Interrupt的前端重试必须复用同一`client_message_id`，确保真实UI请求能够命中exact answer；
 - 授权POST仍在执行时，前端已经重新订阅原Task SSE并能收到决定与后续执行事件；
 - POST返回同一Task ID时，不在已经恢复的SSE之外再建立第三条冗余订阅；
 - 旧POST返回不得覆盖较新的Interrupt、授权决定或Task终态；
@@ -107,19 +108,21 @@ Coordinator随后直接命中Grant/approved action而没有返回decided Event�
 固定顺序：
 
 1. 读取当前approval、conversation、Task、assistant与generation快照；
-2. 设置现有`mcpApprovalSubmitting=true`；
-3. 在调用`api.submitMessage()`前，对原Task调用现有`subscribeToTask()`；
-4. 等待现有POST完成；
-5. response返回后先检查generation、conversation、当前Task、当前phase和当前approval的
+2. 从版本化固定前缀和`interruptId`生成稳定的approval `clientMessageId`；同一Interrupt的同一决定重试
+   必须复用该ID，不同Interrupt必须得到不同ID；
+3. 设置现有`mcpApprovalSubmitting=true`；
+4. 在调用`api.submitMessage()`前，对原Task调用现有`subscribeToTask()`；
+5. 等待现有POST完成；
+6. response返回后先检查generation、conversation、当前Task、当前phase和当前approval的
    `interruptId`；
-6. 当前Task已被清除/替换、phase已进入`loading_artifacts`或取消/终态、或者当前waiting authority已
+7. 当前Task已被清除/替换、phase已进入`loading_artifacts`或取消/终态、或者当前waiting authority已
    不是步骤1捕获的同一pending approval时，旧response不得修改Task phase、approval、pending
    interrupt、assistant或订阅；后一种情况同时包含另一MCP approval和普通Interrupt；
-7. response仍指向原Task时保留步骤3的订阅，不在POST返回后重复创建；只有Task ID实际变化且步骤1的
+8. response仍指向原Task时保留步骤4的订阅，不在POST返回后重复创建；只有Task ID实际变化且步骤1的
    提交快照仍是当前authority时才切换订阅；
-8. 只有当前approval仍是步骤1捕获的同一pending Interrupt时，才允许用成功response作为decided
+9. 只有当前approval仍是步骤1捕获的同一pending Interrupt时，才允许用成功response作为decided
    Event尚未到达时的本地兜底，把该approval设为非pending；
-9. `finally`继续清除submitting状态。
+10. `finally`继续清除submitting状态。
 
 等待事件历史已由`seenEventIds`去重，重订阅回放原`approval_required`不会生成第二次业务授权。
 durable `mcp.tool_approval_decided`到达后由现有reducer把approval置为非pending并关闭弹框，后续Tool和
@@ -127,6 +130,10 @@ Agent事件继续沿同一SSE展示。
 
 若POST在authority转换前失败，不会产生decided事件；现有pending状态与错误提示保持，用户可以重试。
 generation与conversation guard保持原样，切换对话后不得回写旧页面状态。
+
+稳定`clientMessageId`不能包含decision。authority已经接受某个decision后，用户用同一Interrupt改交另一
+decision必须继续触发现有message identity conflict，不能覆盖已经接受的Answer；重复提交原decision才是
+合法exact replay。该规则只修复已有重试身份，不新增本地授权状态或API字段。
 
 上述response guard同时覆盖两个直接竞争：continuation先产生下一次Tool/普通Interrupt，以及SSE先
 产生Task终态并完成结果加载。旧POST在这两种情况下都只能结束自己的loading状态，不得清除新弹框或
@@ -195,6 +202,8 @@ event replay
 - `allow_once`、`always_allow`与`deny`的decision正确；
 - 注入authority成功后的首次Event append失败；exact answer replay补齐同一确定性Event，且不重复
   Answer、决定事件、Grant或Tool调用；
+- 上述部分失败必须通过真实`submit_chat_message`入口以同一稳定`client_message_id`重试，不能只直接调用
+  `answer_interrupt`模拟相同source message；
 - 首次请求与exact replay构造的Event ID、payload和accepted-answer `created_at`完全一致，不触发
   idempotency conflict；
 - decided与required Event使用相同`mcp-approval-call-reference-v1` context生成`safe_call_ref`；
@@ -203,6 +212,8 @@ event replay
 ### 7.2 前端聚焦测试
 
 - 将第二次`submitMessage`设为未完成Promise；点击授权后立即出现第二条Task订阅；
+- 同一Interrupt失败重试的`clientMessageId`完全相同，不同Interrupt的ID不同；改变decision不能生成新
+  消息身份覆盖既有authority；
 - POST未返回时注入`mcp.tool_approval_decided`，授权框关闭并能继续消费Tool事件；
 - response为同一Task时订阅数不再增加；
 - POST未返回时注入下一次approval/Interrupt，再返回旧POST；新授权必须继续pending，且旧response不得
@@ -235,7 +246,9 @@ event replay
 ## 8. 发布与回滚
 
 该修复同时修改backend与frontend，开发环境必须成对构建、验证和部署下一版本；Runtime Sidecar不需
-重建。具体tag、镜像digest和部署步骤由后续实施计划决定。`prod`不在范围。
+重建。具体tag、镜像digest和部署步骤由后续实施计划决定。镜像构建前，实施commit必须以非强制方式推送
+到现有两个源码远端并验证两个`main`都指向同一commit；任一远端失败则停止发布。候选backend还必须同时
+断言`current_database()='biobin_dev'`和`current_user='biobin_user'`。`prod`不在范围。
 
 回滚只恢复前一对backend/frontend镜像或回退对应代码提交。没有schema或数据迁移，不删除本次已
 产生的合法Interrupt、Answer、MCP结果或Grant。

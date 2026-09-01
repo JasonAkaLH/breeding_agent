@@ -2,7 +2,7 @@
 
 依据：`2026-09-01-mcp-approval-dialog-lifecycle-hard-defect-repair-design.md`
 
-设计提交：`2b05c065`；硬伤修订提交：`6d0de294`
+初始设计提交：`2b05c065`；首轮硬伤修订提交：`6d0de294`；后续设计/计划硬伤修订以本文档提交历史为准
 
 状态：`planned`
 
@@ -18,11 +18,13 @@
    `mcp.tool_approval_decided`；
 2. authority与Event之间发生部分失败时，exact answer replay补齐同一个Event且不重复Answer、Grant、
    Tool调用或账本记录；
-3. 用户点击授权后立即恢复原Task SSE，授权框不等待完整Tool/Agent执行才关闭；
-4. 旧授权POST返回不能覆盖下一次MCP/普通Interrupt，也不能复活已进入终态的Task；
-5. Event replay和HTTP状态对账的所有Task/Agent终态都清除`mcp.approval`；
-6. 新代码在`biobin_dev`完成真实审批smoke，backend监听`31888`、frontend监听`31999`，其他开发容器、
-   `breeding-agent-net`和`prod`保持不变。
+3. 同一approval Interrupt的UI重试复用同一消息身份，并经真实chat submission入口命中exact replay；
+4. 用户点击授权后立即恢复原Task SSE，授权框不等待完整Tool/Agent执行才关闭；
+5. 旧授权POST返回不能覆盖下一次MCP/普通Interrupt，也不能复活已进入终态的Task；
+6. Event replay和HTTP状态对账的所有Task/Agent终态都清除`mcp.approval`；
+7. 实施commit已非强制推送到现有两个源码远端，两个`main`均指向同一commit后才构建镜像；
+8. 新代码以`biobin_user`连接`biobin_dev`完成真实审批smoke，backend监听`31888`、frontend监听
+   `31999`，其他开发容器、`breeding-agent-net`和`prod`保持不变。
 
 生产代码只修改：
 
@@ -69,8 +71,8 @@ Gateway、协议、Tool参数、远端OCR、Agent continuation/lease/recovery、
 2. `deny`不进入resume，但返回前已经持久化`decision=deny`；
 3. 决定Event只含`interrupt_id`、64位`safe_call_ref`和`decision`，不含arguments、Endpoint、credential、
    authorization、server/tool原始标识或fingerprint；
-4. 首次决定Event append被注入一次失败后，authority保持成功；使用相同source message和answer重试时，
-   exact append补齐一条Event，Answer/Grant/Tool调用均不重复；
+4. 首次决定Event append被注入一次失败后，authority保持成功；通过真实`submit_chat_message`入口以相同
+   `client_message_id`和answer重试时，exact append补齐一条Event，Answer/Grant/Tool调用均不重复；
 5. 首次请求与exact replay的Event ID、payload和`created_at`完全一致，不触发
    `runtime_store_idempotency_conflict`。
 
@@ -88,6 +90,7 @@ Gateway、协议、Tool参数、远端OCR、Agent continuation/lease/recovery、
   current Task或SSE；
 - approval POST失败时弹框仍pending、按钮恢复，但提前建立的第二条订阅保留；相应旧断言从1条订阅改为
   2条；
+- 同一Interrupt失败后重试必须提交完全相同的`clientMessageId`，新的Interrupt必须使用不同ID；
 - 六类Task/Agent终态Event、`markTaskCompleted()`和`markTaskFailed()`均清除approval；
 - SSE丢失后仅靠`getTask()`对账completed、failed、cancelled或既有MCP terminal projection时，页面不再
   显示授权框。
@@ -155,17 +158,22 @@ Gateway、协议、Tool参数、远端OCR、Agent continuation/lease/recovery、
 只在`frontend/src/App.tsx`的`handleMCPApprovalDecision()`内做手术式修改：
 
 1. 捕获approval、`interruptId`、conversation、Task、assistant和generation快照；
-2. 设置现有submitting状态后，立即对原Task调用`subscribeToTask()`，再调用`api.submitMessage()`；
-3. POST返回后先验证generation/conversation以及当前Task/assistant仍与快照一致；
-4. `loading_artifacts`、cancelling、completed、failed、cancelled均视为已收敛，旧response只进入`finally`；
-5. 当前phase为waiting且当前pending approval不是原`interruptId`时，视为新的MCP/普通Interrupt，旧
+2. 以`mcp-approval-answer-v1-${interruptId}`生成稳定`clientMessageId`；不得包含decision，不得每次点击
+   调用`makeClientId()`；同一Interrupt的重试复用该ID，不同Interrupt自然隔离；
+3. 设置现有submitting状态后，立即对原Task调用`subscribeToTask()`，再调用`api.submitMessage()`；
+4. POST返回后先验证generation/conversation以及当前Task/assistant仍与快照一致；
+5. `loading_artifacts`、cancelling、completed、failed、cancelled均视为已收敛，旧response只进入`finally`；
+6. 当前phase为waiting且当前pending approval不是原`interruptId`时，视为新的MCP/普通Interrupt，旧
    response不得清除pending interrupt、assistant prompt、approval或订阅；
-6. durable decided Event已把原approval设为非pending时，同Task response不再重复修改投影或订阅；
-7. 只有原approval仍为同一pending Interrupt时，成功response才作为Event尚未到达的本地兜底，将它
+7. durable decided Event已把原approval设为非pending时，同Task response不再重复修改投影或订阅；
+8. 只有原approval仍为同一pending Interrupt时，成功response才作为Event尚未到达的本地兜底，将它
    设为非pending并恢复running；
-8. response Task ID与原Task不同时，只有上述快照仍为当前authority才执行既有Task切换和订阅；同Task
+9. response Task ID与原Task不同时，只有上述快照仍为当前authority才执行既有Task切换和订阅；同Task
    不建立第三条订阅；
-9. catch继续显示现有错误且不乐观关闭approval；finally继续清除submitting。
+10. catch继续显示现有错误且不乐观关闭approval；finally继续清除submitting。
+
+若首次请求已经完成authority转换但客户端只收到失败，同一decision重试必须命中相同message identity并
+补写Event；用户改选另一decision时必须保留现有409 conflict，不能创建第二个Answer或覆盖authority。
 
 不得抽取通用SSE/Modal框架，不修改API client、Dialog组件或全局Task状态架构。
 
@@ -230,7 +238,9 @@ Rust/Runtime Sidecar代码没有变化，且复用仓库已经在正式路径使
 - 更新本计划和设计状态，但不提前写入未执行的部署/smoke证据；
 - 更新`CHANGELOG.md`记录准确测试数量、已知失败和范围审计；
 - 检查`docs/AGENTS.md`索引；
-- 提交仓库实现后再构建镜像，保证镜像可追溯到clean commit。
+- 提交仓库实现后，以非强制`git push origin main`推送到`origin`现有的GitHub和Gitee push URL；
+- 分别只读验证两个远端`refs/heads/main`都等于本地实施commit；任一推送或验证失败立即停止；
+- 只有双远端源码检查点闭合后才构建镜像，保证发布artifact可由远端源码恢复。
 
 ### 7.2 镜像构建与验证
 
@@ -272,7 +282,8 @@ tag更新到`0.1.28`；网络、端口、alias、volume、secret、Skill挂载�
 - 当前frontend恰为`breeding-agent-frontend-dev:0.1.27`、端口`31999`且healthy；
 - `breeding-agent-net`中的prod容器和全部其他容器状态已记录；
 - 新backend使用现有环境、只读volume和开发网络预检，`SELECT current_database(), current_user`严格断言
-  `database=biobin_dev`；任何`biobin_db`、数据库身份不一致或strict bootstrap失败都立即停止；
+  `database=biobin_dev user=biobin_user`；任何`biobin_db`、数据库名/用户不一致或strict bootstrap失败都
+  立即停止；
 - 本次无schema或手工数据变更，不运行DDL、migration、restore或数据库清理。
 
 ### 8.2 最小替换顺序
@@ -318,8 +329,9 @@ MCP。选择尚无Grant的Tool；若所有目标Tool已有Grant，只能在用�
 - Task/AgentRun终态一致，无lock、`execution_crash`或重复Tool调用；
 - Event payload泄漏扫描为0。
 
-查询前再次断言`current_database()='biobin_dev'`。不得查询或输出用户消息正文、Tool arguments、Endpoint、
-Header、Token、DSN或原始fingerprint；不得连接、查询或修改`biobin_db`。
+查询前再次断言`current_database()='biobin_dev'`且`current_user='biobin_user'`。不得查询或输出用户消息
+正文、Tool arguments、Endpoint、Header、Token、DSN或原始fingerprint；不得连接、查询或修改
+`biobin_db`。
 
 ### 9.3 发布完成条件
 
@@ -333,7 +345,7 @@ Header、Token、DSN或原始fingerprint；不得连接、查询或修改`biobin
 
 出现以下任一情况立即停止并回滚backend/frontend整对：
 
-- 新backend未连接`biobin_dev`、strict bootstrap或health失败；
+- 新backend未以`biobin_user`连接`biobin_dev`、strict bootstrap或health失败；
 - 新frontend health失败或不能访问backend；
 - approval仍永久pending、下一授权被旧response关闭、Task终态被复活；
 - 出现重复Tool调用、Grant扩大、Event泄漏、`execution_crash`；
@@ -353,11 +365,11 @@ Answer、Event和MCP结果保留，不手工删除。
 | 设计成功标准 | 自动证据 | 开发环境证据 |
 | --- | --- | --- |
 | decided早于完整continuation | 后端阻塞resume测试 | Event时间早于Tool/Agent terminal |
-| exact replay无重复副作用 | append失败注入与exact retry | 唯一Answer/Event/Tool计数 |
+| exact replay无重复副作用 | 稳定client ID、真实chat入口append失败注入与exact retry | 唯一Answer/Event/Tool计数 |
 | 点击后立即恢复SSE | deferred POST前订阅断言 | 授权框不等待OCR结束 |
 | 旧POST不覆盖新Interrupt/终态 | 两类deferred竞争测试 | 连续approval与最终完成 |
 | 所有终态清除approval | reducer/helper/HTTP对账测试 | 完成后刷新无弹框 |
-| 安全与范围不回归 | payload扫描、diff门禁 | `biobin_dev`身份与其他容器不变 |
+| 安全与范围不回归 | payload扫描、双远端commit、diff门禁 | `biobin_dev/biobin_user`身份与其他容器不变 |
 
 ## 12. 建议提交序列
 
