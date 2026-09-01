@@ -1,6 +1,6 @@
 # MCP 2024-11-05 + Streamable HTTP 最小兼容设计
 
-状态：`implemented_verified`
+状态：`published_not_deployed`
 
 目标分支：`main`
 
@@ -89,3 +89,8 @@
   最小修复后聚焦 41 项通过。
 - 用户 MCP API 6 项通过；MCP integrations 569 项通过，其中 2 项为既有环境 skip。
 - `compileall`、变更面 Ruff 和 `git diff --check` 通过。
+- 基于源码提交 `05106654` 覆盖推送 backend-dev `0.1.29`；远端 OCI index digest 为
+  `sha256:9957571e8496cb53b34b17c3f4abb3b18fd6fdd1ec1e750e6a421d3db81af70c`，包含
+  `linux/amd64` manifest `sha256:2a8d4955a88231e9709920db61f6e6de459019befa9d29cce41b04abbf388f14`
+  和 attestation。远端重拉后确认镜像不含 `/app/config.yaml`，并通过2024 direct HTTP、canonical
+  legacy映射和数字字符串响应ID断言；Frontend、Runtime Sidecar、部署与`prod`未修改。
