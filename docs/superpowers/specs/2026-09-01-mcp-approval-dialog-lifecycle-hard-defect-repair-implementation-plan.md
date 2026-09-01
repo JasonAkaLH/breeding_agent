@@ -4,7 +4,7 @@
 
 初始设计提交：`2b05c065`；首轮硬伤修订提交：`6d0de294`；后续设计/计划硬伤修订以本文档提交历史为准
 
-状态：`implemented_automated_pending_publish`
+状态：`published_pending_deploy`
 
 自动化实施证据（2026-09-01）：
 
@@ -14,8 +14,18 @@
 - 前端聚焦门禁通过3个文件193项测试，typecheck与production build通过；
 - 受影响范围门禁通过`tests/api`全量628项、Frontend全量24个文件347项、compileall、变更面Ruff、
   typecheck、production build和`git diff --check`；无测试失败或skip，仅保留既有Frontend大chunk提示；
-- 源码双远端、镜像、`docker_cmd.md`、开发服务器和真实MCP smoke尚未执行，因此不得标记为
-  `published_pending_deploy`、`deployed_pending_smoke`或`complete_dev`。
+- 实施源码commit `36f853a06d263c6ddfbd8670e4b8cba32f13e6c5`已非强制推送，GitHub与Gitee
+  `refs/heads/main`均只读核验为该commit；
+- backend-dev `0.1.29`与frontend-dev `0.1.28`在构建前均确认tag不存在；已从上述clean commit构建并
+  推送，OCI index digest分别为
+  `sha256:a3c0d46470e9c9033d09d01273b0afee2f1b76d14c9c55ceaefd19d8376c6915`和
+  `sha256:5ce9bb47927b560c9f5892eb91ce89b927787fd7185cd13168f96929cf4c85fa`，均含
+  `linux/amd64`及attestation；backend无内置配置/.env/运行数据且严格配置bootstrap、隔离healthy与
+  `/api-doc`通过，frontend `nginx -t`、修复静态标记、隔离healthy与`/seedpilot/`通过；
+- `docker_cmd.md`已在仓库外创建`0600`备份，只完成4处backend dev tag与2处frontend dev tag精确替换，
+  文件继续为`0600`、Git-ignored/untracked；Runtime Sidecar tag未改；
+- 开发服务器部署、真实MCP/Chrome和`biobin_dev`只读smoke尚未执行，因此不得标记为
+  `deployed_pending_smoke`或`complete_dev`。
 
 目标分支：`main`
 

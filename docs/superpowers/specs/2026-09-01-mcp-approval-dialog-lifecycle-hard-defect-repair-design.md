@@ -1,7 +1,7 @@
 # MCP 工具授权框生命周期硬伤最小修复设计
 
 - 日期：2026-09-01
-- 状态：`implemented_automated_pending_publish`
+- 状态：`published_pending_deploy`
 - 目标分支：`main`
 - 目标环境：main 开发环境；不涉及 `prod`
 
