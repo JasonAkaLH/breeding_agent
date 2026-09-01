@@ -42,10 +42,12 @@ Agent continuation结束。本次现场等待约69秒，破坏了原前端修复
 成功标准：
 
 - 授权状态首次成功转换后，立即产生durable frontend `mcp.tool_approval_decided`事件；
+- authority转换成功但首次Event append失败时，exact answer replay必须补齐同一个决定事件且不得生成重复账本记录；
 - 授权POST仍在执行时，前端已经重新订阅原Task SSE并能收到决定与后续执行事件；
 - POST返回同一Task ID时，不在已经恢复的SSE之外再建立第三条冗余订阅；
+- 旧POST返回不得覆盖较新的Interrupt、授权决定或Task终态；
 - 授权提交在状态转换前失败时，弹框保持pending并允许重试；
-- `task.*`或`agent.run.*`终态历史重放后，`mcp.approval`为空；
+- Event fold、HTTP状态对账和结果加载等任一终态收敛路径结束后，`mcp.approval`均为空；
 - Grant、Tool参数、MCP调用、Agent lease/recovery/no-replay语义保持不变。
 
 ## 3. 方案决策
@@ -70,7 +72,7 @@ Agent continuation结束。本次现场等待约69秒，破坏了原前端修复
 修改 `src/api/runtime.py` 的MCP approval分支。
 
 `accept_mcp_tool_approval()` 首次返回 `accepted` 或 `denied_finalized` 后、进入
-`_resume_agent_interrupt()`或deny终态返回前，调用现有Event writer写入并发布：
+`_resume_agent_interrupt()`或deny终态返回前，构造并写入：
 
 ```text
 mcp.tool_approval_decided
@@ -79,16 +81,24 @@ mcp.tool_approval_decided
 payload只包含：
 
 - `interrupt_id`；
-- 由既有audit reference signer和approval fingerprint生成的`safe_call_ref`；
+- 由既有audit reference signer、approval fingerprint和现有
+  `mcp-approval-call-reference-v1` context生成的`safe_call_ref`；
 - `decision`。
 
 前端已有required事件中的Server/Tool显示名称；decided reducer允许复用previous值，因此不新增
 Server查询，也不把Tool参数、Endpoint、凭据或原始fingerprint写入Event。
 
-exact answer replay不再次发布决定事件；既有Coordinator可生成同名事件的路径保持不变。本次只补
-“approval已由持久化authority消费，Coordinator随后直接命中Grant/approved action而没有返回
-decided Event”的缺口。若Coordinator在其他既有路径稍后发布语义相同但Event ID不同的decided
-事件，前端fold仍幂等地保持同一decision；本次不为消除这种无害重复扩大到Coordinator修改。
+Runtime决定事件必须使用由版本化event kind、`interrupt_id`和accepted answer ID派生的确定性
+Event ID，并把accepted answer持久化的`created_at`作为稳定Event时间，再通过现有
+`append_event_exact()`写入。Event ID、payload和`created_at`在首次请求与exact replay中必须完全一致，
+避免exact append发生idempotency conflict。首次写入才发布给Event broker；exact answer replay必须再次
+执行同一个exact append：记录已存在时不产生第二条账本记录，authority已成功但首次Event append失败时
+则补齐并发布缺失记录。该补写只恢复UI投影，不再次创建Answer、Grant或调用Tool。
+
+既有Coordinator可生成同名事件的路径保持不变。本次只补“approval已由持久化authority消费，
+Coordinator随后直接命中Grant/approved action而没有返回decided Event”的缺口。若Coordinator在其他
+既有路径稍后发布语义相同但Event ID不同的decided事件，前端fold仍幂等地保持同一decision；本次不为
+消除这种无害重复扩大到Coordinator修改。
 
 ### 4.2 前端：授权提交开始时立即重订阅
 
@@ -100,8 +110,16 @@ decided Event”的缺口。若Coordinator在其他既有路径稍后发布语�
 2. 设置现有`mcpApprovalSubmitting=true`；
 3. 在调用`api.submitMessage()`前，对原Task调用现有`subscribeToTask()`；
 4. 等待现有POST完成；
-5. response仍指向原Task时保留步骤3的订阅，不在POST返回后重复创建；只有Task ID实际变化时才切换订阅；
-6. `finally`继续清除submitting状态。
+5. response返回后先检查generation、conversation、当前Task、当前phase和当前approval的
+   `interruptId`；
+6. 当前Task已被清除/替换、phase已进入`loading_artifacts`或取消/终态、或者当前waiting authority已
+   不是步骤1捕获的同一pending approval时，旧response不得修改Task phase、approval、pending
+   interrupt、assistant或订阅；后一种情况同时包含另一MCP approval和普通Interrupt；
+7. response仍指向原Task时保留步骤3的订阅，不在POST返回后重复创建；只有Task ID实际变化且步骤1的
+   提交快照仍是当前authority时才切换订阅；
+8. 只有当前approval仍是步骤1捕获的同一pending Interrupt时，才允许用成功response作为decided
+   Event尚未到达时的本地兜底，把该approval设为非pending；
+9. `finally`继续清除submitting状态。
 
 等待事件历史已由`seenEventIds`去重，重订阅回放原`approval_required`不会生成第二次业务授权。
 durable `mcp.tool_approval_decided`到达后由现有reducer把approval置为非pending并关闭弹框，后续Tool和
@@ -110,17 +128,24 @@ Agent事件继续沿同一SSE展示。
 若POST在authority转换前失败，不会产生decided事件；现有pending状态与错误提示保持，用户可以重试。
 generation与conversation guard保持原样，切换对话后不得回写旧页面状态。
 
+上述response guard同时覆盖两个直接竞争：continuation先产生下一次Tool/普通Interrupt，以及SSE先
+产生Task终态并完成结果加载。旧POST在这两种情况下都只能结束自己的loading状态，不得清除新弹框或
+把已完成Task重新设为running。
+
 ### 4.3 前端：终态清除陈旧approval
 
-修改 `frontend/src/domain/taskEvents.ts`。
+修改 `frontend/src/domain/taskEvents.ts`，并同步收紧已在本次范围内的`frontend/src/App.tsx`终态收敛
+入口。
 
-以下终态fold必须把 `mcp.approval`设为`null`：
+以下终态Event fold必须把 `mcp.approval`设为`null`：
 
 - `task.completed`、`task.failed`、`task.cancelled`；
 - `agent.run.completed`、`agent.run.failed`、`agent.run.cancelled`。
 
-终态是“不会再等待该授权”的更强authority。该兜底同时修复本次已完成但缺少decided事件的历史
-Task；不修改数据库，也不回填旧Event。
+同一规则还必须用于不依赖终态Event的状态收敛入口：`markTaskCompleted()`、`markTaskFailed()`、
+App内取消收敛，以及`reconcileTerminalTaskStatus()`的completed、failed、cancelled和既有MCP
+terminal projection分支。终态是“不会再等待该授权”的更强authority。该兜底同时修复本次已完成但
+缺少decided事件的历史Task；不修改数据库，也不回填旧Event。
 
 ## 5. 数据流
 
@@ -129,11 +154,14 @@ frontend approval click
   -> subscribe existing Task SSE immediately
   -> POST interrupt answer
        -> accept approval atomically
-       -> persist/publish mcp.tool_approval_decided
+       -> exact-persist/publish mcp.tool_approval_decided
        -> resume existing AgentRun synchronously
   -> SSE decided event closes dialog
   -> SSE Tool/Agent events continue
-  -> POST eventually returns; same Task keeps current subscription
+  -> POST eventually returns
+       -> newer Interrupt or terminal state: no projection mutation
+       -> same pending approval: response may provide local decided fallback
+       -> same Task keeps current subscription
 ```
 
 恢复路径：
@@ -148,9 +176,11 @@ event replay
 ## 6. 错误与并发边界
 
 - 决定事件只在storage authority成功转换后发布，不做先写UI事件再提交数据库；
+- authority与Event之间发生部分失败时，exact answer replay只补写确定性Event，不重放业务副作用；
 - POST失败且没有决定事件时不自动授权、不关闭可重试状态；
 - 重订阅只读取同一Task的durable Event，不调用MCP、不重放Tool；
 - 同一Task response不重复订阅，避免双SSE和重复事件处理；
+- 旧response不覆盖较新的Interrupt、`loading_artifacts`或取消/终态状态；
 - Event重复投递继续由`seenEventIds`去重；
 - deny保持现有终态，不进入Agent resume；
 - `always_allow`继续使用既有per-Tool Grant scope，不扩大Server级权限；
@@ -163,7 +193,11 @@ event replay
 - 使用可控的阻塞Agent resume：断言resume尚未结束时，Interrupt已answered且
   `mcp.tool_approval_decided`已持久化；
 - `allow_once`、`always_allow`与`deny`的decision正确；
-- exact answer replay不重复决定事件或Grant；
+- 注入authority成功后的首次Event append失败；exact answer replay补齐同一确定性Event，且不重复
+  Answer、决定事件、Grant或Tool调用；
+- 首次请求与exact replay构造的Event ID、payload和accepted-answer `created_at`完全一致，不触发
+  idempotency conflict；
+- decided与required Event使用相同`mcp-approval-call-reference-v1` context生成`safe_call_ref`；
 - Event payload不含arguments、Endpoint、credential、authorization或原始fingerprint。
 
 ### 7.2 前端聚焦测试
@@ -171,9 +205,14 @@ event replay
 - 将第二次`submitMessage`设为未完成Promise；点击授权后立即出现第二条Task订阅；
 - POST未返回时注入`mcp.tool_approval_decided`，授权框关闭并能继续消费Tool事件；
 - response为同一Task时订阅数不再增加；
+- POST未返回时注入下一次approval/Interrupt，再返回旧POST；新授权必须继续pending，且旧response不得
+  清除新pending interrupt或修改waiting phase；
+- POST未返回时注入Task/Agent终态并完成结果收敛，再返回旧POST；Task不得恢复为running、不得重建
+  current Task或SSE；
 - submission失败时授权框仍pending且按钮恢复可用；
-- fold `approval_required -> task.completed`及
-  `approval_required -> agent.run.completed`后`approval=null`；
+- 六类Task/Agent终态Event fold后均为`approval=null`；
+- Event stream失败且只靠`getTask()`对账为completed、failed或cancelled时均为`approval=null`；既有MCP
+  terminal projection分支同样不得保留approval；
 - restore/replay已完成Task时不显示授权框。
 
 ### 7.3 回归门禁
