@@ -2,9 +2,9 @@
 
 ## 状态
 
-`approved_written_review_pending`
+`approved_hard_defect_reviewed`
 
-用户已批准全协议、单向兼容方案；本文等待书面复核后再生成实施计划，当前尚未修改生产代码。
+用户已批准全协议、单向兼容方案；有界硬伤复审发现的 1 个 Blocking 和 2 个 Major 已在本文中修正，当前尚未修改生产代码。
 
 ## 问题与证据
 
@@ -69,11 +69,18 @@ response id = string "01" / "+1" / " 1" / "1.0"
 
 该判定自然支持正数、零和负整数，拒绝前导零、正号、空白、小数、指数、Unicode 数字和其他表示法。
 
+既有“精确匹配”也必须是类型精确匹配：
+
+- expected 为具体 `int` 时，raw 只有具体 `int` 且值相同才是 exact；
+- expected 为具体 `str` 时，raw 只有具体 `str` 且值相同才是 exact；
+- `bool`、`float`、`null` 和其他类型不得利用 Python 的宽松相等语义匹配整数或字符串 request ID。
+
 ### Exact-first 与并发
 
-- 现有相等 response ID 先走原路径；只有未直接关联时才检查单向别名。
+- 类型精确且值相等的 response ID 先走原路径；只有未直接关联时才检查单向别名。
 - Legacy pending 同时存在整数 `1` 与字符串 `"1"` 时，响应 `"1"` 必须优先关联字符串 pending，响应 `1` 关联整数 pending。
 - 只有不存在 exact string pending 时，响应 `"1"` 才可作为整数 pending `1` 的别名。
+- Legacy exact lookup 不得只依赖 Python dict 的宽松 key 相等语义，避免 `True` 与 `1` 串线。
 - 未找到 exact 或规范别名时，保持现有 unknown/mismatch/error/timeout 行为。
 
 ## 组件设计
@@ -82,7 +89,7 @@ response id = string "01" / "+1" / " 1" / "1.0"
 
 新增唯一纯 helper，接收已解析的 response mapping 和 expected request ID：
 
-- 相等时返回原 mapping；
+- 类型和值均精确相等时返回原 mapping；
 - 满足单向规范别名时返回只替换顶层 `id` 的浅副本；
 - 不匹配时返回 `None`；
 - 不修改输入 mapping，不解析 response body，不处理非 response message。
@@ -108,12 +115,30 @@ server request、notification 和 unsupported client request 路径不变。
 
 `Mcp-Method`、`Mcp-Name`、MRTR、Tasks、cache hint、schema 和 recovery identity 不变。
 
+### `src/integrations/mcp/adapter_2025_tasks.py`
+
+独立的 `MCP2025TaskRecoveryClient` 不经过 base client，必须在 `tasks/get`、`tasks/result` 和 `tasks/cancel` response envelope 校验时复用同一 helper。只规范化顶层 JSON-RPC response ID；远端 `taskId`、safe ref、recovery binding 和业务 result 不变。
+
+### `src/integrations/mcp/streaming_response.py`
+
+JSON object 成员顺序没有语义。Legacy persistent response 可能在顶层 `id` 之前先发送 `result`，因此 parser 不得假设 sink selection 时 prefix 已含 ID：
+
+- ID 已在 `result` 前出现时，继续使用现有 sink fast path；
+- ID 尚未出现时，result 必须写入 parser-owned、匿名且有界的 provisional spool，不得继续使用无上限 `bytearray`；
+- provisional spool 的 hard cap 复用 `MAX_DURABLE_MCP_RESULT_BYTES`（64 MiB），超过时使用既有 `MCPResultTooLargeError`；临时存储失败沿用既有 temporary-storage typed failure；
+- 完整 envelope 解析出 response ID 后，先按 shared helper 做 exact/单向规范化，再关联正确 pending sink，并把 provisional bytes 分块写入该 sink；
+- 关联成功后按现有 control-result/materialize 或 durable-result/finalize 规则完成，不能形成第二套 result authority；
+- unknown/mismatch 必须关闭 provisional spool且不得触碰任何未关联 pending；已关联后的 parse/write/finalize failure 必须 abort 目标 sink；reader cancel/close 继续通过既有 fail-pending 路径 abort 受影响 sink；所有分支都不得暴露临时路径；
+- provisional spool 不新增数据库、manifest、公开 ref、配置项或后台清理任务。
+
+该规则只修复 selector 在 ID 尚不可见时的有界承接，不改变 ID-before-result 的现有流式快路径。
+
 ### `src/integrations/mcp/transport_legacy_http_sse.py`
 
 Legacy persistent reader 必须在三处复用 shared helper/规则：
 
 1. pending response correlation：exact key 优先，之后才尝试规范整数别名；
-2. result sink selection：字符串化 ID 必须选中对应整数 pending 的 sink，避免大结果绕过 streaming spool；
+2. result sink selection：字符串化 ID 必须选中对应整数 pending 的 sink；ID 位于 result 后时使用上述唯一有界 provisional spool，避免大结果绕过 sink 或无界驻留内存；
 3. 返回 response/event：别名命中时构造 normalized message 和 event 副本，使后续 `MCPClient`、`sse_events` 与最终 message 看到同一整数 ID。
 
 Legacy direct POST response 也必须在返回上层前或由 base client 唯一 final gate 完成相同规范化。不得修改原始 SSE bytes、pending key 或 request body。
@@ -127,6 +152,7 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 | request `"1"`, response `"1"` | 原样成功 |
 | request `"1"`, response `1` | 不新增兼容，保持 mismatch/unknown |
 | request `1`, response `"01"`/`"+1"`/`"1.0"` | 保持 mismatch/unknown |
+| request `1`, response `true`/`1.0`/`null` | 保持 mismatch/unknown |
 | response ID 无 pending | 保持 unknown count/timeout 或 protocol error |
 | 同时 pending `1` 与 `"1"`，response `"1"` | exact string pending 胜出 |
 | 同时 pending `1` 与 `"1"`，response `1` | integer pending 胜出 |
@@ -138,7 +164,7 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 
 - 整数 exact、字符串 exact和规范字符串别名；
 - 正数、零、负数；
-- leading zero、plus、whitespace、decimal、exponent、Unicode digit、bool、null、未知字符串拒绝；
+- leading zero、plus、whitespace、decimal、exponent、Unicode digit、bool、float、null、未知字符串拒绝；
 - 输入 mapping 不变，只有别名命中返回副本。
 
 ### 2024 Legacy HTTP+SSE
@@ -147,6 +173,8 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 - 服务端字符串化整数 ID 时 initialize + list 通过；
 - direct POST JSON response 与 persistent SSE response均覆盖；
 - streaming result sink 在字符串化 ID 下仍形成正常 result ref；
+- `result` 位于 `id` 前且超过内存阈值时使用 provisional spool 后写入正确 sink，进程内存不随 result 全量增长；
+- late-ID provisional spool 超过 64 MiB、unknown/mismatch、parse failure、cancel 和 close 时 typed failure/cleanup 闭合；
 - integer/string 双 pending 乱序响应保持 exact-first；
 - 非规范/未知 ID 继续 ignored + timeout，不串线。
 
@@ -162,6 +190,12 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 - JSON/SSE双final仅ID类型不同、规范后内容一致时不误报冲突；
 - 非规范/未知 ID、多个final和真实内容冲突继续拒绝；
 - MRTR/Tasks/recovery相关 ID 不被误改。
+
+### 2025 Tasks recovery
+
+- `tasks/get`、`tasks/result`、`tasks/cancel` 分别覆盖整数和字符串化整数 response ID；
+- 非规范字符串、bool、float、null和真实 mismatch 继续拒绝；
+- remote task ID、safe ref和recovery identity断言保持不变。
 
 自动测试使用确定性 fake transport/server，不访问外部 Endpoint，不保存真实 Header、key、响应正文或 Tool descriptor。
 
@@ -184,9 +218,11 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 
 ## 风险与回滚
 
-主要风险是错误地把业务字符串 ID 当成整数别名，导致并发响应串线。规范十进制单向规则、exact-first 和整数 expected 限制共同收窄该风险；非规范字符串保持原失败语义。
+主要风险是错误地把业务字符串 ID 当成整数别名，导致并发响应串线。规范十进制单向规则、类型精确的 exact-first 和整数 expected 限制共同收窄该风险；非规范字符串保持原失败语义。
 
-回滚时恢复 shared helper 和四个消费点的旧严格比较即可；没有数据、schema、缓存、外部服务或部署回滚。
+第二个风险是 JSON member order 使 ID 在 result 后出现，导致 sink selection 前无法关联 pending。唯一有界 provisional spool、64 MiB hard cap、关联后写入既有 sink和全异常清理共同闭合该风险，不新增持久化 authority。
+
+回滚时恢复 shared helper 和本文列出的消费点旧严格比较即可；没有数据、schema、缓存、外部服务或部署回滚。
 
 ## 参考
 
@@ -196,3 +232,11 @@ Legacy direct POST response 也必须在返回上层前或由 base client 唯一
 - MCP 2026-07-28 release：<https://blog.modelcontextprotocol.io/posts/2026-07-28/>
 
 License Requirement：复用现有 Python、MCP protocol helpers、adapters、streaming parser、typed errors 与 unittest；无新增依赖或许可变化。
+
+## 硬伤复审记录
+
+- 审计轮次：1 轮发现，1 轮批准修订与复审。
+- 已修复 Blocking：Legacy `result-before-id` 绕过 sink并进入无界内存 materialization；现改为64 MiB有界 provisional spool并在ID解析后写入唯一现有sink。
+- 已修复 Major：独立 `MCP2025TaskRecoveryClient` 未进入全协议消费面；现已纳入组件和测试。
+- 已修复 Major：普通 Python 相等会让 `True == 1`、`1.0 == 1` 绕过批准规则；现将 exact 固定为类型和值均相同，并要求Legacy pending type-aware lookup。
+- 修订后硬伤结论：0 Blocking，0 Major；Minor 按用户要求未审计。
