@@ -783,6 +783,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       currentCapabilityId: null,
       currentCapabilityLabel: null,
       currentActivityText: null,
+      mcp: { ...state.mcp, approval: null },
       errorMessage: null,
     };
   }
@@ -821,6 +822,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (task.status === 'failed' && task.mcp_terminal_projection) {
       taskPhaseRef.current = 'failed';
       localTaskRuntimeActiveRef.current = false;
+      setTaskState((state) => ({
+        ...state,
+        mcp: { ...state.mcp, approval: null },
+      }));
       updateCurrentTaskId(expectedTaskId);
       return true;
     }
@@ -996,15 +1001,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const assistantId = currentAssistantIdRef.current;
     const generation = restoreGenerationRef.current;
     if (!approval?.pending || !approval.interruptId || !targetConversationId || !taskId || !assistantId) return;
+    const approvalClientMessageId = `mcp-approval-answer-v1-${approval.interruptId}`;
     setMCPApprovalSubmitting(true);
     try {
+      subscribeToTask(taskId, assistantId, generation, targetConversationId);
       const response = await api.submitMessage({
         conversationId: targetConversationId,
         content: decision === 'deny' ? '拒绝本次 MCP 工具调用' : decision === 'always_allow' ? '始终允许此 MCP 工具' : '仅允许本次 MCP 工具调用',
         mode,
         routingMode: 'auto',
         capabilityId: null,
-        clientMessageId: makeClientId('mcp-approval'),
+        clientMessageId: approvalClientMessageId,
         metadata: {
           interrupt_id: approval.interruptId,
           mcp_tool_approval: decision,
@@ -1012,6 +1019,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       });
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       const resumedTaskId = response.task_id || taskId;
+      const currentApproval = taskStateRef.current.mcp.approval;
+      const sameApproval = currentApproval?.interruptId === approval.interruptId;
+      const samePendingApproval = sameApproval && currentApproval.pending;
+      if (
+        currentTaskIdRef.current !== taskId
+        || currentAssistantIdRef.current !== assistantId
+        || taskPhaseRef.current === 'loading_artifacts'
+        || CANCELLATION_OR_TERMINAL_PHASES.has(taskPhaseRef.current)
+        || (taskPhaseRef.current === 'waiting_for_input' && !samePendingApproval)
+      ) return;
+      if (resumedTaskId === taskId && !samePendingApproval) return;
+      if (resumedTaskId !== taskId && !sameApproval) return;
       localTaskRuntimeActiveRef.current = true;
       taskPresentationModesRef.current.set(resumedTaskId, mode);
       updateCurrentTaskId(resumedTaskId);
@@ -1027,11 +1046,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         mcp: {
           ...state.mcp,
           approval: state.mcp.approval
+            && state.mcp.approval.interruptId === approval.interruptId
             ? { ...state.mcp.approval, decision, pending: false }
-            : null,
+            : state.mcp.approval,
         },
       }));
-      subscribeToTask(resumedTaskId, assistantId, generation, targetConversationId);
+      if (resumedTaskId !== taskId) {
+        subscribeToTask(resumedTaskId, assistantId, generation, targetConversationId);
+      }
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {

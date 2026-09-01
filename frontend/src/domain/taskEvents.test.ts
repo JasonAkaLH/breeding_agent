@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, foldMCPResultArtifactProjections, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, taskProgressDisplayText } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, foldMCPResultArtifactProjections, isTaskActive, markTaskCompleted, markTaskFailed, markWaitingInputRequired, parseCapabilityFallbackNotice, taskProgressDisplayText } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -739,6 +739,38 @@ describe('applyTaskEvent', () => {
     expect(state.mcp.input).toMatchObject({ pending: true, fieldNames: ['year'] });
     expect(state.mcp.remoteTask).toMatchObject({ safeTaskRef: 'task-safe-1', status: 'working' });
     expect(JSON.stringify(state.mcp)).not.toContain('must-not-leak');
+  });
+
+  it.each([
+    ['task.completed', {}],
+    ['task.failed', { code: 'failed' }],
+    ['task.cancelled', {}],
+    ['agent.run.completed', { compaction_count: 0, duration_seconds: 0, outcome: 'completed', sample_count: 1, tool_call_count: 0 }],
+    ['agent.run.failed', { compaction_count: 0, duration_seconds: 0, outcome: 'failed', sample_count: 1, tool_call_count: 0 }],
+    ['agent.run.cancelled', { compaction_count: 0, duration_seconds: 0, outcome: 'cancelled', sample_count: 1, tool_call_count: 0 }],
+  ])('clears MCP approval when %s is consumed', (eventType, payload) => {
+    let state = applyTaskEvent(createInitialTaskEventState(), event('mcp.tool_approval_required', {
+      interrupt_id: 'approval-terminal-clear',
+      safe_call_ref: 'a'.repeat(64),
+      server_display_name: 'OCR服务',
+      tool_display_name: 'start_parse_job',
+    }, 'approval-before-terminal'));
+
+    state = applyTaskEvent(state, event(eventType, payload, `terminal-${eventType}`));
+
+    expect(state.mcp.approval).toBeNull();
+  });
+
+  it('clears MCP approval in imperative completed and failed convergence helpers', () => {
+    const waiting = applyTaskEvent(createInitialTaskEventState(), event('mcp.tool_approval_required', {
+      interrupt_id: 'approval-helper-clear',
+      safe_call_ref: 'b'.repeat(64),
+      server_display_name: 'OCR服务',
+      tool_display_name: 'start_parse_job',
+    }, 'approval-before-helper'));
+
+    expect(markTaskCompleted(waiting).mcp.approval).toBeNull();
+    expect(markTaskFailed(waiting, 'failed').mcp.approval).toBeNull();
   });
 
   it('shows a recoverable unavailable state without promising cross-path fallback', () => {

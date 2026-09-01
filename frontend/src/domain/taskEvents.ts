@@ -253,11 +253,11 @@ export function taskProgressDisplayText(state: TaskEventState): string {
 }
 
 export function markTaskCompleted(state: TaskEventState, statusText = '任务已完成'): TaskEventState {
-  return { ...state, phase: 'completed', statusText, currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, errorMessage: null };
+  return { ...state, phase: 'completed', statusText, currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, mcp: { ...state.mcp, approval: null }, errorMessage: null };
 }
 
 export function markTaskFailed(state: TaskEventState, errorMessage: string): TaskEventState {
-  return { ...state, phase: 'failed', statusText: '本次任务未完成', currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, errorMessage };
+  return { ...state, phase: 'failed', statusText: '本次任务未完成', currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, mcp: { ...state.mcp, approval: null }, errorMessage };
 }
 
 export function markWaitingInputRequired(state: TaskEventState): TaskEventState {
@@ -640,6 +640,7 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         skillStatuses: markRunningSkillStatusesCompleted(withEvent.skillStatuses),
         agentWaiting: [],
         agentRemainingWaitCount: 0,
+        mcp: { ...withEvent.mcp, approval: null },
         errorMessage: null,
       };
     case 'agent.run.completed':
@@ -651,6 +652,7 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         skillStatuses: markRunningSkillStatusesCompleted(withEvent.skillStatuses),
         agentWaiting: [],
         agentRemainingWaitCount: 0,
+        mcp: { ...withEvent.mcp, approval: null },
         errorMessage: null,
       };
     case 'agent.run.failed':
@@ -663,6 +665,7 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         currentActivityText: null,
         agentWaiting: [],
         agentRemainingWaitCount: 0,
+        mcp: { ...withEvent.mcp, approval: null },
         errorMessage: state.errorMessage ?? failureMessage(event.payload, event.node_id),
       };
     case 'agent.run.cancelled':
@@ -675,12 +678,13 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         currentActivityText: null,
         agentWaiting: [],
         agentRemainingWaitCount: 0,
+        mcp: { ...withEvent.mcp, approval: null },
         errorMessage: null,
       };
     case 'task.cancellation_requested':
       return { ...withEvent, phase: 'cancelling', statusText: '取消请求已发送', currentActivityText: '正在取消当前任务', errorMessage: null };
     case 'task.cancelled':
-      return { ...withEvent, phase: 'cancelled', statusText: '任务已取消', currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, errorMessage: null };
+      return { ...withEvent, phase: 'cancelled', statusText: '任务已取消', currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, mcp: { ...withEvent.mcp, approval: null }, errorMessage: null };
     case 'node.cancelled':
       return markNodeInterruptedLine(withEvent, event, 'cancelled', '已取消');
     case 'node.blocked_by_cancellation':
@@ -702,6 +706,7 @@ function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskE
         currentCapabilityId: null,
         currentCapabilityLabel: null,
         currentActivityText: null,
+        mcp: { ...withEvent.mcp, approval: null },
         errorMessage: state.errorMessage ?? failureMessage(event.payload, event.node_id),
       };
     case 'skill.progress': {
