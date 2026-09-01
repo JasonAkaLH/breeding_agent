@@ -13,12 +13,6 @@ from unittest.mock import AsyncMock, patch
 
 from src.api.dto import SubmitMessageRequest
 from src.api.runtime import ApiRuntime, build_api_runtime as _build_api_runtime
-
-build_api_runtime = partial(
-    _build_api_runtime,
-    skill_roots=(),
-    public_skill_roots=(),
-)
 from src.capabilities.mcp_dispatch.models import (
     MCPSelectorAction,
     MCPSelectorActionType,
@@ -85,6 +79,12 @@ from src.integrations.mcp.gateway_models import (
 from src.integrations.mcp.temporary_results import MCPTemporaryResultRef
 from tests.api.support import InMemoryTaskRuntimeSidecar
 from tests.master_key_support import recovery_cipher
+
+build_api_runtime = partial(
+    _build_api_runtime,
+    skill_roots=(),
+    public_skill_roots=(),
+)
 
 
 class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
@@ -159,6 +159,331 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             enable_conversation_memory=False,
             runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
         )
+
+    async def _prepare_mcp_approval(self, runtime, *, suffix: str):
+        class OneCallSelector:
+            async def select(self, _context):
+                return MCPSelectorAction(
+                    MCPSelectorActionType.CALL_TOOL,
+                    tool_name="lookup",
+                    arguments={"query": f"approved-{suffix}"},
+                )
+
+        class ApprovalGateway:
+            def __init__(self) -> None:
+                self.call_count = 0
+                self.catalog = ToolCatalogSnapshot(
+                    server_id=f"server-{suffix}",
+                    effective_protocol_version="2026-07-28",
+                    tools=(
+                        MCPToolDescriptor(
+                            name="lookup",
+                            description="lookup",
+                            input_schema={
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                            },
+                            input_schema_sha256=f"schema-{suffix}",
+                        ),
+                    ),
+                )
+
+            async def open_scope(
+                self, principal, platform_task_id, server_id, **_kwargs
+            ):
+                return MCPTaskServerScope(
+                    f"scope-{suffix}",
+                    principal.username,
+                    platform_task_id,
+                    server_id,
+                    1,
+                    1,
+                )
+
+            async def list_tools(self, _scope):
+                return self.catalog
+
+            async def call_tool(self, *_args, **_kwargs):
+                self.call_count += 1
+                raise AssertionError("approval setup must not call the tool")
+
+            async def verify_durable_result(self, *_args, **_kwargs):
+                return None
+
+            async def close_scope(self, _scope, _reason):
+                return None
+
+        now = runtime._utcnow_naive()
+        task = Task(
+            task_id=f"task-{suffix}",
+            conversation_id=f"conversation-{suffix}",
+            root_message_id=f"message-{suffix}",
+            status=TaskStatus.RUNNING,
+            mcp_execution_mode="user_scoped",
+            mcp_shadow_enabled=False,
+            mcp_rollout_config_version="cp7",
+            mcp_route_reason_code="enforce_selected",
+            mcp_rollout_mode="enforce",
+        )
+        node = TaskNode(
+            node_id=f"node-{suffix}",
+            task_id=task.task_id,
+            capability_id="mcp.dispatch",
+            status=NodeStatus.RUNNING,
+        )
+        server = UserMCPServer(
+            server_id=f"server-{suffix}",
+            owner_user_id="alice",
+            display_name=f"Approval {suffix}",
+            routing_description=f"approval {suffix}",
+            endpoint_url="https://example.test/mcp",
+            transport=UserMCPTransport.STREAMABLE_HTTP,
+            health_status=UserMCPHealthStatus.AVAILABLE,
+            created_at=now,
+            updated_at=now,
+        )
+        await runtime.storage.save_conversation(
+            Conversation(task.conversation_id, "alice")
+        )
+        await runtime.storage.save_message(
+            Message(
+                task.root_message_id,
+                task.conversation_id,
+                MessageRole.USER,
+                "request approval",
+                task_id=task.task_id,
+            )
+        )
+        await runtime.storage.save_task(task)
+        await runtime.storage.save_task_node(node)
+        await runtime.storage.create_user_mcp_server(server)
+        gateway = ApprovalGateway()
+        coordinator = UserMCPDispatchCoordinator(
+            storage=runtime.storage,
+            gateway=gateway,
+            selector=OneCallSelector(),
+            audit_reference_signer=runtime._mcp_audit_reference_signer,
+            pending_action_payload_store=runtime._mcp_pending_action_payload_store,
+            terminal_candidate_snapshot_authority=(
+                runtime._mcp_terminal_candidate_snapshot_authority
+            ),
+            durable_result_snapshot_authority=(
+                runtime._mcp_durable_result_snapshot_authority
+            ),
+            terminal_result_root=runtime._mcp_terminal_result_root,
+            now_fn=lambda: now,
+            terminal_now_fn=lambda: now.replace(tzinfo=timezone.utc),
+        )
+        outcome = await coordinator.dispatch(
+            CapabilityExecutionRequest(
+                capability_id="mcp.dispatch",
+                conversation_id=task.conversation_id,
+                task_id=task.task_id,
+                node_id=node.node_id,
+                input_payload={"server_id": server.server_id},
+                metadata={"user_message": "request approval"},
+            ),
+            server_id=server.server_id,
+        )
+        self.assertEqual(outcome.output_payload["mcp_status"], "approval_required")
+        self.assertEqual(gateway.call_count, 0)
+        return task, server, outcome.interrupt
+
+    async def test_approval_decided_event_is_persisted_before_resume(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            task, _server, interrupt = await self._prepare_mcp_approval(
+                runtime, suffix="approval-event-before-resume"
+            )
+            resume_entered = asyncio.Event()
+            release_resume = asyncio.Event()
+
+            async def blocked_resume(**_kwargs):
+                resume_entered.set()
+                await release_resume.wait()
+                return True
+
+            runtime._resume_agent_interrupt = AsyncMock(side_effect=blocked_resume)
+            submission = asyncio.create_task(
+                runtime.submit_chat_message(
+                    task.conversation_id,
+                    SubmitMessageRequest(
+                        conversation_id=task.conversation_id,
+                        content="仅允许本次 MCP 工具调用",
+                        client_message_id=(
+                            f"mcp-approval-answer-v1-{interrupt.interrupt_id}"
+                        ),
+                        metadata={
+                            "interrupt_id": interrupt.interrupt_id,
+                            "mcp_tool_approval": "allow_once",
+                        },
+                    ),
+                    authenticated_username="alice",
+                )
+            )
+            await asyncio.wait_for(resume_entered.wait(), timeout=2)
+            events = await runtime.storage.list_events_for_task_filtered(
+                task.task_id,
+                event_types=("mcp.tool_approval_decided",),
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(set(events[0].payload), {
+                "interrupt_id",
+                "safe_call_ref",
+                "decision",
+            })
+            self.assertEqual(events[0].payload["interrupt_id"], interrupt.interrupt_id)
+            self.assertEqual(events[0].payload["decision"], "allow_once")
+            safe_call_ref = str(events[0].payload["safe_call_ref"])
+            self.assertEqual(len(safe_call_ref), 64)
+            int(safe_call_ref, 16)
+            serialized = json.dumps(events[0].payload, sort_keys=True).lower()
+            for forbidden in (
+                "arguments",
+                "endpoint",
+                "credential",
+                "authorization",
+                "fingerprint",
+                "approved-approval-event-before-resume",
+            ):
+                self.assertNotIn(forbidden, serialized)
+            release_resume.set()
+            await submission
+            await runtime.shutdown()
+
+    async def test_approval_decided_exact_replay_recovers_failed_append(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            task, server, interrupt = await self._prepare_mcp_approval(
+                runtime, suffix="approval-event-exact-replay"
+            )
+            runtime._resume_agent_interrupt = AsyncMock(return_value=True)
+            original_append_event_exact = runtime.storage.append_event_exact
+            attempted_events = []
+            failed_once = False
+
+            async def fail_first_decided_append(event):
+                nonlocal failed_once
+                if event.event_type == "mcp.tool_approval_decided" and not failed_once:
+                    failed_once = True
+                    attempted_events.append(event)
+                    raise OSError("simulated decided event append failure")
+                return await original_append_event_exact(event)
+
+            client_message_id = f"mcp-approval-answer-v1-{interrupt.interrupt_id}"
+            request = SubmitMessageRequest(
+                conversation_id=task.conversation_id,
+                content="始终允许此 MCP 工具",
+                client_message_id=client_message_id,
+                metadata={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "mcp_tool_approval": "always_allow",
+                },
+            )
+            with patch.object(
+                runtime.storage,
+                "append_event_exact",
+                side_effect=fail_first_decided_append,
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "simulated decided event append failure"
+                ):
+                    await runtime.submit_chat_message(
+                        task.conversation_id,
+                        request,
+                        authenticated_username="alice",
+                    )
+
+            replay = await runtime.submit_chat_message(
+                task.conversation_id,
+                request,
+                authenticated_username="alice",
+            )
+            self.assertEqual(replay["task_id"], task.task_id)
+            answers = await runtime.storage.list_interrupt_answers(
+                interrupt.interrupt_id
+            )
+            self.assertEqual(len(answers), 1)
+            self.assertEqual(answers[0].source_message_id, client_message_id)
+            grants = await runtime.storage.list_user_mcp_tool_grants(
+                "alice", server.server_id
+            )
+            self.assertEqual(len(grants), 1)
+            events = await runtime.storage.list_events_for_task_filtered(
+                task.task_id,
+                event_types=("mcp.tool_approval_decided",),
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].payload["decision"], "always_allow")
+            self.assertEqual(events[0].event_id, attempted_events[0].event_id)
+            self.assertEqual(events[0].payload, attempted_events[0].payload)
+            self.assertEqual(events[0].created_at, attempted_events[0].created_at)
+            self.assertEqual(runtime._resume_agent_interrupt.await_count, 1)
+            await runtime.shutdown()
+
+    async def test_approval_deny_persists_decided_without_resume(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            task, _server, interrupt = await self._prepare_mcp_approval(
+                runtime, suffix="approval-event-deny"
+            )
+            runtime._resume_agent_interrupt = AsyncMock(return_value=True)
+            await runtime.submit_chat_message(
+                task.conversation_id,
+                SubmitMessageRequest(
+                    conversation_id=task.conversation_id,
+                    content="拒绝本次 MCP 工具调用",
+                    client_message_id=(
+                        f"mcp-approval-answer-v1-{interrupt.interrupt_id}"
+                    ),
+                    metadata={
+                        "interrupt_id": interrupt.interrupt_id,
+                        "mcp_tool_approval": "deny",
+                    },
+                ),
+                authenticated_username="alice",
+            )
+            events = await runtime.storage.list_events_for_task_filtered(
+                task.task_id,
+                event_types=("mcp.tool_approval_decided",),
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].payload["decision"], "deny")
+            runtime._resume_agent_interrupt.assert_not_awaited()
+            await runtime.shutdown()
 
     async def test_terminal_task_with_active_dispatch_converges_unknown_without_replay(
         self,
@@ -1421,7 +1746,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             await runtime.storage.save_interrupt(
                 replace(interrupt, status=InterruptStatus.ANSWERED)
             )
-            ready_node = await runtime.storage.save_task_node(
+            await runtime.storage.save_task_node(
                 replace(node, status=NodeStatus.READY)
             )
             task = await runtime.storage.save_task(

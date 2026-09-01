@@ -61,6 +61,7 @@ from src.core.models import (
     InterruptAnswer,
     Message,
     MCPCallRecord,
+    MCPPendingToolAction,
     MCPShadowAuditSample,
     MCPRolloutInstanceConfigLease,
     MCPNoServerConvergenceResult,
@@ -5311,6 +5312,55 @@ class ApiRuntime(
         return f"interrupt-answer:{digest}"
 
     @staticmethod
+    def _mcp_tool_approval_decided_event_id(
+        interrupt_id: str,
+        interrupt_answer_id: str,
+    ) -> str:
+        identity = json.dumps(
+            ["mcp.tool_approval_decided", interrupt_id, interrupt_answer_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"mcp-approval-decided:v1:{hashlib.sha256(identity).hexdigest()}"
+
+    async def _record_mcp_tool_approval_decided_event_exact(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        answer: InterruptAnswer,
+        action: MCPPendingToolAction,
+        decision: str,
+    ) -> None:
+        if answer.created_at is None:
+            raise RuntimeError("mcp_approval_answer_created_at_missing")
+        event = self._make_event(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            node_id=interrupt.node_id,
+            event_type="mcp.tool_approval_decided",
+            payload={
+                "interrupt_id": interrupt.interrupt_id,
+                "safe_call_ref": self._mcp_audit_reference_signer.safe_reference(
+                    action.approval_fingerprint,
+                    context="mcp-approval-call-reference-v1",
+                ),
+                "decision": decision,
+            },
+            created_at=answer.created_at,
+        )
+        event = replace(
+            event,
+            event_id=self._mcp_tool_approval_decided_event_id(
+                interrupt.interrupt_id,
+                answer.interrupt_answer_id,
+            ),
+        )
+        saved, duplicate = await self.storage.append_event_exact(event)
+        if not duplicate:
+            await self.event_broker.publish(saved)
+
+    @staticmethod
     def _interrupt_user_message_content(
         interrupt: Interrupt,
         answer_payload: Mapping[str, object],
@@ -5714,6 +5764,18 @@ class ApiRuntime(
             source_message_id=reserved_message.message.message_id,
             request_fingerprint=reserved_message.request.request_fingerprint or "",
         )
+        if (
+            exact_answer is not None
+            and mcp_approval_action is not None
+            and mcp_approval_decision is not None
+        ):
+            await self._record_mcp_tool_approval_decided_event_exact(
+                task=task,
+                interrupt=interrupt,
+                answer=exact_answer,
+                action=mcp_approval_action,
+                decision=mcp_approval_decision,
+            )
         if exact_answer is not None and continuation_receipt is not None:
             await self._ensure_reserved_interrupt_user_message(reserved_message)
             return dict(continuation_receipt)
@@ -5819,6 +5881,14 @@ class ApiRuntime(
             if saved_interrupt is None:
                 raise RuntimeError("mcp_approval_interrupt_missing_after_accept")
             await self._ensure_reserved_interrupt_user_message(reserved_message)
+            if mcp_approval_result in {"accepted", "denied_finalized"}:
+                await self._record_mcp_tool_approval_decided_event_exact(
+                    task=task,
+                    interrupt=interrupt,
+                    answer=answer,
+                    action=mcp_approval_action,
+                    decision=mcp_approval_decision,
+                )
             if mcp_approval_result == "accepted":
                 resumed_node = await self.storage.get_task_node(interrupt.node_id)
                 if resumed_node is None:
