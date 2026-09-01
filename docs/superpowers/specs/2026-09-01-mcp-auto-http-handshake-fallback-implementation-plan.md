@@ -4,9 +4,9 @@
 
 ## 状态
 
-`approved_ready_to_implement`
+`complete`
 
-用户已复核书面设计并批准实施。本计划完成后才允许修改生产代码。
+用户已复核书面设计并批准实施；Checkpoint A～E 已全部完成。
 
 ## 完成声明
 
@@ -146,3 +146,11 @@ fix(mcp): fallback auto on HTTP handshake rejection
 回滚实现检查点即可恢复旧异常边界；设计提交保持历史证据。无数据库、schema、缓存、外部服务、镜像或部署回滚。
 
 License Requirement：复用现有 Python、MCP adapters、typed errors、unittest 与仓库工具链；无新增依赖或许可变化。
+
+## 实施结果
+
+- Checkpoint A：旧实现聚焦 13 项出现且仅出现 HTTP 400/404/405 三个预期 error，证明原 `MCPClientError` 边界阻断 fallback；429/500 和既有负向场景保持通过。
+- Checkpoint B：生产变化仅在 `user_client.py`；新增 closed status 集合和私有纯判定，字符串 `"400"`、布尔 `true`、auth、429、500、network、timeout、cancel 与本地异常均不匹配。聚焦 13 项与变更面 Ruff 通过。
+- Checkpoint C：2026 adapter、Streamable HTTP、协议协商、2025 Tasks recovery、Gateway、Health 相关 85 项通过；MCP integrations 555 项通过、2 项既有环境条件 skip；compileall、Ruff、package import、响应正文/Endpoint/凭据静态扫描、`git diff --check` 和 `docker_cmd.md` 保护门禁通过。
+- Checkpoint D：修改后的实际 `UserMCPClientFactory.create_from_validated_endpoint()` 使用 `streamable_http + auto` 对用户目标只执行 initialize/close，modern HTTP 400 后自动切换；最终 active adapter 为 `MCP2025TasksAdapter`，requested/negotiated 均为 `2025-11-25`，transport 为 `streamable_http`，unpinned 且 Session ID 存在，公开 capability key 仅记录为 `tools`。未调用 `tools/list` 或 `tools/call`，未保存 Endpoint、Header、凭据、Session ID 或响应正文。
+- Checkpoint E：设计、计划、索引、集成/测试模块摘要和总变更记录已同步；Frontend、Rust、schema、数据库、配置、依赖、镜像、部署、外部 Server 与 `prod` 未修改。

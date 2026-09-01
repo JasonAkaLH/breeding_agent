@@ -2,13 +2,13 @@
 
 ## 状态
 
-`approved_planned`
+`implemented_verified`
 
-用户已复核本文并批准实施；详细步骤见同日 implementation plan，当前尚未修改生产代码。
+用户已复核本文并批准实施；同日 implementation plan 的五个 Checkpoint 已完成，自动门禁和脱敏真实连接均已验证。
 
 ## 问题与证据
 
-当前 `streamable_http + protocol_preference=auto` 先由 `MCP2026Adapter.initialize()` 执行无 Session 的 `server/discover`。`_AutoNegotiatingAdapter.initialize()` 只有在该调用抛出 `MCPProtocolError` 或 `MCPRemoteError` 时才关闭现代 candidate，并执行一次 unpinned `2025-11-25` initialize。
+实施前，`streamable_http + protocol_preference=auto` 先由 `MCP2026Adapter.initialize()` 执行无 Session 的 `server/discover`。当时的 `_AutoNegotiatingAdapter.initialize()` 只有在该调用抛出 `MCPProtocolError` 或 `MCPRemoteError` 时才关闭现代 candidate，并执行一次 unpinned `2025-11-25` initialize。
 
 一次经用户授权的只读真实连接证明存在以下兼容形态：
 
@@ -16,7 +16,7 @@
 - 同一 Endpoint、Transport 与凭据使用 unpinned `2025-11-25` initialize 成功，实际协商为 `2025-11-25`，服务端颁发 Session ID 并公开 `tools` capability；
 - Endpoint、Header、凭据和原始响应正文不写入仓库、fixture、自动测试或日志。
 
-该服务是正常的 2025 session-era Streamable HTTP Server，但没有实现 2026 stateless request handling。现有 transport 将带 body 的非结构化 HTTP 400 映射为 `MCPClientError(code="mcp_http_error")`，因此 auto 状态机不会进入已存在且能够成功的第二阶段。
+该服务是正常的 2025 session-era Streamable HTTP Server，但没有实现 2026 stateless request handling。transport 将带 body 的非结构化 HTTP 400 映射为 `MCPClientError(code="mcp_http_error")`，因此实施前的 auto 状态机不会进入已存在且能够成功的第二阶段。
 
 ## 协议依据
 

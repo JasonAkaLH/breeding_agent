@@ -256,6 +256,38 @@ class AutoNegotiatingAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(legacy.initialize_count, 1)
                 self.assertIs(adapter.negotiated_session, legacy.negotiated_session)
 
+    async def test_http_handshake_rejections_fallback_once(self) -> None:
+        for status_code in (400, 404, 405):
+            with self.subTest(status_code=status_code):
+                modern = _FakeAdapter(
+                    initialize_error=MCPClientError(
+                        "modern HTTP handshake rejected",
+                        code="mcp_http_error",
+                        retriable=False,
+                        metadata={"status_code": status_code},
+                    )
+                )
+                legacy = _FakeAdapter(
+                    session=_session(
+                        "2025-11-25",
+                        requested_version="2025-11-25",
+                    )
+                )
+                requested_versions: list[str] = []
+                adapter = _AutoNegotiatingAdapter(
+                    initial=modern,
+                    legacy_factory=lambda version: (
+                        requested_versions.append(version) or legacy
+                    ),
+                    tasks_adapter_factory=lambda client: client,
+                )
+
+                self.assertIs(await adapter.initialize(), legacy.negotiated_session)
+                self.assertEqual(requested_versions, ["2025-11-25"])
+                self.assertEqual(modern.initialize_count, 1)
+                self.assertEqual(modern.close_count, 1)
+                self.assertEqual(legacy.initialize_count, 1)
+
     async def test_non_protocol_initialize_errors_do_not_fallback(self) -> None:
         error_factories = (
             MCPAuthRequiredError,
@@ -263,6 +295,30 @@ class AutoNegotiatingAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "network",
                 code="mcp_transport_error",
                 retriable=True,
+            ),
+            lambda: MCPClientError(
+                "rate limited",
+                code="mcp_http_error",
+                retriable=False,
+                metadata={"status_code": 429},
+            ),
+            lambda: MCPClientError(
+                "server failed",
+                code="mcp_http_error",
+                retriable=True,
+                metadata={"status_code": 500},
+            ),
+            lambda: MCPClientError(
+                "string status",
+                code="mcp_http_error",
+                retriable=False,
+                metadata={"status_code": "400"},
+            ),
+            lambda: MCPClientError(
+                "boolean status",
+                code="mcp_http_error",
+                retriable=False,
+                metadata={"status_code": True},
             ),
             lambda: TimeoutError("timeout"),
             asyncio.CancelledError,

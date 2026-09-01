@@ -11,7 +11,7 @@ from src.core.models import UserMCPServer
 from .adapter import PythonLegacyMCPClientAdapter
 from .adapter_2025_tasks import MCP2025TaskRecoveryClient, MCP2025TasksAdapter
 from .adapter_2026 import MCP2026Adapter
-from .client import MCPClient, MCPProtocolError, MCPRemoteError
+from .client import MCPClient, MCPClientError, MCPProtocolError, MCPRemoteError
 from .credentials import MCPCredentialCipher, CredentialSecurityError, MCPRecoveryService
 from .endpoint_policy import EndpointPolicy, EndpointPolicyError, ValidatedEndpoint
 from .policy_connection import build_policy_bound_http_connection
@@ -21,6 +21,8 @@ from .protocol import (
 )
 from .transport_http import StreamableHTTPTransport
 from .transport_legacy_http_sse import LegacyHTTPSSETransport
+
+_AUTO_HTTP_HANDSHAKE_FALLBACK_STATUS_CODES = frozenset({400, 404, 405})
 
 
 class UserMCPCredentialResolver:
@@ -297,7 +299,9 @@ class _AutoNegotiatingAdapter:
     async def initialize(self):
         try:
             return await self._active.initialize()
-        except (MCPProtocolError, MCPRemoteError):
+        except MCPClientError as exc:
+            if not _is_auto_initialization_fallback_error(exc):
+                raise
             await self._active.close()
             legacy = self._legacy_factory(MCP_PROTOCOL_VERSION_2025_11_25)
             self._active = legacy
@@ -323,3 +327,14 @@ class _AutoNegotiatingAdapter:
 
     async def close(self):
         return await self._active.close()
+
+
+def _is_auto_initialization_fallback_error(error: MCPClientError) -> bool:
+    if isinstance(error, (MCPProtocolError, MCPRemoteError)):
+        return True
+    status_code = error.metadata.get("status_code")
+    return (
+        error.mcp_error_code == "mcp_http_error"
+        and type(status_code) is int
+        and status_code in _AUTO_HTTP_HANDSHAKE_FALLBACK_STATUS_CODES
+    )
