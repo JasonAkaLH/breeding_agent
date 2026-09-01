@@ -2,9 +2,9 @@
 
 ## 状态
 
-`approved_planned`
+`implemented_verified_with_external_smoke_gap`
 
-用户已批准全协议、单向兼容方案；两轮有界硬伤复审累计发现的 2 个 Blocking 和 2 个 Major 已修正，详细步骤见同日 implementation plan，当前尚未修改生产代码。
+用户已批准的全协议、单向兼容方案已完成仓库实现与自动验证；两轮有界硬伤复审累计发现的2个Blocking和2个Major均已闭合。真实Legacy factory initialize成功，tools/list受外部Server额外发送的无ID JSON-RPC result envelope阻断；OCR仅有占位凭据，两个外部缺口均未误报通过，详见同日implementation plan。
 
 ## 问题与证据
 

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections.abc import AsyncIterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from .client import MCPProtocolError
 from .protocol import MCPStreamEvent, json_rpc_message_kind
-from .temporary_results import MCPResultSink, MCPTemporaryResultRef
+from .temporary_results import (
+    MAX_DURABLE_MCP_RESULT_BYTES,
+    MCPResultSink,
+    MCPResultTooLargeError,
+    MCPTemporaryResultRef,
+    MCPTemporaryStorageExhaustedError,
+)
 
 
 MAX_CONTROL_RESULT_BYTES = 1024 * 1024
@@ -21,6 +28,12 @@ class MCPStreamingResponse:
     events: tuple[MCPStreamEvent, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _MCPResultTarget:
+    response_id: str | int | None
+    sink: MCPResultSink | None
+
+
 class IncrementalJSONRPCResultParser:
     """Incremental JSON-RPC parser for transports that own their framing loop."""
 
@@ -28,8 +41,9 @@ class IncrementalJSONRPCResultParser:
         self,
         sink: MCPResultSink | None = None,
         *,
-        sink_selector: Callable[[str | int | None], MCPResultSink | None] | None = None,
+        sink_selector: Callable[[Mapping[str, Any]], _MCPResultTarget | None] | None = None,
         max_envelope_bytes: int = 64 * 1024,
+        max_provisional_result_bytes: int = MAX_DURABLE_MCP_RESULT_BYTES,
         require_response: bool = True,
         control_result_types: frozenset[str] = frozenset(),
     ) -> None:
@@ -37,6 +51,7 @@ class IncrementalJSONRPCResultParser:
             sink,
             sink_selector=sink_selector,
             max_envelope_bytes=max_envelope_bytes,
+            max_provisional_result_bytes=max_provisional_result_bytes,
             require_response=require_response,
             control_result_types=control_result_types,
         )
@@ -102,16 +117,22 @@ class _JSONRPCResultExtractor:
         self,
         sink: MCPResultSink | None,
         *,
-        sink_selector: Callable[[str | int | None], MCPResultSink | None] | None = None,
+        sink_selector: Callable[[Mapping[str, Any]], _MCPResultTarget | None] | None = None,
         max_envelope_bytes: int,
+        max_provisional_result_bytes: int = MAX_DURABLE_MCP_RESULT_BYTES,
         require_response: bool = True,
         control_result_types: frozenset[str] = frozenset(),
     ) -> None:
         if max_envelope_bytes <= 0:
             raise ValueError("max_envelope_bytes must be positive.")
+        if max_provisional_result_bytes <= 0:
+            raise ValueError("max_provisional_result_bytes must be positive.")
         self._sink = sink
         self._sink_selector = sink_selector
-        self._materialized_result: bytearray | None = None
+        self._result_target: _MCPResultTarget | None = None
+        self._provisional_result = None
+        self._provisional_result_size = 0
+        self._max_provisional_result_bytes = max_provisional_result_bytes
         self._result_type = _TopLevelStringFieldDetector("resultType")
         self._control_result_types = control_result_types
         self._max_envelope_bytes = max_envelope_bytes
@@ -163,15 +184,18 @@ class _JSONRPCResultExtractor:
             raise MCPProtocolError(str(exc)) from exc
         if self._require_response and kind != "response":
             raise MCPProtocolError("MCP streaming response must be a JSON-RPC response.")
+        if self._sink_selector is not None and kind == "response":
+            target = self._sink_selector(payload)
+            if target is not None:
+                self._result_target = target
+                self._sink = target.sink
+                if target.response_id is not None:
+                    payload["id"] = target.response_id
         result_ref: MCPTemporaryResultRef | None = None
         if self._result_complete:
-            if self._materialized_result is not None:
-                try:
-                    materialized = json.loads(bytes(self._materialized_result))
-                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    raise MCPProtocolError("MCP streaming result is invalid JSON.") from exc
-                payload["result"] = materialized
-            else:
+            if self._provisional_result is not None:
+                await self._consume_provisional_result(payload)
+            if self._sink is not None:
                 assert self._sink is not None
                 if self._result_type.value in self._control_result_types:
                     materialized = await self._sink.materialize(
@@ -192,6 +216,7 @@ class _JSONRPCResultExtractor:
         return MCPStreamingResponse(message=payload, result_ref=result_ref)
 
     async def abort(self) -> None:
+        self._close_provisional_result()
         if self._sink is not None:
             await self._sink.abort()
 
@@ -274,9 +299,12 @@ class _JSONRPCResultExtractor:
                 prefix_payload = json.loads(bytes(self._prefix) + b"null}")
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise MCPProtocolError("MCP streaming JSON-RPC envelope metadata is invalid.") from exc
-            self._sink = self._sink_selector(prefix_payload.get("id"))
+            target = self._sink_selector(prefix_payload)
+            if target is not None:
+                self._result_target = target
+                self._sink = target.sink
             if self._sink is None:
-                self._materialized_result = bytearray()
+                self._open_provisional_result()
         if byte in (ord("{"), ord("[")):
             self._result_kind = "container"
             self._result_depth = 1
@@ -356,11 +384,58 @@ class _JSONRPCResultExtractor:
 
     async def _write_result(self, data: bytes) -> None:
         self._result_type.feed(data)
-        if self._materialized_result is not None:
-            self._materialized_result.extend(data)
+        if self._provisional_result is not None:
+            self._write_provisional_result(data)
             return
         assert self._sink is not None
         await self._sink.write(data)
+
+    def _open_provisional_result(self) -> None:
+        try:
+            self._provisional_result = tempfile.TemporaryFile()
+        except OSError as exc:
+            raise MCPTemporaryStorageExhaustedError() from exc
+
+    def _write_provisional_result(self, data: bytes) -> None:
+        if self._provisional_result_size + len(data) > self._max_provisional_result_bytes:
+            self._close_provisional_result()
+            raise MCPResultTooLargeError()
+        try:
+            self._provisional_result.write(data)
+        except OSError as exc:
+            self._close_provisional_result()
+            raise MCPTemporaryStorageExhaustedError() from exc
+        self._provisional_result_size += len(data)
+
+    async def _consume_provisional_result(self, payload: dict[str, Any]) -> None:
+        provisional = self._provisional_result
+        assert provisional is not None
+        try:
+            provisional.seek(0)
+            if self._sink is not None:
+                while chunk := provisional.read(64 * 1024):
+                    await self._sink.write(chunk)
+            elif self._result_target is not None:
+                try:
+                    payload["result"] = json.loads(provisional.read())
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise MCPProtocolError("MCP streaming result is invalid JSON.") from exc
+            else:
+                payload["result"] = None
+        except OSError as exc:
+            raise MCPTemporaryStorageExhaustedError() from exc
+        finally:
+            self._close_provisional_result()
+
+    def _close_provisional_result(self) -> None:
+        provisional = self._provisional_result
+        self._provisional_result = None
+        self._provisional_result_size = 0
+        if provisional is not None:
+            try:
+                provisional.close()
+            except OSError:
+                pass
 
 
 class _TopLevelStringFieldDetector:
@@ -583,7 +658,10 @@ class _SSEJSONRPCParser:
     def _new_json_parser(self) -> _JSONRPCResultExtractor:
         return _JSONRPCResultExtractor(
             None,
-            sink_selector=lambda _request_id: self._sink,
+            sink_selector=lambda message: _MCPResultTarget(
+                response_id=message.get("id"),
+                sink=self._sink,
+            ),
             max_envelope_bytes=self._max_envelope_bytes,
             require_response=False,
             control_result_types=self._control_result_types,

@@ -5,7 +5,7 @@ import contextlib
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -13,8 +13,14 @@ import httpx
 
 from .client import MCPAuthRequiredError, MCPClientError, MCPProtocolError
 from .config import MCPAuthConfig
-from .protocol import MCP_PROTOCOL_VERSION_2024_11_05, MCPStreamEvent, MCPTransportResponse, json_rpc_message_kind
-from .streaming_response import IncrementalJSONRPCResultParser
+from .protocol import (
+    MCP_PROTOCOL_VERSION_2024_11_05,
+    MCPStreamEvent,
+    MCPTransportResponse,
+    json_rpc_message_kind,
+    normalize_json_rpc_response_id,
+)
+from .streaming_response import IncrementalJSONRPCResultParser, _MCPResultTarget
 from .temporary_results import MCPResultSink
 from .transport_http import (
     MCPPolicyBoundHTTPConnection,
@@ -29,6 +35,13 @@ class _PendingRequest:
     future: asyncio.Future[MCPTransportResponse]
     events: list[MCPStreamEvent] = field(default_factory=list)
     result_sink: MCPResultSink | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _PendingMatch:
+    request_id: str | int
+    pending: _PendingRequest
+    message: Mapping[str, Any]
 
 
 class LegacyHTTPSSETransport:
@@ -320,7 +333,7 @@ class LegacyHTTPSSETransport:
 
     async def _reader_loop(self) -> None:
         parser = _LegacyStreamingSSEEventParser(
-            sink_selector=self._result_sink_for_response_id,
+            sink_selector=self._result_target_for_response,
         )
         try:
             stream_context = self._client.stream(
@@ -374,6 +387,8 @@ class LegacyHTTPSSETransport:
             )
             self._set_endpoint_exception(wrapped)
             await self._fail_pending(wrapped)
+        finally:
+            await parser.abort()
 
     def _validate_sse_response(self, response: httpx.Response) -> None:
         if response.status_code in {401, 403}:
@@ -413,23 +428,27 @@ class LegacyHTTPSSETransport:
         except ValueError as exc:
             raise MCPProtocolError(str(exc)) from exc
         if kind == "response":
-            request_id = message.get("id")
-            pending = self._pending.get(request_id)
-            if pending is None:
+            match = self._match_pending_response(message)
+            if match is None:
                 self._unknown_response_count += 1
                 return
-            events = (*pending.events, event)
-            if not pending.future.done():
-                pending.future.set_result(
+            normalized_event = (
+                event
+                if match.message is message
+                else replace(event, message=match.message)
+            )
+            events = (*match.pending.events, normalized_event)
+            if not match.pending.future.done():
+                match.pending.future.set_result(
                     MCPTransportResponse(
-                        message=message,
+                        message=match.message,
                         headers={},
                         last_event_id=event.event_id,
                         sse_retry_ms=event.retry_ms,
                         sse_events=events,
                     )
                 )
-            await self._remove_pending(request_id)
+            await self._remove_pending(match.request_id)
             return
         for pending in self._pending.values():
             pending.events.append(event)
@@ -464,9 +483,38 @@ class LegacyHTTPSSETransport:
             if not pending.future.done():
                 pending.future.set_exception(exc)
 
-    def _result_sink_for_response_id(self, request_id: str | int | None) -> MCPResultSink | None:
-        pending = self._pending.get(request_id)
-        return pending.result_sink if pending is not None else None
+    def _result_target_for_response(
+        self,
+        message: Mapping[str, Any],
+    ) -> _MCPResultTarget | None:
+        if "id" not in message:
+            return None
+        match = self._match_pending_response(message)
+        if match is None:
+            return None
+        return _MCPResultTarget(
+            response_id=match.message.get("id"),
+            sink=match.pending.result_sink,
+        )
+
+    def _match_pending_response(
+        self,
+        message: Mapping[str, Any],
+    ) -> _PendingMatch | None:
+        alias: _PendingMatch | None = None
+        for request_id, pending in self._pending.items():
+            normalized = normalize_json_rpc_response_id(
+                message,
+                expected_request_id=request_id,
+            )
+            if normalized is None:
+                continue
+            match = _PendingMatch(request_id, pending, normalized)
+            if normalized is message:
+                return match
+            if alias is None:
+                alias = match
+        return alias
 
     def _set_endpoint_exception(self, exc: MCPClientError) -> None:
         if self._endpoint_ready is not None and not self._endpoint_ready.done():

@@ -17,6 +17,7 @@ from .protocol import (
     json_rpc_error,
     json_rpc_message_kind,
     json_rpc_result,
+    normalize_json_rpc_response_id,
     validate_mcp_protocol_version,
 )
 
@@ -460,8 +461,12 @@ class MCPClient:
                     )
             elif kind == "notification":
                 notifications.append(dict(message))
-            elif kind == "response" and expected_response_id is not None and message.get("id") != expected_response_id:
-                raise MCPProtocolError("MCP response id does not match request id.")
+            elif kind == "response" and expected_response_id is not None:
+                if normalize_json_rpc_response_id(
+                    message,
+                    expected_request_id=expected_response_id,
+                ) is None:
+                    raise MCPProtocolError("MCP response id does not match request id.")
         return tuple(notifications)
 
     @staticmethod
@@ -505,9 +510,13 @@ class MCPClient:
             raise MCPProtocolError("MCP request expected a JSON-RPC response, got server request or notification.")
         if message.get("jsonrpc") != JSONRPC_VERSION:
             raise MCPProtocolError("MCP response must use JSON-RPC 2.0.")
-        if message.get("id") != request_id:
+        normalized = normalize_json_rpc_response_id(
+            message,
+            expected_request_id=request_id,
+        )
+        if normalized is None:
             raise MCPProtocolError("MCP response id does not match request id.")
-        return message
+        return normalized
 
     @staticmethod
     def _result_or_raise(message: Mapping[str, Any]) -> Any:

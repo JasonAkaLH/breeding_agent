@@ -4,9 +4,9 @@
 
 ## 状态
 
-`planned_awaiting_implementation_approval`
+`complete_with_external_smoke_gap`
 
-用户已批准设计并完成硬伤复审；本计划已形成，但在用户明确批准实施前不得修改生产代码。
+用户已批准实施；生产代码、测试和自动门禁已闭合，真实smoke的两个外部缺口按原计划如实记录。
 
 ## 完成声明
 
@@ -265,3 +265,14 @@ fix(mcp): accept numeric string response IDs
 回滚单一实现检查点即可恢复旧严格ID比较和旧parser分支；没有数据、schema、缓存、配置、外部Server、镜像或部署回滚。
 
 License Requirement：复用现有Python、MCP protocol/adapters、temporary result sink、typed errors、unittest和仓库工具链；无新增依赖或许可变化。
+
+## 实施结果
+
+- Checkpoint A：共享`normalize_json_rpc_response_id()`先红后绿；只接受类型精确exact或整数expected对应的规范十进制字符串alias，反向、bool、float、null、非规范字符串和非response均拒绝，输入mapping不变。
+- Checkpoint B：`MCPClient`、2026 adapter和独立2025 Tasks recovery client统一接入helper；三个2025 session版本的JSON/SSE、2026 JSON/SSE双final及tasks/get/result/cancel字符串ID回归闭合。
+- Checkpoint C：Legacy pending改为无await的type-aware exact-first matcher，别名命中时同步规范化message与event；direct/persistent initialize/list及并发乱序保持通过。
+- Checkpoint D：Legacy result selector以显式私有target区分unknown、known buffered和streaming；所有无sink result进入64 MiB有界匿名`TemporaryFile`，buffered恢复原result，streaming以64 KiB分块replay，unknown不暴露业务result，取消/关闭/失败清理闭合。
+- 自动验证：8个聚焦模块88项、Gateway/Health/auto相关61项、MCP integrations 567项通过（2项既有环境skip）；compileall、变更面Ruff、package import、shared rule唯一性、敏感内容扫描和`git diff --check`通过。
+- 真实Legacy smoke：修改后的实际`UserMCPClientFactory`使用`legacy_http_sse + auto`和用户提供的header完成initialize，成功即证明requested/negotiated均为`2024-11-05`且字符串化整数response ID已关联；随后外部Server在tools/list前发送仅含`jsonrpc + result`、不含`id`的非法envelope，现有fail-closed校验拒绝并最终`legacy_response_timeout`，因此未取得9个Tool，不扩大范围吞掉该独立服务端错误。
+- OCR smoke：现有输入只有占位Bearer，未发送无效凭据或误报`2025-11-25`通过；自动auto/2025回归已闭合，但真实OCR仍是外部凭据缺口。
+- 未修改transport/version gate、request body、原始response bytes、业务ID、配置、DTO、schema、数据库、Frontend、Rust、依赖、镜像、部署、外部Server或`prod`；未读取或暂存范围外`test.json`。

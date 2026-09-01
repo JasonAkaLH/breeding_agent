@@ -11,7 +11,6 @@ from src.integrations.mcp.client import MCPClient, MCPClientError, MCPProtocolEr
 from src.integrations.mcp.config import MCPServerConfig
 from src.integrations.mcp.protocol import (
     MCPCompatibilityStatus,
-    MCPTransportResponse,
     is_mcp_transport_family_allowed,
     mcp_feature_status,
 )
@@ -31,6 +30,7 @@ class Streamable2025FakeServer:
         missing_header_compatible: bool = False,
         tool_call_404_once: bool = False,
         tools_response_id: str | int | None = None,
+        stringify_response_ids: bool = False,
     ) -> None:
         self.version = version
         self.session_id = f"sess-{version}"
@@ -38,6 +38,7 @@ class Streamable2025FakeServer:
         self.missing_header_compatible = missing_header_compatible
         self.tool_call_404_once = tool_call_404_once
         self.tools_response_id = tools_response_id
+        self.stringify_response_ids = stringify_response_ids
         self.requests: list[dict[str, Any]] = []
         self._tool_call_404_sent = False
 
@@ -60,12 +61,13 @@ class Streamable2025FakeServer:
         if method != "initialize" and "mcp-session-id" not in headers:
             return httpx.Response(400, json={"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32600, "message": "missing session"}})
         if method == "initialize":
+            response_id = str(payload["id"]) if self.stringify_response_ids else payload["id"]
             return httpx.Response(
                 200,
                 headers={"MCP-Session-Id": self.session_id},
                 json={
                     "jsonrpc": "2.0",
-                    "id": payload["id"],
+                    "id": response_id,
                     "result": {
                         "protocolVersion": self.version,
                         "capabilities": {"tools": {"listChanged": True}},
@@ -77,6 +79,8 @@ class Streamable2025FakeServer:
             return httpx.Response(202)
         if method == "tools/list":
             response_id = payload["id"] if self.tools_response_id is None else self.tools_response_id
+            if self.stringify_response_ids:
+                response_id = str(response_id)
             body = {
                 "jsonrpc": "2.0",
                 "id": response_id,
@@ -109,11 +113,12 @@ class Streamable2025FakeServer:
             if self.tool_call_404_once and not self._tool_call_404_sent:
                 self._tool_call_404_sent = True
                 return httpx.Response(404)
+            response_id = str(payload["id"]) if self.stringify_response_ids else payload["id"]
             return httpx.Response(
                 200,
                 json={
                     "jsonrpc": "2.0",
-                    "id": payload["id"],
+                    "id": response_id,
                     "result": {"content": [{"type": "text", "text": f"ok {self.version}"}], "structuredContent": {"ok": True}, "isError": False},
                 },
             )
@@ -160,6 +165,34 @@ class StreamableHTTPVersionTests(unittest.IsolatedAsyncioTestCase):
                 subsequent_headers = post_headers[1:]
                 self.assertTrue(subsequent_headers)
                 self.assertTrue(all(headers.get("mcp-session-id") == fake.session_id for headers in subsequent_headers))
+
+    async def test_all_2025_versions_accept_numeric_string_response_ids(self) -> None:
+        for version in STREAMABLE_2025_VERSIONS:
+            with self.subTest(version=version):
+                fake = Streamable2025FakeServer(
+                    version=version,
+                    tools_list_as_sse=(version == "2025-06-18"),
+                    stringify_response_ids=True,
+                )
+                async_client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+                transport = StreamableHTTPTransport(
+                    endpoint=f"https://mcp.example.com/{version}",
+                    client=async_client,
+                )
+                client = MCPClient(
+                    server_id=f"srv_string_{version}",
+                    transport=transport,
+                    protocol_version=version,
+                )
+
+                initialized = await client.initialize()
+                tools = await client.list_tools()
+                called = await client.call_tool("search_customer", {"keyword": "rice"})
+                await async_client.aclose()
+
+                self.assertEqual(initialized["protocolVersion"], version)
+                self.assertEqual([tool["name"] for tool in tools], ["search_customer"])
+                self.assertEqual(called["structuredContent"], {"ok": True})
 
     async def test_2025_03_client_still_sends_header_even_when_server_tolerates_missing_header(self) -> None:
         fake = Streamable2025FakeServer(version="2025-03-26", missing_header_compatible=True)

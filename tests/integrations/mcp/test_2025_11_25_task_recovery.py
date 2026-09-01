@@ -93,8 +93,14 @@ class _ExecutionClient:
 
 
 class _TaskTransport:
-    def __init__(self, results: list[Mapping[str, Any]]) -> None:
+    def __init__(
+        self,
+        results: list[Mapping[str, Any]],
+        *,
+        stringify_response_ids: bool = False,
+    ) -> None:
         self._results = [dict(result) for result in results]
+        self._stringify_response_ids = stringify_response_ids
         self.requests: list[dict[str, Any]] = []
         self.closed = False
 
@@ -117,10 +123,15 @@ class _TaskTransport:
             }
         )
         result = self._results.pop(0)
+        response_id = (
+            str(message["id"])
+            if self._stringify_response_ids
+            else message["id"]
+        )
         return MCPTransportResponse(
             message={
                 "jsonrpc": "2.0",
-                "id": message["id"],
+                "id": response_id,
                 "result": result,
             }
         )
@@ -253,6 +264,52 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             published_at=self.now,
         )
         return outcome
+
+    async def test_recovery_methods_accept_numeric_string_response_ids(self) -> None:
+        created = await self._create_binding()
+        transport = _TaskTransport(
+            [
+                {
+                    "taskId": "raw-2025-task-id",
+                    "status": {"state": "working"},
+                    "pollInterval": 1000,
+                },
+                {
+                    "content": [{"type": "text", "text": "done"}],
+                    "structuredContent": {"ok": True},
+                    "isError": False,
+                    "_meta": {
+                        "io.modelcontextprotocol/related-task": {
+                            "taskId": "raw-2025-task-id"
+                        }
+                    },
+                },
+                {"cancelled": True},
+            ],
+            stringify_response_ids=True,
+        )
+        client = MCP2025TaskRecoveryClient(
+            server_id="server-a",
+            transport=transport,
+            recovery_service=self.recovery,
+        )
+
+        state = await client.tasks_get(
+            created.safe_remote_task_ref,
+            recovery_context=self.context,
+        )
+        result = await client.tasks_result(
+            created.safe_remote_task_ref,
+            recovery_context=self.context,
+        )
+        cancelled = await client.tasks_cancel(
+            created.safe_remote_task_ref,
+            recovery_context=self.context,
+        )
+
+        self.assertEqual(state.status, "working")
+        self.assertEqual(result.call_tool_result["structuredContent"], {"ok": True})
+        self.assertTrue(cancelled.cancelled)
 
     async def test_restart_polls_then_fetches_result_without_replaying_call(self) -> None:
         created = await self._create_binding()

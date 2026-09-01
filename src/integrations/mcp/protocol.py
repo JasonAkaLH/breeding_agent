@@ -205,3 +205,27 @@ def json_rpc_message_kind(message: Any) -> str:
     if has_id and (has_result or has_error):
         return "response"
     raise ValueError("JSON-RPC message must be a request, notification, response, or error.")
+
+
+def normalize_json_rpc_response_id(
+    message: Mapping[str, Any],
+    *,
+    expected_request_id: str | int,
+) -> Mapping[str, Any] | None:
+    """Return a matching response with a type-exact request id."""
+
+    try:
+        if json_rpc_message_kind(message) != "response":
+            return None
+    except ValueError:
+        return None
+    raw_response_id = message.get("id")
+    expected_type = type(expected_request_id)
+    raw_type = type(raw_response_id)
+    if expected_type in {int, str} and raw_type is expected_type and raw_response_id == expected_request_id:
+        return message
+    if expected_type is int and raw_type is str and raw_response_id == str(expected_request_id):
+        normalized = dict(message)
+        normalized["id"] = expected_request_id
+        return normalized
+    return None

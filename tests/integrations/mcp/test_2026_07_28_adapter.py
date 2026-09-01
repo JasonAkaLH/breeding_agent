@@ -219,6 +219,39 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(adapter.last_stream_notifications), 1)
         self.assertIsNone(transport.requests[-1]["timeout_seconds"])
 
+    async def test_json_and_sse_finals_accept_numeric_string_response_ids(self) -> None:
+        discover = dict(fixture("server_discover_result.json"))
+        discover["id"] = "1"
+        listed = dict(fixture("tools_list_result.json"))
+        listed["id"] = "2"
+        completed = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "ok"}],
+            },
+        }
+        streamed = dict(completed)
+        streamed["id"] = "3"
+        transport = FakeRequestScopedTransport(
+            [
+                MCPTransportResponse(message=discover),
+                MCPTransportResponse(message=listed),
+                MCPTransportResponse(
+                    message=completed,
+                    sse_events=(MCPStreamEvent(message=streamed),),
+                ),
+            ]
+        )
+        adapter = MCP2026Adapter(server_id="crm", transport=transport)
+
+        await adapter.initialize()
+        await adapter.list_tools()
+        outcome = await adapter.call_tool("lookup", {"tenant": "alpha"})
+
+        self.assertIsInstance(outcome, MCPCompletedOutcome)
+
     async def test_mrtr_request_state_is_sealed_and_cleared_on_close(self) -> None:
         input_required = fixture("input_required_result.json")
         input_required["id"] = 3

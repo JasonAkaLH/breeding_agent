@@ -23,6 +23,7 @@ from .protocol import (
     MCPTransportResponse,
     MCP_TRANSPORT_STREAMABLE_HTTP,
     json_rpc_message_kind,
+    normalize_json_rpc_response_id,
 )
 
 _PROTOCOL_META = "io.modelcontextprotocol/protocolVersion"
@@ -501,18 +502,32 @@ class MCP2026Adapter:
                 continue
             if kind == "request":
                 raise MCPProtocolError("MCP 2026 SSE response must not contain server-to-client requests.")
-            if candidate.get("id") != request_id:
+            normalized_candidate = normalize_json_rpc_response_id(
+                candidate,
+                expected_request_id=request_id,
+            )
+            if normalized_candidate is None:
                 raise MCPProtocolError("MCP response id does not match request id.")
             if final_from_stream is not None:
                 raise MCPProtocolError("MCP 2026 SSE response contained multiple final responses.")
-            final_from_stream = candidate
+            final_from_stream = normalized_candidate
         self._last_stream_notifications = tuple(notifications)
-        if message is not None and final_from_stream is not None and dict(message) != dict(final_from_stream):
+        normalized_message: Mapping[str, Any] | None = None
+        if message is not None:
+            if not isinstance(message, Mapping):
+                raise MCPProtocolError("MCP 2026 request expected a JSON-RPC response.")
+            normalized_message = normalize_json_rpc_response_id(
+                message,
+                expected_request_id=request_id,
+            )
+            if normalized_message is None:
+                raise MCPProtocolError("MCP 2026 response is not a matching JSON-RPC response.")
+        if normalized_message is not None and final_from_stream is not None and dict(normalized_message) != dict(final_from_stream):
             raise MCPProtocolError("MCP 2026 transport exposed conflicting JSON and SSE final responses.")
-        final = final_from_stream or message
+        final = final_from_stream or normalized_message
         if not isinstance(final, Mapping):
             raise MCPProtocolError("MCP 2026 request expected a JSON-RPC response.")
-        if final.get("jsonrpc") != JSONRPC_VERSION or final.get("id") != request_id or final.get("method") is not None:
+        if final.get("jsonrpc") != JSONRPC_VERSION or final.get("method") is not None:
             raise MCPProtocolError("MCP 2026 response is not a matching JSON-RPC response.")
         if "error" in final:
             self._raise_remote_error(final["error"], request_method=request_method)

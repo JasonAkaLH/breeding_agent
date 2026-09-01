@@ -14,6 +14,7 @@ from src.integrations.mcp.protocol import (
     SUPPORTED_MCP_PROTOCOL_VERSIONS,
     is_mcp_transport_family_allowed,
     mcp_feature_status,
+    normalize_json_rpc_response_id,
     validate_mcp_protocol_version,
 )
 
@@ -22,6 +23,77 @@ MODERN_FIXTURE_ROOT = FIXTURE_ROOT.parent / "2026-07-28"
 
 
 class MCPProtocolVersionNegotiationTests(unittest.TestCase):
+    def test_response_id_normalizer_accepts_exact_and_one_way_integer_aliases(self) -> None:
+        exact_integer = {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+        exact_string = {"jsonrpc": "2.0", "id": "1", "result": {"ok": True}}
+        alias = {"jsonrpc": "2.0", "id": "-7", "result": {"ok": True}}
+
+        self.assertIs(
+            normalize_json_rpc_response_id(exact_integer, expected_request_id=1),
+            exact_integer,
+        )
+        self.assertIs(
+            normalize_json_rpc_response_id(exact_string, expected_request_id="1"),
+            exact_string,
+        )
+        normalized = normalize_json_rpc_response_id(
+            alias,
+            expected_request_id=-7,
+        )
+        self.assertIsNot(normalized, alias)
+        self.assertEqual(normalized, {"jsonrpc": "2.0", "id": -7, "result": {"ok": True}})
+        self.assertEqual(alias["id"], "-7")
+
+        for expected in (0, 9):
+            with self.subTest(expected=expected):
+                message = {"jsonrpc": "2.0", "id": str(expected), "error": {"code": -1}}
+                self.assertEqual(
+                    normalize_json_rpc_response_id(
+                        message,
+                        expected_request_id=expected,
+                    )["id"],
+                    expected,
+                )
+
+    def test_response_id_normalizer_rejects_reverse_noncanonical_and_loose_types(self) -> None:
+        rejected = (
+            ("1", 1),
+            (1, True),
+            (1, 1.0),
+            (1, None),
+            (1, "01"),
+            (1, "+1"),
+            (1, " 1"),
+            (1, "1.0"),
+            (1, "1e0"),
+            (1, "١"),
+            (1, []),
+            (1, {}),
+            (1, "2"),
+        )
+        for expected, raw in rejected:
+            with self.subTest(expected=expected, raw=raw):
+                message = {"jsonrpc": "2.0", "id": raw, "result": {}}
+                self.assertIsNone(
+                    normalize_json_rpc_response_id(
+                        message,
+                        expected_request_id=expected,
+                    )
+                )
+
+        for message in (
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "method": "notifications/progress"},
+            {"jsonrpc": "1.0", "id": 1, "result": {}},
+        ):
+            with self.subTest(message=message):
+                self.assertIsNone(
+                    normalize_json_rpc_response_id(
+                        message,
+                        expected_request_id=1,
+                    )
+                )
+
     def test_supported_versions_are_the_five_client_matrix_versions(self) -> None:
         self.assertEqual(
             SUPPORTED_MCP_PROTOCOL_VERSIONS,

@@ -8,8 +8,16 @@ import unittest
 from pathlib import Path
 
 from src.integrations.mcp.client import MCPProtocolError
-from src.integrations.mcp.streaming_response import parse_json_rpc_byte_stream, parse_sse_json_rpc_byte_stream
-from src.integrations.mcp.temporary_results import MCPTemporaryResultStore
+from src.integrations.mcp.streaming_response import (
+    IncrementalJSONRPCResultParser,
+    _MCPResultTarget,
+    parse_json_rpc_byte_stream,
+    parse_sse_json_rpc_byte_stream,
+)
+from src.integrations.mcp.temporary_results import (
+    MCPResultTooLargeError,
+    MCPTemporaryResultStore,
+)
 from src.integrations.mcp.transport_http import StreamableHTTPTransport
 
 
@@ -74,6 +82,73 @@ class _PolicyBoundConnection:
 
 
 class MCPStreamingResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selector_materializes_bounded_buffered_result_for_both_member_orders(self) -> None:
+        for envelope in (
+            b'{"jsonrpc":"2.0","id":"1","result":{"value":"buffered"}}',
+            b'{"jsonrpc":"2.0","result":{"value":"buffered"},"id":"1"}',
+        ):
+            with self.subTest(envelope=envelope):
+                parser = IncrementalJSONRPCResultParser(
+                    sink_selector=lambda message: (
+                        _MCPResultTarget(response_id=1, sink=None)
+                        if message.get("id") == "1"
+                        else None
+                    ),
+                    max_provisional_result_bytes=1024,
+                )
+                await parser.feed(envelope)
+                parsed = await parser.finish()
+
+                self.assertEqual(parsed.message["id"], 1)
+                self.assertEqual(parsed.message["result"], {"value": "buffered"})
+                self.assertIsNone(parsed.result_ref)
+
+    async def test_selector_replays_late_id_result_to_streaming_sink(self) -> None:
+        result_bytes = b'{"value":"streamed"}'
+        envelope = b'{"jsonrpc":"2.0","result":' + result_bytes + b',"id":"7"}'
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=4)
+            sink = store.create_sink("late-id")
+            parser = IncrementalJSONRPCResultParser(
+                sink_selector=lambda message: (
+                    _MCPResultTarget(response_id=7, sink=sink)
+                    if message.get("id") == "7"
+                    else None
+                ),
+                max_provisional_result_bytes=1024,
+            )
+            await parser.feed(envelope)
+            parsed = await parser.finish()
+            rebuilt = b"".join(
+                [chunk async for chunk in store.iter_bytes(parsed.result_ref)]
+            )
+
+        self.assertEqual(parsed.message["id"], 7)
+        self.assertEqual(rebuilt, result_bytes)
+
+    async def test_provisional_result_is_capped_and_unknown_result_is_not_exposed(self) -> None:
+        oversized = IncrementalJSONRPCResultParser(
+            sink_selector=lambda _message: None,
+            max_provisional_result_bytes=8,
+        )
+        with self.assertRaises(MCPResultTooLargeError):
+            await oversized.feed(
+                b'{"jsonrpc":"2.0","result":{"value":"too-large"},"id":"unknown"}'
+            )
+        await oversized.abort()
+
+        unknown = IncrementalJSONRPCResultParser(
+            sink_selector=lambda _message: None,
+            max_provisional_result_bytes=1024,
+        )
+        await unknown.feed(
+            b'{"jsonrpc":"2.0","result":{"secret":"discard"},"id":"unknown"}'
+        )
+        parsed = await unknown.finish()
+
+        self.assertIsNone(parsed.message["result"])
+        self.assertNotIn("secret", repr(parsed.message))
+
     async def test_incremental_json_extracts_result_and_preserves_sha256(self) -> None:
         result_payload = {"content": [{"type": "text", "text": "x" * 5000}], "isError": False}
         result_bytes = json.dumps(result_payload, separators=(",", ":")).encode()

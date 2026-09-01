@@ -16,6 +16,51 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "mcp"
 
 
 class LegacyHTTPSSETransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_post_accepts_numeric_string_response_ids(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    text="event: endpoint\ndata: /messages\n\n",
+                )
+            payload = json.loads(request.content.decode("utf-8"))
+            if payload.get("method") == "notifications/initialized":
+                return httpx.Response(204)
+            result = (
+                {
+                    "protocolVersion": MCP_PROTOCOL_VERSION_2024_11_05,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "legacy"},
+                }
+                if payload.get("method") == "initialize"
+                else {"tools": []}
+            )
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": str(payload["id"]), "result": result},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        transport = LegacyHTTPSSETransport(
+            endpoint="https://legacy.example.com/sse",
+            client=async_client,
+        )
+        client = MCPClient(
+            server_id="legacy",
+            transport=transport,
+            protocol_version=MCP_PROTOCOL_VERSION_2024_11_05,
+            transport_family="legacy_http_sse",
+        )
+
+        initialized = await client.initialize()
+        tools = await client.list_tools()
+
+        self.assertEqual(initialized["protocolVersion"], MCP_PROTOCOL_VERSION_2024_11_05)
+        self.assertEqual(tools, [])
+        await client.close()
+        await async_client.aclose()
+
     async def test_2024_legacy_transport_fixtures_are_present(self) -> None:
         for relative in (
             "messages/2024-11-05/initialize_request.json",

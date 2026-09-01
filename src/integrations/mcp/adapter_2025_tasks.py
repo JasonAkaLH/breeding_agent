@@ -17,6 +17,7 @@ from .protocol import (
     MCP_PROTOCOL_VERSION_2025_11_25,
     MCPNegotiatedSession,
     MCPTransport,
+    normalize_json_rpc_response_id,
 )
 
 _RELATED_TASK_META_KEY = "io.modelcontextprotocol/related-task"
@@ -372,13 +373,15 @@ class MCP2025TaskRecoveryClient:
             last_event_id=None,
         )
         message = response.message
-        if (
-            not isinstance(message, Mapping)
-            or message.get("jsonrpc") != JSONRPC_VERSION
-            or message.get("id") != request_id
-            or message.get("method") is not None
-        ):
+        if not isinstance(message, Mapping):
             raise MCPProtocolError("MCP 2025 Task response is invalid.")
+        normalized = normalize_json_rpc_response_id(
+            message,
+            expected_request_id=request_id,
+        )
+        if normalized is None or normalized.get("method") is not None:
+            raise MCPProtocolError("MCP 2025 Task response is invalid.")
+        message = normalized
         if "error" in message:
             error = message.get("error")
             if isinstance(error, Mapping):
