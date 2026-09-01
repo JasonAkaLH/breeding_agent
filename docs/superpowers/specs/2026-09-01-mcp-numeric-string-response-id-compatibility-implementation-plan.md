@@ -1,0 +1,262 @@
+# MCP 数字字符串响应 ID 全协议兼容实施计划
+
+依据：`2026-09-01-mcp-numeric-string-response-id-compatibility-design.md`
+
+## 状态
+
+`planned_awaiting_implementation_approval`
+
+用户已批准设计并完成硬伤复审；本计划已形成，但在用户明确批准实施前不得修改生产代码。
+
+## 完成声明
+
+只有同时满足以下条件，才可声明实施完成：
+
+1. 当前 Python MCP clients 保持整数 request ID；整数 expected 只接受类型精确同值整数 response 或规范十进制字符串 response；
+2. 字符串 expected 只接受类型精确同值字符串 response，不新增反向兼容；
+3. bool、float、null、leading-zero、plus、whitespace、decimal、exponent、Unicode digit和真实 mismatch 全部拒绝；
+4. 2024 Legacy direct/persistent/streaming、2025 JSON/SSE/base/recovery 与2026 stateless JSON/SSE均使用唯一规则；
+5. Legacy exact-first 并发不串线，result-before-id 使用64 MiB有界匿名provisional spool，所有失败/取消/关闭路径清理；
+6. transport/version gate、请求body、原始response bytes、业务ID、schema、配置和外部Server不变；
+7. 自动门禁通过，真实 `/sse` 只读smoke协商2024并发现9个Tool，既有OCR auto继续协商2025。
+
+外部 smoke 因网络、认证或服务状态失败时必须记录精确缺口，不得替代确定性测试或误报通过。
+
+## Checkpoint A：共享规则红测与实现
+
+### 测试范围
+
+- `tests/integrations/mcp/test_protocol_version_negotiation.py`
+
+新增纯 helper 矩阵：
+
+- expected整数：整数exact、规范字符串alias、正数/零/负数；
+- expected字符串：字符串exact；
+- 单向拒绝：字符串expected + 整数response；
+- 类型拒绝：bool、float、null、list/object；
+- 字符串拒绝：`"01"`、`"+1"`、空白、`"1.0"`、指数、Unicode digit、未知值；
+- 非response message拒绝；
+- exact返回原mapping，alias返回浅副本且输入mapping不变。
+
+### 红门禁
+
+```bash
+conda run -n multi_agent python -m unittest \
+  tests.integrations.mcp.test_protocol_version_negotiation
+```
+
+旧实现应因 helper 不存在而失败；不得先改生产代码规避红测。
+
+### 生产实现
+
+- `src/integrations/mcp/protocol.py`
+
+新增唯一 response-ID normalizer：
+
+- 先确认 message 是 JSON-RPC response；
+- exact 必须满足 expected/raw具体类型同为 `int` 或同为 `str`，且值相同；
+- alias 只允许具体整数 expected 与 `raw == str(expected)` 的具体字符串；
+- exact返回原mapping，alias只浅拷贝并替换顶层`id`，其余返回`None`。
+
+不得调用普通 `str(raw) == str(expected)`，不得修改输入mapping或放宽 `json_rpc_message_kind()`。
+
+### 绿门禁
+
+重复纯 helper 模块并运行变更面 Ruff。
+
+## Checkpoint B：2025 base、2026 与 recovery 消费点
+
+### 红测
+
+修改：
+
+- `tests/integrations/test_mcp_client.py`
+- `tests/integrations/mcp/test_streamable_http_versions.py`
+- `tests/integrations/mcp/test_2026_07_28_adapter.py`
+- `tests/integrations/mcp/test_2025_11_25_task_recovery.py`
+
+锁定：
+
+1. 2025 initialize、tools/list的JSON及POST SSE response接受字符串化整数ID；
+2. base client `_handle_stream_events` 与 final message 使用同一规则；
+3. 2026 JSON、request-scoped SSE及JSON/SSE双final仅ID类型不同、规范后内容相同时成功；
+4. 2026真实内容冲突、多个final、非规范/类型错误ID继续拒绝；
+5. `MCP2025TaskRecoveryClient` 的tasks/get、tasks/result、tasks/cancel分别接受字符串化整数ID；
+6. recovery remote taskId、safe ref和binding mismatch断言不变。
+
+旧实现必须只在新增字符串alias用例失败。
+
+### 最小实现
+
+- `src/integrations/mcp/client.py`
+  - `_require_message()` 返回normalizer结果或抛既有mismatch；
+  - `_handle_stream_events()` 对response事件使用同一normalizer作匹配，不修改server request/notification。
+- `src/integrations/mcp/adapter_2026.py`
+  - JSON body与每个SSE final先规范化，再做final数量、JSON/SSE冲突和result/error检查。
+- `src/integrations/mcp/adapter_2025_tasks.py`
+  - recovery-only response envelope在顶层ID检查时复用normalizer。
+
+不得修改MRTR/Tasks业务字段、request registered callback、cancel request ID、durable recovery identity或transport headers。
+
+### 绿门禁
+
+运行上述四个测试模块和变更面 Ruff。
+
+## Checkpoint C：Legacy direct/persistent correlation
+
+### 红测
+
+- `tests/integrations/mcp/test_legacy_http_sse_transport.py`
+- `tests/integrations/mcp/test_legacy_http_sse_persistent_reader.py`
+
+新增fake server可选择原样或字符串化response ID，并覆盖：
+
+- initialize + tools/list的persistent SSE字符串alias；
+- direct POST JSON response字符串alias；
+- response message和`sse_events`中的ID均被规范为expected整数；
+- 同时pending整数`1`与字符串`"1"`，两类response乱序时exact各自胜出；
+- bool/float/非规范字符串/unknown不命中，unknown count与timeout保持；
+- 整数原样响应及现有并发乱序测试不退化。
+
+### 最小实现
+
+- `src/integrations/mcp/transport_legacy_http_sse.py`
+
+增加私有type-aware pending matcher：
+
+1. 无await地扫描pending，先用shared normalizer寻找返回原mapping的exact；
+2. exact不存在时再寻找返回副本的单向alias；
+3. 返回真实pending key、pending对象和normalized message；
+4. `_handle_sse_event()` 用真实pending key完成future与remove，并构造normalized `MCPStreamEvent`副本；
+5. direct POST由transport或base final gate规范化，但response message与events必须保持一致。
+
+不得直接依赖`dict.get()`处理type-aware exact，不得改pending key、request body或unknown计数规则。
+
+### 绿门禁
+
+运行Legacy transport/persistent reader聚焦模块与Ruff。
+
+## Checkpoint D：Legacy late-ID 有界 provisional spool
+
+### 红测
+
+- `tests/integrations/mcp/test_mcp_streaming_response.py`
+- `tests/integrations/mcp/test_legacy_http_sse_persistent_reader.py`
+
+确定性fixture必须把顶层JSON字段排成`jsonrpc -> result -> id`，并覆盖：
+
+1. ID-before-result继续直接写入目标sink；
+2. result-before-ID且字符串alias时先进入provisional spool，ID解析后分块写入正确sink并形成正常`_mcpResultRef`；
+3. 使用内部test seam把hard cap收窄，精确证明超限抛既有`MCPResultTooLargeError`；runtime默认仍固定64 MiB，不新增公共配置；
+4. unknown/mismatch关闭provisional但不abort其他pending；
+5. 已关联后的write/finalize failure abort目标sink；
+6. parse failure、reader cancel和close关闭provisional并经既有fail-pending清理受影响sink；
+7. provisional raw不进入message、event、metadata、manifest、公开ref或异常文本；
+8. 同时存在buffered/streaming pending时，late-ID结果只写入最终ID匹配的sink。
+
+### 最小实现
+
+- `src/integrations/mcp/streaming_response.py`
+- `src/integrations/mcp/transport_legacy_http_sse.py`
+
+在现有 `_JSONRPCResultExtractor` 内替换“selector无sink即无界bytearray”的分支：
+
+- 以`tempfile.TemporaryFile()`持有匿名provisional bytes；
+- 内部构造参数默认`MAX_DURABLE_MCP_RESULT_BYTES`，仅测试可传较小值，不暴露应用配置；
+- 每次write累计size并在越界前抛`MCPResultTooLargeError`；
+- finish解析完整envelope后以raw/normalized ID重新调用selector；
+- selector命中时64 KiB分块replay到目标sink，并复用现有control materialize/durable finalize；
+- selector未命中时关闭provisional，返回足以让Legacy记录unknown的有界response envelope，不保留业务result；
+- abort/finally对provisional close幂等，目标sink继续复用既有abort authority；
+- OSError映射到既有temporary-storage typed failure，不暴露路径。
+
+不得新建持久化store、manifest、数据库对象、后台janitor或第二种result ref。
+
+### 绿门禁
+
+运行streaming response、Legacy persistent reader、temporary results相关聚焦测试与Ruff。
+
+## Checkpoint E：相关/全量回归与真实smoke
+
+### 自动验证
+
+按由窄到宽执行：
+
+```bash
+conda run -n multi_agent python -m unittest \
+  tests.integrations.mcp.test_protocol_version_negotiation \
+  tests.integrations.test_mcp_client \
+  tests.integrations.mcp.test_streamable_http_versions \
+  tests.integrations.mcp.test_2026_07_28_adapter \
+  tests.integrations.mcp.test_2025_11_25_task_recovery \
+  tests.integrations.mcp.test_legacy_http_sse_transport \
+  tests.integrations.mcp.test_legacy_http_sse_persistent_reader \
+  tests.integrations.mcp.test_mcp_streaming_response
+
+conda run -n multi_agent python -m unittest \
+  tests.integrations.mcp.test_user_mcp_auto_negotiation \
+  tests.integrations.mcp.test_user_mcp_gateway \
+  tests.integrations.mcp.test_user_mcp_health
+
+conda run -n multi_agent python -m unittest discover \
+  -s tests/integrations/mcp -p 'test_*.py'
+
+conda run -n multi_agent python -m compileall -q \
+  src/integrations/mcp tests/integrations/mcp
+
+conda run -n multi_agent ruff check \
+  src/integrations/mcp/protocol.py \
+  src/integrations/mcp/client.py \
+  src/integrations/mcp/adapter_2026.py \
+  src/integrations/mcp/adapter_2025_tasks.py \
+  src/integrations/mcp/streaming_response.py \
+  src/integrations/mcp/transport_legacy_http_sse.py \
+  tests/integrations/mcp/test_protocol_version_negotiation.py \
+  tests/integrations/test_mcp_client.py \
+  tests/integrations/mcp/test_streamable_http_versions.py \
+  tests/integrations/mcp/test_2026_07_28_adapter.py \
+  tests/integrations/mcp/test_2025_11_25_task_recovery.py \
+  tests/integrations/mcp/test_legacy_http_sse_transport.py \
+  tests/integrations/mcp/test_legacy_http_sse_persistent_reader.py \
+  tests/integrations/mcp/test_mcp_streaming_response.py
+
+conda run -n multi_agent python -c 'import src.integrations.mcp'
+git diff --check
+```
+
+静态证明：
+
+- 生产ID兼容规则只能存在于shared helper；
+- 不出现真实Endpoint、key、动态UUID、Session ID、响应正文或Tool descriptor；
+- transport/version gate、配置、DTO、schema、Frontend、Rust和部署文件零diff；
+- `docker_cmd.md`继续存在、ignored且untracked，不读取内容；
+- 范围外未跟踪`test.json`不得读取、暂存、修改或删除。
+
+### 真实脱敏smoke
+
+使用修改后的实际factory：
+
+1. 历史QA `/sse + legacy_http_sse + auto`只执行initialize、tools/list、close；预期协商`2024-11-05`并发现9个Tool；
+2. 已验证OCR `streamable_http + auto`只执行initialize、tools/list、close；预期继续协商`2025-11-25`；
+3. 不调用业务Tool；输出只保留adapter、版本、布尔状态、capability keys和Tool数量/名称。
+
+## Checkpoint F：状态同步与提交
+
+全部门禁通过后：
+
+- 设计状态更新为`implemented_verified`；
+- 本计划更新为`complete`并记录红测、测试数、skip、静态门禁和真实smoke结果；
+- 同步`docs/AGENTS.md`、`src/integrations/AGENTS.md`、`tests/AGENTS.md`与`CHANGELOG.md`；
+- 最终diff复核后创建单一实现检查点。
+
+建议提交信息：
+
+```text
+fix(mcp): accept numeric string response IDs
+```
+
+## 回滚
+
+回滚单一实现检查点即可恢复旧严格ID比较和旧parser分支；没有数据、schema、缓存、配置、外部Server、镜像或部署回滚。
+
+License Requirement：复用现有Python、MCP protocol/adapters、temporary result sink、typed errors、unittest和仓库工具链；无新增依赖或许可变化。

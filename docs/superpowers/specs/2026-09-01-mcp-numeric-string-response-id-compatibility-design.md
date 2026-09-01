@@ -2,9 +2,9 @@
 
 ## 状态
 
-`approved_hard_defect_reviewed`
+`approved_planned`
 
-用户已批准全协议、单向兼容方案；有界硬伤复审发现的 1 个 Blocking 和 2 个 Major 已在本文中修正，当前尚未修改生产代码。
+用户已批准全协议、单向兼容方案；有界硬伤复审发现的 1 个 Blocking 和 2 个 Major 已修正，详细步骤见同日 implementation plan，当前尚未修改生产代码。
 
 ## 问题与证据
 
