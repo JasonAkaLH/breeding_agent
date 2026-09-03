@@ -7,9 +7,9 @@
 `published_pending_deploy`
 
 计划基线为 `main@ad0f00db`。设计已经过12轮审查/修订，以98/100、0 Blocking、0 Major、2 Minor通过
-完整信心门。仓库实现已由`36ce1a9c`、`f13fef39`、`97139173`、`9ab0fe4d`和`9253b299`
-闭合；backend-dev `0.1.31`已基于`main@414afa2d`构建并推送，受保护`docker_cmd.md`已同步backend
-标签并补齐首次v2只读pre/post audit与writer hard cut。尚未修改远端数据库、部署开发环境或触及`prod`。
+完整信心门。仓库实现已由`36ce1a9c`、`f13fef39`、`97139173`、`9ab0fe4d`、`9253b299`和
+`e62c86db`闭合；backend-dev `0.1.32`已基于`main@e62c86db`构建并推送，受保护`docker_cmd.md`已同步
+backend标签并补齐首次v2只读pre/post audit与writer hard cut。修复镜像尚未完成开发部署，`prod`未触及。
 
 范围外未跟踪文件`test.json`必须保持未读取、未修改、未暂存。
 
@@ -28,20 +28,28 @@
   manifest `sha256:942ac5133bfc1a62cfd48d1648bf9eaf04130be47910a066e8b4e214889a0ea7`及attestation；
   按远端digest重拉后确认镜像不含`/app/config.yaml`，revision v2/retired分类和关键API runtime import
   smoke通过。
+- `e62c86db`：`0.1.31`首次开发启动在`agent_startup_terminal_task_has_recoverable_run`退出；DBeaver只读
+  查询确认2条`Task=failed + AgentRun=waiting_for_input`。修复只将`FAILED/CANCELLED` Task对应的
+  recoverable Run收敛到同名终态，不加载旧Skill bundle；`COMPLETED`分裂仍fail closed。backend-dev
+  `0.1.32`远端OCI index digest为
+  `sha256:9d3e7dadfcd386e6b6537dd403a881b58f75966b623ef7962128a1bd9ec17870`，包含`linux/amd64`
+  manifest `sha256:b4c0bd4c0370d8d2ee9361d47f315312711f284e393917ac08a6c289212d981a`及attestation；
+  按远端digest重拉确认无`/app/config.yaml`且收敛入口存在，`0.1.31`不再作为部署候选。
 
-最终自动证据：Storage 569项通过（14项环境skip）、Orchestration 199项通过、API 646项通过、E2E 12项
+最终自动证据：Storage 569项通过（14项环境skip）、Orchestration 199项通过、API 648项通过、E2E 12项
 通过、Skill capability聚焦11项通过、Agent Skills聚焦216项通过（13项平台/环境skip）；compileall、变更面
 Ruff、关键package import、active-fallback静态扫描和`git diff --check`通过。Integrations全量运行801项时仅
 保留仓库既有且与本变更无关的`test_client_rejects_negotiated_version_incompatible_with_transport_family`
 稳定失败，另有2项环境skip；本轮未修改该MCP transport-family合同。
 
 本轮没有新增目录职责或变更模块归属，根`AGENTS.md`无需修改；`docs/AGENTS.md`和`CHANGELOG.md`已同步。
-发布版本升级为backend-dev `0.1.31`。受保护`docker_cmd.md`从旧backend无回显取得唯一PostgreSQL DSN，
+当前发布版本为backend-dev `0.1.32`。受保护`docker_cmd.md`从旧backend无回显取得唯一PostgreSQL DSN，
 停止并证明旧writer退出后，用candidate镜像与当前Skill根执行数据库强制只读pre-audit；v2 backend健康后执行
-post-audit，authority blocker或残留terminalizable legacy均在frontend恢复流量前停止。审计复用正式prepared
-snapshot/receipt/revision validator，只输出计数和active revision；命令块bash语法、镜像内Python
-import/classifier和保护门禁通过，文件继续保持`0600`、Git-ignored/untracked。未执行部署命令，未修改数据库
-schema/data、Rust/proto、Frontend、外部Skill或`prod`；远端旧Task实际终态化与开发环境hard cut仍需独立授权。
+post-audit，authority blocker或残留terminalizable legacy均在frontend恢复流量前停止。audit现已覆盖终态
+Task+recoverable Run，并分别输出v1/null/blank/invalid/unavailable；backend health允许启动恢复期间从
+`unhealthy`转回healthy，最长等待900秒。命令块bash语法、镜像内Python import/classifier和保护门禁通过，
+文件继续保持`0600`、Git-ignored/untracked。未执行`0.1.32`部署命令，未手工修改数据库schema/data，未修改
+Rust/proto、Frontend、外部Skill或`prod`；开发环境hard cut仍需独立授权执行。
 
 ## 完成声明
 

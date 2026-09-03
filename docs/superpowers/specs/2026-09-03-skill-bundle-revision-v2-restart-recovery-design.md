@@ -22,8 +22,9 @@ skillrev-<process-local counter>-<12 hex fingerprint prefix>
 当前系统又只持久化revision字符串，不持久化旧Skill bundle或script package snapshot，因此缺失的旧内容
 没有可恢复authority。
 
-本设计现已完成仓库实现和自动门禁，并基于`main@414afa2d`发布backend-dev `0.1.31`；镜像尚未部署，
-开发库旧Task终态化和hard cut仍待执行。
+本设计现已完成仓库实现和自动门禁。`0.1.31`首次启动暴露终态Task与recoverable Run分裂缺口后，
+`e62c86db`已按既定幂等终态边界补齐收敛并发布backend-dev `0.1.32`；修复镜像尚未部署，开发库hard cut
+仍待执行。
 
 本设计完成三个目标：
 
