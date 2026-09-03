@@ -8,8 +8,8 @@
 
 计划基线为 `main@ad0f00db`。设计已经过12轮审查/修订，以98/100、0 Blocking、0 Major、2 Minor通过
 完整信心门。仓库实现已由`36ce1a9c`、`f13fef39`、`97139173`、`9ab0fe4d`和`9253b299`
-闭合；backend-dev `0.1.31`已基于`main@414afa2d`构建并推送，受保护`docker_cmd.md`仅同步backend
-标签。尚未修改远端数据库、部署开发环境或触及`prod`。
+闭合；backend-dev `0.1.31`已基于`main@414afa2d`构建并推送，受保护`docker_cmd.md`已同步backend
+标签并补齐首次v2只读pre/post audit与writer hard cut。尚未修改远端数据库、部署开发环境或触及`prod`。
 
 范围外未跟踪文件`test.json`必须保持未读取、未修改、未暂存。
 
@@ -36,9 +36,12 @@ Ruff、关键package import、active-fallback静态扫描和`git diff --check`�
 稳定失败，另有2项环境skip；本轮未修改该MCP transport-family合同。
 
 本轮没有新增目录职责或变更模块归属，根`AGENTS.md`无需修改；`docs/AGENTS.md`和`CHANGELOG.md`已同步。
-发布版本升级为backend-dev `0.1.31`，受保护`docker_cmd.md`仅同步该backend标签并继续保持`0600`、
-Git-ignored/untracked。未修改数据库schema/data、Rust/proto、Frontend、外部Skill、部署或`prod`；远端旧Task
-实际终态化与开发环境hard cut仍需独立授权。
+发布版本升级为backend-dev `0.1.31`。受保护`docker_cmd.md`从旧backend无回显取得唯一PostgreSQL DSN，
+停止并证明旧writer退出后，用candidate镜像与当前Skill根执行数据库强制只读pre-audit；v2 backend健康后执行
+post-audit，authority blocker或残留terminalizable legacy均在frontend恢复流量前停止。审计复用正式prepared
+snapshot/receipt/revision validator，只输出计数和active revision；命令块bash语法、镜像内Python
+import/classifier和保护门禁通过，文件继续保持`0600`、Git-ignored/untracked。未执行部署命令，未修改数据库
+schema/data、Rust/proto、Frontend、外部Skill或`prod`；远端旧Task实际终态化与开发环境hard cut仍需独立授权。
 
 ## 完成声明
 
@@ -347,8 +350,9 @@ conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 ### 授权边界与当前状态
 
 最初自动门禁完成时状态上限为`implemented_automated`。用户随后已授权backend镜像构建/推送和
-`docker_cmd.md`标签更新，因此当前状态为`published_pending_deploy`。远端数据库只读统计、旧Task实际
-终态化、开发环境hard cut、readiness和真实旧/新Conversation smoke仍需独立授权。
+`docker_cmd.md`标签和首次v2 hard-cut指令更新，因此当前状态为`published_pending_deploy`。指令本身已通过
+静态和镜像内smoke，但远端数据库只读统计、旧Task实际终态化、开发环境hard cut、readiness和真实旧/新
+Conversation smoke仍需独立授权后执行。
 
 License Requirement：复用现有Python、SQLAlchemy、SHA-256、Agent repository、Submission Admission、
 Runtime Sidecar既有`CommitAgentState` wire和unittest；不新增依赖、第三方代码或许可变化。
