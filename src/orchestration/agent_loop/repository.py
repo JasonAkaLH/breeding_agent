@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from src.core.models import Task
+
 from .models import (
     AgentCallOutcomeCommit,
     AgentCompactionCommit,
@@ -31,6 +33,8 @@ class AgentRunRepository(Protocol):
 
 
 class AgentAtomicWriter(Protocol):
+    async def create_terminal_run(self, run: AgentRun, *, task: Task) -> AgentRun: ...
+
     async def commit_agent_user_message(
         self, commit: AgentUserMessageCommit
     ) -> AgentUserMessageCommitResult: ...

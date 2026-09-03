@@ -7,6 +7,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.core.enums import TaskStatus
+from src.core.models import Task
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
@@ -106,6 +108,39 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
         _terminate_process(self._process)
         self._temp_dir.cleanup()
         await super().asyncTearDown()
+
+    async def test_create_terminal_run_reuses_existing_commit_agent_state_wire(self) -> None:
+        task = Task(
+            task_id=str(self.task["task_id"]),
+            conversation_id=str(self.task["conversation_id"]),
+            root_message_id=str(self.task["root_message_id"]),
+            status=TaskStatus.ACCEPTED,
+        )
+        expected = AgentRun(
+            run_id=f"agent-run:{task.task_id}",
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            status=AgentRunStatus.FAILED,
+            binding=AgentModelBinding("edition-terminal"),
+            terminal_reason_code="agent_skill_bundle_revision_retired",
+        )
+
+        created = await self.repository.create_terminal_run(expected, task=task)
+        replayed = await self.repository.create_terminal_run(
+            expected,
+            task=Task(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                root_message_id=task.root_message_id,
+                status=TaskStatus.FAILED,
+            ),
+        )
+
+        self.assertEqual(replayed, created)
+        self.assertEqual(created.status, AgentRunStatus.FAILED)
+        self.assertEqual(await self.repository.list_items(created.run_id), ())
+        stored_task = self.client.get_task(task_id=task.task_id)
+        self.assertEqual(stored_task["task"]["status"], "failed")
 
     async def test_sample_outcomes_and_final_projection_are_one_sidecar_authority(self) -> None:
         binding = AgentModelBinding(

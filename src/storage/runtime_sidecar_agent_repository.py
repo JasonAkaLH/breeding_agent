@@ -7,6 +7,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
+from src.core.enums import TaskStatus
+from src.core.models import Task
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
@@ -72,6 +74,53 @@ class RuntimeSidecarAgentRepository:
             idempotency_key=f"agent-create:{run.run_id}",
         )
         return _run_from_wire(response["run"])
+
+    async def create_terminal_run(self, run: AgentRun, *, task: Task) -> AgentRun:
+        target_task_status = _validate_terminal_run_request(run)
+        if (
+            run.task_id != task.task_id
+            or run.conversation_id != task.conversation_id
+        ):
+            raise AgentStorageConflict("agent_terminal_task_identity_conflict")
+        task_wire = await self._get_task(run.task_id)
+        if task_wire is None:
+            raise AgentStorageConflict("agent_terminal_task_missing")
+        _validate_terminal_task_identity(task_wire, task)
+
+        existing_by_id = await self.get_run(run.run_id)
+        existing = await self.get_run_for_task(run.task_id)
+        if existing_by_id is not None and existing_by_id != existing:
+            raise AgentStorageConflict("agent_terminal_run_replay_conflict")
+        if existing is not None:
+            _validate_terminal_run_replay(existing, run)
+            if str(task_wire["status"]) != target_task_status.value:
+                raise AgentStorageConflict("agent_terminal_task_status_conflict")
+            return existing
+
+        _validate_terminal_task_transition(task.status, target_task_status)
+        now = self._now()
+        terminal_run = replace(
+            run,
+            created_at=run.created_at or now,
+            updated_at=run.updated_at or now,
+            terminal_at=run.terminal_at or now,
+        )
+        response = await self._commit(
+            operation="create_run",
+            run=terminal_run,
+            items=(),
+            expected_revision=0,
+            expected_claim_token=None,
+            idempotency_key=f"agent-create:{run.run_id}",
+            task={
+                **task_wire,
+                "status": target_task_status.value,
+                "updated_at": _iso(now),
+            },
+        )
+        created = _run_from_wire(response["run"])
+        _validate_terminal_run_replay(created, run)
+        return created
 
     async def get_run(self, run_id: str) -> AgentRun | None:
         response = await self._call(self._client.get_agent_run, run_id=run_id)
@@ -915,6 +964,77 @@ def _run_from_wire(value: Mapping[str, Any]) -> AgentRun:
         updated_at=_datetime(value.get("updated_at_ms")),
         terminal_at=_datetime(value.get("terminal_at_ms")),
     )
+
+
+def _validate_terminal_run_request(run: AgentRun) -> TaskStatus:
+    target_task_status = {
+        AgentRunStatus.FAILED: TaskStatus.FAILED,
+        AgentRunStatus.CANCELLED: TaskStatus.CANCELLED,
+    }.get(run.status)
+    if target_task_status is None or not str(run.terminal_reason_code or "").strip():
+        raise AgentStorageConflict("agent_terminal_run_shape_invalid")
+    if (
+        run.next_item_sequence != 1
+        or run.compacted_through_sequence != 0
+        or run.active_sample_item_id is not None
+        or run.waiting_call_item_ids
+        or run.next_batch_call_ordinal != 0
+        or run.claim_owner is not None
+        or run.claim_token is not None
+        or run.lease_expires_at is not None
+        or run.revision != 0
+    ):
+        raise AgentStorageConflict("agent_terminal_run_shape_invalid")
+    return target_task_status
+
+
+def _validate_terminal_task_identity(value: Mapping[str, Any], task: Task) -> None:
+    if (
+        str(value["task_id"]) != task.task_id
+        or str(value["conversation_id"]) != task.conversation_id
+        or str(value["root_message_id"]) != task.root_message_id
+        or str(value["status"]) != str(task.status)
+    ):
+        raise AgentStorageConflict("agent_terminal_task_identity_conflict")
+
+
+def _validate_terminal_task_transition(
+    current: TaskStatus | str,
+    target: TaskStatus,
+) -> None:
+    current = TaskStatus(str(current))
+    if target == TaskStatus.CANCELLED:
+        allowed = current == TaskStatus.CANCELLING
+    else:
+        allowed = current in {
+            TaskStatus.ACCEPTED,
+            TaskStatus.PLANNING,
+            TaskStatus.RUNNING,
+        }
+    if not allowed:
+        raise AgentStorageConflict("agent_terminal_task_transition_invalid")
+
+
+def _validate_terminal_run_replay(existing: AgentRun, expected: AgentRun) -> None:
+    if (
+        existing.run_id != expected.run_id
+        or existing.task_id != expected.task_id
+        or existing.conversation_id != expected.conversation_id
+        or existing.status != expected.status
+        or existing.binding != expected.binding
+        or existing.next_item_sequence != expected.next_item_sequence
+        or existing.compacted_through_sequence != expected.compacted_through_sequence
+        or existing.active_sample_item_id != expected.active_sample_item_id
+        or existing.waiting_call_item_ids != expected.waiting_call_item_ids
+        or existing.next_batch_call_ordinal != expected.next_batch_call_ordinal
+        or existing.claim_owner is not None
+        or existing.claim_token is not None
+        or existing.lease_expires_at is not None
+        or existing.revision != expected.revision
+        or existing.terminal_reason_code != expected.terminal_reason_code
+        or existing.terminal_at is None
+    ):
+        raise AgentStorageConflict("agent_terminal_run_replay_conflict")
 
 
 def _item(

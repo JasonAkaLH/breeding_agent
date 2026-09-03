@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.core.enums import EventVisibility
+from src.core.enums import EventVisibility, TaskStatus
 from src.core.models import EventRecord
 from src.orchestration.agent_loop.capability_invoker import (
     AgentInvocationContextStore,
@@ -288,6 +288,31 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
             self.contexts.request_metadata(first.run)["agent_owner_scope"],
             "alice",
         )
+
+    async def test_initialize_terminal_run_creates_no_items_events_or_execution(self) -> None:
+        orchestrator, runner = self._orchestrator()
+        request = self._request()
+
+        first = await orchestrator.initialize_terminal_run(
+            request,
+            status=AgentRunStatus.FAILED,
+            reason_code="agent_skill_bundle_revision_retired",
+        )
+        replayed = await orchestrator.initialize_terminal_run(
+            request,
+            status=AgentRunStatus.FAILED,
+            reason_code="agent_skill_bundle_revision_retired",
+        )
+
+        self.assertEqual(replayed, first)
+        self.assertEqual(first.status, AgentRunStatus.FAILED)
+        self.assertEqual(first.next_item_sequence, 1)
+        self.assertEqual(await self.repository.list_items(first.run_id), ())
+        self.assertEqual(self.events.events, {})
+        self.assertEqual(runner.calls, [])
+        task = await self.storage.get_task(request.task_id)
+        assert task is not None
+        self.assertEqual(task.status, TaskStatus.FAILED)
 
     async def test_initialize_rejects_task_run_binding_and_user_identity_drift(self) -> None:
         orchestrator, _ = self._orchestrator()

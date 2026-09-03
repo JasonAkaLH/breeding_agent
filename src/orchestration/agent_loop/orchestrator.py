@@ -220,6 +220,35 @@ class AgentLoopOrchestrator:
         )
         return _InitializedAgentRun(request=request, task=task, run=run)
 
+    async def initialize_terminal_run(
+        self,
+        request: AgentExecutionRequest,
+        *,
+        status: AgentRunStatus,
+        reason_code: str,
+    ) -> AgentRun:
+        task = await self._load_task(request.task_id)
+        if not _task_matches_request(task, request):
+            raise AgentStorageConflict("agent_task_identity_mismatch")
+        assert task is not None
+        expected_run = AgentRun(
+            run_id=_agent_run_id(request.task_id),
+            task_id=request.task_id,
+            conversation_id=request.conversation_id,
+            status=status,
+            binding=self._binding_factory(request),
+            terminal_reason_code=reason_code,
+        )
+        run = await self._writer.create_terminal_run(expected_run, task=task)
+        _validate_run_identity(run, expected_run, check_binding=True)
+        if (
+            run.status is not status
+            or run.terminal_reason_code != reason_code
+            or run.terminal_at is None
+        ):
+            raise AgentStorageConflict("agent_terminal_run_identity_mismatch")
+        return run
+
     async def run_initialized(
         self,
         initialized: _InitializedAgentRun,

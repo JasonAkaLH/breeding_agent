@@ -12,6 +12,8 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.core.enums import TaskStatus
+from src.core.models import Task
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
     AgentCallOutcomeStatus,
@@ -75,6 +77,11 @@ class SQLiteAgentRepository:
 
     async def create_run(self, run: AgentRun) -> AgentRun:
         return await self._write(lambda session: self._create_run(session, run))
+
+    async def create_terminal_run(self, run: AgentRun, *, task: Task) -> AgentRun:
+        return await self._write(
+            lambda session: self._create_terminal_run(session, run, task=task)
+        )
 
     async def get_run(self, run_id: str) -> AgentRun | None:
         return await self._read(lambda session: _run_from_row(session.get(AgentRunRow, run_id)))
@@ -249,6 +256,72 @@ class SQLiteAgentRepository:
             session.flush()
         except IntegrityError as exc:
             raise AgentStorageConflict("agent_run_task_already_bound") from exc
+        return _run_from_row(row)
+
+    def _create_terminal_run(
+        self,
+        session: Session,
+        run: AgentRun,
+        *,
+        task: Task,
+    ) -> AgentRun:
+        target_task_status = _validate_terminal_run_request(run)
+        if (
+            run.task_id != task.task_id
+            or run.conversation_id != task.conversation_id
+        ):
+            raise AgentStorageConflict("agent_terminal_task_identity_conflict")
+        task_row = session.scalar(
+            select(TaskRow).where(TaskRow.task_id == task.task_id).with_for_update()
+        )
+        if task_row is None:
+            raise AgentStorageConflict("agent_terminal_task_missing")
+        _validate_terminal_task_identity(task_row, task)
+
+        existing_by_id = session.get(AgentRunRow, run.run_id)
+        existing = session.scalar(
+            select(AgentRunRow).where(AgentRunRow.task_id == run.task_id)
+        )
+        if existing_by_id is not None and existing_by_id is not existing:
+            raise AgentStorageConflict("agent_terminal_run_replay_conflict")
+        if existing is not None:
+            _validate_terminal_run_replay(_run_from_row(existing), run)
+            if task_row.status != target_task_status.value:
+                raise AgentStorageConflict("agent_terminal_task_status_conflict")
+            return _run_from_row(existing)
+
+        _validate_terminal_task_transition(task.status, target_task_status)
+        now = self._now()
+        row = AgentRunRow(
+            run_id=run.run_id,
+            task_id=run.task_id,
+            conversation_id=run.conversation_id,
+            status=run.status.value,
+            model_edition=run.binding.model_edition,
+            reasoning_effort=run.binding.reasoning_effort,
+            thinking_enabled=run.binding.thinking_enabled,
+            binding_option_digests=dict(run.binding.option_digests),
+            next_item_sequence=run.next_item_sequence,
+            compacted_through_sequence=run.compacted_through_sequence,
+            active_sample_item_id=run.active_sample_item_id,
+            waiting_call_item_ids=list(run.waiting_call_item_ids),
+            next_batch_call_ordinal=run.next_batch_call_ordinal,
+            claim_owner=None,
+            claim_token=None,
+            lease_expires_at=None,
+            revision=run.revision,
+            terminal_reason_code=run.terminal_reason_code,
+            created_at=run.created_at or now,
+            updated_at=run.updated_at or now,
+            terminal_at=run.terminal_at or now,
+        )
+        session.add(row)
+        session.flush()
+        self._inject("terminal_create_after_run_insert")
+        task_row.status = target_task_status.value
+        task_row.updated_at = now
+        session.flush()
+        self._inject("terminal_create_after_task_update")
         return _run_from_row(row)
 
     def _commit_sample(self, session: Session, commit: AgentSampleCommit) -> AgentSampleCommitResult:
@@ -1212,6 +1285,77 @@ def _binding_from_row(row: AgentRunRow) -> AgentModelBinding:
         thinking_enabled=bool(row.thinking_enabled),
         option_digests=dict(row.binding_option_digests or {}),
     )
+
+
+def _validate_terminal_run_request(run: AgentRun) -> TaskStatus:
+    target_task_status = {
+        AgentRunStatus.FAILED: TaskStatus.FAILED,
+        AgentRunStatus.CANCELLED: TaskStatus.CANCELLED,
+    }.get(run.status)
+    if target_task_status is None or not str(run.terminal_reason_code or "").strip():
+        raise AgentStorageConflict("agent_terminal_run_shape_invalid")
+    if (
+        run.next_item_sequence != 1
+        or run.compacted_through_sequence != 0
+        or run.active_sample_item_id is not None
+        or run.waiting_call_item_ids
+        or run.next_batch_call_ordinal != 0
+        or run.claim_owner is not None
+        or run.claim_token is not None
+        or run.lease_expires_at is not None
+        or run.revision != 0
+    ):
+        raise AgentStorageConflict("agent_terminal_run_shape_invalid")
+    return target_task_status
+
+
+def _validate_terminal_task_identity(row: TaskRow, task: Task) -> None:
+    if (
+        row.task_id != task.task_id
+        or row.conversation_id != task.conversation_id
+        or row.root_message_id != task.root_message_id
+        or row.status != str(task.status)
+    ):
+        raise AgentStorageConflict("agent_terminal_task_identity_conflict")
+
+
+def _validate_terminal_task_transition(
+    current: TaskStatus | str,
+    target: TaskStatus,
+) -> None:
+    current = TaskStatus(str(current))
+    if target == TaskStatus.CANCELLED:
+        allowed = current == TaskStatus.CANCELLING
+    else:
+        allowed = current in {
+            TaskStatus.ACCEPTED,
+            TaskStatus.PLANNING,
+            TaskStatus.RUNNING,
+        }
+    if not allowed:
+        raise AgentStorageConflict("agent_terminal_task_transition_invalid")
+
+
+def _validate_terminal_run_replay(existing: AgentRun | None, expected: AgentRun) -> None:
+    if existing is None or (
+        existing.run_id != expected.run_id
+        or existing.task_id != expected.task_id
+        or existing.conversation_id != expected.conversation_id
+        or existing.status != expected.status
+        or existing.binding != expected.binding
+        or existing.next_item_sequence != expected.next_item_sequence
+        or existing.compacted_through_sequence != expected.compacted_through_sequence
+        or existing.active_sample_item_id != expected.active_sample_item_id
+        or existing.waiting_call_item_ids != expected.waiting_call_item_ids
+        or existing.next_batch_call_ordinal != expected.next_batch_call_ordinal
+        or existing.claim_owner is not None
+        or existing.claim_token is not None
+        or existing.lease_expires_at is not None
+        or existing.revision != expected.revision
+        or existing.terminal_reason_code != expected.terminal_reason_code
+        or existing.terminal_at is None
+    ):
+        raise AgentStorageConflict("agent_terminal_run_replay_conflict")
 
 
 def _run_from_row(row: AgentRunRow | None) -> AgentRun | None:

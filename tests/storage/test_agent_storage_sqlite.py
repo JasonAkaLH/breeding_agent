@@ -7,6 +7,8 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
+from src.core.enums import TaskStatus
+from src.core.models import Task
 from src.integrations.agent_skills.public_profile import PublicSkillProfile
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeCommit,
@@ -107,6 +109,107 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             status=AgentRunStatus.RUNNING,
             binding=AgentModelBinding("edition-a", reasoning_effort="high", option_digests={"policy": "abc"}),
         )
+
+    def _terminal_run(
+        self,
+        *,
+        status: AgentRunStatus = AgentRunStatus.FAILED,
+        reason_code: str = "agent_skill_bundle_revision_retired",
+    ) -> AgentRun:
+        return AgentRun(
+            run_id="agent-run:task-1",
+            task_id="task-1",
+            conversation_id="conv-1",
+            status=status,
+            binding=self._run().binding,
+            terminal_reason_code=reason_code,
+        )
+
+    def _task(self, status: TaskStatus = TaskStatus.ACCEPTED) -> Task:
+        return Task(
+            task_id="task-1",
+            conversation_id="conv-1",
+            root_message_id="message-task-1",
+            status=status,
+        )
+
+    async def test_create_terminal_run_is_atomic_and_exactly_replayable(self) -> None:
+        expected = self._terminal_run()
+
+        created = await self.repository.create_terminal_run(
+            expected,
+            task=self._task(),
+        )
+        replayed = await self.repository.create_terminal_run(
+            expected,
+            task=self._task(TaskStatus.FAILED),
+        )
+
+        self.assertEqual(replayed, created)
+        self.assertEqual(created.status, AgentRunStatus.FAILED)
+        self.assertEqual(created.terminal_reason_code, expected.terminal_reason_code)
+        self.assertIsNotNone(created.terminal_at)
+        self.assertEqual(await self.repository.list_items(created.run_id), ())
+        with self.session_factory() as session:
+            self.assertEqual(session.get(TaskRow, "task-1").status, "failed")
+            self.assertEqual(session.scalar(select(func.count()).select_from(TaskNodeRow)), 0)
+            self.assertEqual(session.scalar(select(func.count()).select_from(EventRecordRow)), 0)
+
+    async def test_create_terminal_run_enforces_cancelling_to_cancelled_matrix(self) -> None:
+        with self.session_factory() as session:
+            session.get(TaskRow, "task-1").status = "cancelling"
+            session.commit()
+        created = await self.repository.create_terminal_run(
+            self._terminal_run(
+                status=AgentRunStatus.CANCELLED,
+                reason_code="agent_skill_bundle_revision_retired",
+            ),
+            task=self._task(TaskStatus.CANCELLING),
+        )
+        self.assertEqual(created.status, AgentRunStatus.CANCELLED)
+        with self.session_factory() as session:
+            self.assertEqual(session.get(TaskRow, "task-1").status, "cancelled")
+
+    async def test_create_terminal_run_rejects_transition_and_replay_drift(self) -> None:
+        with self.assertRaisesRegex(
+            AgentStorageConflict,
+            "agent_terminal_task_transition_invalid",
+        ):
+            await self.repository.create_terminal_run(
+                self._terminal_run(status=AgentRunStatus.CANCELLED),
+                task=self._task(),
+            )
+
+        expected = self._terminal_run()
+        await self.repository.create_terminal_run(expected, task=self._task())
+        with self.assertRaisesRegex(
+            AgentStorageConflict,
+            "agent_terminal_run_replay_conflict",
+        ):
+            await self.repository.create_terminal_run(
+                self._terminal_run(reason_code="different_reason"),
+                task=self._task(TaskStatus.FAILED),
+            )
+
+    async def test_create_terminal_run_rolls_back_run_and_task_together(self) -> None:
+        def inject(stage: str) -> None:
+            if stage == "terminal_create_after_task_update":
+                raise RuntimeError("injected_terminal_create_failure")
+
+        repository = SQLiteAgentRepository(
+            self.session_factory,
+            fault_injector=inject,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "injected_terminal_create_failure"):
+            await repository.create_terminal_run(
+                self._terminal_run(),
+                task=self._task(),
+            )
+
+        self.assertIsNone(await self.repository.get_run_for_task("task-1"))
+        with self.session_factory() as session:
+            self.assertEqual(session.get(TaskRow, "task-1").status, "accepted")
 
     def _sample(self, *calls: AgentToolCall, sample_id="sample-1", text="") -> AgentSample:
         return AgentSample(
