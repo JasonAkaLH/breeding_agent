@@ -1,6 +1,6 @@
 # MCP Dispatch 实际 Tool Result 向主 Agent 交付设计
 
-状态：`approved_clean_cutover_hard_defects_resolved`；最新限定硬伤复审中保留的Artifact API Major已闭合，当前0 Blocking / 0 Major；未评Minor，不宣称完整95分信心门
+状态：`implemented_automated_pending_dev_smoke`；代码检查点`036b0ec7`已闭合仓库实现和相关自动门禁，开发环境部署与真实新会话验收尚未授权
 日期：2026-09-03
 目标分支：`main`
 
@@ -368,6 +368,13 @@ branch中，不存在已完成且revision非v2的Call；若存在则停止部署
 result的等待任务不因revision为空被误判为旧projection。只有上述证据闭合后，状态才能从
 `approved_clean_cutover_hard_defects_resolved` 更新为
 `implemented_verified`。
+
+当前仓库实施已由`036b0ec7`完成：Result Parser/Projection Store升级为v2-only，durable authority可重建
+closed bundle，Coordinator在终态提交前注入实际结果，Agent projector按最终envelope预算并同步
+truncation；Artifact API生产代码/DTO/路由未改。普通和oversized E2E均通过真实fake adapter → Gateway
+→ Result Parser → receipt/projection/Artifact → Selector → terminal bundle → 下一次主Agent请求链，业务
+Tool各执行一次。开发环境部署和真实外部MCP新会话未执行，因此状态保持
+`implemented_automated_pending_dev_smoke`。
 
 ## 10. 上游依据
 

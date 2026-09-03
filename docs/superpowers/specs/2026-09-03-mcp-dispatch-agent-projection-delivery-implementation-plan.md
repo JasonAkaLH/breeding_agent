@@ -4,13 +4,34 @@
 
 ## 状态
 
-`planned_hard_defects_resolved`
+`implemented_automated_pending_dev_smoke`
 
-用户已批准退役parser/projection v1，不恢复旧内容；最新限定硬伤审计中保留的Artifact API Major已按
-v2-only clean cutover决策闭合，当前0 Blocking / 0 Major。用户明确不要求增加运行中调用门禁；未评
-Minor，不宣称完整95分信心门；本计划尚未修改生产代码。
+用户已批准退役parser/projection v1，不恢复旧内容；代码检查点`036b0ec7`已完成v2-only仓库实现与
+相关自动验证。用户明确不要求增加运行中调用门禁；开发环境部署和真实外部MCP新会话尚未授权，
+因此不得写成`implemented_verified`。
 
 计划基线为 `main@634fa002`。范围外未跟踪文件 `test.json` 必须保持未读取、未修改、未暂存。
+
+## 实施记录
+
+- Result Parser、Projection Store和Artifact metadata新写均为v2；v1/null历史结果只计
+  `revision_retired`且不load/reproject/raw/CAS，未知revision零改写fail closed；
+- durable completed-result authority返回正文及可信source truncation，并为每个终态重新构建closed
+  bundle；Selector仍只消费原有有界正文列表；
+- Coordinator对FINISH、STOP和终态错误统一交付bundle，authority冲突在completed branch提交前转为
+  typed failed；OCR和waiting/approval/input-required/remote-pending保持原载荷；
+- Agent projector在清洗前后exact-validate bundle，最终预算覆盖model-result和Tool envelope；整项省略
+  与单项收缩同步count、source/carrier/bundle/top-level truncation；
+- legacy `mcp_tool` executor作为既有parser projection consumer同步接受v2 envelope和可信agent
+  truncation；未改变其路由、Gateway或公开合同；
+- 聚焦11模块140项通过（2项既有Linux-only skip）；MCP integrations 579项通过（2项既有平台skip）；
+  Orchestration 198、API 629、E2E 12、Core 54、Lifecycle 48、Main Agent 17、MCP Tool 15、Skill Tool 3、
+  Observability 41项通过；Storage 563项通过（14项外部环境skip）；
+- Backend全量Integrations 801项中800项通过、2项既有平台skip，唯一失败为未修改文件
+  `tests/integrations/test_mcp_client.py`的transport-family旧基线断言，独占复跑仍失败；代码检查点对该
+  测试及`src/integrations/mcp/client.py`均为零diff。本地`skill/sql-query`目录不存在，该可选门禁N/A；
+- compileall、变更面Ruff、package import和`git diff --check`通过；`test.json`未读取、未修改、未暂存，
+  `docker_cmd.md`只验证存在/ignored/untracked且未读取。
 
 ## 完成声明
 
@@ -87,6 +108,7 @@ Minor，不宣称完整95分信心门；本计划尚未修改生产代码。
 - `src/integrations/mcp/result_parsing/historical_reprojection.py`
 - `src/integrations/mcp/durable_result_lifecycle.py`
 - `src/integrations/mcp/result_artifact_projection.py`
+- `src/capabilities/mcp_tool/executor.py`（既有projection consumer只同步v2 envelope/agent truncation）
 - 对应 `tests/integrations/mcp/test_result_parsing.py`
 - 对应 `tests/integrations/mcp/test_result_parser_worker.py`
 - `tests/integrations/mcp/test_result_artifact_projection.py`
@@ -153,10 +175,10 @@ conda run -n multi_agent python -m unittest \
   tests.api.test_conversation_messages_artifacts
 ```
 
-建议检查点提交：
+实际代码检查点：
 
 ```text
-fix(mcp): record agent projection completeness
+036b0ec7 fix(mcp): deliver durable results to agent
 ```
 
 ## Checkpoint B：Durable projection authority 与 canonical bundle
