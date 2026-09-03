@@ -1,6 +1,6 @@
 # COMPLETED Task 与 Recoverable Run 直接收敛设计
 
-状态：`approved_pending_written_review`
+状态：`approved`
 日期：2026-09-04
 目标分支：`main`
 
