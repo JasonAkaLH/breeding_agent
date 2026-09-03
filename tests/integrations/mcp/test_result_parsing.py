@@ -138,7 +138,7 @@ class MCPVersionedResultDecoderTest(unittest.TestCase):
                 _request(version, _minimal(version, structuredContent={"secret": "raw"}))
             )
             self.assertFalse(result.structured_content.present)
-            self.assertNotIn("raw", build_agent_projection(result))
+            self.assertNotIn("raw", build_agent_projection(result).content)
 
     def test_2025_structured_output_schema_pass_fail_missing_and_tool_error_order(self) -> None:
         schema = {
@@ -306,13 +306,13 @@ class MCPVersionedResultDecoderTest(unittest.TestCase):
             )
         )
         self.assertEqual(result.content_blocks[0].audience, ("user",))
-        for annotations in ({"audience": ["system"]}, {"priority": True}, {"priority": 2}):
-            with self.subTest(annotations=annotations):
+        for annotation_case in ({"audience": ["system"]}, {"priority": True}, {"priority": 2}):
+            with self.subTest(annotations=annotation_case):
                 with self.assertRaisesRegex(MCPResultParseError, "content_block_invalid"):
                     decode_result(
                         _request(
                             "2025-03-26",
-                            {"content": [{"type": "text", "text": "x", "annotations": annotations}]},
+                            {"content": [{"type": "text", "text": "x", "annotations": annotation_case}]},
                         )
                     )
         with self.assertRaisesRegex(MCPResultParseError, "content_block_invalid"):
@@ -340,12 +340,13 @@ class MCPVersionedResultDecoderTest(unittest.TestCase):
         view = build_user_view(result)
         serialized = json.dumps(view, ensure_ascii=False)
         agent = build_agent_projection(result)
-        self.assertNotIn("top-secret", serialized + agent)
-        self.assertNotIn("secret.example", serialized + agent)
+        self.assertNotIn("top-secret", serialized + agent.content)
+        self.assertNotIn("secret.example", serialized + agent.content)
         self.assertLessEqual(len(serialized), 20_000)
         self.assertLessEqual(len(serialized.encode("utf-8")), 80_000)
-        self.assertLessEqual(len(agent), 20_000)
-        self.assertLessEqual(len(agent.encode("utf-8")), 80_000)
+        self.assertLessEqual(len(agent.content), 20_000)
+        self.assertLessEqual(len(agent.content.encode("utf-8")), 80_000)
+        self.assertTrue(agent.truncated)
         self.assertTrue(view["projection_truncated"])
         quote_heavy = decode_result(
             _request(

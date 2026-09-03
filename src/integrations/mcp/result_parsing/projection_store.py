@@ -13,7 +13,8 @@ from typing import Any, Mapping
 
 MAX_PROJECTION_ENVELOPE_BYTES = 192 * 1024
 MAX_PROJECTION_MANIFEST_BYTES = 16 * 1024
-PROJECTION_SCHEMA = "maf.mcp.parsed_result_projection.v1"
+PROJECTION_SCHEMA = "maf.mcp.parsed_result_projection.v2"
+PROJECTION_PARSER_REVISION = "mcp-result-parser.v2"
 
 
 class MCPProjectionStoreError(RuntimeError):
@@ -59,8 +60,9 @@ class MCPProjectionStore:
     def stage(
         self, envelope: bytes, *, binding: MCPProjectionBinding
     ) -> MCPProjectionStagingHandle:
+        _validate_projection_binding(binding)
         data = bytes(envelope)
-        _validate_envelope(data)
+        validate_projection_envelope(data)
         token = secrets.token_urlsafe(24)
         path = self._root / f".staged-{token}.json"
         descriptor = os.open(
@@ -93,6 +95,7 @@ class MCPProjectionStore:
         )
 
     def publish(self, handle: MCPProjectionStagingHandle) -> MCPPublishedProjection:
+        _validate_projection_binding(handle.binding)
         staged_path = self._staged_path(handle)
         projection_ref = _projection_ref(handle)
         try:
@@ -155,6 +158,7 @@ class MCPProjectionStore:
     def consume_staged(
         self, handle: MCPProjectionStagingHandle
     ) -> Mapping[str, Any]:
+        _validate_projection_binding(handle.binding)
         path = self._staged_path(handle)
         data = _read_bound_file(
             path,
@@ -163,8 +167,7 @@ class MCPProjectionStore:
             expected_device=handle.device,
             expected_inode=handle.inode,
         )
-        _validate_envelope(data)
-        value = json.loads(data)
+        value = validate_projection_envelope(data)
         path.unlink()
         _fsync_directory(self._root)
         return value
@@ -176,6 +179,7 @@ class MCPProjectionStore:
         binding: MCPProjectionBinding,
         expected_projection_sha256: str,
     ) -> Mapping[str, Any]:
+        _validate_projection_binding(binding)
         if not projection_ref.startswith("mcp-projection-") or len(projection_ref) != 79:
             raise MCPProjectionStoreError("projection reference is invalid")
         data_path = self._root / f"{projection_ref}.json"
@@ -208,8 +212,7 @@ class MCPProjectionStore:
             "sha256:" + hashlib.sha256(data).hexdigest() != expected_projection_sha256
         ):
             raise MCPProjectionStoreError("projection content identity does not match")
-        _validate_envelope(data)
-        return json.loads(data)
+        return validate_projection_envelope(data)
 
     def cleanup_staged(self, *, older_than_seconds: float = 24 * 60 * 60) -> int:
         cutoff = time.time() - older_than_seconds
@@ -232,15 +235,55 @@ class MCPProjectionStore:
         return path
 
 
-def _validate_envelope(data: bytes) -> None:
+def validate_projection_envelope(
+    data: bytes,
+    *,
+    expected_parsed_model_sha256: str | None = None,
+) -> Mapping[str, Any]:
     if len(data) > MAX_PROJECTION_ENVELOPE_BYTES:
         raise MCPProjectionStoreError("projection envelope exceeds size limit")
     try:
         value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MCPProjectionStoreError("projection envelope is invalid") from exc
-    if not isinstance(value, dict) or value.get("schema") != PROJECTION_SCHEMA:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema",
+            "parsed_model_sha256",
+            "user_view",
+            "agent_projection",
+            "agent_projection_truncated",
+            "workflow_control",
+        }
+        or value.get("schema") != PROJECTION_SCHEMA
+        or not _is_sha256(value.get("parsed_model_sha256"))
+        or (
+            expected_parsed_model_sha256 is not None
+            and value.get("parsed_model_sha256") != expected_parsed_model_sha256
+        )
+        or not isinstance(value.get("user_view"), dict)
+        or not isinstance(value.get("agent_projection"), str)
+        or type(value.get("agent_projection_truncated")) is not bool
+        or value.get("workflow_control") is not None
+    ):
         raise MCPProjectionStoreError("projection envelope schema is invalid")
+    return value
+
+
+def _validate_projection_binding(binding: MCPProjectionBinding) -> None:
+    if binding.parser_revision != PROJECTION_PARSER_REVISION:
+        raise MCPProjectionStoreError("projection parser revision is invalid")
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
 
 
 def _projection_ref(handle: MCPProjectionStagingHandle) -> str:

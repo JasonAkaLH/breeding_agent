@@ -110,7 +110,7 @@ def _receipt(*, state: MCPTerminalState = MCPTerminalState.COMPLETED):
         safe_result_content_sha256=CONTENT_SHA,
         safe_result_size_bytes=11,
         safe_result_store_kind="durable_content_addressed",
-        result_parser_revision="mcp-result-parser.v1",
+        result_parser_revision="mcp-result-parser.v2",
         validated_checkpoint_sha256="sha256:" + "2" * 64,
         parsed_model_sha256="sha256:" + "3" * 64,
     )
@@ -363,7 +363,7 @@ class ResultArtifactProjectorTest(unittest.IsolatedAsyncioTestCase):
             raw_sha256=CONTENT_SHA,
             output_schema_sha256=None,
             source="tools_call",
-            parser_revision="mcp-result-parser.v1",
+            parser_revision="mcp-result-parser.v2",
         )
         handle = MCPProjectionStagingHandle(
             token="token",
@@ -400,6 +400,11 @@ class ResultArtifactProjectorTest(unittest.IsolatedAsyncioTestCase):
         metadata = parse_file_storage_ref(attached.storage_ref)
         self.assertEqual(metadata["projection_ref"], published.projection_ref)
         self.assertEqual(metadata["projection_sha256"], published.projection_sha256)
+        self.assertEqual(metadata["parser_revision"], "mcp-result-parser.v2")
+        self.assertEqual(
+            metadata["projection_schema"],
+            "maf.mcp.parsed_result_projection.v2",
+        )
         self.assertEqual(metadata["terminal_result_source"], "tools_call")
         self.assertEqual(retry, attached)
 

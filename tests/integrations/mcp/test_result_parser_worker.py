@@ -74,6 +74,7 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
             "sha256:" + hashlib.sha256(canonical).hexdigest(),
         )
     async def test_mapping_is_parsed_in_spawn_worker_and_projection_is_staged_then_published(self) -> None:
+        self.assertEqual(PARSER_REVISION, "mcp-result-parser.v2")
         request = MCPResultDecodeRequest(
             protocol_version="2025-11-25",
             source=MCPResultSource.TOOLS_CALL,
@@ -115,6 +116,8 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(envelope["user_view"]["primary"]["value"], {"answer": 42})
         self.assertIn("business result", envelope["agent_projection"])
+        self.assertEqual(envelope["schema"], "maf.mcp.parsed_result_projection.v2")
+        self.assertIs(envelope["agent_projection_truncated"], False)
         self.assertNotIn("protocol_version", json.dumps(envelope))
 
     async def test_parser_observation_is_closed_and_contains_no_business_text_or_identity(self) -> None:
@@ -392,10 +395,11 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         envelope = json.dumps(
             {
-                "schema": "maf.mcp.parsed_result_projection.v1",
+                "schema": "maf.mcp.parsed_result_projection.v2",
                 "parsed_model_sha256": "sha256:" + "b" * 64,
                 "user_view": {},
                 "agent_projection": "safe",
+                "agent_projection_truncated": False,
                 "workflow_control": None,
             },
             separators=(",", ":"),
@@ -414,6 +418,61 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         os.chmod(fresh.path, 0o600)
         with self.assertRaises(MCPProjectionStoreError):
             self.projection_store.publish(fresh)
+
+    async def test_projection_store_rejects_non_v2_and_shape_drift(self) -> None:
+        binding = MCPProjectionBinding(
+            owner_user_id="alice",
+            task_id="task",
+            node_id="node",
+            call_ref="call",
+            raw_sha256="sha256:" + "a" * 64,
+            output_schema_sha256=None,
+            source="tools_call",
+            parser_revision=PARSER_REVISION,
+        )
+        base = {
+            "schema": "maf.mcp.parsed_result_projection.v2",
+            "parsed_model_sha256": "sha256:" + "b" * 64,
+            "user_view": {},
+            "agent_projection": "safe",
+            "agent_projection_truncated": False,
+            "workflow_control": None,
+        }
+        invalid = []
+        for schema in (
+            "maf.mcp.parsed_result_projection.v1",
+            "maf.mcp.parsed_result_projection.v3",
+        ):
+            invalid.append({**base, "schema": schema})
+        invalid.extend(
+            (
+                {key: value for key, value in base.items() if key != "agent_projection_truncated"},
+                {**base, "unknown": True},
+                {**base, "agent_projection_truncated": 0},
+            )
+        )
+
+        for envelope in invalid:
+            with self.subTest(envelope=envelope):
+                with self.assertRaises(MCPProjectionStoreError):
+                    self.projection_store.stage(
+                        json.dumps(envelope, separators=(",", ":")).encode(),
+                        binding=binding,
+                    )
+        with self.assertRaises(MCPProjectionStoreError):
+            self.projection_store.stage(
+                json.dumps(base, separators=(",", ":")).encode(),
+                binding=MCPProjectionBinding(
+                    owner_user_id=binding.owner_user_id,
+                    task_id=binding.task_id,
+                    node_id=binding.node_id,
+                    call_ref=binding.call_ref,
+                    raw_sha256=binding.raw_sha256,
+                    output_schema_sha256=binding.output_schema_sha256,
+                    source=binding.source,
+                    parser_revision="mcp-result-parser.v1",
+                ),
+            )
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux RLIMIT gate")
     async def test_linux_worker_enforces_512_mib_and_parses_64_mib_boundary(self) -> None:

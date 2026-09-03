@@ -104,6 +104,38 @@ class _InjectedContextBuilder:
         )
 
 
+def _terminal_bundle(content: str = "business-start business-end") -> dict:
+    return {
+        "schema": "maf.mcp.agent_result_bundle.v1",
+        "result_count": 1,
+        "included_count": 1,
+        "omitted_count": 0,
+        "truncated": False,
+        "results": [
+            {
+                "call_sequence": 1,
+                "content": content,
+                "source_truncated": False,
+                "carrier_truncated": False,
+            }
+        ],
+    }
+
+
+class _TerminalBundleContextBuilder(_InjectedContextBuilder):
+    def __init__(self, bundle=None, *, error_code: str | None = None) -> None:
+        super().__init__()
+        self.bundle = bundle
+        self.error_code = error_code
+        self.terminal_requests = []
+
+    async def build_terminal_result_bundle(self, **kwargs):
+        self.terminal_requests.append(kwargs)
+        if self.error_code is not None:
+            raise MCPSelectorContextAuthorityError(self.error_code)
+        return self.bundle
+
+
 class _FailingContextBuilder:
     async def build(self, **kwargs):
         del kwargs
@@ -447,6 +479,129 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(selector.contexts[0].user_request, "durable selector context")
         self.assertEqual(selector.contexts[0].selector_step_total, 5)
+
+    async def test_completed_tool_result_bundle_replaces_generic_finish_text(self) -> None:
+        storage = _FakeStorage()
+        storage.grants.append(
+            UserMCPToolGrant(
+                "grant-a", "alice", "server-a", "lookup", 1, "schema-v1", NOW
+            )
+        )
+        gateway = _FakeGateway(MCPCallOutcome.completed("result-safe"))
+        context_builder = _TerminalBundleContextBuilder(_terminal_bundle())
+        outcome = await UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=gateway,
+            selector=_SequenceSelector(
+                _call(),
+                MCPSelectorAction(MCPSelectorActionType.FINISH),
+            ),
+            selector_context_builder=context_builder,
+        ).dispatch(_request(), server_id="server-a")
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.output_payload["mcp_status"], "completed")
+        self.assertEqual(
+            outcome.output_payload["agent_projection"],
+            _terminal_bundle(),
+        )
+        self.assertNotIn("text", outcome.output_payload)
+        self.assertIs(outcome.output_payload["truncated"], False)
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertEqual(len(context_builder.terminal_requests), 1)
+
+    async def test_prior_bundle_is_preserved_for_stop_and_later_error(self) -> None:
+        for terminal_action, expected_status, expected_error in (
+            (
+                MCPSelectorAction(MCPSelectorActionType.STOP, reason="stop"),
+                "stopped",
+                None,
+            ),
+            (
+                MCPSelectorAction(
+                    MCPSelectorActionType.CALL_TOOL,
+                    tool_name="missing",
+                ),
+                "failed",
+                "mcp_tool_not_found",
+            ),
+        ):
+            with self.subTest(action=terminal_action.action):
+                storage = _FakeStorage()
+                storage.grants.append(
+                    UserMCPToolGrant(
+                        "grant-a",
+                        "alice",
+                        "server-a",
+                        "lookup",
+                        1,
+                        "schema-v1",
+                        NOW,
+                    )
+                )
+                gateway = _FakeGateway(MCPCallOutcome.completed("result-safe"))
+                outcome = await UserMCPDispatchCoordinator(
+                    storage=storage,
+                    gateway=gateway,
+                    selector=_SequenceSelector(_call(), terminal_action),
+                    selector_context_builder=_TerminalBundleContextBuilder(
+                        _terminal_bundle()
+                    ),
+                ).dispatch(_request(), server_id="server-a")
+
+                self.assertEqual(
+                    outcome.output_payload["mcp_status"], expected_status
+                )
+                self.assertEqual(
+                    outcome.output_payload["agent_projection"],
+                    _terminal_bundle(),
+                )
+                self.assertNotIn("text", outcome.output_payload)
+                self.assertEqual(
+                    None if outcome.error is None else outcome.error.code,
+                    expected_error,
+                )
+                self.assertEqual(len(gateway.calls), 1)
+
+    async def test_terminal_bundle_authority_error_fails_before_completed_branch(self) -> None:
+        for error_code in (
+            "mcp_result_projection_revision_retired",
+            "mcp_result_projection_revision_unsupported",
+        ):
+            with self.subTest(error_code=error_code):
+                storage = _FakeStorage()
+                storage.grants.append(
+                    UserMCPToolGrant(
+                        "grant-a",
+                        "alice",
+                        "server-a",
+                        "lookup",
+                        1,
+                        "schema-v1",
+                        NOW,
+                    )
+                )
+                gateway = _FakeGateway(MCPCallOutcome.completed("result-safe"))
+                outcome = await UserMCPDispatchCoordinator(
+                    storage=storage,
+                    gateway=gateway,
+                    selector=_SequenceSelector(
+                        _call(),
+                        MCPSelectorAction(MCPSelectorActionType.FINISH),
+                    ),
+                    selector_context_builder=_TerminalBundleContextBuilder(
+                        error_code=error_code
+                    ),
+                ).dispatch(_request(), server_id="server-a")
+
+                self.assertEqual(outcome.error.code, error_code)
+                self.assertEqual(outcome.output_payload["mcp_status"], "failed")
+                self.assertNotIn("agent_projection", outcome.output_payload)
+                self.assertEqual(
+                    next(iter(storage.branches.values())).status,
+                    "failed",
+                )
+                self.assertEqual(len(gateway.calls), 1)
 
     def test_attachment_projection_only_uses_current_root_message(self) -> None:
         current = TaskInputAttachment(

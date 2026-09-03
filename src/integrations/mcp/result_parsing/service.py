@@ -21,6 +21,7 @@ from .projection_store import (
     MCPPublishedProjection,
     MCPProjectionStore,
     MCPProjectionStoreError,
+    validate_projection_envelope,
 )
 from .worker import MCPValidatedResultCheckpoint, PARSER_REVISION, worker_entry
 from .json_values import canonical_json_bytes
@@ -235,7 +236,10 @@ class MCPIsolatedResultService:
             try:
                 if not isinstance(projection, bytes) or len(projection) > MAX_PROJECTION_ENVELOPE_BYTES:
                     raise MCPResultWorkerError("mcp_result_parser_projection_invalid")
-                _validate_projection_envelope(projection, checkpoint)
+                validate_projection_envelope(
+                    projection,
+                    expected_parsed_model_sha256=checkpoint.parsed_model_sha256,
+                )
                 handle = self._projection_store.stage(
                     projection,
                     binding=MCPProjectionBinding(
@@ -456,32 +460,6 @@ def _validate_worker_checkpoint(
     )
 
 
-def _validate_projection_envelope(
-    projection: bytes, checkpoint: MCPValidatedResultCheckpoint
-) -> None:
-    try:
-        envelope = json.loads(projection)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise MCPResultWorkerError("mcp_result_parser_projection_invalid") from exc
-    if (
-        not isinstance(envelope, dict)
-        or set(envelope)
-        != {
-            "schema",
-            "parsed_model_sha256",
-            "user_view",
-            "agent_projection",
-            "workflow_control",
-        }
-        or envelope["schema"] != "maf.mcp.parsed_result_projection.v1"
-        or envelope["parsed_model_sha256"] != checkpoint.parsed_model_sha256
-        or not isinstance(envelope["user_view"], dict)
-        or not isinstance(envelope["agent_projection"], str)
-        or envelope["workflow_control"] is not None
-    ):
-        raise MCPResultWorkerError("mcp_result_parser_projection_invalid")
-
-
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -532,7 +510,10 @@ def _build_observation(
                 }
             }
             metadata_kinds = tuple(sorted(kinds))
-            truncated = bool(user_view.get("projection_truncated"))
+            truncated = bool(
+                user_view.get("projection_truncated")
+                or envelope.get("agent_projection_truncated")
+            )
         except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
             primary_kind = "none"
             metadata_kinds = ()

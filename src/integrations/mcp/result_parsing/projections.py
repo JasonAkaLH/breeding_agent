@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from .json_values import canonical_json_bytes
@@ -33,6 +33,12 @@ _URL_RE = re.compile(r"(?i)\b(?:https?|ftp)://[^\s<>'\"]+")
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(?:token|secret|password|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MCPBoundedAgentProjection:
+    content: str
+    truncated: bool
 
 
 def build_user_view(result: MCPParsedToolResult) -> dict[str, Any]:
@@ -108,7 +114,7 @@ def build_user_view(result: MCPParsedToolResult) -> dict[str, Any]:
     return view
 
 
-def build_agent_projection(result: MCPParsedToolResult) -> str:
+def build_agent_projection(result: MCPParsedToolResult) -> MCPBoundedAgentProjection:
     if result.outcome is MCPResultOutcome.TOOL_ERROR:
         body = f"Tool failed with safe code: {result.safe_error_code or 'mcp_tool_error'}"
     elif result.structured_content.present:
@@ -134,7 +140,10 @@ def build_agent_projection(result: MCPParsedToolResult) -> str:
         MAX_PROJECTION_CODE_POINTS - len(prefix),
         MAX_PROJECTION_UTF8_BYTES - len(prefix.encode("utf-8")),
     )
-    return prefix + bounded_body
+    return MCPBoundedAgentProjection(
+        content=prefix + bounded_body,
+        truncated=bounded_body != body,
+    )
 
 
 def parsed_result_payload(result: MCPParsedToolResult) -> dict[str, Any]:

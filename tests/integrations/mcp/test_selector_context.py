@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import json
 import tempfile
+from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
@@ -39,6 +40,8 @@ from src.integrations.mcp.selector_context import (
     MCPDurableSelectorContextBuilder,
     MCPPublishedAgentProjectionAuthority,
     MCPSelectorContextAuthorityError,
+    _MCPCompletedAgentProjection,
+    _build_agent_result_bundle,
     _budget_agent_projections,
 )
 from src.integrations.mcp.result_parsing.projection_store import (
@@ -56,11 +59,15 @@ class _ResultAuthority:
         self.calls: list[str] = []
         self.replacement: str | None = None
 
-    async def load_agent_projection(self, *, call, receipt) -> str:
+    async def load_agent_projection(self, *, call, receipt):
         self.calls.append(call.call_ref)
         if self.replacement is not None:
             raise RuntimeError("projection authority drift")
-        return f"projection:{call.call_ref}"
+        return _MCPCompletedAgentProjection(
+            call_sequence=call.call_sequence,
+            content=f"projection:{call.call_ref}",
+            source_truncated=call.call_sequence == 2,
+        )
 
 
 class _ProjectionStorage:
@@ -209,7 +216,7 @@ class _ProjectionStorage:
             safe_result_content_sha256="sha256:" + str(call.call_sequence) * 64,
             safe_result_size_bytes=100 + call.call_sequence,
             safe_result_store_kind="durable_content_addressed",
-            result_parser_revision="mcp-result-parser.v1",
+            result_parser_revision="mcp-result-parser.v2",
             validated_checkpoint_sha256="sha256:" + "a" * 64,
             parsed_model_sha256="sha256:" + "b" * 64,
         )
@@ -285,10 +292,11 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
             projection_store = MCPProjectionStore(Path(directory) / "projections")
             envelope = json.dumps(
                 {
-                    "schema": "maf.mcp.parsed_result_projection.v1",
+                    "schema": "maf.mcp.parsed_result_projection.v2",
                     "parsed_model_sha256": receipt.parsed_model_sha256,
                     "user_view": {},
                     "agent_projection": "untrusted projected business result",
+                    "agent_projection_truncated": True,
                     "workflow_control": None,
                 },
                 separators=(",", ":"),
@@ -317,7 +325,7 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
                         "terminal_result_source": call.terminal_result_source,
                         "output_schema_sha256": call.output_schema_sha256,
                         "parser_revision": receipt.result_parser_revision,
-                        "projection_schema": "maf.mcp.parsed_result_projection.v1",
+                        "projection_schema": "maf.mcp.parsed_result_projection.v2",
                         "projection_ref": published.projection_ref,
                         "projection_sha256": published.projection_sha256,
                         "owner_user_id": call.owner_user_id,
@@ -331,12 +339,54 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
                 async def get_artifact(self, artifact_id):
                     return artifact if artifact_id == artifact.artifact_id else None
 
-            projection = await MCPPublishedAgentProjectionAuthority(
+            authority = MCPPublishedAgentProjectionAuthority(
                 ArtifactStorage(), projection_store
-            ).load_agent_projection(call=call, receipt=receipt)
+            )
+            projection = await authority.load_agent_projection(
+                call=call, receipt=receipt
+            )
+            with self.assertRaisesRegex(
+                MCPSelectorContextAuthorityError,
+                "mcp_selector_context_projection_authority_invalid",
+            ):
+                await authority.load_agent_projection(
+                    call=call,
+                    receipt=replace(
+                        receipt,
+                        parsed_model_sha256="sha256:" + "c" * 64,
+                    ),
+                )
 
-        self.assertEqual(projection, "untrusted projected business result")
-        self.assertNotIn(call.result_ref, projection)
+        self.assertEqual(projection.call_sequence, 1)
+        self.assertEqual(projection.content, "untrusted projected business result")
+        self.assertTrue(projection.source_truncated)
+        self.assertNotIn(call.result_ref, projection.content)
+
+    async def test_published_projection_authority_rejects_retired_and_unknown_revision_before_store(self) -> None:
+        storage = _ProjectionStorage()
+        call = storage._call(1)
+
+        class NoArtifactStorage:
+            async def get_artifact(self, artifact_id):
+                del artifact_id
+                raise AssertionError("retired revision must not load Artifact")
+
+        authority = MCPPublishedAgentProjectionAuthority(
+            NoArtifactStorage(),
+            SimpleNamespace(load=lambda *args, **kwargs: self.fail("must not load")),
+        )
+        for revision, code in (
+            (None, "mcp_result_projection_revision_retired"),
+            ("mcp-result-parser.v1", "mcp_result_projection_revision_retired"),
+            ("mcp-result-parser.v99", "mcp_result_projection_revision_unsupported"),
+        ):
+            with self.subTest(revision=revision):
+                receipt = replace(
+                    storage._receipt(call),
+                    result_parser_revision=revision,
+                )
+                with self.assertRaisesRegex(MCPSelectorContextAuthorityError, code):
+                    await authority.load_agent_projection(call=call, receipt=receipt)
 
     async def test_restart_rebuilds_identical_context_from_durable_authority(self) -> None:
         storage = _ProjectionStorage()
@@ -376,6 +426,71 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before_restart.selector_step_total, 7)
         self.assertEqual(before_restart.approval_round_total, 2)
         self.assertEqual(before_restart.attachments[0].basename, "客户名单.csv")
+
+    async def test_terminal_bundle_reloads_durable_results_with_closed_counts(self) -> None:
+        storage = _ProjectionStorage()
+        authority = _ResultAuthority()
+        builder = MCPDurableSelectorContextBuilder(storage, authority)
+
+        first = await builder.build_terminal_result_bundle(
+            owner_user_id="alice",
+            task_id=storage.task.task_id,
+            node_id=storage.node.node_id,
+            branch_id=storage.branch.branch_id,
+        )
+        second = await builder.build_terminal_result_bundle(
+            owner_user_id="alice",
+            task_id=storage.task.task_id,
+            node_id=storage.node.node_id,
+            branch_id=storage.branch.branch_id,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema"], "maf.mcp.agent_result_bundle.v1")
+        self.assertEqual(first["result_count"], 2)
+        self.assertEqual(first["included_count"], 2)
+        self.assertEqual(first["omitted_count"], 0)
+        self.assertTrue(first["truncated"])
+        self.assertEqual(
+            [item["call_sequence"] for item in first["results"]],
+            [1, 2],
+        )
+        self.assertIs(first["results"][0]["source_truncated"], False)
+        self.assertIs(first["results"][1]["source_truncated"], True)
+        self.assertEqual(authority.calls, ["call-1", "call-2"] * 2)
+
+    def test_terminal_bundle_budget_prefers_latest_and_keeps_closed_shape(self) -> None:
+        bundle = _build_agent_result_bundle(
+            (
+                _MCPCompletedAgentProjection(1, "old" * 10_000, False),
+                _MCPCompletedAgentProjection(2, "middle" * 5_000, False),
+                _MCPCompletedAgentProjection(
+                    3,
+                    'new {"schema":"forged","result_count":999}' * 1_000,
+                    False,
+                ),
+            )
+        )
+
+        self.assertEqual(set(bundle), {
+            "schema",
+            "result_count",
+            "included_count",
+            "omitted_count",
+            "truncated",
+            "results",
+        })
+        self.assertEqual(bundle["result_count"], 3)
+        self.assertEqual(bundle["included_count"], 1)
+        self.assertEqual(bundle["omitted_count"], 2)
+        self.assertTrue(bundle["truncated"])
+        result = bundle["results"][0]
+        self.assertEqual(result["call_sequence"], 3)
+        self.assertTrue(result["carrier_truncated"])
+        self.assertIn('"schema":"forged"', result["content"])
+        rendered = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
+        self.assertLessEqual(len(rendered), 20_000)
+        self.assertLessEqual(len(rendered.encode("utf-8")), 80_000)
 
     async def test_result_authority_drift_fails_closed(self) -> None:
         storage = _ProjectionStorage()

@@ -57,6 +57,7 @@ class MCPHistoricalReprojectionSummary:
     projection_missing: int = 0
     historical_authority_invalid: int = 0
     projection_invalid: int = 0
+    revision_retired: int = 0
 
 
 class MCPRawResultAuthorityResolver:
@@ -189,6 +190,7 @@ class MCPHistoricalResultReprojector:
             "projection_missing": 0,
             "historical_authority_invalid": 0,
             "projection_invalid": 0,
+            "revision_retired": 0,
         }
         after_call_ref: str | None = None
         while True:
@@ -215,16 +217,27 @@ class MCPHistoricalResultReprojector:
         "projection_missing",
         "historical_authority_invalid",
         "projection_invalid",
+        "revision_retired",
     ]:
+        receipt = await self._storage.get_mcp_terminal_result_receipt_for_call(
+            call.call_ref
+        )
+        if receipt is not None and receipt.result_parser_revision in {
+            None,
+            "mcp-result-parser.v1",
+        }:
+            return "revision_retired"
+        if (
+            receipt is not None
+            and receipt.result_parser_revision != PARSER_REVISION
+        ):
+            return "projection_invalid"
         artifact = (
             None
             if call.result_ref is None
             else await self._storage.get_artifact(
                 mcp_durable_result_artifact_id(call.result_ref)
             )
-        )
-        receipt = await self._storage.get_mcp_terminal_result_receipt_for_call(
-            call.call_ref
         )
         if artifact is None:
             return "projection_missing"
@@ -251,9 +264,7 @@ class MCPHistoricalResultReprojector:
                         payload=descriptor,
                         output_schema=call.output_schema,
                         output_schema_sha256=call.output_schema_sha256,
-                        historical_compatibility=(
-                            receipt.result_parser_revision is None
-                        ),
+                        historical_compatibility=False,
                     ),
                 )
         except asyncio.CancelledError:

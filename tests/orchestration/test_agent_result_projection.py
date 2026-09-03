@@ -19,6 +19,26 @@ from src.orchestration.agent_loop.skill_activation import (
 from src.storage.agent_payload import canonicalize_agent_payload
 
 
+def _mcp_bundle(*contents: str, source_truncated: bool = False) -> dict:
+    results = [
+        {
+            "call_sequence": index,
+            "content": content,
+            "source_truncated": source_truncated,
+            "carrier_truncated": False,
+        }
+        for index, content in enumerate(contents, start=1)
+    ]
+    return {
+        "schema": "maf.mcp.agent_result_bundle.v1",
+        "result_count": len(results),
+        "included_count": len(results),
+        "omitted_count": 0,
+        "truncated": source_truncated,
+        "results": results,
+    }
+
+
 class AgentCallResultProjectorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.projector = AgentCallResultProjector()
@@ -244,10 +264,11 @@ class AgentCallResultProjectorTest(unittest.TestCase):
         )
 
     def test_mcp_uses_agent_projection_without_business_or_raw_duplication(self) -> None:
+        bundle = _mcp_bundle("bounded agent projection")
         projected = self.project(
             "mcp.dispatch",
             {
-                "text": "bounded agent projection",
+                "agent_projection": bundle,
                 "mcp_status": "completed",
                 "mcp_tool": {"name": "lookup"},
                 "business_result": {"private_user_view": [1, 2, 3]},
@@ -260,11 +281,111 @@ class AgentCallResultProjectorTest(unittest.TestCase):
         self.assertTrue(projected.accepted)
         self.assertFalse(projected.spill_required)
         model_view = projected.safe_result_payload["model_view"]
-        self.assertEqual(model_view["text"], "bounded agent projection")
+        self.assertEqual(model_view["agent_projection"], bundle)
         self.assertEqual(model_view["mcp_status"], "completed")
         serialized = json.dumps(model_view)
         for forbidden in ("business_result", "structured_content", "raw_result"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_mcp_rejects_legacy_string_and_invalid_closed_bundles(self) -> None:
+        invalid = [
+            "legacy agent projection",
+            {**_mcp_bundle("safe"), "unknown": True},
+            {
+                **_mcp_bundle("safe"),
+                "results": [
+                    {
+                        **_mcp_bundle("safe")["results"][0],
+                        "raw_result": "forbidden",
+                    }
+                ],
+            },
+            {**_mcp_bundle("safe"), "included_count": 2},
+            {**_mcp_bundle("safe"), "truncated": True},
+            {
+                **_mcp_bundle("safe", "other"),
+                "results": list(reversed(_mcp_bundle("safe", "other")["results"])),
+            },
+            {
+                **_mcp_bundle("safe"),
+                "results": [
+                    {
+                        **_mcp_bundle("safe")["results"][0],
+                        "source_truncated": 0,
+                    }
+                ],
+            },
+        ]
+        for agent_projection in invalid:
+            with self.subTest(agent_projection=agent_projection):
+                projected = self.project(
+                    "mcp.dispatch",
+                    {
+                        "agent_projection": agent_projection,
+                        "mcp_status": "completed",
+                        "truncated": False,
+                    },
+                )
+                self.assertEqual(projected.error_code, "agent_result_invalid")
+                self.assertIsNone(projected.safe_result_payload)
+
+    def test_mcp_outer_budget_removes_oldest_result_and_marks_truncation(self) -> None:
+        projected = self.project(
+            "mcp.dispatch",
+            {
+                "agent_projection": _mcp_bundle(
+                    "old-start-" + "x" * 10_000 + "-old-end",
+                    "new-start-" + "y" * 10_000 + "-new-end",
+                ),
+                "mcp_status": "completed",
+                "truncated": False,
+            },
+        )
+
+        self.assertTrue(projected.accepted)
+        self.assertTrue(projected.projection_truncated)
+        result = projected.safe_result_payload
+        bundle = result["model_view"]["agent_projection"]
+        self.assertEqual(bundle["result_count"], 2)
+        self.assertEqual(bundle["included_count"], 1)
+        self.assertEqual(bundle["omitted_count"], 1)
+        self.assertTrue(bundle["truncated"])
+        self.assertEqual(bundle["results"][0]["call_sequence"], 2)
+        self.assertIn("new-start", bundle["results"][0]["content"])
+        self.assertNotIn("old-start", json.dumps(bundle))
+        self.assertTrue(result["model_view"]["truncated"])
+        self.assertLessEqual(
+            canonicalize_agent_payload(result).size_bytes,
+            MODEL_RESULT_MAX_BYTES,
+        )
+
+    def test_mcp_outer_budget_shrinks_escape_heavy_content_with_explicit_flags(self) -> None:
+        projected = self.project(
+            "mcp.dispatch",
+            {
+                "agent_projection": _mcp_bundle('start-' + '\"\\\n' * 10_000 + '-end'),
+                "mcp_status": "completed",
+                "truncated": False,
+            },
+        )
+
+        self.assertTrue(projected.accepted)
+        result = projected.safe_result_payload
+        bundle = result["model_view"]["agent_projection"]
+        item = bundle["results"][0]
+        self.assertTrue(item["carrier_truncated"])
+        self.assertFalse(item["source_truncated"])
+        self.assertTrue(bundle["truncated"])
+        self.assertTrue(result["projection_truncated"])
+        self.assertIn("[TRUNCATED BY MCP RESULT CARRIER]", item["content"])
+        self.assertNotIn("-end", item["content"])
+        rendered_view = json.dumps(
+            result["model_view"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertLessEqual(len(rendered_view), MODEL_VIEW_MAX_CODE_POINTS)
 
     def test_delegated_model_result_is_validated_without_second_envelope(self) -> None:
         delegated = build_delegated_skill_instruction_result(

@@ -50,6 +50,7 @@ class MCPDurableResultReconcileSummary:
     business_projection_missing: int = 0
     business_historical_authority_invalid: int = 0
     business_projection_invalid: int = 0
+    business_revision_retired: int = 0
 
 
 class MCPDurableResultLifecycleManager:
@@ -211,6 +212,11 @@ class MCPDurableResultLifecycleManager:
                 0
                 if business_summary is None
                 else business_summary.projection_invalid
+            ),
+            business_revision_retired=(
+                0
+                if business_summary is None
+                else business_summary.revision_retired
             ),
         )
 

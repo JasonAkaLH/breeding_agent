@@ -17,7 +17,7 @@ from .projections import build_agent_projection, build_user_view, parsed_result_
 from .registry import decode_result
 
 
-PARSER_REVISION = "mcp-result-parser.v1"
+PARSER_REVISION = "mcp-result-parser.v2"
 CHECKPOINT_SCHEMA = "maf.mcp.validated_result_checkpoint.v1"
 MAX_CHECKPOINT_BYTES = 4 * 1024
 MAX_WORKER_ADDRESS_SPACE_BYTES = 512 * 1024 * 1024
@@ -87,11 +87,13 @@ def worker_entry(connection: Connection, job: Mapping[str, Any]) -> None:
             return
         try:
             phase = "projection"
+            agent_projection = build_agent_projection(parsed)
             envelope = {
-                "schema": "maf.mcp.parsed_result_projection.v1",
+                "schema": "maf.mcp.parsed_result_projection.v2",
                 "parsed_model_sha256": model_sha256,
                 "user_view": build_user_view(parsed),
-                "agent_projection": build_agent_projection(parsed),
+                "agent_projection": agent_projection.content,
+                "agent_projection_truncated": agent_projection.truncated,
                 "workflow_control": None,
             }
             connection.send({"projection": canonical_json_bytes(envelope)})

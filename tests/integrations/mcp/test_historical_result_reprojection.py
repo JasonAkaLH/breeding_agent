@@ -192,7 +192,7 @@ class HistoricalResultReprojectionTest(unittest.IsolatedAsyncioTestCase):
             safe_result_content_sha256=self.raw_sha,
             safe_result_size_bytes=len(raw_bytes),
             safe_result_store_kind="durable_content_addressed",
-            result_parser_revision=None,
+            result_parser_revision="mcp-result-parser.v2",
         )
         lifecycle = MCPDurableResultLifecycle(
             result_ref=self.result_ref,
@@ -279,6 +279,34 @@ class HistoricalResultReprojectionTest(unittest.IsolatedAsyncioTestCase):
             envelope["user_view"]["primary"]["value"], {"answer": 42}
         )
         self.assertNotIn("content", json.dumps(envelope["user_view"]))
+
+    async def test_retired_revision_is_counted_without_loading_or_modifying_artifact(self) -> None:
+        original_ref = self.storage.artifact.storage_ref
+        for revision in (None, "mcp-result-parser.v1"):
+            with self.subTest(revision=revision):
+                self.storage.receipt = replace(
+                    self.storage.receipt,
+                    result_parser_revision=revision,
+                )
+
+                summary = await self.reprojector.run_once(limit=1000)
+
+                self.assertEqual(summary.revision_retired, 1)
+                self.assertEqual(summary.ready, 0)
+                self.assertEqual(self.storage.artifact.storage_ref, original_ref)
+
+    async def test_unknown_revision_is_projection_invalid_without_modifying_artifact(self) -> None:
+        original_ref = self.storage.artifact.storage_ref
+        self.storage.receipt = replace(
+            self.storage.receipt,
+            result_parser_revision="mcp-result-parser.v99",
+        )
+
+        summary = await self.reprojector.run_once(limit=1000)
+
+        self.assertEqual(summary.projection_invalid, 1)
+        self.assertEqual(summary.ready, 0)
+        self.assertEqual(self.storage.artifact.storage_ref, original_ref)
 
     async def test_missing_schema_authority_marks_closed_unavailable_without_parsing(self) -> None:
         self.storage.call = replace(

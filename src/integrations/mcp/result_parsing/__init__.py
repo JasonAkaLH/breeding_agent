@@ -9,7 +9,7 @@ from .models import (
     MCPStructuredContent,
     MCPStructuredSchemaStatus,
 )
-from .projections import build_agent_projection, build_user_view
+from .projections import MCPBoundedAgentProjection, build_agent_projection, build_user_view
 from .historical_reprojection import (
     MCPHistoricalResultReprojector,
     MCPRawResultAuthorityResolver,
@@ -25,6 +25,7 @@ from .worker import MCPValidatedResultCheckpoint
 
 __all__ = [
     "MCPParsedToolResult",
+    "MCPBoundedAgentProjection",
     "MCPRawResultDescriptor",
     "MCPResultDecodeRequest",
     "MCPResultDiagnostic",

@@ -19,6 +19,7 @@ MODEL_VIEW_MAX_CODE_POINTS = 20_000
 MODEL_RESULT_MAX_BYTES = 80_000
 SKILL_RESULT_PROJECTION_REVISION = "skill-result-v1"
 MCP_RESULT_PROJECTION_REVISION = "mcp-result-v1"
+MCP_AGENT_RESULT_BUNDLE_SCHEMA = "maf.mcp.agent_result_bundle.v1"
 DELEGATED_RESULT_PROJECTION_REVISION = "delegated-skill-instruction-v1"
 TOOL_RESULT_REUSE_RECEIPT_SCHEMA = "maf.agent.tool_result_reuse_receipt.v1"
 SKILL_RESULT_PROJECTION_POLICY_LEGACY = "legacy"
@@ -93,6 +94,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(?:access[_-]?token|api[_-]?(?:key|token)|authorization|credential|"
     r"password|refresh[_-]?token|secret)\s*[:=]\s*[^\s,;]+"
 )
+_MCP_CARRIER_TRUNCATION_MARKER = "\n[TRUNCATED BY MCP RESULT CARRIER]"
 
 
 def agent_tool_repeat_key(*, capability_id: str, arguments_json: str) -> str:
@@ -289,6 +291,16 @@ class AgentCallResultProjector:
         artifact_ids: Sequence[str],
         continuation_locator: Mapping[str, Any] | None,
     ) -> AgentCallResultProjection:
+        has_agent_projection = "agent_projection" in raw_value
+        if has_agent_projection:
+            try:
+                _validate_mcp_agent_result_bundle(raw_value["agent_projection"])
+            except ValueError:
+                return _rejected(
+                    "agent_result_invalid",
+                    canonical_raw=canonical_raw,
+                    raw_sha256=raw_sha256,
+                )
         model_view = {
             key: _sanitize_model_value(raw_value[key])
             for key in sorted(raw_value)
@@ -301,35 +313,68 @@ class AgentCallResultProjector:
             model_view["continuation_locator"] = _strict_json_value(
                 continuation_locator
             )
-        truncated = bool(raw_value.get("truncated"))
-        safe_result = _fit_inline_model_result(
-            projection_revision=MCP_RESULT_PROJECTION_REVISION,
-            model_view=model_view,
-            original_size_bytes=len(canonical_raw),
-            raw_sha256=raw_sha256,
-            projection_truncated=truncated,
-            shrink_text_keys=("text", "agent_projection"),
-        )
+        if has_agent_projection:
+            try:
+                bundle = _validate_mcp_agent_result_bundle(
+                    model_view.get("agent_projection")
+                )
+            except ValueError:
+                return _rejected(
+                    "agent_result_invalid",
+                    canonical_raw=canonical_raw,
+                    raw_sha256=raw_sha256,
+                )
+            if (
+                type(raw_value.get("truncated")) is not bool
+                or raw_value["truncated"] != bundle["truncated"]
+            ):
+                return _rejected(
+                    "agent_result_invalid",
+                    canonical_raw=canonical_raw,
+                    raw_sha256=raw_sha256,
+                )
+            safe_result = _fit_mcp_model_result(
+                model_view=model_view,
+                bundle=bundle,
+                original_size_bytes=len(canonical_raw),
+                raw_sha256=raw_sha256,
+                call_item_id=call_item_id,
+                outcome=outcome,
+                safe_error_code=safe_error_code,
+                artifact_ids=artifact_ids,
+            )
+        else:
+            truncated = bool(raw_value.get("truncated"))
+            safe_result = _fit_inline_model_result(
+                projection_revision=MCP_RESULT_PROJECTION_REVISION,
+                model_view=model_view,
+                original_size_bytes=len(canonical_raw),
+                raw_sha256=raw_sha256,
+                projection_truncated=truncated,
+                shrink_text_keys=("text",),
+            )
         if safe_result is None:
             return _rejected(
                 "agent_result_projection_too_large",
                 canonical_raw=canonical_raw,
                 raw_sha256=raw_sha256,
             )
-        try:
-            _preflight_tool_result(
-                call_item_id=call_item_id,
-                outcome=outcome,
-                safe_result=safe_result,
-                safe_error_code=safe_error_code,
-                artifact_ids=artifact_ids,
-            )
-        except AgentPayloadError:
-            return _rejected(
-                "agent_result_projection_too_large",
-                canonical_raw=canonical_raw,
-                raw_sha256=raw_sha256,
-            )
+        if not has_agent_projection:
+            try:
+                _preflight_tool_result(
+                    call_item_id=call_item_id,
+                    outcome=outcome,
+                    safe_result=safe_result,
+                    safe_error_code=safe_error_code,
+                    artifact_ids=artifact_ids,
+                )
+            except AgentPayloadError:
+                return _rejected(
+                    "agent_result_projection_too_large",
+                    canonical_raw=canonical_raw,
+                    raw_sha256=raw_sha256,
+                )
+        final_truncated = bool(safe_result["projection_truncated"])
         return AgentCallResultProjection(
             safe_result_payload=safe_result,
             canonical_raw_bytes=canonical_raw,
@@ -337,7 +382,7 @@ class AgentCallResultProjector:
             original_size_bytes=len(canonical_raw),
             projection_revision=MCP_RESULT_PROJECTION_REVISION,
             projection_mode="inline",
-            projection_truncated=truncated,
+            projection_truncated=final_truncated,
             spill_required=False,
             spill_artifact_id=None,
         )
@@ -661,6 +706,163 @@ def _fit_inline_model_result(
             candidate.pop(shrink_key, None)
         else:
             candidate[shrink_key] = value[: len(value) // 2]
+
+
+def _fit_mcp_model_result(
+    *,
+    model_view: dict[str, Any],
+    bundle: dict[str, Any],
+    original_size_bytes: int,
+    raw_sha256: str,
+    call_item_id: str,
+    outcome: str,
+    safe_error_code: str | None,
+    artifact_ids: Sequence[str],
+) -> dict[str, Any] | None:
+    results = [dict(item) for item in bundle["results"]]
+
+    def fit(candidate_results: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+        candidate_bundle = _mcp_bundle_with_results(bundle, candidate_results)
+        candidate_view = dict(model_view)
+        candidate_view["agent_projection"] = candidate_bundle
+        candidate_view["truncated"] = candidate_bundle["truncated"]
+        try:
+            result = build_model_result_envelope(
+                projection_revision=MCP_RESULT_PROJECTION_REVISION,
+                projection_mode="inline",
+                model_view=candidate_view,
+                original_size_bytes=original_size_bytes,
+                raw_sha256=raw_sha256,
+                projection_truncated=candidate_bundle["truncated"],
+            )
+            _validate_model_result(result)
+            _preflight_tool_result(
+                call_item_id=call_item_id,
+                outcome=outcome,
+                safe_result=result,
+                safe_error_code=safe_error_code,
+                artifact_ids=artifact_ids,
+            )
+        except (AgentPayloadError, ValueError):
+            return None
+        return result
+
+    while len(results) > 1:
+        if (fitted := fit(results)) is not None:
+            return fitted
+        results.pop(0)
+    if (fitted := fit(results)) is not None:
+        return fitted
+    item = dict(results[0])
+    original = str(item["content"])
+    if item["carrier_truncated"] and original.endswith(
+        _MCP_CARRIER_TRUNCATION_MARKER
+    ):
+        original = original[: -len(_MCP_CARRIER_TRUNCATION_MARKER)]
+    low = 0
+    high = len(original)
+    fitted = None
+    while low <= high:
+        middle = (low + high) // 2
+        trial_item = {
+            **item,
+            "content": original[:middle] + _MCP_CARRIER_TRUNCATION_MARKER,
+            "carrier_truncated": True,
+        }
+        trial = fit([trial_item])
+        if trial is None:
+            high = middle - 1
+        else:
+            fitted = trial
+            low = middle + 1
+    return fitted
+
+
+def _validate_mcp_agent_result_bundle(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "result_count",
+        "included_count",
+        "omitted_count",
+        "truncated",
+        "results",
+    }:
+        raise ValueError("agent_mcp_result_bundle_invalid")
+    result_count = value.get("result_count")
+    included_count = value.get("included_count")
+    omitted_count = value.get("omitted_count")
+    results = value.get("results")
+    if (
+        value.get("schema") != MCP_AGENT_RESULT_BUNDLE_SCHEMA
+        or type(result_count) is not int
+        or result_count < 1
+        or type(included_count) is not int
+        or included_count < 1
+        or type(omitted_count) is not int
+        or omitted_count < 0
+        or type(value.get("truncated")) is not bool
+        or not isinstance(results, list)
+        or included_count != len(results)
+        or result_count != included_count + omitted_count
+    ):
+        raise ValueError("agent_mcp_result_bundle_invalid")
+    sequences: list[int] = []
+    expected_truncated = omitted_count > 0
+    normalized_results: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, dict) or set(item) != {
+            "call_sequence",
+            "content",
+            "source_truncated",
+            "carrier_truncated",
+        }:
+            raise ValueError("agent_mcp_result_bundle_invalid")
+        sequence = item.get("call_sequence")
+        if (
+            type(sequence) is not int
+            or sequence < 1
+            or not isinstance(item.get("content"), str)
+            or type(item.get("source_truncated")) is not bool
+            or type(item.get("carrier_truncated")) is not bool
+        ):
+            raise ValueError("agent_mcp_result_bundle_invalid")
+        sequences.append(sequence)
+        expected_truncated = bool(
+            expected_truncated
+            or item["source_truncated"]
+            or item["carrier_truncated"]
+        )
+        normalized_results.append(dict(item))
+    if sequences != sorted(set(sequences)) or value["truncated"] != expected_truncated:
+        raise ValueError("agent_mcp_result_bundle_invalid")
+    return {
+        "schema": MCP_AGENT_RESULT_BUNDLE_SCHEMA,
+        "result_count": result_count,
+        "included_count": included_count,
+        "omitted_count": omitted_count,
+        "truncated": expected_truncated,
+        "results": normalized_results,
+    }
+
+
+def _mcp_bundle_with_results(
+    original: Mapping[str, Any],
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    normalized_results = [dict(item) for item in results]
+    omitted_count = int(original["result_count"]) - len(normalized_results)
+    return {
+        "schema": MCP_AGENT_RESULT_BUNDLE_SCHEMA,
+        "result_count": int(original["result_count"]),
+        "included_count": len(normalized_results),
+        "omitted_count": omitted_count,
+        "truncated": bool(
+            omitted_count
+            or any(item["source_truncated"] for item in normalized_results)
+            or any(item["carrier_truncated"] for item in normalized_results)
+        ),
+        "results": normalized_results,
+    }
 
 
 def _validate_model_result(result: Mapping[str, Any]) -> None:

@@ -204,6 +204,19 @@ class _PermanentProjector:
         self.calls.append((result_ref, source))
         return SimpleNamespace(status="permanent_failure")
 
+
+class _BusinessReprojector:
+    async def run_once(self, *, limit):
+        del limit
+        return SimpleNamespace(
+            ready=1,
+            already_ready=2,
+            projection_missing=3,
+            historical_authority_invalid=4,
+            projection_invalid=5,
+            revision_retired=6,
+        )
+
 class DurableResultLifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def _result(self, root: Path):
         store = MCPTemporaryResultStore(root, memory_threshold_bytes=0)
@@ -402,6 +415,32 @@ class DurableResultLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 storage.row.status,
                 MCPDurableResultLifecycleStatus.DELETED,
             )
+
+    async def test_reconciler_reports_retired_business_projection_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _store, authority, _result, row = await self._result(root)
+            storage = _ProjectionLifecycleStorage(
+                replace(
+                    row,
+                    status=MCPDurableResultLifecycleStatus.DELETED,
+                    eligible_at=None,
+                    deleted_at=NOW,
+                )
+            )
+            manager = MCPDurableResultLifecycleManager(
+                storage,
+                authority,
+                now_fn=lambda: NOW,
+            )
+            manager.configure_result_projector(_PermanentProjector())
+            manager.configure_business_reprojector(_BusinessReprojector())
+
+            summary = await manager.reconcile_artifacts_and_gc_once()
+
+            self.assertEqual(summary.business_ready, 1)
+            self.assertEqual(summary.business_projection_invalid, 5)
+            self.assertEqual(summary.business_revision_retired, 6)
 
     async def test_startup_repairs_manifest_first_partial_delete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

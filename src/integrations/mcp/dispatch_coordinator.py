@@ -1297,6 +1297,7 @@ class UserMCPDispatchCoordinator:
                                 "mcp_tool": tool_name,
                                 "output_size_bytes": outcome.byte_size,
                             },
+                            terminal_bundle=False,
                         )
                         return await self._finalize_no_call_outcome(
                             authority,
@@ -1539,6 +1540,17 @@ class UserMCPDispatchCoordinator:
         outcome: str,
         safe_error_code: str | None,
     ) -> MCPDispatchOutcome | None:
+        if result is not None and "mcp_branch_id" not in result.output_payload:
+            result, carrier_error_code = (
+                await self._attach_terminal_bundle_for_request(
+                    request,
+                    result,
+                    outcome=outcome,
+                )
+            )
+            if carrier_error_code is not None:
+                outcome = "failed"
+                safe_error_code = carrier_error_code
         if authority is not None:
             outbox = await self._storage.get_mcp_dispatch_resume_outbox(
                 authority.outbox_id
@@ -1571,6 +1583,66 @@ class UserMCPDispatchCoordinator:
                 ),
             )
         return result
+
+    async def _attach_terminal_bundle_for_request(
+        self,
+        request: CapabilityExecutionRequest,
+        result: MCPDispatchOutcome,
+        *,
+        outcome: str,
+    ) -> tuple[MCPDispatchOutcome, str | None]:
+        builder = self._selector_context_builder
+        build_terminal = getattr(builder, "build_terminal_result_bundle", None)
+        if not callable(build_terminal):
+            return result, None
+        identity = await self._resolve_identity(request)
+        if identity is None:
+            return result, None
+        owner_user_id, _conversation_id, _root_message_id = identity
+        branch_id = _branch_id(request.task_id, request.node_id)
+        branch = await self._storage.get_mcp_branch_record(
+            owner_user_id, request.task_id, branch_id
+        )
+        if branch is None:
+            return result, None
+        try:
+            bundle = await build_terminal(
+                owner_user_id=owner_user_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                branch_id=branch_id,
+            )
+        except MCPSelectorContextAuthorityError as exc:
+            failed = await self._finish_branch(
+                request,
+                branch,
+                status="failed",
+                safe_summary="MCP completed result authority is invalid.",
+                result_ref=branch.result_ref,
+                events=result.events,
+                terminal_bundle=False,
+            )
+            return (
+                replace(
+                    failed,
+                    artifacts=result.artifacts,
+                    error=CapabilityExecutionError(
+                        code=exc.code,
+                        message="MCP completed result authority is invalid.",
+                        retriable=False,
+                    ),
+                    metadata=result.metadata,
+                ),
+                exc.code,
+            )
+        if bundle is None:
+            return result, None
+        output = dict(result.output_payload)
+        output["agent_projection"] = bundle
+        output["truncated"] = bundle["truncated"]
+        output.setdefault("mcp_status", outcome)
+        output.pop("text", None)
+        return replace(result, output_payload=output), None
 
     async def _renew_dispatch_claim(
         self, authority: _DispatchAuthority
@@ -3130,7 +3202,22 @@ class UserMCPDispatchCoordinator:
         events: Sequence[EventRecord] = (),
         extra_output: Mapping[str, Any] | None = None,
         interrupt: Interrupt | None = None,
+        terminal_bundle: bool = True,
     ) -> MCPDispatchOutcome:
+        bundle = None
+        builder = self._selector_context_builder
+        build_terminal = getattr(builder, "build_terminal_result_bundle", None)
+        if (
+            terminal_bundle
+            and status in {"completed", "stopped", "failed"}
+            and callable(build_terminal)
+        ):
+            bundle = await build_terminal(
+                owner_user_id=branch.owner_user_id,
+                task_id=branch.task_id,
+                node_id=branch.node_id,
+                branch_id=branch.branch_id,
+            )
         now = self._now()
         current = (
             await self._storage.get_mcp_branch_record(
@@ -3186,6 +3273,10 @@ class UserMCPDispatchCoordinator:
             output["text"] = saved.safe_summary
         if extra_output:
             output.update({key: value for key, value in extra_output.items() if value is not None})
+        if bundle is not None:
+            output["agent_projection"] = bundle
+            output["truncated"] = bundle["truncated"]
+            output.pop("text", None)
         return MCPDispatchOutcome(
             output_payload=output,
             events=tuple(final_events),
