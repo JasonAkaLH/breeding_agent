@@ -7,9 +7,21 @@ from unittest.mock import AsyncMock
 from src.api.runtime import ApiRuntime
 from src.core.enums import InterruptStatus, TaskStatus
 from src.core.models import Interrupt, Task
+from src.integrations.agent_skills import SkillBundleRevisionError
 
 
 class TerminalTaskLivenessTest(IsolatedAsyncioTestCase):
+    def test_resume_revision_metadata_never_falls_back_to_active(self) -> None:
+        runtime = object.__new__(ApiRuntime)
+        runtime._task_skill_bundle_revisions = {}
+        runtime._skill_runtime_state = object()
+
+        with self.assertRaisesRegex(
+            SkillBundleRevisionError,
+            "agent_skill_bundle_revision_retired",
+        ):
+            runtime._resume_skill_revision_metadata("task-legacy")
+
     async def test_list_interrupts_reads_history_without_slot_recovery(self) -> None:
         task = Task(
             task_id="task-terminal",

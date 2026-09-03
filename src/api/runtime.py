@@ -10816,6 +10816,16 @@ class ApiRuntime(
                     task,
                     safe_error_code=safe_error_code,
                 )
+            elif authority is not None:
+                self._restore_prepared_bundle_revisions(
+                    task_id=task.task_id,
+                    skill_revision=authority.prepared["bundle_revisions"].get(
+                        "skill_bundle_revision"
+                    ),
+                    mcp_revision=authority.prepared["bundle_revisions"].get(
+                        "mcp_bundle_revision"
+                    ),
+                )
             return
 
         if (
@@ -10827,13 +10837,7 @@ class ApiRuntime(
         kind = str(authority.prepared["planned_handoff_kind"])
         if kind == "agent_run":
             raise RuntimeError("skill_recovery_handed_off_agent_run_missing")
-        safe_error_code = self._skill_recovery_error_code(
-            authority.prepared["bundle_revisions"].get(
-                "skill_bundle_revision"
-            )
-        )
-        if safe_error_code is None:
-            return
+        interrupt = None
         if kind == "interrupt":
             interrupt = await self.storage.get_interrupt(
                 authority.preparation.handoff_identity
@@ -10847,6 +10851,37 @@ class ApiRuntime(
             node = await self.storage.get_task_node(interrupt.node_id)
             if node is None or node.task_id != task.task_id:
                 raise RuntimeError("skill_recovery_interrupt_node_identity_mismatch")
+        elif kind == "no_server_intent":
+            intent = await self.storage.get_mcp_no_server_intent(
+                authority.preparation.handoff_identity
+            )
+            if (
+                intent is None
+                or intent.intent_id != authority.preparation.handoff_identity
+                or intent.task_id != task.task_id
+                or intent.owner_user_id != conversation.username
+                or intent.node_id is not None
+            ):
+                raise RuntimeError("skill_recovery_no_server_intent_identity_mismatch")
+        else:
+            raise RuntimeError("skill_recovery_handoff_kind_invalid")
+        safe_error_code = self._skill_recovery_error_code(
+            authority.prepared["bundle_revisions"].get(
+                "skill_bundle_revision"
+            )
+        )
+        if safe_error_code is None:
+            self._restore_prepared_bundle_revisions(
+                task_id=task.task_id,
+                skill_revision=authority.prepared["bundle_revisions"].get(
+                    "skill_bundle_revision"
+                ),
+                mcp_revision=authority.prepared["bundle_revisions"].get(
+                    "mcp_bundle_revision"
+                ),
+            )
+            return
+        if kind == "interrupt":
             await self._terminalize_pre_agent_skill_task(
                 task,
                 safe_error_code=safe_error_code,
@@ -13528,11 +13563,16 @@ class ApiRuntime(
 
     def _resume_skill_revision_metadata(self, task_id: str) -> dict[str, object]:
         revision = self._task_skill_bundle_revisions.get(task_id)
-        if revision:
-            return {"skill_bundle_revision": revision}
-        if self._skill_runtime_state is not None:
-            return {"skill_bundle_revision": self._skill_runtime_state.active_revision}
-        return {}
+        if not revision:
+            raise SkillBundleRevisionError(
+                "agent_skill_bundle_revision_retired"
+            )
+        if self._skill_runtime_state is None:
+            raise SkillBundleRevisionError(
+                "agent_skill_bundle_revision_unavailable"
+            )
+        self._skill_runtime_state.bundle_for_revision(revision)
+        return {"skill_bundle_revision": revision}
 
     @staticmethod
     def _answer_payload_metadata(answer_payload: Mapping[str, object]) -> dict[str, object]:

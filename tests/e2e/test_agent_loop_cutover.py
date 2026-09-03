@@ -22,7 +22,7 @@ from tests.e2e.support import E2EAPITestCase
 
 
 class AgentLoopCutoverE2ETest(E2EAPITestCase):
-    async def test_startup_recovery_aborts_uncertain_call_without_replay(self) -> None:
+    async def test_startup_retires_missing_prepared_authority_before_call_recovery(self) -> None:
         task_id = "task-agent-startup-recovery"
         conversation_id = "conv-agent-startup-recovery"
         message_id = "msg-agent-startup-recovery"
@@ -104,17 +104,22 @@ class AgentLoopCutoverE2ETest(E2EAPITestCase):
         await self.runtime.start()
 
         recovered = await self.runtime.storage.get_task(task_id)
-        self.assertEqual(recovered.status, TaskStatus.COMPLETED)
+        self.assertEqual(recovered.status, TaskStatus.FAILED)
+        recovered_run = await self.runtime.agent_run_repository.get_run(run.run_id)
+        assert recovered_run is not None
+        self.assertEqual(recovered_run.status, AgentRunStatus.FAILED)
+        self.assertEqual(
+            recovered_run.terminal_reason_code,
+            "agent_skill_bundle_revision_retired",
+        )
         items = await self.runtime.agent_run_repository.list_items(run.run_id)
-        result = next(
+        results = [
             item
             for item in items
             if item.kind is AgentItemKind.TOOL_RESULT
             and item.state.value == "committed"
-        )
-        payload = json.loads(result.payload_json)
-        self.assertEqual(payload["outcome"], "aborted")
-        self.assertEqual(payload["safe_error_code"], "side_effect_unknown_no_replay")
+        ]
+        self.assertEqual(results, [])
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertNotIn(
             "skill.execution_started",

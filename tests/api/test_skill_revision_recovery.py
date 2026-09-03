@@ -221,6 +221,51 @@ class SkillRevisionRecoveryAPITest(APITestCase):
         self.assertEqual(await self.runtime.storage.get_interrupt(identity), interrupt)
         self.assertEqual(await self.runtime.storage.get_task_node(node.node_id), node)
 
+    async def test_handed_off_exact_v2_interrupt_restores_pinned_revision(self) -> None:
+        task, _run = await self._seed_task("interrupt-v2", with_run=False)
+        identity = f"submission-interrupt:v1:{task.task_id}:{'c' * 64}"
+        node = TaskNode(
+            node_id=f"node-{task.task_id}",
+            task_id=task.task_id,
+            capability_id="agent.file_selection",
+            status=NodeStatus.WAITING_FOR_INPUT,
+        )
+        interrupt = Interrupt(
+            interrupt_id=identity,
+            conversation_id=task.conversation_id,
+            task_id=task.task_id,
+            node_id=node.node_id,
+            source_agent=node.capability_id,
+            source_message_id=task.root_message_id,
+            question="choose a file",
+            reason_code="file_selection_required",
+            status=InterruptStatus.OPEN,
+        )
+        await self.runtime.storage.save_task_node(node)
+        await self.runtime.storage.save_interrupt(interrupt)
+        revision = self.runtime._skill_runtime_state.active_revision
+        self.runtime._prepared_agent_recovery_loader = SimpleNamespace(
+            load_authority=AsyncMock(
+                return_value=self._authority(
+                    task,
+                    revision,
+                    kind="interrupt",
+                    identity=identity,
+                )
+            )
+        )
+
+        await self.runtime._reconcile_skill_recovery_task(task.task_id)
+
+        self.assertEqual(
+            self.runtime._task_skill_bundle_revisions[task.task_id],
+            revision,
+        )
+        self.assertEqual(
+            (await self.runtime.storage.get_task(task.task_id)).status,
+            TaskStatus.RUNNING,
+        )
+
     async def test_pending_legacy_without_run_is_left_for_handoff_recovery(self) -> None:
         task, _run = await self._seed_task("pending", with_run=False)
         self.runtime._prepared_agent_recovery_loader = SimpleNamespace(
