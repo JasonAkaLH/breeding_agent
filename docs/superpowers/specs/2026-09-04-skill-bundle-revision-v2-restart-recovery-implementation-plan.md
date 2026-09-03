@@ -4,13 +4,35 @@
 
 ## 状态
 
-`planned`
+`implemented_automated`
 
 计划基线为 `main@ad0f00db`。设计已经过12轮审查/修订，以98/100、0 Blocking、0 Major、2 Minor通过
-完整信心门。用户已授权仓库实现，但尚未授权修改远端数据库、构建或推送镜像、更新受保护
-`docker_cmd.md`、部署开发环境或触及`prod`。
+完整信心门。仓库实现已由`36ce1a9c`、`f13fef39`、`97139173`、`9ab0fe4d`和`9253b299`
+闭合；尚未授权修改远端数据库、构建或推送镜像、更新受保护`docker_cmd.md`、部署开发环境或触及
+`prod`。
 
 范围外未跟踪文件`test.json`必须保持未读取、未修改、未暂存。
+
+## 实施结果（2026-09-04）
+
+- `36ce1a9c`：稳定full-SHA v2 revision、typed retired/invalid/unavailable分类，以及普通、delegated、
+  Slot、retain的exact revision解析；
+- `f13fef39`：SQLite、PostgreSQL继承实现与Runtime Sidecar共用的terminal Run+Task create，以及
+  orchestrator窄初始化入口；Sidecar继续只用既有`CommitAgentState(operation="create_run")`；
+- `97139173`：128条稳定分页候选、MCP前startup eligibility prepass、通用prepared authority只读加载、
+  pending三kind terminal handoff、ack-last和terminal Task Answer/Slot liveness gate；
+- `9ab0fe4d`、`9253b299`：删除剩余resume active fallback，exact校验handed-off Interrupt/Node/no-server
+  intent，并让正常pre-Agent Interrupt在handoff时retain冻结revision。
+
+最终自动证据：Storage 569项通过（14项环境skip）、Orchestration 199项通过、API 646项通过、E2E 12项
+通过、Skill capability聚焦11项通过、Agent Skills聚焦216项通过（13项平台/环境skip）；compileall、变更面
+Ruff、关键package import、active-fallback静态扫描和`git diff --check`通过。Integrations全量运行801项时仅
+保留仓库既有且与本变更无关的`test_client_rejects_negotiated_version_incompatible_with_transport_family`
+稳定失败，另有2项环境skip；本轮未修改该MCP transport-family合同。
+
+本轮没有新增目录职责或变更模块归属，根`AGENTS.md`无需修改；`docs/AGENTS.md`和`CHANGELOG.md`已同步。
+按本计划边界未修改版本号、数据库schema/data、Rust/proto、Frontend、外部Skill、镜像、部署、
+`docker_cmd.md`或`prod`。远端旧Task实际终态化与开发环境hard cut仍需独立授权。
 
 ## 完成声明
 
@@ -324,4 +346,3 @@ conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 
 License Requirement：复用现有Python、SQLAlchemy、SHA-256、Agent repository、Submission Admission、
 Runtime Sidecar既有`CommitAgentState` wire和unittest；不新增依赖、第三方代码或许可变化。
-
