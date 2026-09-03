@@ -28,6 +28,7 @@ from src.storage.sqlite.agent_repository import (
 COMMON_OPERATIONS = frozenset(
     {
         "cancel_agent_run",
+        "complete_agent_run_from_terminal_task",
         "commit_agent_call_outcome",
         "commit_agent_compaction",
         "commit_agent_final_output",
@@ -54,6 +55,7 @@ SQL_OPERATIONS = COMMON_OPERATIONS | SQL_ONLY_TASK_LEASE_OPERATIONS
 
 EXPECTED_COMMON_SIGNATURES = {
     "cancel_agent_run": "(self, run_id: 'str', *, expected_revision: 'int', expected_claim_token: 'str | None', safe_reason_code: 'str') -> 'AgentRun'",
+    "complete_agent_run_from_terminal_task": "(self, run_id: 'str', *, expected_revision: 'int', expected_claim_token: 'str | None', safe_reason_code: 'str') -> 'AgentRun'",
     "commit_agent_call_outcome": "(self, commit: 'AgentCallOutcomeCommit') -> 'AgentItem'",
     "commit_agent_compaction": "(self, commit: 'AgentCompactionCommit') -> 'AgentCompactionResult'",
     "commit_agent_final_output": "(self, commit: 'AgentFinalOutputCommit') -> 'AgentFinalOutputResult'",

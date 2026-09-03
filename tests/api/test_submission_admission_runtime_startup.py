@@ -934,7 +934,7 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
             await runtime._recover_agent_run(run)
         runtime._agent_run_recovery.recover_crashed_run.assert_not_awaited()
 
-    async def test_terminal_task_blocks_recoverable_run_before_bundle_restore(
+    async def test_completed_task_converges_recoverable_run_before_bundle_restore(
         self,
     ) -> None:
         task = Task(
@@ -942,17 +942,6 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
             conversation_id="conversation-terminal",
             root_message_id="message-terminal",
             status=TaskStatus.COMPLETED,
-        )
-        conversation = Conversation(
-            conversation_id=task.conversation_id,
-            username="alice",
-        )
-        root = Message(
-            message_id=task.root_message_id,
-            conversation_id=task.conversation_id,
-            role=MessageRole.USER,
-            content="root",
-            task_id=task.task_id,
         )
         run = AgentRun(
             run_id=f"agent-run:{task.task_id}",
@@ -965,88 +954,30 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
             ),
         )
         terminal_run = replace(run, status=AgentRunStatus.COMPLETED)
-        prepared = PreparedAgentRecoveryContext(
-            username="alice",
-            current_user_input="prepared",
-            initial_required_tool_name=None,
-            model_options={
-                "model_edition": "test-model",
-                "reasoning_effort": "medium",
-                "thinking_enabled": False,
-            },
-            bundle_revisions={
-                "skill_bundle_revision": "skillrev-v2-" + ("1" * 64),
-                "mcp_bundle_revision": "mcp-r1",
-            },
-            execution_metadata={},
-            memory_context=None,
-            mcp_binding=None,
-            mcp_assignment=None,
-            available_mcp_servers=(),
-        )
-
         class Storage:
             async def get_task(_self, _task_id: str):
                 return task
 
-            async def get_conversation(_self, _conversation_id: str):
-                return conversation
-
-            async def get_message(_self, _message_id: str):
-                return root
-
-            async def list_task_input_attachments_for_task(
-                _self, _task_id: str
-            ):
-                return []
-
-        class RevisionState:
-            def __init__(self) -> None:
-                self.retained: list[str] = []
-                self.released: list[str] = []
-
-            def bundle_for_revision(self, revision: str) -> object:
-                return revision
-
-            def retain_revision(self, revision: str) -> None:
-                self.retained.append(revision)
-
-            def release_revision(self, revision: str) -> None:
-                self.released.append(revision)
-
         runtime = object.__new__(ApiRuntime)
         runtime.storage = Storage()
-        runtime._prepared_agent_recovery_loader = SimpleNamespace(
-            load=AsyncMock(return_value=prepared)
+        loader = SimpleNamespace(load=AsyncMock())
+        runtime._prepared_agent_recovery_loader = loader
+        complete_from_terminal_task = AsyncMock(return_value=terminal_run)
+        runtime.agent_loop_orchestrator = SimpleNamespace(
+            complete_from_terminal_task=complete_from_terminal_task,
         )
-        runtime._agent_invocation_contexts = SimpleNamespace(merge=Mock())
-        runtime._agent_run_recovery = SimpleNamespace(
-            recover_crashed_run=AsyncMock(
-                return_value=SimpleNamespace(run=terminal_run)
-            )
+        runtime._best_effort_clear_skill_recovery_pointer = AsyncMock()
+
+        await runtime._recover_agent_run(run)
+
+        complete_from_terminal_task.assert_awaited_once_with(
+            task.task_id,
+            reason_code="agent_terminal_task_completed_run_convergence",
         )
-        runtime._skill_runtime_state = RevisionState()
-        runtime._mcp_runtime_state = RevisionState()
-        runtime._task_skill_bundle_revisions = {}
-        runtime._task_mcp_bundle_revisions = {}
-        runtime._agent_cancellation_token = lambda _task_id: None
-        runtime._release_bundle_revision_with_sidecar_if_enforced = Mock()
-        runtime._record_bundle_revision_shadow = Mock()
-        runtime._clear_conversation_current_task = AsyncMock()
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "agent_startup_terminal_task_has_recoverable_run",
-        ):
-            await runtime._recover_agent_run(run)
-
-        self.assertEqual(runtime._task_skill_bundle_revisions, {})
-        self.assertEqual(runtime._task_mcp_bundle_revisions, {})
-        self.assertEqual(runtime._skill_runtime_state.retained, [])
-        self.assertEqual(runtime._skill_runtime_state.released, [])
-        self.assertEqual(runtime._mcp_runtime_state.retained, [])
-        self.assertEqual(runtime._mcp_runtime_state.released, [])
-        runtime._clear_conversation_current_task.assert_not_awaited()
+        loader.load.assert_not_awaited()
+        runtime._best_effort_clear_skill_recovery_pointer.assert_awaited_once_with(
+            task
+        )
 
     async def test_failed_or_cancelled_task_converges_recoverable_run_without_bundle_restore(
         self,

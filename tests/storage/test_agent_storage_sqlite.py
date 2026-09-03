@@ -54,6 +54,7 @@ from src.storage.sqlite import (
 )
 from src.storage.sqlite.models import (
     AgentFinalReceiptRow,
+    AgentItemRow,
     AgentRunRow,
     ArtifactRow,
     EventRecordRow,
@@ -912,3 +913,156 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
                 expected_claim_token=None,
                 safe_reason_code="duplicate",
             )
+
+    async def test_completed_task_convergence_only_terminalizes_the_run(self) -> None:
+        committed = await self._commit_two_calls()
+        await self.repository.commit_agent_call_outcome(
+            AgentCallOutcomeCommit(
+                "run-1",
+                committed.run.revision,
+                None,
+                committed.call_items[0].item_id,
+                {"prompt": "need input"},
+                AgentCallOutcomeStatus.WAITING_FOR_INPUT,
+            )
+        )
+        waiting = await self.repository.get_run("run-1")
+        assert waiting is not None
+        items_before = await self.repository.list_items("run-1")
+        with self.session_factory() as session:
+            task = session.get(TaskRow, "task-1")
+            assert task is not None
+            task.status = "completed"
+            session.commit()
+            task_fields_before = (
+                task.conversation_id,
+                task.root_message_id,
+                task.status,
+                task.routing_mode,
+                task.updated_at,
+            )
+        tracked_rows = (
+            AgentItemRow,
+            TaskNodeRow,
+            ArtifactRow,
+            MessageRow,
+            EventRecordRow,
+            AgentFinalReceiptRow,
+        )
+        with self.session_factory() as session:
+            before_counts = {
+                row_type: session.scalar(select(func.count()).select_from(row_type))
+                for row_type in tracked_rows
+            }
+            before_node_states = tuple(
+                session.scalars(
+                    select(TaskNodeRow.status)
+                    .where(TaskNodeRow.task_id == "task-1")
+                    .order_by(TaskNodeRow.node_id)
+                ).all()
+            )
+
+        completed = await self.repository.complete_agent_run_from_terminal_task(
+            "run-1",
+            expected_revision=waiting.revision,
+            expected_claim_token=waiting.claim_token,
+            safe_reason_code="agent_terminal_task_completed_run_convergence",
+        )
+        replayed = await self.repository.complete_agent_run_from_terminal_task(
+            "run-1",
+            expected_revision=waiting.revision,
+            expected_claim_token=waiting.claim_token,
+            safe_reason_code="agent_terminal_task_completed_run_convergence",
+        )
+
+        self.assertEqual(replayed, completed)
+        self.assertEqual(completed.status, AgentRunStatus.COMPLETED)
+        self.assertEqual(completed.waiting_call_item_ids, ())
+        self.assertIsNone(completed.claim_owner)
+        self.assertIsNone(completed.claim_token)
+        self.assertIsNone(completed.lease_expires_at)
+        self.assertEqual(completed.revision, waiting.revision + 1)
+        self.assertEqual(
+            completed.terminal_reason_code,
+            "agent_terminal_task_completed_run_convergence",
+        )
+        self.assertIsNotNone(completed.terminal_at)
+        self.assertEqual(completed.terminal_at, completed.updated_at)
+        self.assertEqual(await self.repository.list_items("run-1"), items_before)
+        with self.session_factory() as session:
+            task = session.get(TaskRow, "task-1")
+            assert task is not None
+            self.assertEqual(
+                (
+                    task.conversation_id,
+                    task.root_message_id,
+                    task.status,
+                    task.routing_mode,
+                    task.updated_at,
+                ),
+                task_fields_before,
+            )
+            self.assertEqual(
+                {
+                    row_type: session.scalar(
+                        select(func.count()).select_from(row_type)
+                    )
+                    for row_type in tracked_rows
+                },
+                before_counts,
+            )
+            self.assertEqual(
+                tuple(
+                    session.scalars(
+                        select(TaskNodeRow.status)
+                        .where(TaskNodeRow.task_id == "task-1")
+                        .order_by(TaskNodeRow.node_id)
+                    ).all()
+                ),
+                before_node_states,
+            )
+
+    async def test_completed_task_convergence_rejects_non_completed_authority(self) -> None:
+        run = await self._create()
+
+        with self.assertRaisesRegex(
+            AgentStorageConflict,
+            "agent_completed_convergence_task_not_completed",
+        ):
+            await self.repository.complete_agent_run_from_terminal_task(
+                run.run_id,
+                expected_revision=run.revision,
+                expected_claim_token=run.claim_token,
+                safe_reason_code="agent_terminal_task_completed_run_convergence",
+            )
+
+    async def test_completed_task_convergence_rolls_back_run_update(self) -> None:
+        run = await self._create()
+        with self.session_factory() as session:
+            task = session.get(TaskRow, "task-1")
+            assert task is not None
+            task.status = "completed"
+            session.commit()
+
+        def fail(stage: str) -> None:
+            if stage == "completed_convergence_after_run_update":
+                raise RuntimeError("injected_completed_convergence_failure")
+
+        repository = SQLiteAgentRepository(
+            self.session_factory,
+            fault_injector=fail,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "injected_completed_convergence_failure",
+        ):
+            await repository.complete_agent_run_from_terminal_task(
+                run.run_id,
+                expected_revision=run.revision,
+                expected_claim_token=run.claim_token,
+                safe_reason_code="agent_terminal_task_completed_run_convergence",
+            )
+
+        stored = await self.repository.get_run(run.run_id)
+        assert stored is not None
+        self.assertEqual(stored, run)

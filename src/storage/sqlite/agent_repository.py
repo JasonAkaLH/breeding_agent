@@ -37,6 +37,9 @@ from src.orchestration.agent_loop.models import (
 from src.orchestration.agent_loop.result_artifacts import (
     validate_skill_result_staged_artifact,
 )
+from src.orchestration.agent_loop.repository import (
+    COMPLETED_TASK_RUN_CONVERGENCE_REASON_CODE,
+)
 from src.storage.agent_payload import (
     CanonicalAgentPayload,
     agent_compaction_source_digest,
@@ -220,6 +223,24 @@ class SQLiteAgentRepository:
                 status=AgentRunStatus.CANCELLED,
                 task_status="cancelled",
                 node_status="cancelled",
+                reason_code=safe_reason_code,
+            )
+        )
+
+    async def complete_agent_run_from_terminal_task(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_claim_token: str | None,
+        safe_reason_code: str,
+    ) -> AgentRun:
+        return await self._write(
+            lambda session: self._complete_from_terminal_task(
+                session,
+                run_id,
+                expected_revision=expected_revision,
+                expected_claim_token=expected_claim_token,
                 reason_code=safe_reason_code,
             )
         )
@@ -1076,6 +1097,71 @@ class SQLiteAgentRepository:
         run.terminal_at = now
         session.flush()
         return _run_from_row(run)
+
+    def _complete_from_terminal_task(
+        self,
+        session: Session,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_claim_token: str | None,
+        reason_code: str,
+    ) -> AgentRun:
+        if reason_code != COMPLETED_TASK_RUN_CONVERGENCE_REASON_CODE:
+            raise AgentStorageConflict("agent_completed_convergence_reason_invalid")
+        run = self._locked_run(session, run_id)
+        task = session.scalar(
+            select(TaskRow)
+            .where(TaskRow.task_id == run.task_id)
+            .with_for_update()
+        )
+        if task is None:
+            raise AgentStorageConflict("agent_terminal_task_missing")
+        if task.conversation_id != run.conversation_id:
+            raise AgentStorageConflict("agent_terminal_task_identity_conflict")
+        if task.status != TaskStatus.COMPLETED.value:
+            raise AgentStorageConflict(
+                "agent_completed_convergence_task_not_completed"
+            )
+        if run.status == AgentRunStatus.COMPLETED.value:
+            completed = _run_from_row(run)
+            assert completed is not None
+            if (
+                completed.waiting_call_item_ids
+                or completed.claim_owner is not None
+                or completed.claim_token is not None
+                or completed.lease_expires_at is not None
+                or completed.terminal_reason_code != reason_code
+                or completed.terminal_at is None
+            ):
+                raise AgentStorageConflict(
+                    "agent_completed_convergence_replay_conflict"
+                )
+            return completed
+        if run.status not in {
+            AgentRunStatus.RUNNING.value,
+            AgentRunStatus.WAITING_FOR_INPUT.value,
+            AgentRunStatus.WAITING_FOR_DEPENDENCY.value,
+        }:
+            raise AgentStorageConflict(
+                "agent_completed_convergence_run_not_recoverable"
+            )
+        self._validate_cas(run, expected_revision, expected_claim_token)
+        now = self._now()
+        run.status = AgentRunStatus.COMPLETED.value
+        run.waiting_call_item_ids = []
+        run.claim_owner = None
+        run.claim_token = None
+        run.lease_expires_at = None
+        run.revision = int(run.revision) + 1
+        run.terminal_reason_code = reason_code
+        run.updated_at = now
+        run.terminal_at = now
+        session.flush()
+        self._inject("completed_convergence_after_run_update")
+        completed = _run_from_row(run)
+        assert completed is not None
+        return completed
 
     def _acquire_lease(
         self,

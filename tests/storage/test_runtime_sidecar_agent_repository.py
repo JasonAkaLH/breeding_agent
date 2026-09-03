@@ -379,6 +379,56 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             "running",
         )
 
+    async def test_completed_task_convergence_reuses_sidecar_commit_without_projection(
+        self,
+    ) -> None:
+        task = self._submit_task(
+            "task-agent-completed-split",
+            "conv-agent-completed-split",
+            "agent-repository-completed-split-task",
+            status="completed",
+        )
+        run = await self.repository.create_run(
+            AgentRun(
+                run_id="run-agent-completed-split",
+                task_id=task["task_id"],
+                conversation_id=task["conversation_id"],
+                status=AgentRunStatus.WAITING_FOR_INPUT,
+                binding=AgentModelBinding("edition-a"),
+                waiting_call_item_ids=("call-pending",),
+            )
+        )
+
+        completed = await self.repository.complete_agent_run_from_terminal_task(
+            run.run_id,
+            expected_revision=run.revision,
+            expected_claim_token=run.claim_token,
+            safe_reason_code="agent_terminal_task_completed_run_convergence",
+        )
+        replayed = await self.repository.complete_agent_run_from_terminal_task(
+            run.run_id,
+            expected_revision=run.revision,
+            expected_claim_token=run.claim_token,
+            safe_reason_code="agent_terminal_task_completed_run_convergence",
+        )
+
+        self.assertEqual(replayed, completed)
+        self.assertEqual(completed.status, AgentRunStatus.COMPLETED)
+        self.assertEqual(completed.waiting_call_item_ids, ())
+        self.assertEqual(completed.revision, run.revision + 1)
+        self.assertEqual(
+            completed.terminal_reason_code,
+            "agent_terminal_task_completed_run_convergence",
+        )
+        self.assertEqual(await self.repository.list_items(run.run_id), ())
+        self.assertFalse(
+            self.client.get_agent_final_projection(run_id=run.run_id)["found"]
+        )
+        self.assertEqual(
+            self.client.get_task(task_id=run.task_id)["task"]["status"],
+            "completed",
+        )
+
     async def test_skill_result_artifact_outcome_replays_exactly_in_sidecar_cas(self) -> None:
         binding = AgentModelBinding("edition-a")
         run = await self.repository.create_run(

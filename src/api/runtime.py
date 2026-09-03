@@ -389,7 +389,10 @@ from src.orchestration.agent_loop.observability import (
 from src.orchestration.agent_loop.task_projection import (
     AgentTaskInvocationCommitPort,
 )
-from src.orchestration.agent_loop.repository import AgentRunRepository
+from src.orchestration.agent_loop.repository import (
+    COMPLETED_TASK_RUN_CONVERGENCE_REASON_CODE,
+    AgentRunRepository,
+)
 from src.orchestration.conversation_memory import (
     ConversationMemoryBuilder,
     ConversationMemoryConfig,
@@ -11206,6 +11209,14 @@ class ApiRuntime(
                 reason_code=reason_code,
             )
             target_run_status = AgentRunStatus.CANCELLED
+        elif task.status == TaskStatus.COMPLETED:
+            converged = (
+                await self.agent_loop_orchestrator.complete_from_terminal_task(
+                    task.task_id,
+                    reason_code=COMPLETED_TASK_RUN_CONVERGENCE_REASON_CODE,
+                )
+            )
+            target_run_status = AgentRunStatus.COMPLETED
         else:
             raise RuntimeError("agent_startup_terminal_task_has_recoverable_run")
         current_task = await self.storage.get_task(task.task_id)

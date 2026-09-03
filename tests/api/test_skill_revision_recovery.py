@@ -208,6 +208,32 @@ class SkillRevisionRecoveryAPITest(APITestCase):
         self.assertEqual(stored_task.status, TaskStatus.FAILED)
         loader.load.assert_not_awaited()
 
+    async def test_completed_task_with_recoverable_run_converges_on_restart(self) -> None:
+        task, run = await self._seed_task("completed-terminal-split")
+        assert run is not None
+        completed_task = await self.runtime.storage.compare_and_set_task(
+            replace(task, status=TaskStatus.COMPLETED),
+            expected_from_status=TaskStatus.RUNNING,
+        )
+        assert completed_task is not None
+        loader = SimpleNamespace(load=AsyncMock())
+        self.runtime._prepared_agent_recovery_loader = loader
+
+        await self.runtime._recover_agent_run(run)
+
+        stored_run = await self.runtime.agent_run_repository.get_run_for_task(
+            task.task_id
+        )
+        stored_task = await self.runtime.storage.get_task(task.task_id)
+        assert stored_run is not None and stored_task is not None
+        self.assertEqual(stored_run.status, AgentRunStatus.COMPLETED)
+        self.assertEqual(
+            stored_run.terminal_reason_code,
+            "agent_terminal_task_completed_run_convergence",
+        )
+        self.assertEqual(stored_task.status, TaskStatus.COMPLETED)
+        loader.load.assert_not_awaited()
+
     async def test_handed_off_legacy_interrupt_becomes_inactive_history(self) -> None:
         task, _run = await self._seed_task("interrupt", with_run=False)
         identity = f"submission-interrupt:v1:{task.task_id}:{'b' * 64}"

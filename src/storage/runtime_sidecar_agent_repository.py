@@ -31,6 +31,9 @@ from src.orchestration.agent_loop.models import (
 from src.orchestration.agent_loop.result_artifacts import (
     validate_skill_result_staged_artifact,
 )
+from src.orchestration.agent_loop.repository import (
+    COMPLETED_TASK_RUN_CONVERGENCE_REASON_CODE,
+)
 from src.storage.agent_payload import (
     CanonicalAgentPayload,
     agent_compaction_source_digest,
@@ -798,6 +801,76 @@ class RuntimeSidecarAgentRepository:
             node_status="cancelled",
             reason_code=safe_reason_code,
         )
+
+    async def complete_agent_run_from_terminal_task(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_claim_token: str | None,
+        safe_reason_code: str,
+    ) -> AgentRun:
+        if safe_reason_code != COMPLETED_TASK_RUN_CONVERGENCE_REASON_CODE:
+            raise AgentStorageConflict("agent_completed_convergence_reason_invalid")
+        run = await self.get_run(run_id)
+        if run is None:
+            raise AgentStorageConflict("agent_run_missing")
+        task = await self._get_task(run.task_id)
+        if task is None:
+            raise AgentStorageConflict("agent_terminal_task_missing")
+        if task["conversation_id"] != run.conversation_id:
+            raise AgentStorageConflict("agent_terminal_task_identity_conflict")
+        if task["status"] != TaskStatus.COMPLETED.value:
+            raise AgentStorageConflict(
+                "agent_completed_convergence_task_not_completed"
+            )
+        if run.status is AgentRunStatus.COMPLETED:
+            if (
+                run.waiting_call_item_ids
+                or run.claim_owner is not None
+                or run.claim_token is not None
+                or run.lease_expires_at is not None
+                or run.terminal_reason_code != safe_reason_code
+                or run.terminal_at is None
+            ):
+                raise AgentStorageConflict(
+                    "agent_completed_convergence_replay_conflict"
+                )
+            return run
+        if run.status not in {
+            AgentRunStatus.RUNNING,
+            AgentRunStatus.WAITING_FOR_INPUT,
+            AgentRunStatus.WAITING_FOR_DEPENDENCY,
+        }:
+            raise AgentStorageConflict(
+                "agent_completed_convergence_run_not_recoverable"
+            )
+        self._validate_cas(run, expected_revision, expected_claim_token)
+        now = self._now()
+        updated_run = replace(
+            run,
+            status=AgentRunStatus.COMPLETED,
+            waiting_call_item_ids=(),
+            claim_owner=None,
+            claim_token=None,
+            lease_expires_at=None,
+            revision=run.revision + 1,
+            terminal_reason_code=safe_reason_code,
+            updated_at=now,
+            terminal_at=now,
+        )
+        response = await self._commit(
+            operation="converge_completed_from_terminal_task",
+            run=updated_run,
+            items=(),
+            expected_revision=expected_revision,
+            expected_claim_token=expected_claim_token,
+            idempotency_key=(
+                f"agent-terminal-task-completed:{run.run_id}:{safe_reason_code}"
+            ),
+            task=task,
+        )
+        return _run_from_wire(response["run"])
 
     async def _commit_terminal(
         self,

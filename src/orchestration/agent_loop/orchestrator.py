@@ -444,6 +444,24 @@ class AgentLoopOrchestrator:
         self._contexts.release(run.run_id)
         return failed
 
+    async def complete_from_terminal_task(
+        self,
+        task_id: str,
+        *,
+        reason_code: str,
+    ) -> AgentRun | None:
+        run = await self._runs.get_run_for_task(task_id)
+        if run is None:
+            return None
+        completed = await self._writer.complete_agent_run_from_terminal_task(
+            run.run_id,
+            expected_revision=run.revision,
+            expected_claim_token=run.claim_token,
+            safe_reason_code=reason_code,
+        )
+        self._contexts.release(run.run_id)
+        return completed
+
     async def _ensure_task_running(self, task: Task) -> Task:
         if task.status == TaskStatus.RUNNING:
             return task

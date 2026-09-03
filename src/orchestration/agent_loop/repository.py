@@ -20,6 +20,11 @@ from .models import (
 )
 
 
+COMPLETED_TASK_RUN_CONVERGENCE_REASON_CODE = (
+    "agent_terminal_task_completed_run_convergence"
+)
+
+
 class AgentRunRepository(Protocol):
     async def create_run(self, run: AgentRun) -> AgentRun: ...
 
@@ -61,6 +66,15 @@ class AgentAtomicWriter(Protocol):
     ) -> AgentRun: ...
 
     async def cancel_agent_run(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_claim_token: str | None,
+        safe_reason_code: str,
+    ) -> AgentRun: ...
+
+    async def complete_agent_run_from_terminal_task(
         self,
         run_id: str,
         *,

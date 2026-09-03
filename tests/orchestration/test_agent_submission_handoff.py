@@ -314,6 +314,36 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
         assert task is not None
         self.assertEqual(task.status, TaskStatus.FAILED)
 
+    async def test_completed_task_authority_terminalizes_only_the_run(self) -> None:
+        orchestrator, _ = self._orchestrator()
+        initialized = await orchestrator.initialize_run(self._request())
+        task = await self.storage.get_task(initialized.task.task_id)
+        assert task is not None
+        completed_task = await self.storage.compare_and_set_task(
+            replace(task, status=TaskStatus.COMPLETED),
+            expected_from_status=TaskStatus.RUNNING,
+        )
+        assert completed_task is not None
+        items_before = await self.repository.list_items(initialized.run.run_id)
+        events_before = list(self.events.record_calls)
+
+        completed = await orchestrator.complete_from_terminal_task(
+            initialized.task.task_id,
+            reason_code="agent_terminal_task_completed_run_convergence",
+        )
+
+        assert completed is not None
+        self.assertEqual(completed.status, AgentRunStatus.COMPLETED)
+        self.assertEqual(
+            completed.terminal_reason_code,
+            "agent_terminal_task_completed_run_convergence",
+        )
+        self.assertEqual(
+            await self.repository.list_items(initialized.run.run_id),
+            items_before,
+        )
+        self.assertEqual(self.events.record_calls, events_before)
+
     async def test_initialize_rejects_task_run_binding_and_user_identity_drift(self) -> None:
         orchestrator, _ = self._orchestrator()
         await orchestrator.initialize_run(self._request())
