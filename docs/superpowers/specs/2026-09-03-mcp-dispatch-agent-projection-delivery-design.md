@@ -1,6 +1,6 @@
 # MCP Dispatch 实际 Tool Result 向主 Agent 交付设计
 
-状态：`approved_clean_cutover_hard_defects_resolved`；v2-only修订经限定硬伤复审为0 Blocking / 0 Major；未评Minor，不宣称完整95分信心门
+状态：`approved_clean_cutover_hard_defects_resolved`；最新限定硬伤复审中保留的Artifact API Major已闭合，当前0 Blocking / 0 Major；未评Minor，不宣称完整95分信心门
 日期：2026-09-03
 目标分支：`main`
 
@@ -33,6 +33,12 @@ Agent。只要某个会返回主 Agent 的终态已经积累成功结果，该�
 用户已明确决定退役现有 `mcp-result-parser.v1` / `maf.mcp.parsed_result_projection.v1`：新运行时不恢复、
 不读取、不重投影旧 projection。旧 receipt、projection文件和 Artifact metadata 原样保留，不删除、
 不清空、不改写。
+
+该退役决定的公开可见边界固定如下：新运行时读取带v1 projection metadata/ref的历史MCP Artifact时，
+现有Artifact响应层因v2-only Projection Store拒绝旧envelope而沿既有安全路径返回
+`availability=unavailable`、`outcome=succeeded`、`unavailable_reason=projection_invalid`；`storage_ref`
+保持空字符串，不提供下载地址，直接下载仍不可用。新写入且有效的v2 projection继续返回`ready`业务视图。
+这不是v1恢复或兼容读取，不新增公开DTO字段、路由或错误枚举，也不得暴露raw result或内部引用。
 
 ## 2. 已批准的流程
 
@@ -243,6 +249,9 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
   projections。
 - 历史 Run 已提交的 Tool Result 不原地改写。旧v1 projection及其Artifact metadata保留但不再由新
   Selector、terminal carrier或historical reprojector消费。
+- 任务Artifact和会话历史API继续使用现有响应合同：有效v2 projection保持`ready`；指向v1
+  projection的历史MCP Artifact通过现有`projection_invalid`返回`unavailable`，`storage_ref`为空且
+  无下载能力。不得为区分retired revision新增公开reason、读取raw或修改历史metadata。
 
 ## 5. 预期修改面
 
@@ -259,8 +268,8 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
   传递closed计数，禁止load、reprojection、metadata CAS或raw authority读取；
 - `src/orchestration/agent_loop/result_projection.py`：让现有 `agent_projection` allowlist 接受 closed
   bundle，并保证外层收缩会同步更新 bundle/top-level truncation；
-- 现有 MCP coordinator、Result Parser、Agent projection 和 E2E 测试：补充真实 result handoff、
-  多终态与大小边界回归。
+- 现有 MCP coordinator、Result Parser、Artifact API、Agent projection 和 E2E 测试：补充真实
+  result handoff、v2 ready/v1 unavailable、多终态与大小边界回归；Artifact API生产代码和DTO不改。
 
 这些修改仍只属于结果载荷及其安全预算。不得借机修改 `selector.py` 的 action 集合、全局 Server
 路由、Gateway 调用、approval/recovery authority、数据库 schema、公开 API 或 Artifact 生命周期。
@@ -287,6 +296,9 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
    现有 typed authority error，且 Gateway 调用次数不增加。
 8. parser.v2/projection.v2组合及 truncation元数据可验证；v1、交叉版本和未知版本返回
    revision-retired或typed authority错误，不读取raw、不迁移、不网络重放。
+9. 任务Artifact和会话历史API对有效v2 fixture继续返回`ready`；对历史v1 fixture返回
+   `availability=unavailable`、`outcome=succeeded`、`unavailable_reason=projection_invalid`，且
+   `storage_ref`为空、无下载地址、直接下载返回404，不泄露raw或内部引用。
 
 ### 6.2 Agent Loop 回归
 

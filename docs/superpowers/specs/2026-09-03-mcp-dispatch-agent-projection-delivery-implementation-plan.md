@@ -6,9 +6,9 @@
 
 `planned_hard_defects_resolved`
 
-用户已批准退役parser/projection v1，不恢复旧内容；两轮限定硬伤审计中报告的3个Major已按v2-only
-clean cutover决策闭合，当前0 Blocking / 0 Major。未评Minor，不宣称完整95分信心门；本计划尚未修改
-生产代码。
+用户已批准退役parser/projection v1，不恢复旧内容；最新限定硬伤审计中保留的Artifact API Major已按
+v2-only clean cutover决策闭合，当前0 Blocking / 0 Major。用户明确不要求增加运行中调用门禁；未评
+Minor，不宣称完整95分信心门；本计划尚未修改生产代码。
 
 计划基线为 `main@634fa002`。范围外未跟踪文件 `test.json` 必须保持未读取、未修改、未暂存。
 
@@ -34,7 +34,10 @@ clean cutover决策闭合，当前0 Blocking / 0 Major。未评Minor，不宣称
    外部 MCP Server、部署文件或 `prod` 变化。
 9. 新旧版本不交叉：明确v1或null revision的pre-v2 completed result返回
    `mcp_result_projection_revision_retired`；部署前必须只读证明可恢复branch中没有已完成且revision
-   非v2的Call，不能把尚未产生completed result的等待任务误计为旧projection。
+   非v2的Call，不能把尚未产生completed result的等待任务误计为旧projection；
+10. 公开API的DTO和路由不变：有效v2 MCP Artifact继续返回`ready`业务视图，指向v1 projection的历史
+    MCP Artifact通过既有`projection_invalid`安全返回`unavailable`，不返回storage ref、下载地址、
+    raw result或内部引用。
 
 若只完成自动测试而未获得开发环境部署/真实新会话授权，状态最多为
 `implemented_automated_pending_dev_smoke`，不得写成 `implemented_verified`。
@@ -56,6 +59,7 @@ clean cutover决策闭合，当前0 Blocking / 0 Major。未评Minor，不宣称
 - `tests/integrations/mcp/test_dispatch_coordinator.py`
 - `tests/orchestration/test_agent_result_projection.py`
 - `tests/e2e/test_mcp_server_explicit_agent_loop.py`
+- `tests/api/test_conversation_messages_artifacts.py`
 
 先增加最小失败断言，分别证明旧实现存在以下缺口：
 
@@ -66,6 +70,8 @@ clean cutover决策闭合，当前0 Blocking / 0 Major。未评Minor，不宣称
 5. FINISH 只返回 Selector reason / generic text；
 6. STOP、route exhausted、后续 unavailable/denied/terminal error 会丢弃先前成功结果；
 7. 现有 E2E 只把 Selector reason sentinel 当结果，未执行实际 MCP Tool。
+8. 现有Artifact API回归把v1 projection当作`ready`，没有锁定v2-only切换后的v2 ready / v1
+   `projection_invalid` unavailable边界。
 
 旧实现必须只在新增断言失败。若既有测试先失败，查明并隔离环境或用户改动后再继续；不得修改生产
 代码掩盖非预期红灯。
@@ -86,6 +92,7 @@ clean cutover决策闭合，当前0 Blocking / 0 Major。未评Minor，不宣称
 - `tests/integrations/mcp/test_result_artifact_projection.py`
 - `tests/integrations/mcp/test_historical_result_reprojection.py`
 - `tests/integrations/mcp/test_durable_result_lifecycle.py`
+- `tests/api/test_conversation_messages_artifacts.py`
 
 ### 实现
 
@@ -114,6 +121,11 @@ clean cutover决策闭合，当前0 Blocking / 0 Major。未评Minor，不宣称
    计数；不把Task、Call、业务正文或revision字符串写入日志/Event，不改变删除判定。
 8. 不修改 raw parsed model、validated checkpoint字段集合、output schema validation、public user
    view、durable raw Artifact或数据库schema。
+9. 不修改`src/api/artifact_responses.py`、公开DTO或路由。更新现有API测试：有效v2 binding/envelope经
+   当前Projection Store stage/publish后，任务Artifact和会话历史均继续返回`ready`；历史v1 fixture
+   不得通过v2-only `stage`伪造，而应使用独立于当前writer的冻结legacy fixture，断言两个API均返回
+   `availability=unavailable`、`outcome=succeeded`、`unavailable_reason=projection_invalid`、空
+   `storage_ref`和空下载地址，直接下载返回404且不出现raw或内部引用。
 
 ### 红绿验证
 
@@ -125,6 +137,8 @@ clean cutover决策闭合，当前0 Blocking / 0 Major。未评Minor，不宣称
   `projection_invalid`；两者的Artifact metadata/ref/SHA和raw authority调用数均不变；durable lifecycle
   summary准确透传retired计数且不触发删除；
 - projection SHA/manifest/file tamper 仍 fail closed；
+- Artifact API对v2 fixture继续返回`ready`；对冻结v1 fixture在任务和历史响应中均返回既有
+  `projection_invalid` unavailable，storage ref为空且无下载能力；
 - 原敏感 key、URL、secret assignment 和 raw 泄漏断言保持通过。
 
 聚焦命令：
@@ -135,7 +149,8 @@ conda run -n multi_agent python -m unittest \
   tests.integrations.mcp.test_result_parser_worker \
   tests.integrations.mcp.test_result_artifact_projection \
   tests.integrations.mcp.test_historical_result_reprojection \
-  tests.integrations.mcp.test_durable_result_lifecycle
+  tests.integrations.mcp.test_durable_result_lifecycle \
+  tests.api.test_conversation_messages_artifacts
 ```
 
 建议检查点提交：
@@ -376,7 +391,8 @@ conda run -n multi_agent python -m unittest \
   tests.integrations.mcp.test_dispatch_coordinator \
   tests.orchestration.test_agent_result_projection \
   tests.capabilities.mcp_dispatch.test_selector_router_executor \
-  tests.e2e.test_mcp_server_explicit_agent_loop
+  tests.e2e.test_mcp_server_explicit_agent_loop \
+  tests.api.test_conversation_messages_artifacts
 
 conda run -n multi_agent python -m unittest discover \
   -s tests/integrations/mcp -p 'test_*.py'
@@ -411,7 +427,8 @@ conda run -n multi_agent ruff check \
   tests/integrations/mcp/test_selector_context.py \
   tests/integrations/mcp/test_dispatch_coordinator.py \
   tests/orchestration/test_agent_result_projection.py \
-  tests/e2e/test_mcp_server_explicit_agent_loop.py
+  tests/e2e/test_mcp_server_explicit_agent_loop.py \
+  tests/api/test_conversation_messages_artifacts.py
 
 conda run -n multi_agent python -c 'import src.integrations.mcp; import src.orchestration.agent_loop'
 
@@ -430,7 +447,9 @@ git diff --check
 - parser/projection只接受v2；v1/null revision只由historical/continuation退役门识别并跳过，旧数据
   不被重写，未知非空版本fail closed；
 - 所有 terminal output入口均由表驱动测试覆盖，waiting/interrupt不误携带业务结果；
-- 数据库 model/migration、API DTO、Frontend、Rust、Skill、镜像、部署和 `prod` 零diff；
+- Artifact API生产代码、DTO和路由零diff；测试证明v2保持`ready`，v1历史projection沿既有
+  `projection_invalid`安全降级且不暴露storage ref、下载或raw；
+- 数据库 model/migration、Frontend、Rust、Skill、镜像、部署和 `prod` 零diff；
 - `docker_cmd.md` 继续存在、ignored且untracked，全程未读取；
 - Git staged paths不包含 `test.json` 或其他用户无关文件。
 
