@@ -1,6 +1,6 @@
 # MCP Dispatch 实际 Tool Result 向主 Agent 交付设计
 
-状态：`implemented_automated_pending_dev_smoke`；代码检查点`036b0ec7`已闭合仓库实现和相关自动门禁，开发环境部署与真实新会话验收尚未授权
+状态：`published_pending_deploy`；代码检查点`036b0ec7`已闭合仓库实现和相关自动门禁，backend-dev `0.1.30`已基于`367c3bc1`发布，开发环境部署与真实新会话验收尚未授权
 日期：2026-09-03
 目标分支：`main`
 
@@ -373,8 +373,11 @@ result的等待任务不因revision为空被误判为旧projection。只有上�
 closed bundle，Coordinator在终态提交前注入实际结果，Agent projector按最终envelope预算并同步
 truncation；Artifact API生产代码/DTO/路由未改。普通和oversized E2E均通过真实fake adapter → Gateway
 → Result Parser → receipt/projection/Artifact → Selector → terminal bundle → 下一次主Agent请求链，业务
-Tool各执行一次。开发环境部署和真实外部MCP新会话未执行，因此状态保持
-`implemented_automated_pending_dev_smoke`。
+Tool各执行一次。基于源码`367c3bc1`构建并推送backend-dev `0.1.30`，远端OCI index digest为
+`sha256:fd9e3e13803cbbc2b25b2c458caa953f3fce3d3e7b06dedaec9e9a464fd99d9c`，包含`linux/amd64`
+manifest和attestation；按远端digest重拉后的镜像不含`/app/config.yaml`，parser v2与Agent result bundle import smoke通过。
+受保护`docker_cmd.md`只更新backend标签并继续保持`0600`、ignored/untracked。开发环境部署和真实外部
+MCP新会话未执行，因此状态为`published_pending_deploy`。
 
 ## 10. 上游依据
 

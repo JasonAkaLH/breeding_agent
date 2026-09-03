@@ -4,11 +4,12 @@
 
 ## 状态
 
-`implemented_automated_pending_dev_smoke`
+`published_pending_deploy`
 
 用户已批准退役parser/projection v1，不恢复旧内容；代码检查点`036b0ec7`已完成v2-only仓库实现与
-相关自动验证。用户明确不要求增加运行中调用门禁；开发环境部署和真实外部MCP新会话尚未授权，
-因此不得写成`implemented_verified`。
+相关自动验证。backend-dev `0.1.30`已基于`367c3bc1`发布，受保护`docker_cmd.md`已同步backend标签。
+用户明确不要求增加运行中调用门禁；开发环境部署和真实外部MCP新会话尚未授权，因此不得写成
+`implemented_verified`。
 
 计划基线为 `main@634fa002`。范围外未跟踪文件 `test.json` 必须保持未读取、未修改、未暂存。
 
@@ -30,8 +31,14 @@
 - Backend全量Integrations 801项中800项通过、2项既有平台skip，唯一失败为未修改文件
   `tests/integrations/test_mcp_client.py`的transport-family旧基线断言，独占复跑仍失败；代码检查点对该
   测试及`src/integrations/mcp/client.py`均为零diff。本地`skill/sql-query`目录不存在，该可选门禁N/A；
-- compileall、变更面Ruff、package import和`git diff --check`通过；`test.json`未读取、未修改、未暂存，
-  `docker_cmd.md`只验证存在/ignored/untracked且未读取。
+- compileall、变更面Ruff、package import和`git diff --check`通过；`test.json`未读取、未修改、未暂存；
+- 基于源码`367c3bc1`构建并推送backend-dev `0.1.30`，远端OCI index digest为
+  `sha256:fd9e3e13803cbbc2b25b2c458caa953f3fce3d3e7b06dedaec9e9a464fd99d9c`，包含`linux/amd64`
+  manifest `sha256:7b982ee3ad118338a9afc2d3f7339883a436f471ef0df8ee8603eaca9fa87db6`和attestation；
+  按远端digest重拉后的镜像不含`/app/config.yaml`，parser v2与Agent result bundle import smoke通过；
+- 受保护`docker_cmd.md`先在仓库外创建`0600`一致备份，再只将4处backend-dev tag从`0.1.29`
+  更新为`0.1.30`；文件继续保持`0600`、ignored/untracked，frontend `0.1.28`和runtime-sidecar
+  `0.1.27`未变。
 
 ## 完成声明
 
@@ -60,8 +67,8 @@
     MCP Artifact通过既有`projection_invalid`安全返回`unavailable`，不返回storage ref、下载地址、
     raw result或内部引用。
 
-若只完成自动测试而未获得开发环境部署/真实新会话授权，状态最多为
-`implemented_automated_pending_dev_smoke`，不得写成 `implemented_verified`。
+若只完成自动测试且未发布镜像，状态最多为`implemented_automated_pending_dev_smoke`；镜像已经授权发布、
+但尚未部署和完成真实新会话验收时，状态为`published_pending_deploy`，不得写成`implemented_verified`。
 
 ## Checkpoint 0：基线与红测边界
 
@@ -471,8 +478,8 @@ git diff --check
 - 所有 terminal output入口均由表驱动测试覆盖，waiting/interrupt不误携带业务结果；
 - Artifact API生产代码、DTO和路由零diff；测试证明v2保持`ready`，v1历史projection沿既有
   `projection_invalid`安全降级且不暴露storage ref、下载或raw；
-- 数据库 model/migration、Frontend、Rust、Skill、镜像、部署和 `prod` 零diff；
-- `docker_cmd.md` 继续存在、ignored且untracked，全程未读取；
+- 数据库 model/migration、Frontend、Rust、Skill、Dockerfile、Compose、部署代码和 `prod` 零diff；
+- 发布阶段只对`docker_cmd.md`做backend-dev精确版本替换；文件继续存在、`0600`、ignored且untracked；
 - Git staged paths不包含 `test.json` 或其他用户无关文件。
 
 ### 文档与检查点
@@ -488,7 +495,8 @@ git diff --check
 
 ## Checkpoint G：开发环境真实新会话验收
 
-本检查点需要独立的部署/环境操作授权；计划获批本身不授权构建镜像、部署或修改远端数据库。
+本检查点需要独立的部署/环境操作授权；用户本次另行授权的镜像构建、推送和`docker_cmd.md`版本同步
+不授权部署或修改远端数据库。
 
 获得授权后，只在 `main` 对应开发环境创建全新会话，使用与原问题等价的项目统计请求：
 
@@ -507,7 +515,7 @@ git diff --check
 条件；不得把完整业务清单、凭据或内部路径写入文档和 Git。
 
 真实验收通过后，才可把设计与计划更新为 `implemented_verified`。若外部 Server、授权或部署状态
-阻断，保留 `implemented_automated_pending_dev_smoke` 并记录精确缺口，不自动重跑历史失败 Task。
+阻断，保留`published_pending_deploy`并记录精确缺口，不自动重跑历史失败Task。
 
 ## Cutback 与不可逆兼容边界
 
