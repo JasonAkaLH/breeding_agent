@@ -1,6 +1,6 @@
 # MCP Dispatch 实际 Tool Result 向主 Agent 交付设计
 
-状态：`approved`；用户已确认总体流程，尚未生成实施计划或修改生产代码
+状态：`approved_hard_defects_resolved`；三轮限定硬伤审计的 4 个 Major 已闭合，0 Blocking / 0 Major；未评 Minor，不宣称完整 95 分信心门
 日期：2026-09-03
 目标分支：`main`
 
@@ -20,9 +20,10 @@
 这不是 Server 选择错误，也不是 MCP Tool 没有返回结果，而是内部 Selector Loop 与外层
 `mcp.dispatch` Tool Result 之间的结果承载合同断裂。
 
-本设计只完成一个目标：保持现有 Capability、Selector、Gateway、解析、审批、恢复和 Artifact
-框架不变，把已经生成的 validated agent projection 作为实际 `mcp.dispatch` Tool Result 交给
-主 Agent。
+本设计只完成一个目标：保持现有 Capability、Selector、Gateway、审批、恢复和 Artifact 框架
+不变，把已经生成的 validated agent projection 作为实际 `mcp.dispatch` Tool Result 交给主
+Agent。只要某个会返回主 Agent 的终态已经积累成功结果，该结果就必须随终态 Tool Result 返回，
+不能只在 Selector 选择 `finish` 时返回。
 
 本设计仅替代
 `2026-08-29-agent-tool-result-delivery-and-repeat-guard-design.md` 第 3.1 节中“普通 MCP branch
@@ -63,39 +64,113 @@
 
 ### 3.1 唯一结果权威
 
-普通 Selector 路径的模型可见业务结果只来自现有
-`MCPSelectorContext.completed_result_projections`：
+普通 Selector 路径和终态 carrier 共享同一个 durable completed-result projection authority；
+`MCPSelectorContext.completed_result_projections` 只是该 authority 的 Selector 输入投影，不是终态
+结果权威或可复用缓存：
 
 - 只收集状态为 `completed` 的 Call；
 - 每个结果必须具有匹配 intent、owner、Task、Node、Call、Server 版本、result ref、内容摘要、
   parser revision 和 validated checkpoint 的 terminal receipt；
-- 通过 `MCPPublishedAgentProjectionAuthority.load_agent_projection()` 读取发布后的模型安全投影；
-- 继续使用现有 20,000 code points、80,000 bytes 总预算和 Call sequence 顺序。
+- 通过 `MCPPublishedAgentProjectionAuthority` 读取发布后的模型安全投影及其可信完整性元数据；
+- 每项至少保留 `call_sequence`、projection 正文和 source-truncated 状态；
+- 继续使用现有 20,000 code points、80,000 bytes 上限和 Call sequence 顺序，但预算必须覆盖最终
+  carrier 及其元数据，而不是先截断正文、再额外增加未计入预算的包装。
 
 不得从 raw result、内部文件、公共 Artifact preview、`result_ref` 或 Selector 自由文本重新构造
 业务答案，也不得为补齐结果重新调用 Server。
 
-### 3.2 FINISH 时的结果承载
+### 3.2 Canonical 结果载荷
 
-当 Selector 返回 `finish` 时，Coordinator 按以下确定性规则生成 outcome：
+`agent_projection` 继续使用现有 allowlist key，但值改为 closed、结构化对象，禁止用自由文本分隔符
+拼接多个不可信结果：
 
-| 条件 | 主 Agent 可见的 Tool Result | 控制面记录 |
+```json
+{
+  "schema": "maf.mcp.agent_result_bundle.v1",
+  "result_count": 2,
+  "included_count": 2,
+  "omitted_count": 0,
+  "truncated": false,
+  "completeness_known": true,
+  "results": [
+    {
+      "call_sequence": 1,
+      "content": "validated model-safe projection",
+      "source_truncated": false,
+      "carrier_truncated": false
+    },
+    {
+      "call_sequence": 2,
+      "content": "second validated model-safe projection",
+      "source_truncated": false,
+      "carrier_truncated": false
+    }
+  ]
+}
+```
+
+字段合同：
+
+- `result_count` 是该 branch 中通过 receipt/checkpoint authority 的 completed Call 总数；
+- `included_count` 是本载荷实际包含的结果数，必须等于 `results` 长度；
+- `omitted_count = result_count - included_count`；
+- `results` 必须按 `call_sequence` 升序且 sequence 唯一；跨 automatic route 的 Call 仍使用 branch
+  内唯一 sequence，不引入第二套 Server 顺序；
+- `source_truncated` 由可信 Result Parser projection 元数据产生，不从不可信 Tool 正文猜测；
+- `carrier_truncated` 表示该项在聚合或外层模型预算中被进一步截断；
+- `truncated` 在任一 source/carrier truncation 或 `omitted_count > 0` 时必须为 `true`；
+- `completeness_known` 只有全部 source projection 都具有可信 truncation 元数据时才为 `true`。部署前
+  已发布、缺少该字段的兼容 projection 以 `source_truncated=null`、
+  `completeness_known=false` 交付，不能伪称完整，也不触发历史网络重放或 reprojection。
+
+普通单结果也使用同一 bundle schema，避免单/多结果出现两套模型合同。Coordinator 同时把 bundle
+的 `truncated` 镜像到 `MCPDispatchOutcome.output_payload["truncated"]`，使现有外层
+`projection_truncated` 语义可用。
+
+### 3.3 预算与截断规则
+
+结果 carrier 必须在最终结构化形态上执行一次确定性预算：
+
+1. 预算计入 schema、计数、sequence、布尔字段、JSON 转义、外层 `model_view` 固定字段和 Tool
+   Result envelope 开销；不得把已经达到 20,000 code points 的正文直接加包装后交给外层减半。
+2. 继续沿用现有“优先保留最新结果、最终按 sequence 恢复顺序”的选择策略，但任何整项省略都增加
+   `omitted_count` 并设置 `truncated=true`。
+3. 单项正文需要收缩时，按 UTF-8 边界截断，保留明确的可信截断标记，并设置该项
+   `carrier_truncated=true`；不得截断到半个结构化 envelope。
+4. `AgentCallResultProjector` 对该 closed bundle 只能完整接收，或调用 bundle-aware 收缩逻辑并同步
+   更新计数与 truncation 字段；禁止沿用普通字符串反复减半后仍报告未截断。
+5. 若连 schema、计数和一项有界结果元数据都无法通过既有 80,000-byte model-result / 128 KiB
+   Tool-result preflight，则返回既有 `agent_result_projection_too_large`，不得降级为通用成功摘要。
+
+Result Parser 必须为新 projection 持久化可信 `agent_projection_truncated` 元数据；reader 同时兼容
+旧 projection。该变化只完善模型安全结果载荷，不改变 raw result、user view、业务 Artifact 或
+output schema authority。
+
+### 3.4 所有会返回主 Agent 的终态
+
+Coordinator 在形成终态 Tool Result 时统一应用 carrier，而不是只在 FINISH 分支临时拼装：
+
+| 终态 | 已有 validated completed results | 主 Agent 可见结果 |
 | --- | --- | --- |
-| 存在一个 validated projection | `agent_projection` 为该 projection 原文 | 持久化 `safe_summary`、`result_ref` 和既有审计事件 |
-| 存在多个 validated projections | `agent_projection` 按 Call sequence 顺序，以固定、无歧义的 result 分隔符连接 | 同上 |
-| 没有已完成 Call，属于 discover-only / 无调用结束 | 保留现有安全 `text` 摘要 | 同上 |
-| 存在已完成 Call但 projection authority 不成立 | 沿现有 typed authority error fail closed | 不伪装成成功，不网络重放 |
+| Selector `finish` | 有 | `mcp_status=completed` + canonical `agent_projection` bundle |
+| Selector `finish` / discover-only | 无 | 保留现有安全 `text` 摘要，不伪造 bundle |
+| Selector `stop`、automatic route 无下一 Server、Server 后续不可用 | 有 | 保留 stopped/error 状态，同时返回已有 bundle，允许主 Agent说明部分结果与停止原因 |
+| 后续 Tool 被拒绝或发生不会重放的终态失败 | 有 | 保留原 safe error/status，同时返回先前已完成 bundle |
+| waiting / input-required / approval interrupt | 任意 | 不是最终 Agent Tool Result；等待 continuation，最终终态再统一承载 |
+| cancelled 且不会继续采样主 Agent | 任意 | 保持现有取消收敛；不得为交付结果重新唤醒 Agent |
+| completed Call 的 projection authority 冲突 | 有 | typed authority error fail closed，不返回未经验证内容，不网络重放 |
 
-`agent_projection` 使用现有字段，不新增 DTO、数据库字段、Artifact 类型或第二个 Tool。多结果拼接
-不得改变单个 projection 内容，必须继续受现有总预算和外层 Agent Tool Result 128 KiB preflight
-约束；一旦外层 projector 需要收缩，继续使用既有确定性收缩行为。本次不新建截断协议，也不把
-既有预算策略改造成新的结果存储机制。
+“会返回主 Agent 的终态”以 committed Agent Tool result 为准。所有此类 stopped/failed 结果必须保留
+原 `mcp_status` 和 `safe_error_code`，不得因为携带先前成功 projection 而伪装成 completed。
+终态 carrier 必须在终态形成时从 branch 的 durable Call、receipt 和 published projection authority
+重新构建；不得直接复用上一 Selector step 的 context，因为它可能不包含刚完成的 Call。该重建只读
+现有持久化 authority，不访问 Gateway、不重新执行 Tool，也不改变 no-replay 规则。
 
-只要存在 `agent_projection`，completed branch 就不得再向模型投放通用成功 `text`。否则模型可能
-优先采信“结果可由安全引用获取”而忽略同一 Tool Result 中的业务数据。`finish.reason` 仍可进入
+只要存在 `agent_projection`，终态 branch 就不得再向模型投放通用成功 `text`。否则模型可能优先
+采信“结果可由安全引用获取”而忽略业务数据。`finish.reason`、stop reason 和安全错误摘要仍可进入
 branch 的 `safe_summary`，用于审计、恢复和 UI 安全摘要，但不能充当业务 payload。
 
-### 3.3 外层 Agent Tool Result 合同
+### 3.5 外层 Agent Tool Result 合同
 
 结果交付链固定为：
 
@@ -103,8 +178,9 @@ branch 的 `safe_summary`，用于审计、恢复和 UI 安全摘要，但不能
 MCP Server CallToolResult
   -> versioned Result Parser
   -> validated agent projection + terminal receipt
-  -> MCPSelectorContext.completed_result_projections
-  -> Selector 返回 finish
+  -> durable completed-result projection authority
+       ├─ bounded Selector context projection -> Selector 决定下一控制动作
+       └─ terminal carrier rebuild -> 执行链形成终态
   -> MCPDispatchOutcome.output_payload["agent_projection"]
   -> AgentCallResultProjector MCP allowlist
   -> 同一个 mcp.dispatch call 对应的 committed Tool result
@@ -112,8 +188,8 @@ MCP Server CallToolResult
   -> 主 Agent 基于实际结果生成最终回答
 ```
 
-这里的“实际 Tool Result”指经过现有 parser、大小和安全策略处理后的完整或有界
-`agent_projection`，不是未经验证的 upstream raw payload。它仍然属于主 Agent 发起的同一次
+这里的“实际 Tool Result”指经过现有 parser、大小和安全策略处理后的 canonical
+`agent_projection` bundle，不是未经验证的 upstream raw payload。它仍然属于主 Agent 发起的同一次
 `mcp.dispatch` Tool call，并继续与该 provider call ID 配对；不会伪装成 user message、system
 message、Selector answer 或单独的 Artifact 读取结果。
 
@@ -125,7 +201,7 @@ message、Selector answer 或单独的 Artifact 读取结果。
 - credential、header、session、Server 配置和内部 authority；
 - branch 内部 `safe_summary` 与 `result_ref`。
 
-### 3.4 Selector 合同保持不变
+### 3.6 Selector 合同保持不变
 
 Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、上游事实、失败/拒绝指纹、
 剩余调用预算和已完成 projections。Selector 输出仍只有：
@@ -143,28 +219,35 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
 
 - OCR 固定工作流继续使用现有 `external_text` / `text` 交付，不并入普通 Selector 改动。
 - Tool approval、Interrupt、remote Task、resume outbox、no-replay、claim、cancel 和 aggregate
-  终态保持原行为；恢复后的 FINISH 必须走同一 projection carrier 规则。
+  终态保持原行为；恢复后形成的任何最终 Agent Tool result 必须走同一 projection carrier 规则。
 - `result_ref`、公共 Artifact 和 raw durable authority 继续用于审计、下载或历史恢复，不要求主 Agent
   再调用 Artifact reader。
 - discover-only FINISH 没有业务 projection 时保留现有安全摘要，避免把正常目录发现误判为结果缺失。
-- `stop`、failed、rejected、cancelled 和 waiting 不伪造 `agent_projection`。
+- `stop`、failed 或 rejected 没有任何已完成 projection 时不伪造 `agent_projection`；已有结果时按
+  第 3.4 节携带结果并保留真实状态。cancelled 和 waiting 不为交付结果额外唤醒主 Agent。
 - automatic binding 的既有 `route_another_server` / Server Router 兼容路径不变；每次 Tool 选择仍只
-  面向当时已固定的一个 Server，最终 FINISH 使用同一组已验证 completed projections。
+  面向当时已固定的一个 Server，最终终态从同一 durable authority 重建已验证 completed
+  projections。
 - 历史 Run 已提交的 Tool Result 不原地改写；本修复只影响新执行或按现有 continuation 重新完成的
   outcome。
 
-## 5. 预期最小修改面
+## 5. 预期修改面
 
 实施阶段预计只触及：
 
-- `src/integrations/mcp/dispatch_coordinator.py`：在普通 Selector FINISH 边界承载
-  `completed_result_projections`，并在有 projection 时禁止通用 `text` 进入模型视图；
-- 现有 MCP coordinator / Agent Loop 测试：补充真实 result handoff 回归；
-- 必要时增加一个私有纯函数，负责单/多 projection 的确定性拼接，不建立新抽象层。
+- `src/integrations/mcp/dispatch_coordinator.py`：在统一终态边界承载 canonical bundle，有结果时禁止
+  通用 `text` 替代业务数据；
+- `src/integrations/mcp/selector_context.py` 及对应内部 model：在不改变 Selector Server/Tool 决策的
+  前提下，保留 sequence、source truncation 和聚合省略元数据；
+- `src/integrations/mcp/result_parsing/` 的 projection producer/validator/reader：为新 projection 记录
+  可信 agent truncation 状态，并兼容旧 projection 的 unknown 状态；
+- `src/orchestration/agent_loop/result_projection.py`：让现有 `agent_projection` allowlist 接受 closed
+  bundle，并保证外层收缩会同步更新 bundle/top-level truncation；
+- 现有 MCP coordinator、Result Parser、Agent projection 和 E2E 测试：补充真实 result handoff、
+  多终态与大小边界回归。
 
-原则上不修改 `selector.py`、`selector_context.py`、`result_projection.py`：它们已经分别提供控制面
-决策、validated projection authority 和 `agent_projection` allowlist。只有红测证明既有预算或投影
-合同无法复用时，才允许对这些文件做与 carrier 直接相关的最小修改，并在实施计划中明确理由。
+这些修改仍只属于结果载荷及其安全预算。不得借机修改 `selector.py` 的 action 集合、全局 Server
+路由、Gateway 调用、approval/recovery authority、数据库 schema、公开 API 或 Artifact 生命周期。
 
 ## 6. 测试与验收
 
@@ -174,21 +257,31 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
    `reason` 返回 `finish`；断言 outcome 含 `agent_projection`，且不含通用成功 `text`。
 2. Selector 提供非空 `finish.reason` 时，断言 reason 只写入 branch `safe_summary`，不会覆盖或
    替代 `agent_projection`。
-3. 两个成功 Call 的 projections 按 Call sequence 有界、稳定地进入同一 Tool Result；不同运行和
-   重启恢复得到相同顺序。
-4. discover-only FINISH 继续返回现有安全 `text`；failed、stop、waiting、approval 和 OCR 固定流程
+3. 两个成功 Call 的 projections 以 closed bundle 按 Call sequence 稳定进入同一 Tool Result；结果
+   正文伪造分隔符或 schema 文本不能改变 bundle 边界。
+4. source truncation、聚合整项省略、聚合单项截断和外层预算收缩分别正确设置
+   `source_truncated`、`carrier_truncated`、`omitted_count`、bundle/top-level `truncated`；达到
+   20,000-code-point / 80,000-byte 边界时不得发生无标记减半。
+5. 已有一个成功 Call 后分别走 Selector STOP、automatic route 无下一 Server、Server 不可用、后续
+   Tool denied 和终态 failure；断言每条会提交 Agent Tool result 的路径都保留先前 bundle及原
+   status/error，Gateway 不重放成功 Call。
+6. discover-only FINISH 继续返回现有安全 `text`；waiting、input-required、approval 和 OCR 固定流程
    保持原行为。
-5. receipt、owner、Call、Server version、digest 或 checkpoint 冲突时，在主 Agent 再采样前返回
+7. receipt、owner、Call、Server version、digest 或 checkpoint 冲突时，在主 Agent 再采样前返回
    现有 typed authority error，且 Gateway 调用次数不增加。
+8. 新 projection 的 truncation 元数据可验证；旧 projection 只读兼容为
+   `completeness_known=false`，不迁移、不网络重放。
 
 ### 6.2 Agent Loop 回归
 
-1. `AgentCallResultProjector` 后的 `model_view.agent_projection` 仍包含首尾 sentinel。
+1. `AgentCallResultProjector` 后的 `model_view.agent_projection` 是 closed bundle，结果项仍包含首尾
+   sentinel、准确 sequence 和完整性字段。
 2. 下一次 `AgentModelRequest` 中，对应 provider call ID 的 tool message 包含 sentinel；不出现
    raw、path、result ref、credential 或内部 receipt。
 3. 端到端 fixture 证明主 Agent 在一次 MCP 外部调用后依据 projection 回答，不因看不到结果再次
    调用相同 Tool。
-4. 大小门禁覆盖单结果、多结果和 UTF-8 边界；外层 Tool Result 仍通过 128 KiB preflight。
+4. 大小门禁覆盖单结果、多结果、JSON 转义和 UTF-8 边界；外层 Tool Result 仍通过 128 KiB
+   preflight，任何收缩都可由主 Agent识别。
 
 ### 6.3 现场验收
 
@@ -198,6 +291,7 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
 - Selector 在该 Server 内选择正确 Tool；
 - MCP Call 数为预期值且无补偿重放；
 - committed Tool Result 的模型安全视图包含业务 sentinel / 统计字段；
+- bundle 的计数、顺序和完整性字段与 durable completed Call / projection metadata 一致；
 - 最终回答引用实际项目统计，不再输出“无法直接查询”的兜底文案；
 - 日志、Event、AgentItem 和公开响应均不泄露 credential、raw storage path 或内部 authority。
 
@@ -212,6 +306,7 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
   Selector 直接选择一个或多个 `server_id`；
 - 新增 `artifact.read`、结果查询 API、数据库 schema、Frontend、Rust 或外部 MCP Server 改造；
 - 修改历史 Task、自动重跑外部 Tool、放宽 raw result 可见性；
+- 为旧 projection 回填或重新生成正文；旧格式只做本设计要求的 conservative unknown 读取兼容；
 - 语义去重、通用重试策略或其他 Agent 调度优化。
 
 这些事项如需处理，应分别立项、复现、设计和验收，不能借结果承载修复扩大范围。
@@ -232,13 +327,15 @@ Selector 输入继续包含安全 Server Profile、当前 Server Tool catalog、
 
 ## 9. 回滚与完成定义
 
-实现应保持为单一、可逆的 carrier 改动。若发生异常，可回滚 FINISH 分支的
-`agent_projection` 注入和对应测试，不涉及数据库回滚、Artifact 迁移或外部 Server 变更。
+实现应保持为单一、可逆的 carrier 改动。若发生异常，可整体回滚 canonical bundle、终态注入、
+projection truncation metadata 和对应 reader/test；旧 projection reader兼容必须与 writer 一起
+回滚，不涉及数据库回滚、Artifact 迁移或外部 Server 变更。
 
 完成定义：聚焦红测先在旧实现上精确复现“Tool 已成功但主 Agent 只收到通用摘要”，最小实现后
 转绿；相关 MCP / Orchestration / API 回归、compileall、Ruff 和 `git diff --check` 通过；最后由
-全新开发会话证明一次实际调用的 validated Tool Result 已进入主 Agent 上下文。只有上述证据闭合
-后，状态才能从 `approved` 更新为 `implemented_verified`。
+全新开发会话证明一次实际调用的 validated Tool Result 已进入主 Agent 上下文，且 oversized fixture
+不会被误报为完整。只有上述证据闭合后，状态才能从 `approved_revision_1` 更新为
+`implemented_verified`。
 
 ## 10. 上游依据
 
