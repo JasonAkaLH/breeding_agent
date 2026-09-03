@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
-from src.core.enums import InterruptStatus
+from src.core.enums import InterruptStatus, TaskStatus
 from src.core.errors import MessageIdentityConflictError
 from src.core.models import SlotCollection
 from src.integrations.agent_skills import SkillBundleRevisionError
@@ -100,30 +100,61 @@ class SkillSlotCollectionV2APITest(APITestCase):
         )
 
         planner = AsyncMock(side_effect=AssertionError("planner must not run on receipt replay"))
+        current_task = await self.runtime.storage.get_task(task_id)
+        assert current_task is not None
         with patch.object(self.runtime, "_plan_v2_interrupt_open_turn", new=planner):
-            replay = await self.runtime.answer_interrupt(
-                task_id,
-                interrupt["interrupt_id"],
-                answer_payload,
-                source_message_id=source_message_id,
-            )
+            if current_task.status in {
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            }:
+                with self.assertRaisesRegex(ValueError, "Task is terminal"):
+                    await self.runtime.answer_interrupt(
+                        task_id,
+                        interrupt["interrupt_id"],
+                        answer_payload,
+                        source_message_id=source_message_id,
+                    )
+            else:
+                replay = await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    answer_payload,
+                    source_message_id=source_message_id,
+                )
+                self.assertEqual(replay["source_message_id"], source_message_id)
         self.assertEqual(planner.await_count, 0)
-        self.assertEqual(replay["source_message_id"], source_message_id)
 
         messages_before = await self.runtime.storage.list_messages_for_conversation(
             interrupt["conversation_id"]
         )
         events_before = await self.runtime.storage.list_events_for_task(task_id)
-        with self.assertRaises(MessageIdentityConflictError):
-            await self.runtime.answer_interrupt(
-                task_id,
-                interrupt["interrupt_id"],
-                {
-                    "client_request_id": source_message_id,
-                    "answer": {"text": "13列"},
-                },
-                source_message_id=source_message_id,
-            )
+        changed_answer = {
+            "client_request_id": source_message_id,
+            "answer": {"text": "13列"},
+        }
+        latest_task = await self.runtime.storage.get_task(task_id)
+        assert latest_task is not None
+        if latest_task.status in {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }:
+            with self.assertRaisesRegex(ValueError, "Task is terminal"):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    changed_answer,
+                    source_message_id=source_message_id,
+                )
+        else:
+            with self.assertRaises(MessageIdentityConflictError):
+                await self.runtime.answer_interrupt(
+                    task_id,
+                    interrupt["interrupt_id"],
+                    changed_answer,
+                    source_message_id=source_message_id,
+                )
         self.assertEqual(
             len(await self.runtime.storage.list_messages_for_conversation(interrupt["conversation_id"])),
             len(messages_before),
@@ -1408,8 +1439,8 @@ input_schemas:
         first = await self.client.post("/api/v1/conversations/chat-messages", json=body)
         self.assertEqual(first.status_code, 202, first.text)
         second = await self.client.post("/api/v1/conversations/chat-messages", json=body)
-        self.assertEqual(second.status_code, 202, second.text)
-        self.assertEqual(first.json()["assistant_message"], second.json()["assistant_message"])
+        self.assertEqual(second.status_code, 400, second.text)
+        self.assertIn("Task is terminal", second.text)
         self.assertEqual(counts, {"planner": 1, "answer": 1, "extract": 1})
         collection_id = interrupt["required_fields"][SLOT_COLLECTION_REF_FIELD]["collection_id"]
         collection = await self.runtime.storage.get_slot_collection(collection_id)
@@ -2003,8 +2034,8 @@ input_schemas:
                 "metadata": {"interrupt_id": interrupt["interrupt_id"]},
             },
         )
-        self.assertEqual(retry.status_code, 202, retry.text)
-        self.assertEqual(retry.json()["action"], "interrupt_resumed")
+        self.assertEqual(retry.status_code, 400, retry.text)
+        self.assertIn("Task is terminal", retry.text)
         self.assertEqual(
             len(await self.runtime.storage.list_messages_for_conversation("conv-v2-stale-interrupt")),
             len(messages_before),
@@ -2022,8 +2053,8 @@ input_schemas:
                 "metadata": {"interrupt_id": interrupt["interrupt_id"]},
             },
         )
-        self.assertEqual(stale_chat.status_code, 409, stale_chat.text)
-        self.assertEqual(stale_chat.json(), {"detail": {"code": "message_id_conflict"}})
+        self.assertEqual(stale_chat.status_code, 400, stale_chat.text)
+        self.assertIn("Task is terminal", stale_chat.text)
 
         self.assertEqual(
             len(await self.runtime.storage.list_messages_for_conversation("conv-v2-stale-interrupt")),
@@ -2202,7 +2233,8 @@ input_schemas:
             client_message_id="req-v2-idempotent",
             content="12列",
         )
-        self.assertEqual(duplicate.status_code, 202, duplicate.text)
+        self.assertEqual(duplicate.status_code, 400, duplicate.text)
+        self.assertIn("Task is terminal", duplicate.text)
         events_after = await self.runtime.storage.list_slot_events(collection.collection_id)
         messages_after = await self.runtime.storage.list_messages_for_conversation("conv-v2-idempotent")
         answers_after = await self.runtime.storage.list_interrupt_answers(interrupt["interrupt_id"])

@@ -1658,6 +1658,13 @@ class TaskStoragePort(Protocol):
 
     async def list_tasks_for_conversation(self, conversation_id: str, statuses: Iterable[TaskStatus] | None = None) -> list[Task]: ...
 
+    async def list_skill_recovery_candidate_task_ids(
+        self,
+        *,
+        after_task_id: str | None = None,
+        limit: int = 128,
+    ) -> tuple[str, ...]: ...
+
     async def save_task_node(
         self, node: TaskNode, *, expected_from_status: NodeStatus | None = None
     ) -> TaskNode: ...

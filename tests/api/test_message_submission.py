@@ -1031,6 +1031,12 @@ class MessageSubmissionAPITest(APITestCase):
 
             self.assertEqual(second.status_code, 202, second.text)
             self.assertNotEqual(second.json()["task_id"], first_task_id)
+            self.assertRegex(
+                self.runtime._task_skill_bundle_revisions[  # noqa: SLF001
+                    second.json()["task_id"]
+                ],
+                r"^skillrev-v2-[0-9a-f]{64}$",
+            )
         finally:
             release_clear.set()
             self.runtime._clear_conversation_current_task = original_clear  # type: ignore[method-assign]

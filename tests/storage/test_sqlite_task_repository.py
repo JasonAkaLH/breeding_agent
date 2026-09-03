@@ -9,6 +9,7 @@ from src.core.enums import ArtifactType, NodeStatus, RoutingMode, TaskStatus
 from src.core.models import Artifact, Task, TaskInputAttachment, TaskNode
 from src.lifecycle.rust_contract import status_list
 from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage
+from src.storage.sqlalchemy_models import AgentRunRow
 from tests.storage.support import SQLiteStorageTestCase
 
 
@@ -402,3 +403,73 @@ class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
             )
 
         self.assertEqual([task.task_id for task in loaded], ["task-running", "task-accepted"])
+
+    def test_skill_recovery_candidate_reader_pages_only_nonterminal_tasks(self) -> None:
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            for index in range(129):
+                task = repo.save_task(
+                    Task(
+                        task_id=f"recovery-{index:03d}",
+                        conversation_id=f"conv-{index:03d}",
+                        root_message_id=f"msg-{index:03d}",
+                        status=TaskStatus.RUNNING,
+                    )
+                )
+                session.add(
+                    AgentRunRow(
+                        run_id=f"agent-run:{task.task_id}",
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        status="running",
+                        model_edition="test",
+                        reasoning_effort="minimal",
+                        thinking_enabled=False,
+                        binding_option_digests={},
+                        next_item_sequence=1,
+                        compacted_through_sequence=0,
+                        active_sample_item_id=None,
+                        waiting_call_item_ids=[],
+                        next_batch_call_ordinal=0,
+                        claim_owner=None,
+                        claim_token=None,
+                        lease_expires_at=None,
+                        revision=0,
+                        terminal_reason_code=None,
+                        created_at=datetime(2026, 4, 23, 11, 0, 0),
+                        updated_at=datetime(2026, 4, 23, 11, 0, 0),
+                        terminal_at=None,
+                    )
+                )
+            repo.save_task(
+                Task(
+                    task_id="recovery-terminal",
+                    conversation_id="conv-terminal",
+                    root_message_id="msg-terminal",
+                    status=TaskStatus.FAILED,
+                )
+            )
+            session.commit()
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            first = repo.list_skill_recovery_candidate_task_ids(limit=128)
+            second = repo.list_skill_recovery_candidate_task_ids(
+                after_task_id=first[-1],
+                limit=128,
+            )
+
+        self.assertEqual(len(first), 128)
+        self.assertEqual(second, ("recovery-128",))
+        self.assertNotIn("recovery-terminal", first + second)
+
+        storage = SQLiteStorage(self.session_factory)
+        self.assertEqual(
+            asyncio.run(
+                storage.list_skill_recovery_candidate_task_ids(
+                    after_task_id=first[-1],
+                    limit=128,
+                )
+            ),
+            second,
+        )

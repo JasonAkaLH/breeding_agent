@@ -74,6 +74,7 @@ from src.core.models import (
     SlotCollection,
     SlotEvent,
     SubmissionAdmissionDisposition,
+    SubmissionHandoffState,
     SubmissionPreparationReceipt,
     SubmissionRecoveryRecord,
     Task,
@@ -104,6 +105,7 @@ from src.integrations.agent_skills import (
     SkillScriptRunner,
     SkillResourceService,
     SkillBundleRevisionError,
+    classify_skill_bundle_revision,
     SlotExtractionCandidate,
     SlotExtractionResult,
     apply_extraction_result_to_collection,
@@ -440,6 +442,7 @@ from src.api.submission_admission import (
     DurableSubmissionHandoff,
     PreparedAgentRecoveryContext,
     PreparedAgentRecoveryLoader,
+    PreparedSubmissionRecoveryAuthority,
     SubmissionAdmissionCoordinator,
     SubmissionPreparedAgentRecoveryLoader,
     submission_interrupt_handoff_id,
@@ -3715,6 +3718,237 @@ class ApiRuntime(
         self._submission_file_selection_computations.pop(record.task_id, None)
         return DurableSubmissionHandoff("agent_run", f"agent-run:{record.task_id}")
 
+    def skill_revision_error_code(self, revision: object) -> str | None:
+        return self._skill_recovery_error_code(revision)
+
+    async def materialize_terminal_handoff(
+        self,
+        record: SubmissionRecoveryRecord,
+        prepared: Mapping[str, Any],
+        receipt: SubmissionPreparationReceipt,
+        safe_error_code: str,
+    ) -> DurableSubmissionHandoff:
+        task = await self.storage.get_task(record.task_id)
+        if (
+            task is None
+            or task.conversation_id != record.conversation_id
+            or task.root_message_id != record.message_id
+        ):
+            raise RuntimeError("submission_terminal_task_identity_mismatch")
+        if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            terminal_task_status = task.status
+        elif task.status in UNFINISHED_TASK_STATUSES:
+            terminal_task_status = (
+                TaskStatus.CANCELLED
+                if task.status == TaskStatus.CANCELLING
+                else TaskStatus.FAILED
+            )
+        else:
+            raise RuntimeError("submission_terminal_task_status_conflict")
+
+        kind = str(prepared["planned_handoff_kind"])
+        if kind == "agent_run":
+            model_options = prepared["model_options"]
+            metadata = {
+                key: value
+                for source in (
+                    prepared["execution_metadata"],
+                    model_options,
+                    prepared["bundle_revisions"],
+                )
+                for key, value in source.items()
+                if value is not None
+            }
+            thinking_enabled = bool(model_options.get("thinking_enabled", False))
+            reasoning_effort = str(
+                model_options.get("reasoning_effort") or "minimal"
+            )
+            metadata.update(
+                {
+                    "deep_thinking": thinking_enabled,
+                    "main_agent_thinking_enabled": thinking_enabled,
+                    "main_agent_reasoning_effort": reasoning_effort,
+                    "requested_reasoning_effort": reasoning_effort,
+                }
+            )
+            activation = prepared.get("skill_activation")
+            root_content = str(
+                json.loads(record.message_projection.decode("utf-8"))["content"]
+            )
+            request = AgentExecutionRequest(
+                task_id=record.task_id,
+                conversation_id=record.conversation_id,
+                root_message_id=record.message_id,
+                user_message=root_content,
+                owner_scope=self._agent_owner_scope(record.username),
+                requested_capability_id=prepared.get("requested_capability_id"),
+                metadata=metadata,
+                skill_activation_payload_json=(
+                    str(activation["payload"])
+                    if isinstance(activation, Mapping)
+                    else None
+                ),
+                skill_activation_payload_sha256=(
+                    str(activation["payload_sha256"])
+                    if isinstance(activation, Mapping)
+                    else None
+                ),
+            )
+            run = await self.agent_loop_orchestrator.initialize_terminal_run(
+                request,
+                status=(
+                    AgentRunStatus.CANCELLED
+                    if terminal_task_status == TaskStatus.CANCELLED
+                    else AgentRunStatus.FAILED
+                ),
+                reason_code=safe_error_code,
+            )
+            if run.run_id != f"agent-run:{record.task_id}":
+                raise RuntimeError("submission_terminal_agent_identity_mismatch")
+            handoff = DurableSubmissionHandoff("agent_run", run.run_id)
+        elif kind == "interrupt":
+            selector = self._submission_component_value(
+                receipt.selector_decision
+            )
+            interrupt_kind = (
+                selector.get("interrupt_kind")
+                if isinstance(selector, Mapping)
+                else None
+            )
+            if interrupt_kind == "file_selection":
+                node_id = f"{record.task_id}:file_selection"
+                capability_id = (
+                    prepared["requested_capability_id"] or "agent.file_selection"
+                )
+            elif interrupt_kind == "sheet_selection":
+                node_id = f"{record.task_id}:sheet_selection"
+                capability_id = (
+                    prepared["requested_capability_id"] or "agent.sheet_selection"
+                )
+            else:
+                raise RuntimeError("submission_terminal_interrupt_kind_invalid")
+            identity = submission_interrupt_handoff_id(
+                record.task_id,
+                str(
+                    prepared["preparation_receipt"][
+                        "selector_decision_sha256"
+                    ]
+                ),
+            )
+            node = await self.storage.get_task_node(node_id)
+            if node is None:
+                node = TaskNode(
+                    node_id=node_id,
+                    task_id=record.task_id,
+                    capability_id=capability_id,
+                    status=NodeStatus.CANCELLED,
+                    started_at=record.created_at,
+                    finished_at=record.created_at,
+                )
+            elif (
+                node.task_id != record.task_id
+                or node.capability_id != capability_id
+            ):
+                raise RuntimeError("submission_terminal_interrupt_node_conflict")
+            elif node.status not in {
+                NodeStatus.COMPLETED,
+                NodeStatus.FAILED,
+                NodeStatus.CANCELLED,
+            }:
+                node = replace(
+                    node,
+                    status=NodeStatus.CANCELLED,
+                    finished_at=node.finished_at or record.created_at,
+                )
+            if node.status != NodeStatus.CANCELLED:
+                raise RuntimeError("submission_terminal_interrupt_node_conflict")
+            saved_node = await self.storage.save_task_node(node)
+            if saved_node != node:
+                raise RuntimeError("submission_terminal_interrupt_node_conflict")
+
+            interrupt = await self.storage.get_interrupt(identity)
+            if interrupt is None:
+                interrupt = Interrupt(
+                    interrupt_id=identity,
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    node_id=node_id,
+                    source_agent=capability_id,
+                    source_message_id=record.message_id,
+                    question="该任务已终止，不能再提交补充输入。",
+                    reason_code=safe_error_code,
+                    required_fields={},
+                    status=InterruptStatus.CANCELLED,
+                    created_at=record.created_at,
+                    cancelled_at=record.created_at,
+                )
+            elif (
+                interrupt.task_id != record.task_id
+                or interrupt.conversation_id != record.conversation_id
+                or interrupt.node_id != node_id
+                or interrupt.source_message_id != record.message_id
+            ):
+                raise RuntimeError("submission_terminal_interrupt_identity_conflict")
+            elif interrupt.status == InterruptStatus.OPEN:
+                interrupt = replace(
+                    interrupt,
+                    status=InterruptStatus.CANCELLED,
+                    cancelled_at=interrupt.cancelled_at or record.created_at,
+                )
+            if interrupt.status != InterruptStatus.CANCELLED:
+                raise RuntimeError("submission_terminal_interrupt_status_conflict")
+            saved_interrupt = await self.storage.save_interrupt(interrupt)
+            if saved_interrupt != interrupt:
+                raise RuntimeError("submission_terminal_interrupt_identity_conflict")
+            if task.status in UNFINISHED_TASK_STATUSES:
+                await self._terminalize_pre_agent_skill_task(
+                    task,
+                    safe_error_code=safe_error_code,
+                )
+            handoff = DurableSubmissionHandoff("interrupt", identity)
+        elif kind == "no_server_intent":
+            if terminal_task_status == TaskStatus.CANCELLED:
+                await self.storage.materialize_submission_no_server_intent_exact(
+                    username=record.username,
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    occurred_at=record.created_at,
+                )
+                if task.status in UNFINISHED_TASK_STATUSES:
+                    await self._terminalize_pre_agent_skill_task(
+                        task,
+                        safe_error_code=safe_error_code,
+                    )
+            else:
+                outcome = await self.storage.converge_submission_no_server_handoff_exact(
+                    username=record.username,
+                    conversation_id=record.conversation_id,
+                    task_id=record.task_id,
+                    occurred_at=record.created_at,
+                )
+                if outcome not in {
+                    MCPNoServerConvergenceResult.CONVERGED,
+                    MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+                    MCPNoServerConvergenceResult.ALREADY_TERMINAL,
+                }:
+                    raise RuntimeError(
+                        f"submission_terminal_no_server_convergence_failed:{outcome}"
+                    )
+            handoff = DurableSubmissionHandoff(
+                "no_server_intent",
+                mcp_no_server_intent_id(record.task_id),
+            )
+        else:
+            raise RuntimeError("submission_terminal_handoff_kind_invalid")
+
+        terminal = await self.storage.get_task(record.task_id)
+        if terminal is None or terminal.status != terminal_task_status:
+            raise RuntimeError("submission_terminal_task_convergence_failed")
+        await self._best_effort_clear_skill_recovery_pointer(terminal)
+        self._submission_selector_facts.pop(record.task_id, None)
+        self._submission_file_selection_computations.pop(record.task_id, None)
+        return handoff
+
     async def materialize_interrupt_handoff(
         self,
         record: SubmissionRecoveryRecord,
@@ -4849,6 +5083,12 @@ class ApiRuntime(
         task = await self.storage.get_task(task_id)
         if task is None:
             return
+        if task.status in {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }:
+            return
         task_interrupts = await self.storage.list_interrupts_for_task(task_id)
         open_slot_collection_ids = {
             str(ref.get("collection_id") or "").strip()
@@ -5603,6 +5843,12 @@ class ApiRuntime(
         task = await self.storage.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
+        if task.status in {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }:
+            raise ValueError(f"Task is terminal: {task_id}")
         interrupt = await self.storage.get_interrupt(interrupt_id)
         if interrupt is None or interrupt.task_id != task_id:
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
@@ -10266,6 +10512,7 @@ class ApiRuntime(
             await coordinator.project_pending()
             submission_projection_pending = True
         try:
+            await self._reconcile_skill_recovery_eligibility()
             await self._admit_mcp_rollout_instance()
             aggregate_reconciler = MCPAggregateStartupReconciler(
                 MCPAggregateRecoveryStages(
@@ -10476,10 +10723,256 @@ class ApiRuntime(
                     raise
                 self._schedule_agent_run_lease_retry(run.run_id)
 
+    async def _reconcile_skill_recovery_eligibility(self) -> None:
+        candidate_reader = getattr(
+            self.storage,
+            "list_skill_recovery_candidate_task_ids",
+            None,
+        )
+        if not callable(candidate_reader):
+            return
+        after_task_id: str | None = None
+        while True:
+            task_ids = tuple(
+                await candidate_reader(
+                    after_task_id=after_task_id,
+                    limit=128,
+                )
+            )
+            if (
+                len(task_ids) > 128
+                or tuple(sorted(set(task_ids))) != task_ids
+                or (
+                    after_task_id is not None
+                    and any(task_id <= after_task_id for task_id in task_ids)
+                )
+            ):
+                raise RuntimeError("skill_recovery_candidate_page_invalid")
+            for task_id in task_ids:
+                await self._reconcile_skill_recovery_task(task_id)
+            if len(task_ids) < 128:
+                return
+            after_task_id = task_ids[-1]
+
+    async def _reconcile_skill_recovery_task(self, task_id: str) -> None:
+        task = await self.storage.get_task(task_id)
+        if task is None:
+            raise RuntimeError("skill_recovery_task_authority_missing")
+        if task.status not in UNFINISHED_TASK_STATUSES:
+            return
+        run = await self.agent_run_repository.get_run_for_task(task.task_id)
+        if run is not None and (
+            run.task_id != task.task_id
+            or run.conversation_id != task.conversation_id
+        ):
+            raise RuntimeError("skill_recovery_agent_run_identity_mismatch")
+        if run is not None and run.status in {
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.FAILED,
+            AgentRunStatus.CANCELLED,
+        }:
+            raise RuntimeError("skill_recovery_terminal_run_task_mismatch")
+
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        if conversation is None:
+            raise RuntimeError("skill_recovery_conversation_missing")
+        root_message = await self.storage.get_message(task.root_message_id)
+        if (
+            root_message is None
+            or root_message.conversation_id != task.conversation_id
+            or root_message.task_id != task.task_id
+        ):
+            raise RuntimeError("skill_recovery_root_message_identity_mismatch")
+
+        authority: PreparedSubmissionRecoveryAuthority | None = None
+        prepared_loader = getattr(self, "_prepared_agent_recovery_loader", None)
+        authority_loader = getattr(prepared_loader, "load_authority", None)
+        if prepared_loader is not None and not callable(authority_loader):
+            raise RuntimeError("skill_recovery_prepared_authority_loader_missing")
+        if callable(authority_loader):
+            authority = await authority_loader(
+                username=conversation.username,
+                conversation_id=conversation.conversation_id,
+                task_id=task.task_id,
+                message_id=task.root_message_id,
+                root_message_content=root_message.content,
+            )
+
+        if run is not None:
+            if authority is not None and (
+                authority.prepared["planned_handoff_kind"] != "agent_run"
+                or authority.agent_context is None
+            ):
+                raise RuntimeError("skill_recovery_run_handoff_kind_mismatch")
+            safe_error_code = self._skill_recovery_error_code(
+                None
+                if authority is None
+                else authority.prepared["bundle_revisions"].get(
+                    "skill_bundle_revision"
+                )
+            )
+            if safe_error_code is not None:
+                await self._terminalize_skill_recovery_run(
+                    task,
+                    safe_error_code=safe_error_code,
+                )
+            return
+
+        if (
+            authority is None
+            or authority.preparation.handoff_state
+            is SubmissionHandoffState.PENDING
+        ):
+            return
+        kind = str(authority.prepared["planned_handoff_kind"])
+        if kind == "agent_run":
+            raise RuntimeError("skill_recovery_handed_off_agent_run_missing")
+        safe_error_code = self._skill_recovery_error_code(
+            authority.prepared["bundle_revisions"].get(
+                "skill_bundle_revision"
+            )
+        )
+        if safe_error_code is None:
+            return
+        if kind == "interrupt":
+            interrupt = await self.storage.get_interrupt(
+                authority.preparation.handoff_identity
+            )
+            if (
+                interrupt is None
+                or interrupt.task_id != task.task_id
+                or interrupt.conversation_id != task.conversation_id
+            ):
+                raise RuntimeError("skill_recovery_interrupt_identity_mismatch")
+            node = await self.storage.get_task_node(interrupt.node_id)
+            if node is None or node.task_id != task.task_id:
+                raise RuntimeError("skill_recovery_interrupt_node_identity_mismatch")
+            await self._terminalize_pre_agent_skill_task(
+                task,
+                safe_error_code=safe_error_code,
+            )
+            return
+        if kind == "no_server_intent":
+            if task.status == TaskStatus.CANCELLING:
+                await self.storage.materialize_submission_no_server_intent_exact(
+                    username=conversation.username,
+                    conversation_id=conversation.conversation_id,
+                    task_id=task.task_id,
+                    occurred_at=self._utcnow_naive(),
+                )
+                await self._terminalize_pre_agent_skill_task(
+                    task,
+                    safe_error_code=safe_error_code,
+                )
+            else:
+                outcome = await self.storage.converge_submission_no_server_handoff_exact(
+                    username=conversation.username,
+                    conversation_id=conversation.conversation_id,
+                    task_id=task.task_id,
+                    occurred_at=self._utcnow_naive(),
+                )
+                if outcome not in {
+                    MCPNoServerConvergenceResult.CONVERGED,
+                    MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+                    MCPNoServerConvergenceResult.ALREADY_TERMINAL,
+                }:
+                    raise RuntimeError(
+                        f"skill_recovery_no_server_convergence_failed:{outcome}"
+                    )
+                await self._best_effort_clear_skill_recovery_pointer(task)
+            return
+        raise RuntimeError("skill_recovery_handoff_kind_invalid")
+
+    def _skill_recovery_error_code(self, revision: object) -> str | None:
+        classification = classify_skill_bundle_revision(revision)
+        if classification == "retired":
+            return "agent_skill_bundle_revision_retired"
+        if classification == "invalid":
+            return "agent_skill_bundle_revision_invalid"
+        if self._skill_runtime_state is None:
+            return "agent_skill_bundle_revision_unavailable"
+        try:
+            self._skill_runtime_state.bundle_for_revision(str(revision).strip())
+        except SkillBundleRevisionError as exc:
+            return exc.safe_error_code
+        return None
+
+    async def _terminalize_skill_recovery_run(
+        self,
+        task: Task,
+        *,
+        safe_error_code: str,
+    ) -> None:
+        if task.status == TaskStatus.CANCELLING:
+            run = await self.agent_loop_orchestrator.cancel(
+                task.task_id,
+                reason_code=safe_error_code,
+            )
+            target_status = AgentRunStatus.CANCELLED
+            target_task_status = TaskStatus.CANCELLED
+        else:
+            run = await self.agent_loop_orchestrator.fail(
+                task.task_id,
+                error_code=safe_error_code,
+            )
+            target_status = AgentRunStatus.FAILED
+            target_task_status = TaskStatus.FAILED
+        current_task = await self.storage.get_task(task.task_id)
+        if (
+            run is None
+            or run.status != target_status
+            or current_task is None
+            or current_task.status != target_task_status
+        ):
+            raise RuntimeError("skill_recovery_run_terminalization_failed")
+        await self._best_effort_clear_skill_recovery_pointer(current_task)
+
+    async def _terminalize_pre_agent_skill_task(
+        self,
+        task: Task,
+        *,
+        safe_error_code: str,
+    ) -> None:
+        if safe_error_code not in {
+            "agent_skill_bundle_revision_retired",
+            "agent_skill_bundle_revision_invalid",
+            "agent_skill_bundle_revision_unavailable",
+        }:
+            raise RuntimeError("skill_recovery_error_code_invalid")
+        target_status = (
+            TaskStatus.CANCELLED
+            if task.status == TaskStatus.CANCELLING
+            else TaskStatus.FAILED
+        )
+        saved = await self.storage.compare_and_set_task(
+            replace(
+                task,
+                status=target_status,
+                updated_at=self._utcnow_naive(),
+            ),
+            expected_from_status=task.status,
+        )
+        if saved is None:
+            saved = await self.storage.get_task(task.task_id)
+        if saved is None or saved.status != target_status:
+            raise RuntimeError("skill_recovery_task_terminalization_failed")
+        await self._best_effort_clear_skill_recovery_pointer(saved)
+
+    async def _best_effort_clear_skill_recovery_pointer(self, task: Task) -> None:
+        try:
+            await self._clear_conversation_current_task(
+                task.conversation_id,
+                task.task_id,
+            )
+        except Exception:
+            pass
+
     async def _recover_agent_run(self, run: AgentRun) -> None:
         task = await self.storage.get_task(run.task_id)
         if task is None or task.conversation_id != run.conversation_id:
             raise RuntimeError("agent_startup_task_identity_mismatch")
+        if task.status not in UNFINISHED_TASK_STATUSES:
+            raise RuntimeError("agent_startup_terminal_task_has_recoverable_run")
         conversation = await self.storage.get_conversation(run.conversation_id)
         if conversation is None:
             raise RuntimeError("agent_startup_conversation_missing")
@@ -10504,41 +10997,31 @@ class ApiRuntime(
                     root_message.content if root_message is not None else None
                 ),
             )
-        if uninitialized_run and prepared is None:
-            raise RuntimeError("agent_startup_initialization_authority_missing")
+        safe_error_code = self._skill_recovery_error_code(
+            None
+            if prepared is None
+            else prepared.bundle_revisions.get("skill_bundle_revision")
+        )
+        if safe_error_code is not None:
+            await self._terminalize_skill_recovery_run(
+                task,
+                safe_error_code=safe_error_code,
+            )
+            return
         if prepared is None:
-            user_message = (
-                root_message.content
-                if root_message is not None
-                else task.summary or ""
-            )
-            metadata = {
-                **await self._task_accepted_llm_metadata(task.task_id),
-                **self._mcp_task_assignment_metadata(task),
-            }
-            if self._skill_runtime_state is not None:
-                metadata["skill_bundle_revision"] = (
-                    self._skill_runtime_state.active_revision
-                )
-            profiles = await self.available_user_mcp_server_profiles(
-                conversation.username,
-                execution_mode=task.mcp_execution_mode,
-            )
-            owner_scope = self._agent_owner_scope(conversation.username)
-            initial_required_tool_name = None
-        else:
-            (
-                metadata,
-                profiles,
-                owner_scope,
-                user_message,
-                initial_required_tool_name,
-            ) = await self._prepared_agent_recovery_values(
-                run=run,
-                task=task,
-                conversation=conversation,
-                prepared=prepared,
-            )
+            raise RuntimeError("agent_startup_prepared_authority_missing")
+        (
+            metadata,
+            profiles,
+            owner_scope,
+            user_message,
+            initial_required_tool_name,
+        ) = await self._prepared_agent_recovery_values(
+            run=run,
+            task=task,
+            conversation=conversation,
+            prepared=prepared,
+        )
         metadata["available_mcp_server_ids"] = [
             profile.server_id for profile in profiles
         ]

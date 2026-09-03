@@ -10,12 +10,18 @@ from unittest.mock import AsyncMock, Mock
 
 from src.api.runtime import ApiRuntime
 from src.api.submission_admission import PreparedAgentRecoveryContext
-from src.core.enums import EventVisibility, RoutingMode, TaskStatus
+from src.core.enums import EventVisibility, InterruptStatus, NodeStatus, RoutingMode, TaskStatus
 from src.core.models import (
     EventRecord,
+    MCPNoServerConvergenceResult,
     SubmissionRecoveryRecord,
     Task,
     TaskInputAttachment,
+)
+from src.orchestration.agent_loop.models import (
+    AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
 )
 
 
@@ -70,6 +76,190 @@ class _ExactEventStorage:
 
 
 class SubmissionPreparationCallbacksTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _terminal_prepared(kind: str) -> dict[str, object]:
+        return {
+            "planned_handoff_kind": kind,
+            "requested_capability_id": None,
+            "model_options": {
+                "model_edition": "api-test",
+                "reasoning_effort": "minimal",
+                "thinking_enabled": False,
+            },
+            "bundle_revisions": {
+                "skill_bundle_revision": "skillrev-000001-aaaaaaaaaaaa",
+                "mcp_bundle_revision": None,
+            },
+            "execution_metadata": {},
+            "skill_activation": None,
+            "preparation_receipt": {"selector_decision_sha256": "b" * 64},
+        }
+
+    @staticmethod
+    def _terminal_receipt(*, interrupt_kind: str | None = None):
+        selector = (
+            None
+            if interrupt_kind is None
+            else json.dumps(
+                {"interrupt_kind": interrupt_kind},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        return SimpleNamespace(selector_decision=selector)
+
+    async def test_terminal_agent_handoff_creates_no_initial_items_or_sampling(self) -> None:
+        task = Task(
+            task_id="task-1",
+            conversation_id="conversation-1",
+            root_message_id="message-1",
+            status=TaskStatus.ACCEPTED,
+        )
+        terminal_task = Task(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            root_message_id=task.root_message_id,
+            status=TaskStatus.FAILED,
+        )
+        run = AgentRun(
+            run_id="agent-run:task-1",
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            status=AgentRunStatus.FAILED,
+            binding=AgentModelBinding("api-test"),
+            terminal_reason_code="agent_skill_bundle_revision_retired",
+            terminal_at=NOW,
+        )
+        storage = SimpleNamespace(
+            get_task=AsyncMock(side_effect=[task, terminal_task]),
+        )
+        initialize_terminal = AsyncMock(return_value=run)
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = storage
+        runtime._agent_owner_scope = lambda username: f"owner:{username}"
+        runtime.agent_loop_orchestrator = SimpleNamespace(
+            initialize_terminal_run=initialize_terminal,
+            initialize_run=AsyncMock(
+                side_effect=AssertionError("normal Agent initialization must not run")
+            ),
+        )
+        runtime._best_effort_clear_skill_recovery_pointer = AsyncMock()
+        runtime._submission_selector_facts = {}
+        runtime._submission_file_selection_computations = {}
+
+        handoff = await runtime.materialize_terminal_handoff(
+            _record(),
+            self._terminal_prepared("agent_run"),
+            self._terminal_receipt(),
+            "agent_skill_bundle_revision_retired",
+        )
+
+        self.assertEqual(handoff.kind, "agent_run")
+        self.assertEqual(handoff.identity, "agent-run:task-1")
+        initialize_terminal.assert_awaited_once()
+        request = initialize_terminal.await_args.args[0]
+        self.assertEqual(
+            request.metadata["skill_bundle_revision"],
+            "skillrev-000001-aaaaaaaaaaaa",
+        )
+        self.assertEqual(
+            initialize_terminal.await_args.kwargs["status"],
+            AgentRunStatus.FAILED,
+        )
+        runtime.agent_loop_orchestrator.initialize_run.assert_not_awaited()
+
+    async def test_terminal_interrupt_handoff_persists_only_cancelled_history(self) -> None:
+        state = SimpleNamespace(
+            task=Task(
+                task_id="task-1",
+                conversation_id="conversation-1",
+                root_message_id="message-1",
+                status=TaskStatus.ACCEPTED,
+            ),
+            node=None,
+            interrupt=None,
+        )
+
+        async def save_task(task, *, expected_from_status):
+            self.assertEqual(expected_from_status, TaskStatus.ACCEPTED)
+            state.task = task
+            return task
+
+        async def save_node(node):
+            state.node = node
+            return node
+
+        async def save_interrupt(interrupt):
+            state.interrupt = interrupt
+            return interrupt
+
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = SimpleNamespace(
+            get_task=AsyncMock(side_effect=lambda _task_id: state.task),
+            compare_and_set_task=save_task,
+            get_task_node=AsyncMock(side_effect=lambda _node_id: state.node),
+            save_task_node=save_node,
+            get_interrupt=AsyncMock(side_effect=lambda _interrupt_id: state.interrupt),
+            save_interrupt=save_interrupt,
+        )
+        runtime._utcnow_naive = lambda: NOW
+        runtime._best_effort_clear_skill_recovery_pointer = AsyncMock()
+        runtime._submission_selector_facts = {}
+        runtime._submission_file_selection_computations = {}
+
+        handoff = await runtime.materialize_terminal_handoff(
+            _record(),
+            self._terminal_prepared("interrupt"),
+            self._terminal_receipt(interrupt_kind="file_selection"),
+            "agent_skill_bundle_revision_retired",
+        )
+
+        self.assertEqual(handoff.kind, "interrupt")
+        self.assertEqual(state.task.status, TaskStatus.FAILED)
+        self.assertEqual(state.node.status, NodeStatus.CANCELLED)
+        self.assertEqual(state.interrupt.status, InterruptStatus.CANCELLED)
+        self.assertEqual(state.interrupt.required_fields, {})
+
+    async def test_terminal_no_server_handoff_reuses_exact_convergence(self) -> None:
+        state = SimpleNamespace(
+            task=Task(
+                task_id="task-1",
+                conversation_id="conversation-1",
+                root_message_id="message-1",
+                status=TaskStatus.ACCEPTED,
+            )
+        )
+
+        async def converge(**_kwargs):
+            state.task = Task(
+                task_id=state.task.task_id,
+                conversation_id=state.task.conversation_id,
+                root_message_id=state.task.root_message_id,
+                status=TaskStatus.FAILED,
+            )
+            return MCPNoServerConvergenceResult.CONVERGED
+
+        runtime = object.__new__(ApiRuntime)
+        runtime.storage = SimpleNamespace(
+            get_task=AsyncMock(side_effect=lambda _task_id: state.task),
+            converge_submission_no_server_handoff_exact=AsyncMock(
+                side_effect=converge
+            ),
+        )
+        runtime._best_effort_clear_skill_recovery_pointer = AsyncMock()
+        runtime._submission_selector_facts = {}
+        runtime._submission_file_selection_computations = {}
+
+        handoff = await runtime.materialize_terminal_handoff(
+            _record(),
+            self._terminal_prepared("no_server_intent"),
+            self._terminal_receipt(),
+            "agent_skill_bundle_revision_retired",
+        )
+
+        self.assertEqual(handoff.kind, "no_server_intent")
+        self.assertEqual(state.task.status, TaskStatus.FAILED)
+        runtime.storage.converge_submission_no_server_handoff_exact.assert_awaited_once()
     async def test_prepared_agent_request_restores_persisted_artifacts_for_skill(
         self,
     ) -> None:

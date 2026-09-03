@@ -65,6 +65,32 @@ class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(admission.handoff_acks, ["1", "2"])
         self.assertEqual(callbacks.wakeups, ["agent-run:task-1", "agent-run:task-2"])
 
+    async def test_ineligible_skill_revision_uses_terminal_handoff_before_materialization(self) -> None:
+        admission = _FakeAdmission([_record("1")], self.clock)
+        callbacks = _Callbacks(admission)
+        callbacks.skill_revision_failure = "agent_skill_bundle_revision_retired"
+
+        result = await self._coordinator(
+            admission,
+            _FakeReceipts(),
+            callbacks,
+        ).recover_pending()
+
+        self.assertEqual(result.status, SubmissionRecoveryStatus.COMPLETED)
+        self.assertEqual(
+            callbacks.terminal_handoffs,
+            [
+                (
+                    "agent-run:task-1",
+                    "agent_skill_bundle_revision_retired",
+                )
+            ],
+        )
+        self.assertEqual(callbacks.materialized, [])
+        self.assertEqual(callbacks.agent_creates, 0)
+        self.assertEqual(callbacks.wakeups, [])
+        self.assertEqual(admission.handoff_acks, ["1"])
+
     async def test_projected_sidecar_missing_sql_repairs_after_restart_with_fresh_claim(
         self,
     ) -> None:
@@ -1174,6 +1200,33 @@ class PreparedAgentRecoveryLoaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(loaded.skill_activation_payload_json)
         self.assertIsNone(loaded.skill_activation_payload_sha256)
 
+    async def test_authority_loader_reads_pending_preparation_without_handoff_recompute(self) -> None:
+        record = _record("51")
+        loader, admission, _receipts = await self._loader_for(record)
+        assert admission.preparation is not None
+        admission.preparation = replace(
+            admission.preparation,
+            handoff_state=SubmissionHandoffState.PENDING,
+            handoff_kind=None,
+            handoff_identity=None,
+        )
+
+        authority = await loader.load_authority(
+            username=record.username,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            message_id=record.message_id,
+            root_message_content="hello-51",
+        )
+
+        assert authority is not None
+        self.assertEqual(
+            authority.preparation.handoff_state,
+            SubmissionHandoffState.PENDING,
+        )
+        self.assertEqual(authority.prepared["planned_handoff_kind"], "agent_run")
+        self.assertIsNotNone(authority.agent_context)
+
     async def test_v2_content_with_v1_digest_is_rejected(self) -> None:
         record = _record("49")
         loader, admission, receipts = await self._loader_for(record)
@@ -1998,6 +2051,8 @@ class _Callbacks:
         self.last_handoff_identity = ""
         self.forced_handoff_identity: str | None = None
         self.receipts: _FakeReceipts | None = None
+        self.skill_revision_failure: str | None = None
+        self.terminal_handoffs: list[tuple[str, str]] = []
 
     async def settle_route_decision_exact(self, record, continuation, written_at):
         self._computed("route", record)
@@ -2071,6 +2126,32 @@ class _Callbacks:
         self.sink.write(f"handoff:{record.task_id}", identity.encode())
         self.last_handoff_identity = identity
         return DurableSubmissionHandoff("no_server_intent", identity)
+
+    def skill_revision_error_code(self, _revision):
+        return self.skill_revision_failure
+
+    async def materialize_terminal_handoff(
+        self,
+        record,
+        prepared,
+        receipt,
+        safe_error_code,
+    ):
+        del receipt
+        kind = prepared["planned_handoff_kind"]
+        identity = (
+            f"agent-run:{record.task_id}"
+            if kind == "agent_run"
+            else mcp_no_server_intent_id(record.task_id)
+            if kind == "no_server_intent"
+            else submission_interrupt_handoff_id(
+                record.task_id,
+                prepared["preparation_receipt"]["selector_decision_sha256"],
+            )
+        )
+        self.terminal_handoffs.append((identity, safe_error_code))
+        self.sink.write(f"terminal:{record.task_id}", identity.encode())
+        return DurableSubmissionHandoff(kind, identity)
 
     async def wakeup_agent(self, record, handoff_identity):
         self.wakeups.append(handoff_identity)

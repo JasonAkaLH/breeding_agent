@@ -1355,9 +1355,8 @@ class ConversationFileSelectionAPITest(APITestCase):
                 content=f"使用 {first}",
                 client_message_id="client-file-selection-resume-replay",
             )
-        self.assertEqual(replay.status_code, 202, replay.text)
-        self.assertEqual(replay.json()["action"], "interrupt_resumed")
-        self.assertEqual(replay.json()["answer_payload"]["upload_ids"], [first])
+        self.assertEqual(replay.status_code, 400, replay.text)
+        self.assertIn("Task is terminal", replay.text)
         replayed_attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
         self.assertEqual(len(replayed_attachments), 1)
 

@@ -430,6 +430,14 @@ class PreparedAgentRecoveryContext:
     skill_activation_payload_sha256: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedSubmissionRecoveryAuthority:
+    preparation: SubmissionPreparationRecord
+    prepared: Mapping[str, Any]
+    receipt: SubmissionPreparationReceipt
+    agent_context: PreparedAgentRecoveryContext | None = None
+
+
 class PreparedAgentRecoveryLoader(Protocol):
     async def load(
         self,
@@ -440,6 +448,16 @@ class PreparedAgentRecoveryLoader(Protocol):
         message_id: str,
         root_message_content: str | None,
     ) -> PreparedAgentRecoveryContext | None: ...
+
+    async def load_authority(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        message_id: str,
+        root_message_content: str | None,
+    ) -> PreparedSubmissionRecoveryAuthority | None: ...
 
 
 class SubmissionPreparedAgentRecoveryLoader:
@@ -463,6 +481,37 @@ class SubmissionPreparedAgentRecoveryLoader:
         message_id: str,
         root_message_content: str | None,
     ) -> PreparedAgentRecoveryContext | None:
+        authority = await self.load_authority(
+            username=username,
+            conversation_id=conversation_id,
+            task_id=task_id,
+            message_id=message_id,
+            root_message_content=root_message_content,
+        )
+        if authority is None:
+            return None
+        preparation = authority.preparation
+        prepared = authority.prepared
+        if (
+            preparation.handoff_state is not SubmissionHandoffState.HANDED_OFF
+            or preparation.handoff_kind != "agent_run"
+            or preparation.handoff_identity != f"agent-run:{task_id}"
+            or prepared["prepared_kind"] != "agent_run"
+            or prepared["planned_handoff_kind"] != "agent_run"
+            or authority.agent_context is None
+        ):
+            raise SubmissionRecoveryError("submission_prepared_agent_handoff_drift")
+        return authority.agent_context
+
+    async def load_authority(
+        self,
+        *,
+        username: str,
+        conversation_id: str,
+        task_id: str,
+        message_id: str,
+        root_message_content: str | None,
+    ) -> PreparedSubmissionRecoveryAuthority | None:
         preparation = await self._admission.get_submission_preparation(
             SubmissionPreparationLookup(
                 username=username,
@@ -476,11 +525,8 @@ class SubmissionPreparedAgentRecoveryLoader:
             preparation.conversation_id != conversation_id
             or preparation.message_id != message_id
             or preparation.task_id != task_id
-            or preparation.handoff_state is not SubmissionHandoffState.HANDED_OFF
-            or preparation.handoff_kind != "agent_run"
-            or preparation.handoff_identity != f"agent-run:{task_id}"
         ):
-            raise SubmissionRecoveryError("submission_prepared_agent_handoff_drift")
+            raise SubmissionRecoveryError("submission_prepared_authority_identity_drift")
         if preparation.prepared_execution_sha256 != _prepared_execution_digest(
             preparation.prepared_execution
         ):
@@ -493,11 +539,23 @@ class SubmissionPreparedAgentRecoveryLoader:
             task_id=task_id,
         )
         if (
-            prepared["prepared_kind"] != "agent_run"
-            or prepared["planned_handoff_kind"] != "agent_run"
-            or prepared["owner_scope"] != username
+            prepared["owner_scope"] != username
+            or prepared["prepared_kind"] != prepared["planned_handoff_kind"]
         ):
             raise SubmissionRecoveryError("submission_prepared_agent_identity_drift")
+        expected_identity = _expected_handoff_identity(task_id, prepared)
+        if preparation.handoff_state is SubmissionHandoffState.PENDING:
+            if (
+                preparation.handoff_kind is not None
+                or preparation.handoff_identity is not None
+            ):
+                raise SubmissionRecoveryError("submission_prepared_handoff_drift")
+        elif (
+            preparation.handoff_state is not SubmissionHandoffState.HANDED_OFF
+            or preparation.handoff_kind != prepared["planned_handoff_kind"]
+            or preparation.handoff_identity != expected_identity
+        ):
+            raise SubmissionRecoveryError("submission_prepared_handoff_drift")
         receipt = await self._receipts.get_submission_preparation_receipt(
             username=username,
             conversation_id=conversation_id,
@@ -511,11 +569,32 @@ class SubmissionPreparedAgentRecoveryLoader:
             receipt=receipt,
         )
         assert receipt is not None
-        return _build_prepared_agent_recovery_context(
-            preparation,
+        _validate_prepared_receipt_facts(prepared, prepared, receipt)
+        current_user_input = _execution_text_from_facts(
+            root_message_content=root_message_content,
+            facts=prepared,
+            memory_component=receipt.memory_context,
+            source=prepared["execution_text_source"],
+        )
+        if hashlib.sha256(current_user_input.encode("utf-8")).hexdigest() != prepared.get(
+            "execution_text_sha256"
+        ):
+            raise SubmissionRecoveryError("submission_execution_text_digest_mismatch")
+        agent_context = (
+            _build_prepared_agent_recovery_context(
+                preparation,
+                prepared=prepared,
+                receipt=receipt,
+                root_message_content=root_message_content,
+            )
+            if prepared["planned_handoff_kind"] == "agent_run"
+            else None
+        )
+        return PreparedSubmissionRecoveryAuthority(
+            preparation=preparation,
             prepared=prepared,
             receipt=receipt,
-            root_message_content=root_message_content,
+            agent_context=agent_context,
         )
 
 
@@ -646,6 +725,16 @@ class SubmissionPreparationCallbacks(Protocol):
         self,
         record: SubmissionRecoveryRecord,
         prepared: Mapping[str, Any],
+    ) -> DurableSubmissionHandoff: ...
+
+    def skill_revision_error_code(self, revision: object) -> str | None: ...
+
+    async def materialize_terminal_handoff(
+        self,
+        record: SubmissionRecoveryRecord,
+        prepared: Mapping[str, Any],
+        receipt: SubmissionPreparationReceipt,
+        safe_error_code: str,
     ) -> DurableSubmissionHandoff: ...
 
     async def wakeup_agent(
@@ -1174,6 +1263,36 @@ class SubmissionAdmissionCoordinator:
             prepared_execution=prepared_bytes,
             prepared_execution_sha256=_prepared_execution_digest(prepared_bytes),
         )
+        safe_error_code = self._callbacks.skill_revision_error_code(
+            prepared["bundle_revisions"].get("skill_bundle_revision")
+        )
+        if safe_error_code is not None:
+            await keeper.renew_now()
+            handoff = await self._callbacks.materialize_terminal_handoff(
+                materialization_record,
+                prepared,
+                receipt,
+                safe_error_code,
+            )
+            _validate_handoff(record, prepared, handoff)
+            await keeper.renew_now()
+            handoff_phase = await keeper.call(
+                lambda handle: self._admission.acknowledge_submission_handoff(
+                    SubmissionHandoffAcknowledgementRequest(
+                        handle=handle,
+                        prepared_execution_sha256=_prepared_execution_digest(
+                            prepared_bytes
+                        ),
+                        handoff_kind=handoff.kind,
+                        handoff_identity=handoff.identity,
+                        acknowledged_at=self._now(),
+                    )
+                )
+            )
+            if handoff_phase.handoff_state is not SubmissionHandoffState.HANDED_OFF:
+                raise SubmissionRecoveryError("submission_handoff_ack_phase_invalid")
+            await keeper.stop()
+            return
         await keeper.renew_now()
         await self._callbacks.materialize_route_decision(
             materialization_record, _required_component(receipt.route_decision)
@@ -2260,18 +2379,24 @@ def _validate_handoff(
 ) -> None:
     if handoff.kind != prepared["planned_handoff_kind"] or not handoff.identity:
         raise SubmissionRecoveryError("submission_handoff_identity_drift")
-    expected = (
-        f"agent-run:{record.task_id}"
-        if handoff.kind == "agent_run"
-        else mcp_no_server_intent_id(record.task_id)
-        if handoff.kind == "no_server_intent"
-        else submission_interrupt_handoff_id(
-            record.task_id,
-            str(prepared["preparation_receipt"]["selector_decision_sha256"]),
-        )
-    )
+    expected = _expected_handoff_identity(record.task_id, prepared)
     if handoff.identity != expected:
         raise SubmissionRecoveryError("submission_handoff_identity_drift")
+
+
+def _expected_handoff_identity(
+    task_id: str,
+    prepared: Mapping[str, Any],
+) -> str:
+    kind = prepared["planned_handoff_kind"]
+    if kind == "agent_run":
+        return f"agent-run:{task_id}"
+    if kind == "no_server_intent":
+        return mcp_no_server_intent_id(task_id)
+    return submission_interrupt_handoff_id(
+        task_id,
+        str(prepared["preparation_receipt"]["selector_decision_sha256"]),
+    )
 
 
 def submission_interrupt_handoff_id(task_id: str, selector_decision_sha256: str) -> str:

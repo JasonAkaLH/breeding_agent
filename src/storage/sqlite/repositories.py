@@ -224,6 +224,7 @@ from src.storage.row_mappers import (
 )
 
 from src.storage.sqlalchemy_models import (
+    AgentRunRow,
     ArtifactRow,
     AuthUserTokenRow,
     CheckpointRow,
@@ -5229,6 +5230,50 @@ class SQLiteStateRepository:
             query = query.where(TaskRow.status.in_([str(status) for status in statuses]))
         rows = self._session.scalars(query.order_by(TaskRow.created_at.desc(), TaskRow.task_id.desc())).all()
         return [_row_to_task(row) for row in rows]
+
+    def list_skill_recovery_candidate_task_ids(
+        self,
+        *,
+        after_task_id: str | None = None,
+        limit: int = 128,
+    ) -> tuple[str, ...]:
+        if limit < 1 or limit > 128:
+            raise ValueError("skill_recovery_candidate_limit_invalid")
+        statuses = (
+            str(TaskStatus.ACCEPTED),
+            str(TaskStatus.PLANNING),
+            str(TaskStatus.RUNNING),
+            str(TaskStatus.CANCELLING),
+        )
+        cursor = after_task_id
+        candidates: list[str] = []
+        while len(candidates) < limit:
+            query = (
+                select(
+                    TaskRow.task_id,
+                    AgentRunRow.run_id,
+                    MessageRow.message_id,
+                )
+                .outerjoin(AgentRunRow, AgentRunRow.task_id == TaskRow.task_id)
+                .outerjoin(MessageRow, MessageRow.message_id == TaskRow.root_message_id)
+                .where(TaskRow.status.in_(statuses))
+            )
+            if cursor is not None:
+                query = query.where(TaskRow.task_id > cursor)
+            rows = self._session.execute(
+                query.order_by(TaskRow.task_id).limit(128)
+            ).all()
+            if not rows:
+                break
+            for task_id, run_id, message_id in rows:
+                cursor = str(task_id)
+                if run_id is not None or message_id is not None:
+                    candidates.append(str(task_id))
+                    if len(candidates) == limit:
+                        break
+            if len(rows) < 128:
+                break
+        return tuple(candidates)
 
     def save_task_node(self, node: TaskNode) -> TaskNode:
         _ensure_runtime_store_write_allowed_by_rust_contract(
@@ -19160,6 +19205,19 @@ class SQLiteStorage(StoragePort):
             mode=self._task_authority_mode(),
         )
         return loaded
+
+    async def list_skill_recovery_candidate_task_ids(
+        self,
+        *,
+        after_task_id: str | None = None,
+        limit: int = 128,
+    ) -> tuple[str, ...]:
+        return await self._run(
+            lambda state, collab: state.list_skill_recovery_candidate_task_ids(
+                after_task_id=after_task_id,
+                limit=limit,
+            )
+        )
 
     async def save_task_node(
         self, node: TaskNode, *, expected_from_status: NodeStatus | None = None

@@ -137,6 +137,9 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         runtime.recover_deleting_conversations = lambda: record(
             "deleting-conversations-recovered"
         )
+        runtime._reconcile_skill_recovery_eligibility = lambda: record(
+            "skill-recovery-eligibility"
+        )
         runtime._admit_mcp_rollout_instance = lambda: record("mcp-admit")
         for name in (
             "_repair_mcp_terminal_candidate_lifecycle",
@@ -287,6 +290,14 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             events.index("submission-projected"),
         )
         self.assertLess(events.index("submission-projected"), events.index("mcp-admit"))
+        self.assertLess(
+            events.index("submission-projected"),
+            events.index("skill-recovery-eligibility"),
+        )
+        self.assertLess(
+            events.index("skill-recovery-eligibility"),
+            events.index("mcp-admit"),
+        )
         self.assertLess(events.index("mcp-reconciled"), events.index("submission-handoff"))
         self.assertLess(events.index("submission-handoff"), events.index("agent-recovery"))
         self.assertNotIn("submission-abort", events)
@@ -402,6 +413,11 @@ class AgentRunLeaseRetryStartupTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(message_id, message.message_id)
                 return message
 
+            async def list_task_input_attachments_for_task(
+                _self, _task_id: str
+            ):
+                return []
+
         runtime = object.__new__(ApiRuntime)
         runtime.agent_run_repository = Repository()
         runtime.storage = Storage()
@@ -413,13 +429,38 @@ class AgentRunLeaseRetryStartupTest(unittest.IsolatedAsyncioTestCase):
         runtime._agent_run_recovery = SimpleNamespace(
             recover_crashed_run=recover_with_result
         )
+        runtime._prepared_agent_recovery_loader = SimpleNamespace(
+            load=AsyncMock(
+                return_value=PreparedAgentRecoveryContext(
+                    username="alice",
+                    current_user_input="hello",
+                    initial_required_tool_name=None,
+                    model_options={
+                        "model_edition": "test-model",
+                        "reasoning_effort": "minimal",
+                        "thinking_enabled": False,
+                    },
+                    bundle_revisions={
+                        "skill_bundle_revision": "skillrev-v2-" + ("a" * 64),
+                        "mcp_bundle_revision": None,
+                    },
+                    execution_metadata={},
+                    memory_context=None,
+                    mcp_binding=None,
+                    mcp_assignment=None,
+                    available_mcp_servers=(),
+                )
+            )
+        )
         runtime._agent_invocation_contexts = SimpleNamespace(merge=lambda *_args, **_kwargs: None)
         runtime._task_accepted_llm_metadata = AsyncMock(return_value={})
         runtime._mcp_task_assignment_metadata = lambda _task: {}
         runtime._skill_runtime_state = None
+        runtime._skill_recovery_error_code = lambda _revision: None
         runtime._mcp_runtime_state = None
         runtime._task_skill_bundle_revisions = {}
         runtime._task_mcp_bundle_revisions = {}
+        runtime._restore_prepared_bundle_revisions = lambda **_kwargs: None
         runtime.available_user_mcp_server_profiles = AsyncMock(return_value=())
         runtime._agent_cancellation_token = lambda _task_id: None
         runtime._agent_run_lease_retry_tasks = {}
@@ -628,9 +669,11 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         runtime._agent_invocation_contexts = SimpleNamespace(merge=Mock())
         runtime._agent_run_recovery = SimpleNamespace(recover_crashed_run=recovery)
         runtime._skill_runtime_state = None
+        runtime._skill_recovery_error_code = lambda _revision: None
         runtime._mcp_runtime_state = None
         runtime._task_skill_bundle_revisions = {}
         runtime._task_mcp_bundle_revisions = {}
+        runtime._restore_prepared_bundle_revisions = lambda **_kwargs: None
         runtime._agent_cancellation_token = lambda _task_id: None
 
         with self.assertRaisesRegex(UploadValidationError, "upl-deleted"):
@@ -692,7 +735,7 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
                 "thinking_enabled": False,
             },
             bundle_revisions={
-                "skill_bundle_revision": "skill-r7",
+                "skill_bundle_revision": "skillrev-v2-" + ("7" * 64),
                 "mcp_bundle_revision": "mcp-r9",
             },
             execution_metadata={
@@ -809,12 +852,19 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         )
         visibility = recovery_kwargs["visibility_context"]
         self.assertEqual(visibility.authenticated_owner_scope, expected_scope)
-        self.assertEqual(visibility.pinned_skill_bundle_revision, "skill-r7")
+        self.assertEqual(
+            visibility.pinned_skill_bundle_revision,
+            "skillrev-v2-" + ("7" * 64),
+        )
         self.assertEqual(visibility.safe_mcp_server_profiles, (profile,))
-        self.assertEqual(skill_state.retained, ["skill-r7"])
+        self.assertEqual(
+            skill_state.retained,
+            ["skillrev-v2-" + ("7" * 64)],
+        )
         self.assertEqual(mcp_state.retained, ["mcp-r9"])
         self.assertEqual(
-            runtime._task_skill_bundle_revisions, {task.task_id: "skill-r7"}
+            runtime._task_skill_bundle_revisions,
+            {task.task_id: "skillrev-v2-" + ("7" * 64)},
         )
         self.assertEqual(
             runtime._task_mcp_bundle_revisions, {task.task_id: "mcp-r9"}
@@ -878,12 +928,13 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         runtime._agent_run_recovery = SimpleNamespace(
             recover_crashed_run=AsyncMock()
         )
+        runtime._skill_recovery_error_code = lambda _revision: None
 
         with self.assertRaisesRegex(RuntimeError, "model_binding_mismatch"):
             await runtime._recover_agent_run(run)
         runtime._agent_run_recovery.recover_crashed_run.assert_not_awaited()
 
-    async def test_prepared_terminal_recovery_releases_restored_bundle_revisions(
+    async def test_terminal_task_blocks_recoverable_run_before_bundle_restore(
         self,
     ) -> None:
         task = Task(
@@ -924,7 +975,7 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
                 "thinking_enabled": False,
             },
             bundle_revisions={
-                "skill_bundle_revision": "skill-r1",
+                "skill_bundle_revision": "skillrev-v2-" + ("1" * 64),
                 "mcp_bundle_revision": "mcp-r1",
             },
             execution_metadata={},
@@ -983,18 +1034,19 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         runtime._record_bundle_revision_shadow = Mock()
         runtime._clear_conversation_current_task = AsyncMock()
 
-        await runtime._recover_agent_run(run)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "agent_startup_terminal_task_has_recoverable_run",
+        ):
+            await runtime._recover_agent_run(run)
 
         self.assertEqual(runtime._task_skill_bundle_revisions, {})
         self.assertEqual(runtime._task_mcp_bundle_revisions, {})
-        self.assertEqual(runtime._skill_runtime_state.retained, ["skill-r1"])
-        self.assertEqual(runtime._skill_runtime_state.released, ["skill-r1"])
-        self.assertEqual(runtime._mcp_runtime_state.retained, ["mcp-r1"])
-        self.assertEqual(runtime._mcp_runtime_state.released, ["mcp-r1"])
-        runtime._clear_conversation_current_task.assert_awaited_once_with(
-            task.conversation_id,
-            task.task_id,
-        )
+        self.assertEqual(runtime._skill_runtime_state.retained, [])
+        self.assertEqual(runtime._skill_runtime_state.released, [])
+        self.assertEqual(runtime._mcp_runtime_state.retained, [])
+        self.assertEqual(runtime._mcp_runtime_state.released, [])
+        runtime._clear_conversation_current_task.assert_not_awaited()
 
     async def test_observer_terminal_fast_path_releases_restored_revisions(self) -> None:
         run = AgentRun(
@@ -1166,9 +1218,11 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
             recover_crashed_run=recover
         )
         runtime._skill_runtime_state = None
+        runtime._skill_recovery_error_code = lambda _revision: None
         runtime._mcp_runtime_state = None
         runtime._task_skill_bundle_revisions = {}
         runtime._task_mcp_bundle_revisions = {}
+        runtime._restore_prepared_bundle_revisions = lambda **_kwargs: None
         runtime._agent_cancellation_token = lambda _task_id: None
 
         await runtime._recover_agent_run(run)
@@ -1225,12 +1279,15 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
             initialize_run=initialize
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError, "agent_startup_initialization_authority_missing"
-        ):
-            await runtime._recover_agent_run(run)
+        runtime._terminalize_skill_recovery_run = AsyncMock()
+
+        await runtime._recover_agent_run(run)
 
         initialize.assert_not_awaited()
+        runtime._terminalize_skill_recovery_run.assert_awaited_once_with(
+            task,
+            safe_error_code="agent_skill_bundle_revision_retired",
+        )
 
 
 class AgentRunLeaseRetryFailureBoundaryTest(unittest.IsolatedAsyncioTestCase):
