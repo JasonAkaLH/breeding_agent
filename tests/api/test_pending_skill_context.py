@@ -299,6 +299,9 @@ entrypoints: {run: {path: scripts/fail.py}}
             )
         )
         await self.runtime.storage.save_task(Task(task_id, conversation_id, root_message_id))
+        skill_revision = self.runtime._skill_runtime_state.active_revision
+        self.runtime._skill_runtime_state.retain_revision(skill_revision)
+        self.runtime._task_skill_bundle_revisions[task_id] = skill_revision
         await self.runtime.storage.save_task_node(
             TaskNode(
                 node_id=node_id,
@@ -402,6 +405,9 @@ entrypoints: {run: {path: scripts/fail.py}}
             )
         )
         await self.runtime.storage.save_task(Task(task_id, conversation_id, root_message_id))
+        skill_revision = self.runtime._skill_runtime_state.active_revision
+        self.runtime._skill_runtime_state.retain_revision(skill_revision)
+        self.runtime._task_skill_bundle_revisions[task_id] = skill_revision
         await self.runtime.storage.save_task_node(
             TaskNode(
                 node_id=node_id,
@@ -522,6 +528,9 @@ entrypoints: {run: {path: scripts/fail.py}}
             )
         )
         await self.runtime.storage.save_task(Task(task_id, conversation_id, root_message_id))
+        skill_revision = self.runtime._skill_runtime_state.active_revision
+        self.runtime._skill_runtime_state.retain_revision(skill_revision)
+        self.runtime._task_skill_bundle_revisions[task_id] = skill_revision
         await self.runtime.storage.save_task_node(
             TaskNode(
                 node_id=node_id,

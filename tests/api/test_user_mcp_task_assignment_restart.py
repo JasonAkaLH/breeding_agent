@@ -89,6 +89,9 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
         restarted = self._build_runtime(
             self._enforce_env(percent=0, salt="replacement-salt")
         )
+        skill_revision = scheduled[0].metadata["skill_bundle_revision"]
+        restarted._skill_runtime_state.retain_revision(skill_revision)
+        restarted._task_skill_bundle_revisions[task.task_id] = skill_revision
         resumed: list[AgentExecutionRequest] = []
         durable_starts: list[bool] = []
 
@@ -208,6 +211,9 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
         await runtime.shutdown()
 
         restarted = self._build_runtime(self._enforce_env(percent=100, salt="enforce-salt"))
+        skill_revision = scheduled[0].metadata["skill_bundle_revision"]
+        restarted._skill_runtime_state.retain_revision(skill_revision)
+        restarted._task_skill_bundle_revisions[task.task_id] = skill_revision
         resumed: list[AgentExecutionRequest] = []
         durable_starts: list[bool] = []
 

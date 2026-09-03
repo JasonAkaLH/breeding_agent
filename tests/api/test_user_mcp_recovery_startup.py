@@ -255,6 +255,9 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         await runtime.storage.save_task(task)
+        skill_revision = runtime._skill_runtime_state.active_revision
+        runtime._skill_runtime_state.retain_revision(skill_revision)
+        runtime._task_skill_bundle_revisions[task.task_id] = skill_revision
         await runtime.storage.save_task_node(node)
         await runtime.storage.create_user_mcp_server(server)
         gateway = ApprovalGateway()

@@ -3954,6 +3954,15 @@ class ApiRuntime(
         record: SubmissionRecoveryRecord,
         prepared: Mapping[str, Any],
     ) -> DurableSubmissionHandoff:
+        self._restore_prepared_bundle_revisions(
+            task_id=record.task_id,
+            skill_revision=prepared["bundle_revisions"].get(
+                "skill_bundle_revision"
+            ),
+            mcp_revision=prepared["bundle_revisions"].get(
+                "mcp_bundle_revision"
+            ),
+        )
         selector_sha256 = prepared["preparation_receipt"]["selector_decision_sha256"]
         identity = submission_interrupt_handoff_id(record.task_id, selector_sha256)
         receipt = await self.storage.get_submission_preparation_receipt(
