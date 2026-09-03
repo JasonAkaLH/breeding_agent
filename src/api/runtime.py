@@ -11016,7 +11016,8 @@ class ApiRuntime(
         if task is None or task.conversation_id != run.conversation_id:
             raise RuntimeError("agent_startup_task_identity_mismatch")
         if task.status not in UNFINISHED_TASK_STATUSES:
-            raise RuntimeError("agent_startup_terminal_task_has_recoverable_run")
+            await self._converge_terminal_task_recoverable_run(task, run)
+            return
         conversation = await self.storage.get_conversation(run.conversation_id)
         if conversation is None:
             raise RuntimeError("agent_startup_conversation_missing")
@@ -11186,6 +11187,36 @@ class ApiRuntime(
             )
             await self._release_task_skill_revision_if_terminal(task.task_id)
             await self._release_task_mcp_revision_if_terminal(task.task_id)
+
+    async def _converge_terminal_task_recoverable_run(
+        self,
+        task: Task,
+        run: AgentRun,
+    ) -> None:
+        reason_code = "agent_terminal_task_run_convergence"
+        if task.status == TaskStatus.FAILED:
+            converged = await self.agent_loop_orchestrator.fail(
+                task.task_id,
+                error_code=reason_code,
+            )
+            target_run_status = AgentRunStatus.FAILED
+        elif task.status == TaskStatus.CANCELLED:
+            converged = await self.agent_loop_orchestrator.cancel(
+                task.task_id,
+                reason_code=reason_code,
+            )
+            target_run_status = AgentRunStatus.CANCELLED
+        else:
+            raise RuntimeError("agent_startup_terminal_task_has_recoverable_run")
+        current_task = await self.storage.get_task(task.task_id)
+        if (
+            converged is None
+            or converged.status != target_run_status
+            or current_task is None
+            or current_task.status != task.status
+        ):
+            raise RuntimeError("agent_startup_terminal_task_run_convergence_failed")
+        await self._best_effort_clear_skill_recovery_pointer(current_task)
 
     async def _reconcile_agent_terminal_events(self, run: AgentRun) -> None:
         repository = getattr(self, "agent_run_repository", None)

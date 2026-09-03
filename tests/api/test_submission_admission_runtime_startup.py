@@ -1048,6 +1048,64 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(runtime._mcp_runtime_state.released, [])
         runtime._clear_conversation_current_task.assert_not_awaited()
 
+    async def test_failed_or_cancelled_task_converges_recoverable_run_without_bundle_restore(
+        self,
+    ) -> None:
+        cases = (
+            (TaskStatus.FAILED, AgentRunStatus.FAILED, "fail", "error_code"),
+            (
+                TaskStatus.CANCELLED,
+                AgentRunStatus.CANCELLED,
+                "cancel",
+                "reason_code",
+            ),
+        )
+        for task_status, run_status, method_name, reason_argument in cases:
+            with self.subTest(task_status=task_status):
+                task = Task(
+                    task_id=f"task-terminal-{task_status.value}",
+                    conversation_id=f"conversation-terminal-{task_status.value}",
+                    root_message_id=f"message-terminal-{task_status.value}",
+                    status=task_status,
+                )
+                run = AgentRun(
+                    run_id=f"agent-run:{task.task_id}",
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    status=AgentRunStatus.WAITING_FOR_INPUT,
+                    binding=AgentModelBinding("test-model"),
+                )
+                converged = replace(run, status=run_status)
+                fail = AsyncMock(return_value=converged)
+                cancel = AsyncMock(return_value=converged)
+                loader = SimpleNamespace(load=AsyncMock())
+                runtime = object.__new__(ApiRuntime)
+                runtime.storage = SimpleNamespace(
+                    get_task=AsyncMock(return_value=task)
+                )
+                runtime.agent_loop_orchestrator = SimpleNamespace(
+                    fail=fail,
+                    cancel=cancel,
+                )
+                runtime._prepared_agent_recovery_loader = loader
+                runtime._best_effort_clear_skill_recovery_pointer = AsyncMock()
+
+                await runtime._recover_agent_run(run)
+
+                selected = getattr(runtime.agent_loop_orchestrator, method_name)
+                selected.assert_awaited_once_with(
+                    task.task_id,
+                    **{
+                        reason_argument: "agent_terminal_task_run_convergence"
+                    },
+                )
+                other = cancel if method_name == "fail" else fail
+                other.assert_not_awaited()
+                loader.load.assert_not_awaited()
+                runtime._best_effort_clear_skill_recovery_pointer.assert_awaited_once_with(
+                    task
+                )
+
     async def test_observer_terminal_fast_path_releases_restored_revisions(self) -> None:
         run = AgentRun(
             run_id="agent-run:task-observed-terminal",
