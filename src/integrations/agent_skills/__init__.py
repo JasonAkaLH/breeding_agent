@@ -102,7 +102,13 @@ from .skill_runtime_gates import (
     validate_skill_runtime_ops_readiness,
     validate_skill_runtime_promotion_readiness,
 )
-from .skill_runtime_state import SkillRuntimeBundle, SkillRuntimeRefreshResult, SkillRuntimeState
+from .skill_runtime_state import (
+    SkillBundleRevisionError,
+    SkillRuntimeBundle,
+    SkillRuntimeRefreshResult,
+    SkillRuntimeState,
+    classify_skill_bundle_revision,
+)
 
 __all__ = [
     "SkillCatalog",
@@ -163,6 +169,8 @@ __all__ = [
     "SkillRuntimeBundle",
     "SkillRuntimeRefreshResult",
     "SkillRuntimeState",
+    "SkillBundleRevisionError",
+    "classify_skill_bundle_revision",
     "SkillRuntimePyo3PolicyClient",
     "SlotExtractionCandidate",
     "SlotExtractionResult",

@@ -103,6 +103,7 @@ from src.integrations.agent_skills import (
     SkillRuntimeState,
     SkillScriptRunner,
     SkillResourceService,
+    SkillBundleRevisionError,
     SlotExtractionCandidate,
     SlotExtractionResult,
     apply_extraction_result_to_collection,
@@ -9086,10 +9087,9 @@ class ApiRuntime(
     def _manifest_for_slot_collection(self, collection: SlotCollection):
         if self._skill_runtime_state is None:
             return None
-        try:
-            catalog = self._skill_runtime_state.catalog_for_revision(collection.skill_bundle_revision)
-        except Exception:
-            catalog = self._skill_runtime_state.active_bundle.catalog
+        catalog = self._skill_runtime_state.catalog_for_revision(
+            collection.skill_bundle_revision
+        )
         return catalog.get(collection.skill_name)
 
     def _schema_for_slot_collection(self, collection: SlotCollection):
@@ -10809,17 +10809,19 @@ class ApiRuntime(
                 str(skill_revision or "").strip(),
                 self._skill_runtime_state,
                 self._task_skill_bundle_revisions,
+                True,
             ),
             (
                 "mcp",
                 str(mcp_revision or "").strip(),
                 self._mcp_runtime_state,
                 self._task_mcp_bundle_revisions,
+                False,
             ),
         )
         pending: list[tuple[str, str, Any, dict[str, str]]] = []
-        for kind, revision, state, retained in candidates:
-            if not revision:
+        for kind, revision, state, retained, required in candidates:
+            if not revision and not required:
                 continue
             if state is None:
                 raise RuntimeError(f"agent_prepared_{kind}_bundle_runtime_missing")
@@ -12857,10 +12859,8 @@ class ApiRuntime(
     def _retain_task_skill_revision(self, request: AgentExecutionRequest) -> None:
         if self._skill_runtime_state is None or request.task_id in self._task_skill_bundle_revisions:
             return
-        raw_revision = request.metadata.get("skill_bundle_revision") or self._skill_runtime_state.active_revision
-        revision = str(raw_revision).strip()
-        if not revision:
-            return
+        revision = str(request.metadata.get("skill_bundle_revision") or "").strip()
+        self._skill_runtime_state.bundle_for_revision(revision)
         self._pin_bundle_revision_with_sidecar_if_enforced(
             task_id=request.task_id,
             bundle_kind="skill",
@@ -15340,13 +15340,11 @@ def build_api_runtime(
     ) -> AgentCallExecution | None:
         pinned_revision = str(metadata.get("skill_bundle_revision") or "").strip()
         try:
-            bundle = skill_runtime_state.bundle_for_revision(
-                pinned_revision or None
-            )
-        except KeyError:
+            bundle = skill_runtime_state.bundle_for_revision(pinned_revision)
+        except SkillBundleRevisionError as exc:
             return AgentCallExecution(
                 AgentCallOutcomeStatus.FAILED,
-                safe_error_code="skill_bundle_revision_missing",
+                safe_error_code=exc.safe_error_code,
             )
         skill_name = bundle.skill_capabilities.skill_name_by_capability_id.get(
             capability_id
@@ -15366,11 +15364,6 @@ def build_api_runtime(
             )
         if execution.mode != "delegated_main_agent":
             return None
-        if not pinned_revision:
-            return AgentCallExecution(
-                AgentCallOutcomeStatus.FAILED,
-                safe_error_code="agent_skill_pinned_revision_missing",
-            )
         descriptor = bundle.skill_capabilities.descriptors_by_id.get(capability_id)
         profile = build_public_skill_profile(
             manifest,

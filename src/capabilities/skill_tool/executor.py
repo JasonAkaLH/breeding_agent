@@ -17,6 +17,7 @@ from src.integrations.agent_skills import (
     SkillManifest,
     SkillPlatformExecutionContext,
     SkillPlatformHandlerRegistry,
+    SkillBundleRevisionError,
     SkillScriptExecutionService,
     SkillScriptRunner,
     SkillRuntimeState,
@@ -38,14 +39,10 @@ from src.integrations.agent_skills.missing_input_interrupt import (
 
 @dataclass(slots=True, frozen=True)
 class _ResolvedSkill:
-    revision: str | None
+    revision: str
     manifest: SkillManifest
     capability_id: str
     public_skill_roots: tuple[Any, ...] = ()
-
-
-class _UnknownSkillBundleRevisionError(KeyError):
-    pass
 
 
 class SkillExecutor(ExecutorPort):
@@ -78,10 +75,10 @@ class SkillExecutor(ExecutorPort):
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         try:
             resolved = self._resolve_skill(request)
-        except _UnknownSkillBundleRevisionError:
+        except SkillBundleRevisionError as exc:
             return self._error_result(
                 request,
-                code="skill_bundle_revision_missing",
+                code=exc.safe_error_code,
                 message="Skill bundle revision is not available.",
             )
         except KeyError:
@@ -213,11 +210,8 @@ class SkillExecutor(ExecutorPort):
         )
 
     def _resolve_skill(self, request: CapabilityExecutionRequest) -> _ResolvedSkill:
-        revision = str(request.metadata.get("skill_bundle_revision") or "").strip() or None
-        try:
-            bundle = self._runtime_state.bundle_for_revision(revision)
-        except KeyError as exc:
-            raise _UnknownSkillBundleRevisionError(revision or "") from exc
+        revision = str(request.metadata.get("skill_bundle_revision") or "").strip()
+        bundle = self._runtime_state.bundle_for_revision(revision)
         skill_name = bundle.skill_capabilities.skill_name_by_capability_id.get(request.capability_id)
         if not skill_name:
             raise KeyError(request.capability_id)
@@ -225,7 +219,7 @@ class SkillExecutor(ExecutorPort):
         if manifest is None:
             raise SkillExecutionConfigError(f"Missing manifest for {request.capability_id}")
         return _ResolvedSkill(
-            revision=revision,
+            revision=bundle.revision,
             manifest=manifest,
             capability_id=request.capability_id,
             public_skill_roots=bundle.public_skill_roots,

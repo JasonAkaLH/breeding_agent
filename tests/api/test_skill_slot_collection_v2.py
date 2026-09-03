@@ -7,11 +7,31 @@ from unittest.mock import AsyncMock, patch
 from src.core.enums import InterruptStatus
 from src.core.errors import MessageIdentityConflictError
 from src.core.models import SlotCollection
+from src.integrations.agent_skills import SkillBundleRevisionError
 from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_FIELD, SLOT_COLLECTION_REF_FIELD
 from tests.api.support import APITestCase
 
 
 class SkillSlotCollectionV2APITest(APITestCase):
+    async def test_slot_manifest_rejects_invalid_revision_without_active_fallback(self) -> None:
+        collection = SlotCollection(
+            collection_id="slot-invalid-revision",
+            task_id="task-invalid-revision",
+            node_id="node-invalid-revision",
+            conversation_id="conv-invalid-revision",
+            capability_id="skill.missing",
+            skill_name="missing",
+            kind="input_collection",
+            status="waiting_for_user",
+            skill_bundle_revision="skillrev-forged",
+        )
+
+        with self.assertRaisesRegex(
+            SkillBundleRevisionError,
+            "agent_skill_bundle_revision_invalid",
+        ):
+            self.runtime._manifest_for_slot_collection(collection)  # noqa: SLF001
+
     async def _open_diagonal_v2_interrupt(self, suffix: str):
         root = self.workspace / f"skill-v2-{suffix}"
         self._write_diagonal_skill(root)

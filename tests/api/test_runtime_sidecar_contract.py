@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from src.core.enums import TaskStatus
 from src.core.models import Conversation, EventRecord, PendingSkillContext, Task
+from src.integrations.agent_skills import SkillBundleRevisionError
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract, mode_for_component
 from src.storage.sqlalchemy_models import EventRecordRow
@@ -159,6 +160,29 @@ class RuntimeSidecarContractAPITest(APITestCase):
             root_message_id="msg-bundle-pin",
             user_message="bundle pin",
             owner_scope="owner:test",
+            metadata={
+                "skill_bundle_revision": self.runtime._skill_runtime_state.active_revision,
+            },
+        )
+
+    async def test_skill_revision_retain_rejects_missing_metadata_without_active_fallback(self) -> None:
+        request = AgentExecutionRequest(
+            task_id="task-bundle-missing",
+            conversation_id="conv-bundle-pin",
+            root_message_id="msg-bundle-missing",
+            user_message="bundle pin",
+            owner_scope="owner:test",
+        )
+
+        with self.assertRaisesRegex(
+            SkillBundleRevisionError,
+            "agent_skill_bundle_revision_retired",
+        ):
+            self.runtime._retain_task_skill_revision(request)  # noqa: SLF001
+
+        self.assertNotIn(
+            request.task_id,
+            self.runtime._task_skill_bundle_revisions,  # noqa: SLF001
         )
 
     async def test_dispatcher_enforce_rejects_python_legacy_bundle_revision_pin_without_sidecar(self) -> None:
