@@ -502,8 +502,9 @@ rolling overlap。若无法证明旧writer已经退出，停止发布。v2 readi
 - 无数据库schema迁移或无关data mutation；持久化data变化严格限于本设计逐分支列出的幂等终态与best-effort
   current-task指针，不修改Frontend、Rust、MCP parser/projection或`prod`。
 
-设计经12轮审查/修订循环，以98/100、0 Blocking、0 Major、2 Minor通过完整信心门。当前尚未生成实施计划、
-修改生产代码、处理远端失败Run、构建镜像或部署。
+设计经12轮审查/修订循环，以98/100、0 Blocking、0 Major、2 Minor通过完整信心门。实施计划见
+`2026-09-04-skill-bundle-revision-v2-restart-recovery-implementation-plan.md`；当前尚未修改生产代码、
+处理远端失败Run、构建镜像或部署。
 
 License Requirement：复用现有Python、SHA-256 fingerprint、Agent Run terminal writer、prepared authority与
 unittest；不新增依赖、第三方代码或许可变化。
