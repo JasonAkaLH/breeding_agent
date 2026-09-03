@@ -4,12 +4,12 @@
 
 ## 状态
 
-`implemented_automated`
+`published_pending_deploy`
 
 计划基线为 `main@ad0f00db`。设计已经过12轮审查/修订，以98/100、0 Blocking、0 Major、2 Minor通过
 完整信心门。仓库实现已由`36ce1a9c`、`f13fef39`、`97139173`、`9ab0fe4d`和`9253b299`
-闭合；尚未授权修改远端数据库、构建或推送镜像、更新受保护`docker_cmd.md`、部署开发环境或触及
-`prod`。
+闭合；backend-dev `0.1.31`已基于`main@414afa2d`构建并推送，受保护`docker_cmd.md`仅同步backend
+标签。尚未修改远端数据库、部署开发环境或触及`prod`。
 
 范围外未跟踪文件`test.json`必须保持未读取、未修改、未暂存。
 
@@ -23,6 +23,11 @@
   pending三kind terminal handoff、ack-last和terminal Task Answer/Slot liveness gate；
 - `9ab0fe4d`、`9253b299`：删除剩余resume active fallback，exact校验handed-off Interrupt/Node/no-server
   intent，并让正常pre-Agent Interrupt在handoff时retain冻结revision。
+- backend-dev `0.1.31`：远端OCI index digest为
+  `sha256:3a90a5da0b5b9ce86987e82b3f49093cbc35b238e296ce96453078d81937ea25`，包含`linux/amd64`
+  manifest `sha256:942ac5133bfc1a62cfd48d1648bf9eaf04130be47910a066e8b4e214889a0ea7`及attestation；
+  按远端digest重拉后确认镜像不含`/app/config.yaml`，revision v2/retired分类和关键API runtime import
+  smoke通过。
 
 最终自动证据：Storage 569项通过（14项环境skip）、Orchestration 199项通过、API 646项通过、E2E 12项
 通过、Skill capability聚焦11项通过、Agent Skills聚焦216项通过（13项平台/环境skip）；compileall、变更面
@@ -31,8 +36,9 @@ Ruff、关键package import、active-fallback静态扫描和`git diff --check`�
 稳定失败，另有2项环境skip；本轮未修改该MCP transport-family合同。
 
 本轮没有新增目录职责或变更模块归属，根`AGENTS.md`无需修改；`docs/AGENTS.md`和`CHANGELOG.md`已同步。
-按本计划边界未修改版本号、数据库schema/data、Rust/proto、Frontend、外部Skill、镜像、部署、
-`docker_cmd.md`或`prod`。远端旧Task实际终态化与开发环境hard cut仍需独立授权。
+发布版本升级为backend-dev `0.1.31`，受保护`docker_cmd.md`仅同步该backend标签并继续保持`0600`、
+Git-ignored/untracked。未修改数据库schema/data、Rust/proto、Frontend、外部Skill、部署或`prod`；远端旧Task
+实际终态化与开发环境hard cut仍需独立授权。
 
 ## 完成声明
 
@@ -338,11 +344,11 @@ conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 另运行变更文件Ruff、关键package import、敏感revision/path输出扫描、`git diff --check`和最终
 `git status --short`。任何环境skip或既有失败必须逐项记录，不得宣称通过未运行门禁。
 
-### 本地完成上限
+### 授权边界与当前状态
 
-全部自动门禁通过后状态最多为`implemented_automated`。远端数据库只读统计、旧Task实际终态化、
-镜像构建/推送、`docker_cmd.md`更新、开发环境hard cut、readiness和真实旧/新Conversation smoke均需
-用户另行授权，不纳入本次“实施”默认权限。
+最初自动门禁完成时状态上限为`implemented_automated`。用户随后已授权backend镜像构建/推送和
+`docker_cmd.md`标签更新，因此当前状态为`published_pending_deploy`。远端数据库只读统计、旧Task实际
+终态化、开发环境hard cut、readiness和真实旧/新Conversation smoke仍需独立授权。
 
 License Requirement：复用现有Python、SQLAlchemy、SHA-256、Agent repository、Submission Admission、
 Runtime Sidecar既有`CommitAgentState` wire和unittest；不新增依赖、第三方代码或许可变化。

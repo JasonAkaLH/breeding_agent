@@ -1,6 +1,6 @@
 # Skill Bundle Revision v2 与缺失 Revision 启动隔离设计
 
-状态：`reviewed_ready`
+状态：`published_pending_deploy`
 信心门：`98/100 Pass（0 Blocking / 0 Major / 2 Minor）`
 日期：2026-09-03
 目标分支：`main`
@@ -21,6 +21,9 @@ skillrev-<process-local counter>-<12 hex fingerprint prefix>
 序号不能跨重启重建。即使当前挂载的Skill文件与旧任务使用的内容相同，新进程生成的序号也可能不同。
 当前系统又只持久化revision字符串，不持久化旧Skill bundle或script package snapshot，因此缺失的旧内容
 没有可恢复authority。
+
+本设计现已完成仓库实现和自动门禁，并基于`main@414afa2d`发布backend-dev `0.1.31`；镜像尚未部署，
+开发库旧Task终态化和hard cut仍待执行。
 
 本设计完成三个目标：
 
