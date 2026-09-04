@@ -2,7 +2,7 @@
 
 依据：`2026-09-04-mcp-selector-pre-approval-argument-validation-design.md`
 
-状态：`implemented_verified`
+状态：`published_pending_deploy`
 日期：2026-09-04
 目标分支：`main`
 
@@ -88,7 +88,12 @@ MCP Server、Skill revision、镜像、部署或`prod`。不直接修改开发�
 
 共享校验、最终action门禁、附件单次物化、具体Selector repair、自定义Port兜底、Gateway纵深防线、零副作用回归和相关自动
 门禁已全部闭合。MCP integrations 587项（2项环境skip）、Orchestration 200项、API 651项、E2E 12项、compileall、变更面
-Ruff、共享实现扫描与`git diff --check`均通过。当前真实失败Task保持历史终态，后续验证应使用新Task。
+Ruff、共享实现扫描与`git diff --check`均通过。后续经用户单独授权，基于`main@67c584f5`构建并推送backend-dev
+`0.1.34`；远端OCI index digest为`sha256:991fa1e3d768782e6f61be6fb63630048a4e632d6bb29a9e1dcfd973e1273da4`，
+`linux/amd64` manifest为`sha256:1b72a445d3e767ce2af40b76d85556f73858058869b0800b9538de95570d3c9d`，attestation为
+`sha256:297d42b7ad16afbefe774a888f55fdde3320bf7da4f3082cb7e8d846712683b7`；远端digest重拉smoke通过。
+受保护`docker_cmd.md`的6处backend-dev候选标签已精确更新为`0.1.34`。当前真实失败Task保持历史终态，后续验证应使用新Task；
+尚未部署或修改数据库。
 
 License Requirement：复用现有Python、`jsonschema`、Selector repair、附件物化、Gateway、unittest与现有测试链；无新增依赖、
 第三方代码或许可变化。
