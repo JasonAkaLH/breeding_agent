@@ -38,7 +38,6 @@ from src.orchestration.agent_loop.result_artifacts import (
 )
 from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
-    AgentCallResultProjector,
 )
 from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.agent_payload import (
@@ -62,6 +61,7 @@ from src.storage.sqlite.models import (
     TaskNodeRow,
     TaskRow,
 )
+from tests.orchestration.support import make_agent_result_projector
 
 
 class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
@@ -543,12 +543,13 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
     async def test_skill_result_artifact_and_terminal_node_commit_in_one_exact_cas(self) -> None:
         committed = await self._commit_two_calls()
         call_item = committed.call_items[0]
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.one",
             output_payload={"articles": ["x" * 10_000 for _ in range(20)]},
             call_item_id=call_item.item_id,
             outcome="completed",
             safe_error_code=None,
+            model_edition="edition-a",
         )
         self.assertTrue(projection.spill_required)
         file_store = LocalArtifactFileStore(Path(self._tmpdir.name) / "artifacts")
@@ -559,8 +560,8 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             run=committed.run,
             call_item=call_item,
             node_id=committed.node_ids[0],
-            canonical_raw_bytes=projection.canonical_raw_bytes,
-            raw_sha256=projection.raw_sha256,
+            canonical_raw_bytes=projection.spill_content_bytes,
+            raw_sha256=projection.spill_content_sha256,
             projection_revision=projection.projection_revision,
             expected_artifact_id=projection.spill_artifact_id,
         )
@@ -586,7 +587,9 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(artifact)
             metadata = parse_skill_result_storage_ref(artifact.storage_ref)
             self.assertEqual(metadata["call_item_id"], call_item.item_id)
-            self.assertEqual(metadata["raw_sha256"], projection.raw_sha256)
+            self.assertEqual(
+                metadata["raw_sha256"], projection.spill_content_sha256
+            )
 
         drifted = AgentStagedArtifact(
             staged.artifact_id,
@@ -610,7 +613,7 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
     async def test_transient_receipt_commits_with_no_artifact_metadata(self) -> None:
         committed = await self._commit_two_calls()
         call_item = committed.call_items[0]
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.one",
             output_payload={"records": ["x" * 150_000]},
             call_item_id=call_item.item_id,
@@ -619,6 +622,7 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
             ),
+            model_edition="edition-a",
         )
         self.assertTrue(projection.transient_stage_required)
         outcome = AgentCallOutcomeCommit(
@@ -788,12 +792,13 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
     async def test_skill_result_stage_remains_private_when_outcome_cas_rolls_back(self) -> None:
         committed = await self._commit_two_calls()
         call = committed.call_items[0]
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.one",
             output_payload={"rows": ["x" * 10_000 for _ in range(20)]},
             call_item_id=call.item_id,
             outcome="completed",
             safe_error_code=None,
+            model_edition="edition-a",
         )
         file_store = LocalArtifactFileStore(Path(self._tmpdir.name) / "private-artifacts")
         manifest_root = Path(self._tmpdir.name) / "private-manifests"
@@ -804,8 +809,8 @@ class SQLiteAgentStorageTest(unittest.IsolatedAsyncioTestCase):
             run=committed.run,
             call_item=call,
             node_id=committed.node_ids[0],
-            canonical_raw_bytes=projection.canonical_raw_bytes,
-            raw_sha256=projection.raw_sha256,
+            canonical_raw_bytes=projection.spill_content_bytes,
+            raw_sha256=projection.spill_content_sha256,
             projection_revision=projection.projection_revision,
             expected_artifact_id=projection.spill_artifact_id,
         )

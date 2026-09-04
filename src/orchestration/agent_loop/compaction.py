@@ -318,6 +318,5 @@ def _is_transient_result_payload(payload: dict[str, Any]) -> bool:
     safe_result = payload.get("safe_result")
     return bool(
         isinstance(safe_result, dict)
-        and safe_result.get("projection_revision") == "skill-result-v2"
         and safe_result.get("projection_mode") == "transient_staged"
     )

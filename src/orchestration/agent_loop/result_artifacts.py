@@ -145,7 +145,7 @@ class AgentSkillResultArtifactStager:
             artifact_id=artifact_id,
             artifact_type=str(ArtifactType.FILE),
             storage_ref=storage_ref,
-            summary="完整 Skill 结构化结果",
+            summary="Skill 模型安全结果",
         )
 
     def _manifest_path(self, artifact_id: str) -> Path:
@@ -268,7 +268,7 @@ class AgentSkillResultArtifactResolver:
             }
             or safe_result.get("schema") != "maf.agent.model_result.v1"
             or safe_result.get("projection_mode") != "artifact_backed"
-            or safe_result.get("projection_truncated") is not True
+            or type(safe_result.get("projection_truncated")) is not bool
             or durable_payload.get("outcome") != "completed"
             or durable_payload.get("safe_error_code") is not None
             or durable_payload.get("call_item_id") != call_item.item_id
@@ -347,6 +347,12 @@ class AgentSkillResultArtifactResolver:
         raw_value = json.loads(raw_text)
         if (
             not isinstance(raw_value, dict)
+            or raw_value.get("schema") != "maf.agent.model_result.v1"
+            or raw_value.get("projection_mode") != "inline"
+            or raw_value.get("projection_truncated")
+            != safe_result.get("projection_truncated")
+            or raw_value.get("projected_size_bytes")
+            != len(raw_text.encode("utf-8"))
             or json.dumps(
                 raw_value,
                 ensure_ascii=False,
@@ -599,7 +605,7 @@ def skill_result_artifact_id_from_durable_payload(
         raise ValueError("agent_skill_result_artifact_unavailable") from None
     if (
         safe_result.get("schema") != "maf.agent.model_result.v1"
-        or safe_result.get("projection_truncated") is not True
+        or type(safe_result.get("projection_truncated")) is not bool
         or not isinstance(raw_sha256, str)
         or len(raw_sha256) != 64
         or any(character not in "0123456789abcdef" for character in raw_sha256)
@@ -642,7 +648,7 @@ def validate_skill_result_staged_artifact(
         or artifact.artifact_id != expected_artifact_id
         or safe_result.get("schema") != "maf.agent.model_result.v1"
         or safe_result.get("projection_mode") != "artifact_backed"
-        or safe_result.get("projection_truncated") is not True
+        or type(safe_result.get("projection_truncated")) is not bool
         or metadata["task_id"] != run.task_id
         or metadata["conversation_id"] != run.conversation_id
         or metadata["node_id"] != node_id

@@ -30,7 +30,6 @@ from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactStager,
 )
-from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
 from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.postgres import (
     PostgreSQLAgentRepository,
@@ -47,6 +46,7 @@ from src.storage.sqlite.models import (
     TaskRow,
 )
 from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
+from tests.orchestration.support import make_agent_result_projector
 
 
 class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
@@ -227,12 +227,13 @@ class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         call = sampled.call_items[0]
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.large",
             output_payload={"rows": ["x" * 10_000 for _ in range(20)]},
             call_item_id=call.item_id,
             outcome="completed",
             safe_error_code=None,
+            model_edition="edition-a",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -243,8 +244,8 @@ class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 run=sampled.run,
                 call_item=call,
                 node_id=sampled.node_ids[0],
-                canonical_raw_bytes=projection.canonical_raw_bytes,
-                raw_sha256=projection.raw_sha256,
+                canonical_raw_bytes=projection.spill_content_bytes,
+                raw_sha256=projection.spill_content_sha256,
                 projection_revision=projection.projection_revision,
                 expected_artifact_id=projection.spill_artifact_id,
             )

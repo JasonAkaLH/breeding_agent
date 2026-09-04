@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -15,8 +16,6 @@ from .transient_results import (
 )
 
 
-MODEL_VIEW_MAX_CODE_POINTS = 20_000
-MODEL_RESULT_MAX_BYTES = 80_000
 SKILL_RESULT_PROJECTION_REVISION = "skill-result-v1"
 MCP_RESULT_PROJECTION_REVISION = "mcp-result-v1"
 MCP_AGENT_RESULT_BUNDLE_SCHEMA = "maf.mcp.agent_result_bundle.v1"
@@ -38,18 +37,6 @@ _SKILL_RESULT_PROJECTION_POLICIES = frozenset(
 )
 _RAW_MAX_DEPTH = 64
 _RAW_MAX_NODES = 200_000
-_SKILL_PREVIEW_KEYS = (
-    "answer",
-    "response_text",
-    "summary",
-    "search_summary",
-    "status",
-    "missing",
-    "error",
-    "files",
-    "artifacts",
-    "outputs",
-)
 _MCP_MODEL_KEYS = frozenset(
     {
         "agent_projection",
@@ -94,9 +81,6 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(?:access[_-]?token|api[_-]?(?:key|token)|authorization|credential|"
     r"password|refresh[_-]?token|secret)\s*[:=]\s*[^\s,;]+"
 )
-_MCP_CARRIER_TRUNCATION_MARKER = "\n[TRUNCATED BY MCP RESULT CARRIER]"
-
-
 def agent_tool_repeat_key(*, capability_id: str, arguments_json: str) -> str:
     if not capability_id.strip() or not arguments_json:
         raise ValueError("agent_tool_repeat_identity_invalid")
@@ -165,6 +149,10 @@ class AgentCallResultProjection:
     error_code: str | None = None
     transient_stage_required: bool = False
     transient_stage_ref: str | None = None
+    transient_content_bytes: bytes | None = None
+    transient_content_sha256: str | None = None
+    spill_content_bytes: bytes | None = None
+    spill_content_sha256: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -172,9 +160,26 @@ class AgentCallResultProjection:
 
 
 class AgentCallResultProjector:
-    """Pure, deterministic Capability-result boundary for Agent persistence."""
+    """Model-bound Capability-result boundary for Agent persistence."""
 
-    def project(
+    def __init__(
+        self,
+        *,
+        tokenization_config: Mapping[str, Any] | None = None,
+        token_budgeter: Callable[..., Awaitable[Any]] | None = None,
+    ) -> None:
+        from src.integrations.token_counter import (
+            TOOL_RESULT_BUSINESS_MAX_TOKENS,
+            truncate_text_to_token_budget_async,
+        )
+
+        self._tokenization_config = dict(tokenization_config or {})
+        self._token_budgeter = (
+            token_budgeter or truncate_text_to_token_budget_async
+        )
+        self._max_business_tokens = TOOL_RESULT_BUSINESS_MAX_TOKENS
+
+    async def project(
         self,
         *,
         capability_id: str,
@@ -185,6 +190,7 @@ class AgentCallResultProjector:
         artifact_ids: Sequence[str] = (),
         continuation_locator: Mapping[str, Any] | None = None,
         skill_projection_policy: str = SKILL_RESULT_PROJECTION_POLICY_LEGACY,
+        model_edition: str,
     ) -> AgentCallResultProjection:
         try:
             raw_value = _strict_json_value(output_payload)
@@ -194,7 +200,7 @@ class AgentCallResultProjector:
         raw_sha256 = hashlib.sha256(canonical_raw).hexdigest()
 
         if _is_delegated_model_result(raw_value):
-            return self._delegated(
+            return await self._delegated(
                 raw_value=raw_value,
                 canonical_raw=canonical_raw,
                 raw_sha256=raw_sha256,
@@ -202,9 +208,10 @@ class AgentCallResultProjector:
                 outcome=outcome,
                 safe_error_code=safe_error_code,
                 artifact_ids=artifact_ids,
+                model_edition=model_edition,
             )
         if capability_id == "mcp.dispatch" or capability_id.startswith("mcp."):
-            return self._mcp(
+            return await self._mcp(
                 raw_value=raw_value,
                 canonical_raw=canonical_raw,
                 raw_sha256=raw_sha256,
@@ -213,8 +220,9 @@ class AgentCallResultProjector:
                 safe_error_code=safe_error_code,
                 artifact_ids=artifact_ids,
                 continuation_locator=continuation_locator,
+                model_edition=model_edition,
             )
-        return self._skill(
+        return await self._skill(
             capability_id=capability_id,
             raw_value=raw_value,
             canonical_raw=canonical_raw,
@@ -225,9 +233,10 @@ class AgentCallResultProjector:
             artifact_ids=artifact_ids,
             continuation_locator=continuation_locator,
             skill_projection_policy=skill_projection_policy,
+            model_edition=model_edition,
         )
 
-    def _delegated(
+    async def _delegated(
         self,
         *,
         raw_value: dict[str, Any],
@@ -237,6 +246,7 @@ class AgentCallResultProjector:
         outcome: str,
         safe_error_code: str | None,
         artifact_ids: Sequence[str],
+        model_edition: str,
     ) -> AgentCallResultProjection:
         if (
             raw_value.get("projection_revision")
@@ -252,12 +262,27 @@ class AgentCallResultProjector:
                 canonical_raw=canonical_raw,
                 raw_sha256=raw_sha256,
             )
+        model_view = dict(raw_value["model_view"])
+        truncated = False
+        if outcome == "completed" and safe_error_code is None:
+            model_view, truncated = await self._budget_model_view(
+                model_view,
+                model_edition=model_edition,
+            )
+        projected = build_model_result_envelope(
+            projection_revision=DELEGATED_RESULT_PROJECTION_REVISION,
+            projection_mode="inline",
+            model_view=model_view,
+            original_size_bytes=len(canonical_raw),
+            raw_sha256=raw_sha256,
+            projection_truncated=truncated,
+        )
         try:
-            _validate_model_result(raw_value)
+            _validate_model_result(projected)
             _preflight_tool_result(
                 call_item_id=call_item_id,
                 outcome=outcome,
-                safe_result=raw_value,
+                safe_result=projected,
                 safe_error_code=safe_error_code,
                 artifact_ids=artifact_ids,
             )
@@ -268,18 +293,18 @@ class AgentCallResultProjector:
                 raw_sha256=raw_sha256,
             )
         return AgentCallResultProjection(
-            safe_result_payload=raw_value,
+            safe_result_payload=projected,
             canonical_raw_bytes=canonical_raw,
             raw_sha256=raw_sha256,
             original_size_bytes=len(canonical_raw),
             projection_revision=DELEGATED_RESULT_PROJECTION_REVISION,
             projection_mode="inline",
-            projection_truncated=False,
+            projection_truncated=truncated,
             spill_required=False,
             spill_artifact_id=None,
         )
 
-    def _mcp(
+    async def _mcp(
         self,
         *,
         raw_value: dict[str, Any],
@@ -290,6 +315,7 @@ class AgentCallResultProjector:
         safe_error_code: str | None,
         artifact_ids: Sequence[str],
         continuation_locator: Mapping[str, Any] | None,
+        model_edition: str,
     ) -> AgentCallResultProjection:
         has_agent_projection = "agent_projection" in raw_value
         if has_agent_projection:
@@ -313,6 +339,7 @@ class AgentCallResultProjector:
             model_view["continuation_locator"] = _strict_json_value(
                 continuation_locator
             )
+        source_truncated = bool(raw_value.get("truncated"))
         if has_agent_projection:
             try:
                 bundle = _validate_mcp_agent_result_bundle(
@@ -333,61 +360,54 @@ class AgentCallResultProjector:
                     canonical_raw=canonical_raw,
                     raw_sha256=raw_sha256,
                 )
-            safe_result = _fit_mcp_model_result(
-                model_view=model_view,
-                bundle=bundle,
-                original_size_bytes=len(canonical_raw),
-                raw_sha256=raw_sha256,
-                call_item_id=call_item_id,
-                outcome=outcome,
-                safe_error_code=safe_error_code,
-                artifact_ids=artifact_ids,
+        elif outcome == "completed" and safe_error_code is None:
+            model_view, token_truncated = await self._budget_model_view(
+                model_view,
+                model_edition=model_edition,
             )
-        else:
-            truncated = bool(raw_value.get("truncated"))
-            safe_result = _fit_inline_model_result(
+            source_truncated = bool(source_truncated or token_truncated)
+        full_result = build_model_result_envelope(
+            projection_revision=MCP_RESULT_PROJECTION_REVISION,
+            projection_mode="inline",
+            model_view=model_view,
+            original_size_bytes=len(canonical_raw),
+            raw_sha256=raw_sha256,
+            projection_truncated=source_truncated,
+        )
+        if _inline_result_fits(
+            full_result,
+            call_item_id=call_item_id,
+            outcome=outcome,
+            safe_error_code=safe_error_code,
+            artifact_ids=artifact_ids,
+        ):
+            return AgentCallResultProjection(
+                safe_result_payload=full_result,
+                canonical_raw_bytes=canonical_raw,
+                raw_sha256=raw_sha256,
+                original_size_bytes=len(canonical_raw),
                 projection_revision=MCP_RESULT_PROJECTION_REVISION,
-                model_view=model_view,
-                original_size_bytes=len(canonical_raw),
-                raw_sha256=raw_sha256,
-                projection_truncated=truncated,
-                shrink_text_keys=("text",),
+                projection_mode="inline",
+                projection_truncated=source_truncated,
+                spill_required=False,
+                spill_artifact_id=None,
             )
-        if safe_result is None:
+        if outcome != "completed" or safe_error_code is not None or artifact_ids:
             return _rejected(
                 "agent_result_projection_too_large",
                 canonical_raw=canonical_raw,
                 raw_sha256=raw_sha256,
             )
-        if not has_agent_projection:
-            try:
-                _preflight_tool_result(
-                    call_item_id=call_item_id,
-                    outcome=outcome,
-                    safe_result=safe_result,
-                    safe_error_code=safe_error_code,
-                    artifact_ids=artifact_ids,
-                )
-            except AgentPayloadError:
-                return _rejected(
-                    "agent_result_projection_too_large",
-                    canonical_raw=canonical_raw,
-                    raw_sha256=raw_sha256,
-                )
-        final_truncated = bool(safe_result["projection_truncated"])
-        return AgentCallResultProjection(
-            safe_result_payload=safe_result,
-            canonical_raw_bytes=canonical_raw,
-            raw_sha256=raw_sha256,
-            original_size_bytes=len(canonical_raw),
+        return _transient_projection(
+            full_result=full_result,
+            canonical_raw=canonical_raw,
+            original_raw_sha256=raw_sha256,
+            call_item_id=call_item_id,
             projection_revision=MCP_RESULT_PROJECTION_REVISION,
-            projection_mode="inline",
-            projection_truncated=final_truncated,
-            spill_required=False,
-            spill_artifact_id=None,
+            projection_truncated=source_truncated,
         )
 
-    def _skill(
+    async def _skill(
         self,
         *,
         capability_id: str,
@@ -400,6 +420,7 @@ class AgentCallResultProjector:
         artifact_ids: Sequence[str],
         continuation_locator: Mapping[str, Any] | None,
         skill_projection_policy: str,
+        model_edition: str,
     ) -> AgentCallResultProjection:
         if skill_projection_policy not in _SKILL_RESULT_PROJECTION_POLICIES:
             return _rejected(
@@ -407,115 +428,28 @@ class AgentCallResultProjector:
                 canonical_raw=canonical_raw,
                 raw_sha256=raw_sha256,
             )
-        if skill_projection_policy != SKILL_RESULT_PROJECTION_POLICY_LEGACY:
-            if (
-                not capability_id.startswith("skill.")
-                or outcome != "completed"
-                or safe_error_code is not None
-                or continuation_locator is not None
-                or (
-                    skill_projection_policy
-                    == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
-                    and artifact_ids
-                )
-                or (
-                    skill_projection_policy
-                    == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
-                    and not artifact_ids
-                )
-                or _contains_forbidden_raw_value(raw_value)
-            ):
-                return _rejected(
-                    "agent_result_invalid",
-                    canonical_raw=canonical_raw,
-                    raw_sha256=raw_sha256,
-                )
-            try:
-                full_result = build_model_result_envelope(
-                    projection_revision=SKILL_RESULT_PROJECTION_REVISION,
-                    projection_mode="inline",
-                    model_view=raw_value,
-                    original_size_bytes=len(canonical_raw),
-                    raw_sha256=raw_sha256,
-                    projection_truncated=False,
-                )
-                _preflight_tool_result(
-                    call_item_id=call_item_id,
-                    outcome=outcome,
-                    safe_result=full_result,
-                    safe_error_code=safe_error_code,
-                    artifact_ids=artifact_ids,
-                )
-            except (AgentPayloadError, ValueError):
-                full_result = None
-            if full_result is not None:
-                return AgentCallResultProjection(
-                    safe_result_payload=full_result,
-                    canonical_raw_bytes=canonical_raw,
-                    raw_sha256=raw_sha256,
-                    original_size_bytes=len(canonical_raw),
-                    projection_revision=SKILL_RESULT_PROJECTION_REVISION,
-                    projection_mode="inline",
-                    projection_truncated=False,
-                    spill_required=False,
-                    spill_artifact_id=None,
-                )
-            if (
+        if (
+            (
+                skill_projection_policy
+                != SKILL_RESULT_PROJECTION_POLICY_LEGACY
+                and not capability_id.startswith("skill.")
+            )
+            or (
                 skill_projection_policy
                 == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
-            ):
-                stage_ref = transient_skill_result_stage_ref(
-                    call_item_id=call_item_id,
-                    raw_sha256=raw_sha256,
-                    projection_revision=(
-                        AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
-                    ),
-                )
-                try:
-                    receipt = build_model_result_envelope(
-                        projection_revision=(
-                            AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
-                        ),
-                        projection_mode="transient_staged",
-                        model_view={
-                            "complete_result_pending_context_injection": True,
-                            "schema": (
-                                "maf.agent.transient_skill_result_receipt.v1"
-                            ),
-                            "stage_ref": stage_ref,
-                        },
-                        original_size_bytes=len(canonical_raw),
-                        raw_sha256=raw_sha256,
-                        projection_truncated=True,
-                    )
-                    _preflight_tool_result(
-                        call_item_id=call_item_id,
-                        outcome=outcome,
-                        safe_result=receipt,
-                        safe_error_code=safe_error_code,
-                        artifact_ids=(),
-                    )
-                except (AgentPayloadError, ValueError):
-                    return _rejected(
-                        "agent_result_projection_too_large",
-                        canonical_raw=canonical_raw,
-                        raw_sha256=raw_sha256,
-                    )
-                return AgentCallResultProjection(
-                    safe_result_payload=receipt,
-                    canonical_raw_bytes=canonical_raw,
-                    raw_sha256=raw_sha256,
-                    original_size_bytes=len(canonical_raw),
-                    projection_revision=(
-                        AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
-                    ),
-                    projection_mode="transient_staged",
-                    projection_truncated=True,
-                    spill_required=False,
-                    spill_artifact_id=None,
-                    transient_stage_required=True,
-                    transient_stage_ref=stage_ref,
-                )
+                and artifact_ids
+            )
+            or (
+                skill_projection_policy
+                == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
+                and not artifact_ids
+            )
+        ):
+            return _rejected(
+                "agent_result_invalid",
+                canonical_raw=canonical_raw,
+                raw_sha256=raw_sha256,
+            )
         model_view = _sanitize_model_value(raw_value)
         if not isinstance(model_view, dict):
             model_view = {}
@@ -530,90 +464,90 @@ class AgentCallResultProjector:
                     canonical_raw=canonical_raw,
                     raw_sha256=raw_sha256,
                 )
-        safe_result = _fit_inline_model_result(
+        token_truncated = False
+        if outcome == "completed" and safe_error_code is None:
+            model_view, token_truncated = await self._budget_model_view(
+                model_view,
+                model_edition=model_edition,
+            )
+        full_result = build_model_result_envelope(
             projection_revision=SKILL_RESULT_PROJECTION_REVISION,
             model_view=model_view,
             original_size_bytes=len(canonical_raw),
             raw_sha256=raw_sha256,
-            projection_truncated=False,
+            projection_truncated=token_truncated,
+            projection_mode="inline",
         )
-        if safe_result is not None:
-            try:
-                _preflight_tool_result(
-                    call_item_id=call_item_id,
-                    outcome=outcome,
-                    safe_result=safe_result,
-                    safe_error_code=safe_error_code,
-                    artifact_ids=artifact_ids,
-                )
-            except AgentPayloadError:
-                safe_result = None
-        if safe_result is not None:
+        if _inline_result_fits(
+            full_result,
+            call_item_id=call_item_id,
+            outcome=outcome,
+            safe_error_code=safe_error_code,
+            artifact_ids=artifact_ids,
+        ):
             return AgentCallResultProjection(
-                safe_result_payload=safe_result,
+                safe_result_payload=full_result,
                 canonical_raw_bytes=canonical_raw,
                 raw_sha256=raw_sha256,
                 original_size_bytes=len(canonical_raw),
                 projection_revision=SKILL_RESULT_PROJECTION_REVISION,
                 projection_mode="inline",
-                projection_truncated=False,
+                projection_truncated=token_truncated,
                 spill_required=False,
                 spill_artifact_id=None,
             )
-        if _contains_forbidden_raw_value(raw_value):
-            return _rejected(
-                "agent_result_invalid",
-                canonical_raw=canonical_raw,
-                raw_sha256=raw_sha256,
-            )
-        spill_artifact_id = skill_result_artifact_id(
-            call_item_id=call_item_id,
-            raw_sha256=raw_sha256,
-            projection_revision=SKILL_RESULT_PROJECTION_REVISION,
-        )
-        preview = _skill_preview(raw_value)
-        if continuation_locator is not None:
-            preview["continuation_locator"] = _strict_json_value(
-                continuation_locator
-            )
-        safe_result = _fit_inline_model_result(
-            projection_revision=SKILL_RESULT_PROJECTION_REVISION,
-            model_view=preview,
-            original_size_bytes=len(canonical_raw),
-            raw_sha256=raw_sha256,
-            projection_truncated=True,
-            projection_mode="artifact_backed",
-        )
-        if safe_result is None:
+        if outcome != "completed" or safe_error_code is not None:
             return _rejected(
                 "agent_result_projection_too_large",
                 canonical_raw=canonical_raw,
                 raw_sha256=raw_sha256,
             )
-        try:
-            _preflight_tool_result(
+        if (
+            skill_projection_policy
+            == SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
+        ):
+            return _transient_projection(
+                full_result=full_result,
+                canonical_raw=canonical_raw,
+                original_raw_sha256=raw_sha256,
                 call_item_id=call_item_id,
-                outcome=outcome,
-                safe_result=safe_result,
-                safe_error_code=safe_error_code,
-                artifact_ids=(*artifact_ids, spill_artifact_id),
+                projection_revision=(
+                    AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+                ),
+                projection_truncated=token_truncated,
             )
-        except AgentPayloadError:
-            return _rejected(
-                "agent_result_projection_too_large",
-                canonical_raw=canonical_raw,
-                raw_sha256=raw_sha256,
-            )
-        return AgentCallResultProjection(
-            safe_result_payload=safe_result,
-            canonical_raw_bytes=canonical_raw,
-            raw_sha256=raw_sha256,
-            original_size_bytes=len(canonical_raw),
-            projection_revision=SKILL_RESULT_PROJECTION_REVISION,
-            projection_mode="artifact_backed",
-            projection_truncated=True,
-            spill_required=True,
-            spill_artifact_id=spill_artifact_id,
+        return _artifact_projection(
+            full_result=full_result,
+            canonical_raw=canonical_raw,
+            original_raw_sha256=raw_sha256,
+            call_item_id=call_item_id,
+            artifact_ids=artifact_ids,
+            projection_truncated=token_truncated,
+        )
+
+    async def _budget_model_view(
+        self,
+        model_view: Mapping[str, Any],
+        *,
+        model_edition: str,
+    ) -> tuple[dict[str, Any], bool]:
+        source = _canonical_json_bytes(dict(model_view)).decode("utf-8").removesuffix(
+            "\n"
+        )
+        bounded = await self._token_budgeter(
+            source,
+            max_tokens=self._max_business_tokens,
+            model_edition=model_edition,
+            config=self._tokenization_config,
+        )
+        if not bounded.truncated:
+            return dict(model_view), False
+        return (
+            {
+                "schema": "maf.agent.tool_result_preview.v1",
+                "structured_preview": bounded.text,
+            },
+            True,
         )
 
 
@@ -637,12 +571,11 @@ def build_model_result_envelope(
         "projection_truncated": projection_truncated,
     }
     for _ in range(4):
-        size = canonicalize_agent_payload(result).size_bytes
+        size = len(_canonical_json_bytes(result))
         if result["projected_size_bytes"] == size:
             break
         result["projected_size_bytes"] = size
-    canonical = canonicalize_agent_payload(result)
-    if result["projected_size_bytes"] != canonical.size_bytes:
+    if result["projected_size_bytes"] != len(_canonical_json_bytes(result)):
         raise ValueError("agent_result_projection_size_unstable")
     return result
 
@@ -664,118 +597,137 @@ def skill_result_artifact_id(
     return f"agent-skill-result:{identity}"
 
 
-def _fit_inline_model_result(
+def _inline_result_fits(
+    result: Mapping[str, Any],
     *,
-    projection_revision: str,
-    model_view: dict[str, Any],
-    original_size_bytes: int,
-    raw_sha256: str,
-    projection_truncated: bool,
-    projection_mode: str = "inline",
-    shrink_text_keys: Sequence[str] = (),
-) -> dict[str, Any] | None:
-    candidate = dict(model_view)
-    while True:
-        try:
-            result = build_model_result_envelope(
-                projection_revision=projection_revision,
-                projection_mode=projection_mode,
-                model_view=candidate,
-                original_size_bytes=original_size_bytes,
-                raw_sha256=raw_sha256,
-                projection_truncated=projection_truncated,
-            )
-            if _model_view_code_points(candidate) <= MODEL_VIEW_MAX_CODE_POINTS:
-                _validate_model_result(result)
-                return result
-        except (AgentPayloadError, ValueError):
-            pass
-        shrink_key = next(
-            (
-                key
-                for key in shrink_text_keys
-                if isinstance(candidate.get(key), str) and candidate[key]
-            ),
-            None,
-        )
-        if shrink_key is None:
-            return None
-        value = candidate[shrink_key]
-        assert isinstance(value, str)
-        if len(value) <= 1:
-            candidate.pop(shrink_key, None)
-        else:
-            candidate[shrink_key] = value[: len(value) // 2]
-
-
-def _fit_mcp_model_result(
-    *,
-    model_view: dict[str, Any],
-    bundle: dict[str, Any],
-    original_size_bytes: int,
-    raw_sha256: str,
     call_item_id: str,
     outcome: str,
     safe_error_code: str | None,
     artifact_ids: Sequence[str],
-) -> dict[str, Any] | None:
-    results = [dict(item) for item in bundle["results"]]
+) -> bool:
+    try:
+        _validate_model_result(result)
+        _preflight_tool_result(
+            call_item_id=call_item_id,
+            outcome=outcome,
+            safe_result=result,
+            safe_error_code=safe_error_code,
+            artifact_ids=artifact_ids,
+        )
+    except (AgentPayloadError, ValueError):
+        return False
+    return True
 
-    def fit(candidate_results: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
-        candidate_bundle = _mcp_bundle_with_results(bundle, candidate_results)
-        candidate_view = dict(model_view)
-        candidate_view["agent_projection"] = candidate_bundle
-        candidate_view["truncated"] = candidate_bundle["truncated"]
-        try:
-            result = build_model_result_envelope(
-                projection_revision=MCP_RESULT_PROJECTION_REVISION,
-                projection_mode="inline",
-                model_view=candidate_view,
-                original_size_bytes=original_size_bytes,
-                raw_sha256=raw_sha256,
-                projection_truncated=candidate_bundle["truncated"],
-            )
-            _validate_model_result(result)
-            _preflight_tool_result(
-                call_item_id=call_item_id,
-                outcome=outcome,
-                safe_result=result,
-                safe_error_code=safe_error_code,
-                artifact_ids=artifact_ids,
-            )
-        except (AgentPayloadError, ValueError):
-            return None
-        return result
 
-    while len(results) > 1:
-        if (fitted := fit(results)) is not None:
-            return fitted
-        results.pop(0)
-    if (fitted := fit(results)) is not None:
-        return fitted
-    item = dict(results[0])
-    original = str(item["content"])
-    if item["carrier_truncated"] and original.endswith(
-        _MCP_CARRIER_TRUNCATION_MARKER
+def _transient_projection(
+    *,
+    full_result: Mapping[str, Any],
+    canonical_raw: bytes,
+    original_raw_sha256: str,
+    call_item_id: str,
+    projection_revision: str,
+    projection_truncated: bool,
+) -> AgentCallResultProjection:
+    content = _canonical_json_bytes(dict(full_result))
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    stage_ref = transient_skill_result_stage_ref(
+        call_item_id=call_item_id,
+        raw_sha256=content_sha256,
+        projection_revision=projection_revision,
+    )
+    receipt = build_model_result_envelope(
+        projection_revision=projection_revision,
+        projection_mode="transient_staged",
+        model_view={
+            "complete_result_pending_context_injection": True,
+            "schema": "maf.agent.transient_skill_result_receipt.v1",
+            "stage_ref": stage_ref,
+        },
+        original_size_bytes=len(content),
+        raw_sha256=content_sha256,
+        projection_truncated=projection_truncated,
+    )
+    if not _inline_result_fits(
+        receipt,
+        call_item_id=call_item_id,
+        outcome="completed",
+        safe_error_code=None,
+        artifact_ids=(),
     ):
-        original = original[: -len(_MCP_CARRIER_TRUNCATION_MARKER)]
-    low = 0
-    high = len(original)
-    fitted = None
-    while low <= high:
-        middle = (low + high) // 2
-        trial_item = {
-            **item,
-            "content": original[:middle] + _MCP_CARRIER_TRUNCATION_MARKER,
-            "carrier_truncated": True,
-        }
-        trial = fit([trial_item])
-        if trial is None:
-            high = middle - 1
-        else:
-            fitted = trial
-            low = middle + 1
-    return fitted
+        return _rejected(
+            "agent_result_projection_too_large",
+            canonical_raw=canonical_raw,
+            raw_sha256=original_raw_sha256,
+        )
+    return AgentCallResultProjection(
+        safe_result_payload=receipt,
+        canonical_raw_bytes=canonical_raw,
+        raw_sha256=original_raw_sha256,
+        original_size_bytes=len(canonical_raw),
+        projection_revision=projection_revision,
+        projection_mode="transient_staged",
+        projection_truncated=projection_truncated,
+        spill_required=False,
+        spill_artifact_id=None,
+        transient_stage_required=True,
+        transient_stage_ref=stage_ref,
+        transient_content_bytes=content,
+        transient_content_sha256=content_sha256,
+    )
+
+
+def _artifact_projection(
+    *,
+    full_result: Mapping[str, Any],
+    canonical_raw: bytes,
+    original_raw_sha256: str,
+    call_item_id: str,
+    artifact_ids: Sequence[str],
+    projection_truncated: bool,
+) -> AgentCallResultProjection:
+    content = _canonical_json_bytes(dict(full_result))
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    spill_artifact_id = skill_result_artifact_id(
+        call_item_id=call_item_id,
+        raw_sha256=content_sha256,
+        projection_revision=SKILL_RESULT_PROJECTION_REVISION,
+    )
+    receipt = build_model_result_envelope(
+        projection_revision=SKILL_RESULT_PROJECTION_REVISION,
+        projection_mode="artifact_backed",
+        model_view={
+            "complete_result_available_as_artifact": True,
+            "schema": "maf.agent.skill_result_projection_receipt.v1",
+        },
+        original_size_bytes=len(content),
+        raw_sha256=content_sha256,
+        projection_truncated=projection_truncated,
+    )
+    if not _inline_result_fits(
+        receipt,
+        call_item_id=call_item_id,
+        outcome="completed",
+        safe_error_code=None,
+        artifact_ids=(*artifact_ids, spill_artifact_id),
+    ):
+        return _rejected(
+            "agent_result_projection_too_large",
+            canonical_raw=canonical_raw,
+            raw_sha256=original_raw_sha256,
+        )
+    return AgentCallResultProjection(
+        safe_result_payload=receipt,
+        canonical_raw_bytes=canonical_raw,
+        raw_sha256=original_raw_sha256,
+        original_size_bytes=len(canonical_raw),
+        projection_revision=SKILL_RESULT_PROJECTION_REVISION,
+        projection_mode="artifact_backed",
+        projection_truncated=projection_truncated,
+        spill_required=True,
+        spill_artifact_id=spill_artifact_id,
+        spill_content_bytes=content,
+        spill_content_sha256=content_sha256,
+    )
 
 
 def _validate_mcp_agent_result_bundle(value: object) -> dict[str, Any]:
@@ -845,34 +797,9 @@ def _validate_mcp_agent_result_bundle(value: object) -> dict[str, Any]:
     }
 
 
-def _mcp_bundle_with_results(
-    original: Mapping[str, Any],
-    results: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    normalized_results = [dict(item) for item in results]
-    omitted_count = int(original["result_count"]) - len(normalized_results)
-    return {
-        "schema": MCP_AGENT_RESULT_BUNDLE_SCHEMA,
-        "result_count": int(original["result_count"]),
-        "included_count": len(normalized_results),
-        "omitted_count": omitted_count,
-        "truncated": bool(
-            omitted_count
-            or any(item["source_truncated"] for item in normalized_results)
-            or any(item["carrier_truncated"] for item in normalized_results)
-        ),
-        "results": normalized_results,
-    }
-
-
 def _validate_model_result(result: Mapping[str, Any]) -> None:
     canonical = canonicalize_agent_payload(dict(result))
-    if canonical.size_bytes > MODEL_RESULT_MAX_BYTES:
-        raise ValueError("agent_result_projection_too_large")
-    model_view = result.get("model_view")
-    if not isinstance(model_view, Mapping) or _model_view_code_points(
-        model_view
-    ) > MODEL_VIEW_MAX_CODE_POINTS:
+    if not isinstance(result.get("model_view"), Mapping):
         raise ValueError("agent_result_projection_too_large")
     if result.get("projected_size_bytes") != canonical.size_bytes:
         raise ValueError("agent_result_projection_size_invalid")
@@ -969,17 +896,6 @@ def _sanitize_model_value(value: Any) -> Any:
     return value
 
 
-def _contains_forbidden_raw_value(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(
-            _is_forbidden_key(key) or _contains_forbidden_raw_value(child)
-            for key, child in value.items()
-        )
-    if isinstance(value, list):
-        return any(_contains_forbidden_raw_value(item) for item in value)
-    return isinstance(value, str) and _SECRET_ASSIGNMENT_RE.search(value) is not None
-
-
 def _is_forbidden_key(key: str) -> bool:
     normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower().replace("-", "_")
     normalized = re.sub(r"_+", "_", normalized).strip("_")
@@ -988,50 +904,6 @@ def _is_forbidden_key(key: str) -> bool:
     return normalized.endswith(
         ("_password", "_secret", "_api_key", "_access_token", "_refresh_token")
     )
-
-
-def _skill_preview(raw_value: dict[str, Any]) -> dict[str, Any]:
-    summary_fields: dict[str, Any] = {}
-    for key in _SKILL_PREVIEW_KEYS:
-        if key not in raw_value or _is_forbidden_key(key):
-            continue
-        value = _sanitize_model_value(raw_value[key])
-        if _is_small_preview_value(value):
-            summary_fields[key] = value
-    return {
-        "schema": "maf.agent.skill_result_preview.v1",
-        "summary_fields": summary_fields,
-        "available_top_level_fields": [
-            key for key in sorted(raw_value) if not _is_forbidden_key(key)
-        ][:128],
-        "complete_result_available_as_artifact": True,
-    }
-
-
-def _is_small_preview_value(value: Any) -> bool:
-    if value is None or isinstance(value, bool | int | float):
-        return True
-    if isinstance(value, str):
-        return len(value) <= 8_000
-    if isinstance(value, list):
-        return len(value) <= 16 and _model_view_code_points({"value": value}) <= 8_000
-    if isinstance(value, dict):
-        return len(value) <= 32 and _model_view_code_points({"value": value}) <= 8_000
-    return False
-
-
-def _model_view_code_points(value: Mapping[str, Any]) -> int:
-    return len(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    )
-
-
 def _is_delegated_model_result(value: Mapping[str, Any]) -> bool:
     return (
         value.get("schema") == "maf.agent.model_result.v1"

@@ -341,8 +341,7 @@ def _item_is_full_result_transport(item: AgentItem) -> bool:
         isinstance(safe_result, Mapping)
         and (
             (
-                safe_result.get("projection_revision") == "skill-result-v2"
-                and safe_result.get("projection_mode") == "transient_staged"
+                safe_result.get("projection_mode") == "transient_staged"
             )
             or safe_result.get("projection_mode") == "artifact_backed"
             or parse_tool_result_reuse_receipt(safe_result) is not None
@@ -371,7 +370,11 @@ def _message_contains_full_skill_result(message: AgentMessage) -> bool:
     safe_result = payload.get("safe_result") if isinstance(payload, Mapping) else None
     return bool(
         isinstance(safe_result, Mapping)
-        and safe_result.get("schema") == "maf.agent.skill_result_full.v1"
+        and safe_result.get("schema")
+        in {
+            "maf.agent.skill_result_full.v1",
+            "maf.agent.mcp_result_full.v1",
+        }
     )
 
 

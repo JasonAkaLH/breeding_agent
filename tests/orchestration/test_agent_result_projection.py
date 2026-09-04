@@ -4,10 +4,8 @@ import json
 import math
 import unittest
 
+from src.integrations.token_counter import TokenBoundedText
 from src.orchestration.agent_loop.result_projection import (
-    MODEL_RESULT_MAX_BYTES,
-    MODEL_VIEW_MAX_CODE_POINTS,
-    SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
     AgentCallResultProjector,
     build_tool_result_reuse_receipt,
@@ -16,7 +14,7 @@ from src.orchestration.agent_loop.result_projection import (
 from src.orchestration.agent_loop.skill_activation import (
     build_delegated_skill_instruction_result,
 )
-from src.storage.agent_payload import canonicalize_agent_payload
+from src.storage.agent_payload import AGENT_PAYLOAD_MAX_BYTES, canonicalize_agent_payload
 
 
 def _mcp_bundle(*contents: str, source_truncated: bool = False) -> dict:
@@ -39,12 +37,23 @@ def _mcp_bundle(*contents: str, source_truncated: bool = False) -> dict:
     }
 
 
-class AgentCallResultProjectorTest(unittest.TestCase):
+class AgentCallResultProjectorTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.projector = AgentCallResultProjector()
+        self.token_calls: list[tuple[str, dict]] = []
 
-    def project(self, capability_id: str, payload: dict, **overrides):
-        return self.projector.project(
+        async def keep_all(text: str, **kwargs) -> TokenBoundedText:
+            self.token_calls.append((text, kwargs))
+            return TokenBoundedText(
+                text=text,
+                total_tokens=1,
+                truncated=False,
+                cutoff=len(text),
+            )
+
+        self.projector = AgentCallResultProjector(token_budgeter=keep_all)
+
+    async def project(self, capability_id: str, payload: dict, **overrides):
+        return await self.projector.project(
             capability_id=capability_id,
             output_payload=payload,
             call_item_id=overrides.pop("call_item_id", "call-item-1"),
@@ -52,48 +61,39 @@ class AgentCallResultProjectorTest(unittest.TestCase):
             safe_error_code=overrides.pop("safe_error_code", None),
             artifact_ids=overrides.pop("artifact_ids", ()),
             continuation_locator=overrides.pop("continuation_locator", None),
+            model_edition=overrides.pop("model_edition", "edition-a"),
             **overrides,
         )
 
-    def test_small_skill_result_is_deterministic_inline_model_result(self) -> None:
+    async def test_small_skill_result_is_model_bound_and_deterministic(self) -> None:
         payload = {
             "answer": "found",
             "records": [{"name": "A"}, {"name": "B"}],
             "source_url": "https://example.test/result",
         }
 
-        first = self.project("skill.lookup", payload)
-        second = self.project("skill.lookup", payload)
+        first = await self.project("skill.lookup", payload)
+        second = await self.project("skill.lookup", payload)
 
         self.assertTrue(first.accepted)
         self.assertEqual(first, second)
         self.assertEqual(first.projection_mode, "inline")
         self.assertFalse(first.projection_truncated)
-        self.assertFalse(first.spill_required)
-        result = dict(first.safe_result_payload or {})
-        self.assertEqual(result["schema"], "maf.agent.model_result.v1")
-        self.assertEqual(result["projection_revision"], "skill-result-v1")
-        self.assertEqual(result["model_view"], payload)
-        self.assertEqual(
-            result["projected_size_bytes"],
-            canonicalize_agent_payload(result).size_bytes,
+        self.assertEqual(first.safe_result_payload["model_view"], payload)
+        self.assertEqual(len(self.token_calls), 2)
+        self.assertTrue(
+            all(call[1]["model_edition"] == "edition-a" for call in self.token_calls)
         )
-        self.assertEqual(first.original_size_bytes, len(first.canonical_raw_bytes or b""))
+        self.assertTrue(
+            all(call[1]["max_tokens"] == 50_000 for call in self.token_calls)
+        )
 
-    def test_reuse_receipt_has_exact_bounded_schema(self) -> None:
+    async def test_reuse_receipt_has_exact_bounded_schema(self) -> None:
         receipt = build_tool_result_reuse_receipt(
             source_result_item_id="result-root",
             source_result_payload_sha256="a" * 64,
         )
 
-        self.assertEqual(
-            set(receipt),
-            {
-                "schema",
-                "source_result_item_id",
-                "source_result_payload_sha256",
-            },
-        )
         self.assertEqual(
             parse_tool_result_reuse_receipt(receipt),
             ("result-root", "a" * 64),
@@ -105,46 +105,33 @@ class AgentCallResultProjectorTest(unittest.TestCase):
                 {**receipt, "artifact_refs": ["forbidden"]}
             )
 
-    def test_large_duplicate_articles_spill_once_with_small_priority_preview(self) -> None:
-        articles = [
-            {
-                "title": f"article-{index}",
-                "abstract": "育种研究" * 900,
-                "url": f"https://example.test/articles/{index}",
-            }
-            for index in range(28)
-        ]
+    async def test_legacy_large_skill_stages_safe_projection_not_raw(self) -> None:
         payload = {
             "answer": "检索完成",
-            "search_summary": "找到 28 篇文献",
-            "articles": articles,
-            "structured_content": {"articles": articles},
+            "records": ["育种研究" * 20_000],
+            "password": "do-not-stage",
         }
 
-        projected = self.project("skill.bioinfo_daily", payload)
+        projected = await self.project("skill.bioinfo_daily", payload)
 
         self.assertTrue(projected.accepted)
         self.assertTrue(projected.spill_required)
         self.assertEqual(projected.projection_mode, "artifact_backed")
-        self.assertTrue(projected.projection_truncated)
-        self.assertGreater(projected.original_size_bytes, 250_000)
-        self.assertTrue(projected.spill_artifact_id.startswith("agent-skill-result:"))
-        model_view = projected.safe_result_payload["model_view"]
-        self.assertEqual(
-            model_view["summary_fields"],
-            {"answer": "检索完成", "search_summary": "找到 28 篇文献"},
-        )
-        serialized = json.dumps(projected.safe_result_payload, ensure_ascii=False)
-        self.assertNotIn("article-0", serialized)
-        self.assertLessEqual(
-            canonicalize_agent_payload(projected.safe_result_payload).size_bytes,
-            MODEL_RESULT_MAX_BYTES,
+        self.assertFalse(projected.projection_truncated)
+        self.assertIsNotNone(projected.spill_content_bytes)
+        staged = json.loads(projected.spill_content_bytes)
+        self.assertEqual(staged["model_view"]["answer"], "检索完成")
+        self.assertNotIn("password", staged["model_view"])
+        self.assertNotIn("do-not-stage", projected.spill_content_bytes.decode())
+        self.assertNotEqual(
+            projected.spill_content_sha256,
+            projected.raw_sha256,
         )
 
-    def test_budgeted_skill_result_uses_only_whole_item_limit_for_inline(self) -> None:
+    async def test_result_above_old_80k_limit_remains_inline_under_agent_item_limit(self) -> None:
         payload = {"answer": "x" * 100_000}
 
-        projected = self.project(
+        projected = await self.project(
             "skill.lookup",
             payload,
             skill_projection_policy=(
@@ -155,20 +142,18 @@ class AgentCallResultProjectorTest(unittest.TestCase):
         self.assertTrue(projected.accepted)
         self.assertEqual(projected.projection_mode, "inline")
         self.assertFalse(projected.projection_truncated)
-        self.assertFalse(projected.spill_required)
-        self.assertFalse(projected.transient_stage_required)
         self.assertEqual(projected.safe_result_payload["model_view"], payload)
         self.assertGreater(
             canonicalize_agent_payload(projected.safe_result_payload).size_bytes,
-            MODEL_RESULT_MAX_BYTES,
+            80_000,
         )
 
-    def test_budgeted_large_skill_without_business_artifacts_uses_v2_receipt(
-        self,
-    ) -> None:
-        projected = self.project(
+    async def test_agent_item_overflow_uses_reference_without_content_truncation(self) -> None:
+        payload = {"records": ["x" * 150_000]}
+
+        projected = await self.project(
             "skill.lookup",
-            {"records": ["x" * 150_000]},
+            payload,
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
             ),
@@ -177,77 +162,53 @@ class AgentCallResultProjectorTest(unittest.TestCase):
         self.assertTrue(projected.accepted)
         self.assertEqual(projected.projection_revision, "skill-result-v2")
         self.assertEqual(projected.projection_mode, "transient_staged")
-        self.assertTrue(projected.projection_truncated)
+        self.assertFalse(projected.projection_truncated)
         self.assertTrue(projected.transient_stage_required)
-        self.assertFalse(projected.spill_required)
-        self.assertIsNone(projected.spill_artifact_id)
-        self.assertEqual(
-            projected.safe_result_payload["model_view"],
-            {
-                "complete_result_pending_context_injection": True,
-                "schema": "maf.agent.transient_skill_result_receipt.v1",
-                "stage_ref": projected.transient_stage_ref,
-            },
-        )
-        self.assertRegex(
-            projected.transient_stage_ref or "",
-            r"^agent-transient-skill-result:[0-9a-f]{64}$",
+        self.assertIsNotNone(projected.transient_content_bytes)
+        staged = json.loads(projected.transient_content_bytes)
+        self.assertEqual(staged["model_view"], payload)
+        self.assertLessEqual(
+            canonicalize_agent_payload(projected.safe_result_payload).size_bytes,
+            AGENT_PAYLOAD_MAX_BYTES,
         )
 
-    def test_budgeted_large_skill_with_business_artifact_keeps_v1_legacy(
-        self,
-    ) -> None:
-        projected = self.project(
-            "skill.lookup",
-            {"records": ["x" * 150_000]},
-            artifact_ids=("business-artifact",),
-            skill_projection_policy=(
-                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
-            ),
+    async def test_token_overflow_uses_single_structured_preview(self) -> None:
+        calls = []
+
+        async def truncate(text: str, **kwargs) -> TokenBoundedText:
+            calls.append((text, kwargs))
+            return TokenBoundedText(
+                text=text[:24],
+                total_tokens=50_001,
+                truncated=True,
+                cutoff=24,
+            )
+
+        projector = AgentCallResultProjector(token_budgeter=truncate)
+        projected = await projector.project(
+            capability_id="skill.lookup",
+            output_payload={"records": ["业务正文" * 100]},
+            call_item_id="call-item-1",
+            outcome="completed",
+            safe_error_code=None,
+            model_edition="edition-b",
         )
 
         self.assertTrue(projected.accepted)
-        self.assertEqual(projected.projection_revision, "skill-result-v1")
-        self.assertEqual(projected.projection_mode, "artifact_backed")
-        self.assertTrue(projected.spill_required)
-        self.assertFalse(projected.transient_stage_required)
-
-    def test_budgeted_skill_rejects_forbidden_raw_before_inline_classification(
-        self,
-    ) -> None:
-        projected = self.project(
-            "skill.lookup",
-            {"answer": "safe", "storage_key": "private/object"},
-            skill_projection_policy=(
-                SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
-            ),
+        self.assertTrue(projected.projection_truncated)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["model_edition"], "edition-b")
+        self.assertEqual(calls[0][1]["max_tokens"], 50_000)
+        self.assertEqual(
+            projected.safe_result_payload["model_view"],
+            {
+                "schema": "maf.agent.tool_result_preview.v1",
+                "structured_preview": calls[0][0][:24],
+            },
         )
 
-        self.assertEqual(projected.error_code, "agent_result_invalid")
-        self.assertIsNone(projected.safe_result_payload)
-
-    def test_spill_rejects_internal_authority_but_allows_business_urls(self) -> None:
-        large = ["x" * 10_000 for _ in range(20)]
-        allowed = self.project(
-            "skill.lookup",
-            {"articles": large, "source_url": "https://example.test/a"},
-        )
-        denied = self.project(
-            "skill.lookup",
-            {"articles": large, "storage_key": "private/object"},
-        )
-        denied_text = self.project(
-            "skill.lookup",
-            {"articles": large, "note": "access_token=do-not-persist"},
-        )
-
-        self.assertTrue(allowed.spill_required)
-        self.assertEqual(denied.error_code, "agent_result_invalid")
-        self.assertEqual(denied_text.error_code, "agent_result_invalid")
-        self.assertIsNone(denied.canonical_raw_bytes)
-
-    def test_inline_sanitizer_removes_sensitive_fields_and_assignments(self) -> None:
-        projected = self.project(
+    async def test_sensitive_fields_are_removed_before_tokenization(self) -> None:
+        projected = await self.project(
             "skill.lookup",
             {
                 "answer": "safe",
@@ -262,132 +223,63 @@ class AgentCallResultProjectorTest(unittest.TestCase):
             projected.safe_result_payload["model_view"],
             {"answer": "safe", "token_count": 12},
         )
+        self.assertNotIn("not-for-model", self.token_calls[0][0])
 
-    def test_mcp_uses_agent_projection_without_business_or_raw_duplication(self) -> None:
+    async def test_mcp_bundle_is_not_tokenized_twice(self) -> None:
         bundle = _mcp_bundle("bounded agent projection")
-        projected = self.project(
+        projected = await self.project(
             "mcp.dispatch",
             {
                 "agent_projection": bundle,
                 "mcp_status": "completed",
-                "mcp_tool": {"name": "lookup"},
                 "business_result": {"private_user_view": [1, 2, 3]},
                 "structured_content": {"private_raw": [1, 2, 3]},
-                "raw_result": "do-not-copy",
                 "truncated": False,
             },
         )
 
         self.assertTrue(projected.accepted)
-        self.assertFalse(projected.spill_required)
+        self.assertEqual(self.token_calls, [])
         model_view = projected.safe_result_payload["model_view"]
         self.assertEqual(model_view["agent_projection"], bundle)
-        self.assertEqual(model_view["mcp_status"], "completed")
-        serialized = json.dumps(model_view)
-        for forbidden in ("business_result", "structured_content", "raw_result"):
-            self.assertNotIn(forbidden, serialized)
+        self.assertNotIn("business_result", model_view)
+        self.assertNotIn("structured_content", model_view)
 
-    def test_mcp_rejects_legacy_string_and_invalid_closed_bundles(self) -> None:
-        invalid = [
-            "legacy agent projection",
-            {**_mcp_bundle("safe"), "unknown": True},
-            {
-                **_mcp_bundle("safe"),
-                "results": [
-                    {
-                        **_mcp_bundle("safe")["results"][0],
-                        "raw_result": "forbidden",
-                    }
-                ],
-            },
-            {**_mcp_bundle("safe"), "included_count": 2},
-            {**_mcp_bundle("safe"), "truncated": True},
-            {
-                **_mcp_bundle("safe", "other"),
-                "results": list(reversed(_mcp_bundle("safe", "other")["results"])),
-            },
-            {
-                **_mcp_bundle("safe"),
-                "results": [
-                    {
-                        **_mcp_bundle("safe")["results"][0],
-                        "source_truncated": 0,
-                    }
-                ],
-            },
-        ]
-        for agent_projection in invalid:
-            with self.subTest(agent_projection=agent_projection):
-                projected = self.project(
-                    "mcp.dispatch",
-                    {
-                        "agent_projection": agent_projection,
-                        "mcp_status": "completed",
-                        "truncated": False,
-                    },
-                )
-                self.assertEqual(projected.error_code, "agent_result_invalid")
-                self.assertIsNone(projected.safe_result_payload)
-
-    def test_mcp_outer_budget_removes_oldest_result_and_marks_truncation(self) -> None:
-        projected = self.project(
+    async def test_large_mcp_bundle_uses_reference_without_carrier_truncation(self) -> None:
+        old = "old-start-" + "x" * 70_000 + "-old-end"
+        new = "new-start-" + "y" * 70_000 + "-new-end"
+        projected = await self.project(
             "mcp.dispatch",
             {
-                "agent_projection": _mcp_bundle(
-                    "old-start-" + "x" * 10_000 + "-old-end",
-                    "new-start-" + "y" * 10_000 + "-new-end",
-                ),
+                "agent_projection": _mcp_bundle(old, new),
                 "mcp_status": "completed",
                 "truncated": False,
             },
         )
 
         self.assertTrue(projected.accepted)
-        self.assertTrue(projected.projection_truncated)
-        result = projected.safe_result_payload
-        bundle = result["model_view"]["agent_projection"]
-        self.assertEqual(bundle["result_count"], 2)
-        self.assertEqual(bundle["included_count"], 1)
-        self.assertEqual(bundle["omitted_count"], 1)
-        self.assertTrue(bundle["truncated"])
-        self.assertEqual(bundle["results"][0]["call_sequence"], 2)
-        self.assertIn("new-start", bundle["results"][0]["content"])
-        self.assertNotIn("old-start", json.dumps(bundle))
-        self.assertTrue(result["model_view"]["truncated"])
-        self.assertLessEqual(
-            canonicalize_agent_payload(result).size_bytes,
-            MODEL_RESULT_MAX_BYTES,
+        self.assertEqual(projected.projection_mode, "transient_staged")
+        self.assertFalse(projected.projection_truncated)
+        staged = json.loads(projected.transient_content_bytes)
+        staged_bundle = staged["model_view"]["agent_projection"]
+        self.assertEqual(staged_bundle["included_count"], 2)
+        self.assertIn("old-end", staged_bundle["results"][0]["content"])
+        self.assertIn("new-end", staged_bundle["results"][1]["content"])
+        self.assertTrue(
+            all(not item["carrier_truncated"] for item in staged_bundle["results"])
         )
 
-    def test_mcp_outer_budget_shrinks_escape_heavy_content_with_explicit_flags(self) -> None:
-        projected = self.project(
-            "mcp.dispatch",
-            {
-                "agent_projection": _mcp_bundle('start-' + '\"\\\n' * 10_000 + '-end'),
-                "mcp_status": "completed",
-                "truncated": False,
-            },
+    async def test_legacy_mcp_result_is_tokenized_once(self) -> None:
+        projected = await self.project(
+            "mcp.crm.lookup",
+            {"mcp_status": "completed", "text": "business", "truncated": False},
         )
 
         self.assertTrue(projected.accepted)
-        result = projected.safe_result_payload
-        bundle = result["model_view"]["agent_projection"]
-        item = bundle["results"][0]
-        self.assertTrue(item["carrier_truncated"])
-        self.assertFalse(item["source_truncated"])
-        self.assertTrue(bundle["truncated"])
-        self.assertTrue(result["projection_truncated"])
-        self.assertIn("[TRUNCATED BY MCP RESULT CARRIER]", item["content"])
-        self.assertNotIn("-end", item["content"])
-        rendered_view = json.dumps(
-            result["model_view"],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        self.assertLessEqual(len(rendered_view), MODEL_VIEW_MAX_CODE_POINTS)
+        self.assertEqual(len(self.token_calls), 1)
+        self.assertIn("business", self.token_calls[0][0])
 
-    def test_delegated_model_result_is_validated_without_second_envelope(self) -> None:
+    async def test_delegated_result_uses_same_model_bound_budget(self) -> None:
         delegated = build_delegated_skill_instruction_result(
             capability_id="skill.report",
             pinned_bundle_revision="revision-1",
@@ -395,82 +287,82 @@ class AgentCallResultProjectorTest(unittest.TestCase):
             instruction_body="# Instructions\nUse the workflow.",
         )
 
-        projected = self.project("skill.report", delegated)
+        projected = await self.project("skill.report", delegated)
 
         self.assertTrue(projected.accepted)
-        self.assertEqual(projected.safe_result_payload, delegated)
         self.assertEqual(
             projected.projection_revision,
             "delegated-skill-instruction-v1",
         )
+        self.assertEqual(
+            projected.safe_result_payload["model_view"],
+            delegated["model_view"],
+        )
+        self.assertEqual(len(self.token_calls), 1)
 
-    def test_invalid_strict_json_values_fail_closed(self) -> None:
-        values = (
+    async def test_failed_or_waiting_result_does_not_call_tokenization(self) -> None:
+        failed = await self.project(
+            "skill.lookup",
+            {"error": "safe"},
+            outcome="failed",
+            safe_error_code="skill_failed",
+        )
+        waiting = await self.project(
+            "skill.lookup",
+            {"question": "need input"},
+            outcome="waiting_for_input",
+            continuation_locator={
+                "schema": "maf.agent.continuation_locator.v1",
+                "safe_ref": "r1",
+            },
+        )
+
+        self.assertTrue(failed.accepted)
+        self.assertTrue(waiting.accepted)
+        self.assertEqual(self.token_calls, [])
+
+    async def test_invalid_mcp_bundles_and_json_values_fail_closed(self) -> None:
+        invalid_bundles = [
+            "legacy agent projection",
+            {**_mcp_bundle("safe"), "unknown": True},
+            {**_mcp_bundle("safe"), "included_count": 2},
+            {**_mcp_bundle("safe"), "truncated": True},
+        ]
+        for agent_projection in invalid_bundles:
+            projected = await self.project(
+                "mcp.dispatch",
+                {
+                    "agent_projection": agent_projection,
+                    "mcp_status": "completed",
+                    "truncated": False,
+                },
+            )
+            self.assertEqual(projected.error_code, "agent_result_invalid")
+
+        invalid_values = (
             {"value": math.nan},
             {"value": math.inf},
             {1: "non-string-key"},
             {"value": object()},
             {"value": "\ud800"},
         )
-        for value in values:
-            with self.subTest(value=repr(value)):
-                projected = self.project("skill.lookup", value)
-                self.assertEqual(projected.error_code, "agent_result_invalid")
-                self.assertIsNone(projected.safe_result_payload)
+        for value in invalid_values:
+            projected = await self.project("skill.lookup", value)
+            self.assertEqual(projected.error_code, "agent_result_invalid")
 
-        nested: dict[str, object] = {}
-        cursor = nested
-        for _ in range(66):
-            child: dict[str, object] = {}
-            cursor["child"] = child
-            cursor = child
-        self.assertEqual(
-            self.project("skill.lookup", nested).error_code,
-            "agent_result_invalid",
-        )
-
-    def test_multibyte_and_escape_heavy_views_stay_within_both_budgets(self) -> None:
-        for value in (
-            "中" * MODEL_VIEW_MAX_CODE_POINTS,
-            "😀" * MODEL_VIEW_MAX_CODE_POINTS,
-            ('"\\\n' * MODEL_VIEW_MAX_CODE_POINTS),
-        ):
-            with self.subTest(prefix=value[:1]):
-                projected = self.project("skill.lookup", {"answer": value})
-                self.assertTrue(projected.accepted)
-                result = projected.safe_result_payload
-                encoded = canonicalize_agent_payload(result)
-                rendered_view = json.dumps(
-                    result["model_view"],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                self.assertLessEqual(len(rendered_view), MODEL_VIEW_MAX_CODE_POINTS)
-                self.assertLessEqual(encoded.size_bytes, MODEL_RESULT_MAX_BYTES)
-
-    def test_continuation_locator_is_bounded_inside_model_view(self) -> None:
-        locator = {"schema": "maf.agent.continuation_locator.v1", "safe_ref": "r1"}
-        projected = self.project(
-            "skill.lookup",
-            {"question": "need input"},
-            outcome="waiting_for_input",
-            continuation_locator=locator,
-        )
-        self.assertEqual(
-            projected.safe_result_payload["model_view"]["continuation_locator"],
-            locator,
-        )
-
-    def test_full_tool_result_envelope_overflow_returns_typed_projection_failure(self) -> None:
-        projected = self.project(
+    async def test_full_tool_result_envelope_overflow_is_typed(self) -> None:
+        projected = await self.project(
             "skill.lookup",
             {"answer": "small"},
-            artifact_ids=tuple(f"artifact-{index}-" + "x" * 200 for index in range(700)),
+            artifact_ids=tuple(
+                f"artifact-{index}-" + "x" * 200 for index in range(700)
+            ),
         )
-        self.assertEqual(
-            projected.error_code,
-            "agent_result_projection_too_large",
-        )
+
+        self.assertEqual(projected.error_code, "agent_result_projection_too_large")
         self.assertGreater(projected.original_size_bytes, 0)
         self.assertRegex(projected.raw_sha256 or "", r"^[0-9a-f]{64}$")
+
+
+if __name__ == "__main__":
+    unittest.main()

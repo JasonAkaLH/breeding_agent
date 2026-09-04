@@ -378,6 +378,7 @@ from src.orchestration.agent_loop.lease import AgentLeaseController
 from src.orchestration.agent_loop.result_artifacts import (
     AgentSkillResultArtifactResolver,
 )
+from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
 from src.orchestration.agent_loop.capability_invoker import (
     AgentCapabilityInvoker,
     AgentInvocationContextStore,
@@ -16112,6 +16113,9 @@ def build_api_runtime(
         current_user_input_loader=invocation_contexts.current_user_input,
         continuation_loader=invocation_commit_port.continuation_locator_for_call,
         delegated_skill_activator=activate_delegated_skill,
+        result_projector=AgentCallResultProjector(
+            tokenization_config=resolved_model_edition_config,
+        ),
         legacy_result_artifact_stager=agent_skill_result_stager.stage,
         transient_result_stager=agent_transient_skill_result_store.stage,
         result_projection_observer=observe_agent_result_projection,
@@ -16272,7 +16276,7 @@ def build_api_runtime(
                 },
                 original_size_bytes=recovered.raw_size_bytes,
                 raw_sha256=recovered.raw_sha256,
-                projection_truncated=True,
+                projection_truncated=recovered.projection_truncated,
             )
         )
 

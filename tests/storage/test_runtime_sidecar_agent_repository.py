@@ -33,7 +33,6 @@ from src.orchestration.agent_loop.result_artifacts import (
 )
 from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
-    AgentCallResultProjector,
 )
 from src.storage.artifact_files import LocalArtifactFileStore
 from src.storage.runtime_sidecar_agent_repository import RuntimeSidecarAgentRepository
@@ -45,6 +44,7 @@ from tests.integrations.test_runtime_sidecar_grpc_client import (
     _repo_root,
     _terminate_process,
 )
+from tests.orchestration.support import make_agent_result_projector
 
 
 class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestCase):
@@ -457,12 +457,13 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             )
         )
         call = sampled.call_items[0]
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.large",
             output_payload={"rows": ["x" * 10_000 for _ in range(20)]},
             call_item_id=call.item_id,
             outcome="completed",
             safe_error_code=None,
+            model_edition="edition-a",
         )
         staged = AgentSkillResultArtifactStager(
             file_store=LocalArtifactFileStore(
@@ -473,8 +474,8 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             run=sampled.run,
             call_item=call,
             node_id=sampled.node_ids[0],
-            canonical_raw_bytes=projection.canonical_raw_bytes,
-            raw_sha256=projection.raw_sha256,
+            canonical_raw_bytes=projection.spill_content_bytes,
+            raw_sha256=projection.spill_content_sha256,
             projection_revision=projection.projection_revision,
             expected_artifact_id=projection.spill_artifact_id,
         )
@@ -528,7 +529,7 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             )
         )
         call = sampled.call_items[0]
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.large",
             output_payload={"rows": ["x" * 150_000]},
             call_item_id=call.item_id,
@@ -537,6 +538,7 @@ class RuntimeSidecarAgentRepositoryIntegrationTest(unittest.IsolatedAsyncioTestC
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
             ),
+            model_edition="edition-a",
         )
         commit = AgentCallOutcomeCommit(
             run.run_id,

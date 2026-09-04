@@ -503,9 +503,6 @@ class MCPBusinessResultView(BaseModel):
             or self.projection_truncated
         ):
             raise ValueError("unavailable MCP result contains display content")
-        encoded = self.model_dump_json(by_alias=True).encode("utf-8")
-        if len(encoded.decode("utf-8")) > 20_000 or len(encoded) > 80_000:
-            raise ValueError("MCP result view exceeds public projection budget")
         return self
 
 

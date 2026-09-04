@@ -31,6 +31,7 @@ from src.orchestration.agent_loop.transient_results import (
 from src.orchestration.agent_loop.result_projection import (
     build_model_result_envelope,
 )
+from tests.orchestration.support import make_agent_result_projector
 
 
 class AgentTransientSkillResultStoreTest(unittest.IsolatedAsyncioTestCase):
@@ -57,7 +58,24 @@ class AgentTransientSkillResultStoreTest(unittest.IsolatedAsyncioTestCase):
             ),
             payload_sha256="a" * 64,
         )
-        self.raw = b'{"records":[1,2,3]}\n'
+        self.staged_projection = build_model_result_envelope(
+            projection_revision="skill-result-v1",
+            projection_mode="inline",
+            model_view={"records": [1, 2, 3]},
+            original_size_bytes=20,
+            raw_sha256="d" * 64,
+            projection_truncated=True,
+        )
+        self.raw = (
+            json.dumps(
+                self.staged_projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode()
         self.raw_sha256 = hashlib.sha256(self.raw).hexdigest()
         self.stage_ref = transient_skill_result_stage_ref(
             call_item_id=self.call.item_id,
@@ -234,7 +252,7 @@ class AgentTransientSkillResultStoreTest(unittest.IsolatedAsyncioTestCase):
                 "safe_error_code": None,
                 "safe_result": {
                     "schema": "maf.agent.skill_result_full.v1",
-                    "result": {"records": [1, 2, 3]},
+                    "result": self.staged_projection,
                 },
             },
         )
@@ -268,6 +286,85 @@ class AgentTransientSkillResultStoreTest(unittest.IsolatedAsyncioTestCase):
                 result_item=result,
                 durable_payload=durable_payload,
             )
+
+    async def test_large_mcp_projection_uses_same_reference_carrier(self) -> None:
+        call_payload = {
+            "capability_id": "mcp.dispatch",
+            "node_id": "node-1",
+        }
+        call = replace(
+            self.call,
+            payload_json=json.dumps(call_payload, sort_keys=True) + "\n",
+        )
+        bundle = {
+            "schema": "maf.mcp.agent_result_bundle.v1",
+            "result_count": 1,
+            "included_count": 1,
+            "omitted_count": 0,
+            "truncated": False,
+            "results": [
+                {
+                    "call_sequence": 1,
+                    "content": "BEGIN-MCP" + "x" * 150_000 + "END-MCP",
+                    "source_truncated": False,
+                    "carrier_truncated": False,
+                }
+            ],
+        }
+        projection = await make_agent_result_projector().project(
+            capability_id="mcp.dispatch",
+            output_payload={
+                "agent_projection": bundle,
+                "mcp_status": "completed",
+                "truncated": False,
+            },
+            call_item_id=call.item_id,
+            outcome="completed",
+            safe_error_code=None,
+            model_edition="edition-a",
+        )
+        self.assertTrue(projection.transient_stage_required)
+        self.store.stage(
+            run=self.run,
+            call_item=call,
+            result_item_id="result-mcp",
+            node_id="node-1",
+            capability_id="mcp.dispatch",
+            canonical_raw_bytes=projection.transient_content_bytes,
+            raw_sha256=projection.transient_content_sha256,
+            projection_revision=projection.projection_revision,
+            expected_stage_ref=projection.transient_stage_ref,
+        )
+        durable_payload = {
+            "artifact_refs": [],
+            "call_item_id": call.item_id,
+            "outcome": "completed",
+            "safe_error_code": None,
+            "safe_result": projection.safe_result_payload,
+        }
+        result = replace(
+            self.result_item(),
+            item_id="result-mcp",
+            payload_json=json.dumps(durable_payload, sort_keys=True) + "\n",
+        )
+
+        resolved = AgentTransientSkillResultResolver(
+            self.store
+        ).resolve_tool_result(
+            run=self.run,
+            call_item=call,
+            result_item=result,
+            durable_payload=durable_payload,
+        )
+
+        self.assertEqual(
+            resolved["safe_result"]["schema"],
+            "maf.agent.mcp_result_full.v1",
+        )
+        rendered = json.dumps(resolved, ensure_ascii=False)
+        self.assertIn("BEGIN-MCP", rendered)
+        self.assertIn("END-MCP", rendered)
+        self.assertNotIn("stage_ref", rendered)
 
     def test_cleaner_deletes_only_after_terminal_authority(self) -> None:
         self.stage()

@@ -242,12 +242,13 @@ class AgentCapabilityInvoker:
                     or activated.safe_result_payload is None
                 ):
                     return activated
-                projected = self._result_projector.project(
+                projected = await self._result_projector.project(
                     capability_id=capability_id,
                     output_payload=activated.safe_result_payload,
                     call_item_id=call_item.item_id,
                     outcome=activated.status.value,
                     safe_error_code=activated.safe_error_code,
+                    model_edition=run.binding.model_edition,
                 )
                 if not projected.accepted:
                     await self._record_result_projection(
@@ -410,7 +411,7 @@ class AgentCapabilityInvoker:
                 AgentCallOutcomeStatus.FAILED,
                 safe_error_code="agent_context_budget_invalid",
             )
-        projection = self._result_projector.project(
+        projection = await self._result_projector.project(
             capability_id=capability_id,
             output_payload=result.output_payload,
             call_item_id=call_item.item_id,
@@ -421,6 +422,7 @@ class AgentCapabilityInvoker:
             artifact_ids=tuple(artifact.artifact_id for artifact in artifacts),
             continuation_locator=continuation_locator,
             skill_projection_policy=skill_projection_policy,
+            model_edition=run.binding.model_edition,
         )
         if not projection.accepted:
             await self._record_result_projection(
@@ -453,8 +455,8 @@ class AgentCapabilityInvoker:
                     run=run,
                     call_item=call_item,
                     node_id=node.node_id,
-                    canonical_raw_bytes=projection.canonical_raw_bytes,
-                    raw_sha256=projection.raw_sha256,
+                    canonical_raw_bytes=projection.spill_content_bytes,
+                    raw_sha256=projection.spill_content_sha256,
                     projection_revision=projection.projection_revision,
                     expected_artifact_id=projection.spill_artifact_id,
                 )
@@ -520,8 +522,8 @@ class AgentCapabilityInvoker:
                     result_item_id=result_reservation.item_id,
                     node_id=node.node_id,
                     capability_id=capability_id,
-                    canonical_raw_bytes=projection.canonical_raw_bytes,
-                    raw_sha256=projection.raw_sha256,
+                    canonical_raw_bytes=projection.transient_content_bytes,
+                    raw_sha256=projection.transient_content_sha256,
                     projection_revision=projection.projection_revision,
                     expected_stage_ref=projection.transient_stage_ref,
                 )
@@ -535,9 +537,10 @@ class AgentCapabilityInvoker:
                 )
                 or transient_stage.stage_ref
                 != projection.transient_stage_ref
-                or transient_stage.raw_sha256 != projection.raw_sha256
+                or transient_stage.raw_sha256
+                != projection.transient_content_sha256
                 or transient_stage.raw_size_bytes
-                != projection.original_size_bytes
+                != len(projection.transient_content_bytes or b"")
                 or transient_stage.projection_revision
                 != projection.projection_revision
             ):

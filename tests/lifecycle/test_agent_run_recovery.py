@@ -46,7 +46,6 @@ from src.orchestration.agent_loop.models import (
 )
 from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
-    AgentCallResultProjector,
     build_model_result_envelope,
 )
 from src.orchestration.agent_loop.transient_results import (
@@ -60,6 +59,7 @@ from src.storage.sqlite import (
     create_sqlite_session_factory,
 )
 from src.storage.sqlite.models import TaskRow
+from tests.orchestration.support import make_agent_result_projector
 
 
 class _WaitingLeaseStore:
@@ -826,7 +826,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         )
         call = sampled.call_items[0]
         reservation = sampled.result_reservations[0]
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.safe",
             output_payload={"rows": ["x" * 150_000]},
             call_item_id=call.item_id,
@@ -835,6 +835,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
             ),
+            model_edition="edition-a",
         )
         store = AgentTransientSkillResultStore(
             Path(self.temp_dir.name) / "transient-results"
@@ -845,8 +846,8 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             result_item_id=reservation.item_id,
             node_id=sampled.node_ids[0],
             capability_id="skill.safe",
-            canonical_raw_bytes=projection.canonical_raw_bytes,
-            raw_sha256=projection.raw_sha256,
+            canonical_raw_bytes=projection.transient_content_bytes,
+            raw_sha256=projection.transient_content_sha256,
             projection_revision=projection.projection_revision,
             expected_stage_ref=projection.transient_stage_ref,
         )
@@ -872,7 +873,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                     },
                     original_size_bytes=recovered.raw_size_bytes,
                     raw_sha256=recovered.raw_sha256,
-                    projection_truncated=True,
+                    projection_truncated=recovered.projection_truncated,
                 )
             )
 

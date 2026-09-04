@@ -49,6 +49,7 @@ from src.storage.sqlite import (
     create_sqlite_session_factory,
 )
 from src.storage.sqlite.models import TaskNodeRow, TaskRow
+from tests.orchestration.support import make_agent_result_projector
 
 
 def _policy(*, parallel_safe: bool) -> CapabilityInvocationPolicy:
@@ -718,6 +719,7 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
             node_loader=load_node,
             request_metadata_loader=lambda _run: {},
             current_user_input_loader=lambda _run: "",
+            result_projector=make_agent_result_projector(),
         )
 
         class ResponseLostRepository:

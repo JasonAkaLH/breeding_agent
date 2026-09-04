@@ -13,7 +13,6 @@ from src.orchestration.agent_loop.models import (
     AgentRunStatus,
 )
 from src.orchestration.agent_loop.skill_activation import (
-    AGENT_MODEL_RESULT_MAX_BYTES,
     DELEGATED_SKILL_INSTRUCTION_MAX_CODE_POINTS,
     DelegatedSkillActivationService,
     build_canonical_skill_activation,
@@ -60,7 +59,7 @@ class DelegatedSkillActivationServiceTest(unittest.IsolatedAsyncioTestCase):
             + "\n"
         ).encode()
         self.assertEqual(result["projected_size_bytes"], len(encoded))
-        self.assertLessEqual(len(encoded), AGENT_MODEL_RESULT_MAX_BYTES)
+        self.assertLessEqual(len(encoded), AGENT_PAYLOAD_MAX_BYTES)
         self.assertNotIn("profile", result["model_view"])
 
     def test_delegated_instruction_rejects_missing_and_over_limit_body(self) -> None:

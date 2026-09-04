@@ -30,10 +30,10 @@ from src.orchestration.agent_loop.result_artifacts import (
 from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_REVISION,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
-    AgentCallResultProjector,
     skill_result_artifact_id,
 )
 from src.storage.artifact_files import LocalArtifactFileStore
+from tests.orchestration.support import make_agent_result_projector
 
 
 class AgentSkillResultArtifactStagerTest(unittest.TestCase):
@@ -186,9 +186,9 @@ class AgentSkillResultArtifactStagerTest(unittest.TestCase):
         )
 
 
-class AgentSkillResultArtifactResolverTest(unittest.TestCase):
-    def setUp(self) -> None:
-        super().setUp()
+class AgentSkillResultArtifactResolverTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
         self.tmpdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tmpdir.name)
         self.file_store = LocalArtifactFileStore(self.root / "artifacts")
@@ -222,7 +222,7 @@ class AgentSkillResultArtifactResolverTest(unittest.TestCase):
         self.raw_payload = {
             "records": ["BEGIN-ARTIFACT", "x" * 150_000, "END-ARTIFACT"]
         }
-        self.projection = AgentCallResultProjector().project(
+        self.projection = await make_agent_result_projector().project(
             capability_id="skill.lookup",
             output_payload=self.raw_payload,
             call_item_id=self.call.item_id,
@@ -232,6 +232,7 @@ class AgentSkillResultArtifactResolverTest(unittest.TestCase):
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
             ),
+            model_edition="edition-a",
         )
         staged = AgentSkillResultArtifactStager(
             file_store=self.file_store,
@@ -240,8 +241,8 @@ class AgentSkillResultArtifactResolverTest(unittest.TestCase):
             run=self.run,
             call_item=self.call,
             node_id="node-resolve",
-            canonical_raw_bytes=self.projection.canonical_raw_bytes,
-            raw_sha256=self.projection.raw_sha256,
+            canonical_raw_bytes=self.projection.spill_content_bytes,
+            raw_sha256=self.projection.spill_content_sha256,
             projection_revision=self.projection.projection_revision,
             expected_artifact_id=self.projection.spill_artifact_id,
         )
@@ -299,7 +300,7 @@ class AgentSkillResultArtifactResolverTest(unittest.TestCase):
             resolved["safe_result"],
             {
                 "schema": "maf.agent.skill_result_full.v1",
-                "result": self.raw_payload,
+                "result": json.loads(self.projection.spill_content_bytes),
             },
         )
 
@@ -370,7 +371,7 @@ class AgentSkillResultArtifactResolverTest(unittest.TestCase):
                 artifact=self.artifact,
             )
 
-        raw_path.write_bytes(self.projection.canonical_raw_bytes)
+        raw_path.write_bytes(self.projection.spill_content_bytes)
         raw_path.chmod(0o644)
         with self.assertRaisesRegex(
             ValueError, "agent_skill_result_artifact_unavailable"

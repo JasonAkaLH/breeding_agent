@@ -8,7 +8,26 @@ from pathlib import Path
 from typing import Any
 
 from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
+from src.integrations.token_counter import TokenBoundedText
+from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
+
+
+async def keep_all_tool_result_tokens(
+    text: str, **_kwargs: object
+) -> TokenBoundedText:
+    return TokenBoundedText(
+        text=text,
+        total_tokens=1,
+        truncated=False,
+        cutoff=len(text),
+    )
+
+
+def make_agent_result_projector() -> AgentCallResultProjector:
+    return AgentCallResultProjector(
+        token_budgeter=keep_all_tool_result_tokens
+    )
 
 
 class OrchestrationSQLiteTestCase(unittest.TestCase):

@@ -31,7 +31,6 @@ from src.orchestration.agent_loop.models import (
 from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
-    AgentCallResultProjector,
     build_tool_result_reuse_receipt,
 )
 from src.orchestration.agent_loop.tool_catalog import AgentToolCatalog
@@ -39,6 +38,7 @@ from src.orchestration.agent_loop.transient_results import (
     AgentTransientSkillResultResolver,
     AgentTransientSkillResultStore,
 )
+from tests.orchestration.support import make_agent_result_projector
 
 
 def _item(
@@ -199,7 +199,7 @@ class AgentContextPreflightTest(unittest.IsolatedAsyncioTestCase):
             call_ordinal=0,
         )
         raw_payload = {"records": ["BEGIN", "x" * 150_000, "END"]}
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.lookup",
             output_payload=raw_payload,
             call_item_id=call.item_id,
@@ -208,6 +208,7 @@ class AgentContextPreflightTest(unittest.IsolatedAsyncioTestCase):
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
             ),
+            model_edition="edition-a",
         )
         result = _item(
             "result-1",
@@ -231,8 +232,8 @@ class AgentContextPreflightTest(unittest.IsolatedAsyncioTestCase):
                 result_item_id=result.item_id,
                 node_id="node-1",
                 capability_id="skill.lookup",
-                canonical_raw_bytes=projection.canonical_raw_bytes,
-                raw_sha256=projection.raw_sha256,
+                canonical_raw_bytes=projection.transient_content_bytes,
+                raw_sha256=projection.transient_content_sha256,
                 projection_revision=projection.projection_revision,
                 expected_stage_ref=projection.transient_stage_ref,
             )
@@ -289,7 +290,7 @@ class AgentContextPreflightTest(unittest.IsolatedAsyncioTestCase):
             call_ordinal=0,
         )
         raw_payload = {"records": ["BEGIN", "x" * 150_000, "END"]}
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.lookup",
             output_payload=raw_payload,
             call_item_id=call.item_id,
@@ -299,6 +300,7 @@ class AgentContextPreflightTest(unittest.IsolatedAsyncioTestCase):
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
             ),
+            model_edition="edition-a",
         )
         result = _item(
             "result-1",

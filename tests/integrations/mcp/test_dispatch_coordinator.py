@@ -66,7 +66,7 @@ from src.integrations.mcp.rollout_evidence import (
 from src.integrations.mcp.temporary_results import MCPResultTooLargeError
 from src.integrations.mcp.selector_context import MCPSelectorContextAuthorityError
 from src.orchestration.models import UserMCPServerProfile
-from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
+from tests.orchestration.support import make_agent_result_projector
 
 
 NOW = datetime(2026, 8, 12, 12, 0, 0)
@@ -1188,12 +1188,13 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(materialize.call_count, 1)
         self.assertEqual(outcome.output_payload["mcp_status"], "completed")
         self.assertIn("助力双方交往", outcome.output_payload["text"])
-        projected = AgentCallResultProjector().project(
+        projected = await make_agent_result_projector().project(
             capability_id="mcp.dispatch",
             output_payload=outcome.output_payload,
             call_item_id="call-item-ocr",
             outcome="completed",
             safe_error_code=None,
+            model_edition="edition-a",
         )
         self.assertTrue(projected.accepted)
         self.assertIn(

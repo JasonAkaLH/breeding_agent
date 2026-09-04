@@ -27,6 +27,9 @@ AGENT_TRANSIENT_SKILL_RESULT_MANIFEST_SCHEMA = (
 )
 AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND = "agent_transient_skill_result"
 AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION = "skill-result-v2"
+_TRANSIENT_RESULT_PROJECTION_REVISIONS = frozenset(
+    {AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION, "mcp-result-v1"}
+)
 _STAGE_REF_PREFIX = "agent-transient-skill-result:"
 _RAW_FILENAME = "result.json"
 
@@ -47,6 +50,7 @@ class AgentTransientSkillResultRecoveryStage:
     raw_size_bytes: int
     raw_sha256: str
     projection_revision: str
+    projection_truncated: bool
 
 
 class AgentTransientSkillResultStore:
@@ -171,6 +175,9 @@ class AgentTransientSkillResultStore:
             value = json.loads(raw.decode("utf-8"))
             if (
                 not isinstance(value, dict)
+                or value.get("schema") != "maf.agent.model_result.v1"
+                or value.get("projection_mode") != "inline"
+                or type(value.get("projection_truncated")) is not bool
                 or (
                     json.dumps(
                         value,
@@ -191,6 +198,7 @@ class AgentTransientSkillResultStore:
                 raw_size_bytes=int(manifest["raw_size_bytes"]),
                 raw_sha256=str(manifest["raw_sha256"]),
                 projection_revision=str(manifest["projection_revision"]),
+                projection_truncated=bool(value["projection_truncated"]),
             )
         except (OSError, TypeError, ValueError):
             raise ValueError(
@@ -285,14 +293,13 @@ class AgentTransientSkillResultStore:
             not isinstance(canonical_raw_bytes, bytes)
             or not canonical_raw_bytes
             or not _is_sha256(raw_sha256)
-            or projection_revision
-            != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+            or projection_revision not in _TRANSIENT_RESULT_PROJECTION_REVISIONS
             or not isinstance(result_item_id, str)
             or not result_item_id.strip()
             or not isinstance(node_id, str)
             or not node_id.strip()
             or not isinstance(capability_id, str)
-            or not capability_id.startswith("skill.")
+            or not capability_id.startswith(("skill.", "mcp."))
             or call_item.kind is not AgentItemKind.TOOL_CALL
             or call_item.run_id != run.run_id
             or call_item.task_id != run.task_id
@@ -465,9 +472,9 @@ class AgentTransientSkillResultResolver:
             set(safe_result) != receipt_keys
             or safe_result.get("schema") != "maf.agent.model_result.v1"
             or safe_result.get("projection_revision")
-            != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+            not in _TRANSIENT_RESULT_PROJECTION_REVISIONS
             or safe_result.get("projection_mode") != "transient_staged"
-            or safe_result.get("projection_truncated") is not True
+            or type(safe_result.get("projection_truncated")) is not bool
             or not isinstance(model_view, Mapping)
             or set(model_view)
             != {
@@ -493,6 +500,7 @@ class AgentTransientSkillResultResolver:
         original_size = safe_result.get("original_size_bytes")
         projected_size = safe_result.get("projected_size_bytes")
         raw_sha256 = safe_result.get("raw_sha256")
+        projection_revision = safe_result.get("projection_revision")
         stage_ref = str(model_view["stage_ref"])
         if (
             isinstance(original_size, bool)
@@ -505,9 +513,7 @@ class AgentTransientSkillResultResolver:
             or transient_skill_result_stage_ref(
                 call_item_id=call_item.item_id,
                 raw_sha256=str(raw_sha256),
-                projection_revision=(
-                    AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
-                ),
+                projection_revision=str(projection_revision),
             )
             != stage_ref
             or canonicalize_agent_payload(dict(safe_result)).size_bytes
@@ -533,9 +539,7 @@ class AgentTransientSkillResultResolver:
             "capability_id": capability_id,
             "raw_size_bytes": original_size,
             "raw_sha256": raw_sha256,
-            "projection_revision": (
-                AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
-            ),
+            "projection_revision": projection_revision,
         }
         if any(
             manifest.get(key) != value
@@ -550,6 +554,11 @@ class AgentTransientSkillResultResolver:
         raw_value = json.loads(raw_bytes.decode("utf-8"))
         if (
             not isinstance(raw_value, dict)
+            or raw_value.get("schema") != "maf.agent.model_result.v1"
+            or raw_value.get("projection_mode") != "inline"
+            or raw_value.get("projection_truncated")
+            != safe_result.get("projection_truncated")
+            or raw_value.get("projected_size_bytes") != len(raw_bytes)
             or (
                 json.dumps(
                     raw_value,
@@ -568,7 +577,11 @@ class AgentTransientSkillResultResolver:
             "outcome": "completed",
             "safe_error_code": None,
             "safe_result": {
-                "schema": "maf.agent.skill_result_full.v1",
+                "schema": (
+                    "maf.agent.skill_result_full.v1"
+                    if str(capability_id).startswith("skill.")
+                    else "maf.agent.mcp_result_full.v1"
+                ),
                 "result": raw_value,
             },
         }
@@ -751,9 +764,9 @@ def transient_stage_ref_from_result_item(item: AgentItem) -> str | None:
         not isinstance(model_view, dict)
         or safe_result.get("schema") != "maf.agent.model_result.v1"
         or safe_result.get("projection_revision")
-        != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+        not in _TRANSIENT_RESULT_PROJECTION_REVISIONS
         or safe_result.get("projection_mode") != "transient_staged"
-        or safe_result.get("projection_truncated") is not True
+        or type(safe_result.get("projection_truncated")) is not bool
         or model_view.get("schema")
         != "maf.agent.transient_skill_result_receipt.v1"
         or not isinstance(model_view.get("stage_ref"), str)
@@ -761,6 +774,7 @@ def transient_stage_ref_from_result_item(item: AgentItem) -> str | None:
         return None
     _stage_ref_digest(model_view["stage_ref"])
     return model_view["stage_ref"]
+
 
 def transient_skill_result_stage_ref(
     *,
@@ -772,8 +786,7 @@ def transient_skill_result_stage_ref(
         not isinstance(call_item_id, str)
         or not call_item_id.strip()
         or not _is_sha256(raw_sha256)
-        or projection_revision
-        != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+        or projection_revision not in _TRANSIENT_RESULT_PROJECTION_REVISIONS
     ):
         raise ValueError("agent_transient_skill_result_stage_identity_invalid")
     digest = hashlib.sha256(
@@ -829,7 +842,7 @@ def _load_manifest(path: Path) -> dict[str, object]:
         or value.get("source_kind")
         != AGENT_TRANSIENT_SKILL_RESULT_SOURCE_KIND
         or value.get("projection_revision")
-        != AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION
+        not in _TRANSIENT_RESULT_PROJECTION_REVISIONS
         or any(
             not isinstance(value.get(key), str) or not value[key]
             for key in string_keys

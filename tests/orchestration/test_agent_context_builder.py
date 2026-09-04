@@ -23,7 +23,6 @@ from src.orchestration.agent_loop.tool_catalog import AgentToolCatalog
 from src.orchestration.agent_loop.result_projection import (
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY,
     SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT,
-    AgentCallResultProjector,
     build_tool_result_reuse_receipt,
 )
 from src.orchestration.agent_loop.result_artifacts import (
@@ -35,6 +34,7 @@ from src.orchestration.agent_loop.transient_results import (
     AgentTransientSkillResultStore,
 )
 from src.storage.artifact_files import LocalArtifactFileStore
+from tests.orchestration.support import make_agent_result_projector
 
 
 def _item(
@@ -58,7 +58,7 @@ def _item(
     )
 
 
-class AgentContextBuilderTest(unittest.TestCase):
+class AgentContextBuilderTest(unittest.IsolatedAsyncioTestCase):
     def test_budgeted_initial_user_is_reinserted_once_after_compaction(self) -> None:
         run = AgentRun(
             "run-1",
@@ -109,7 +109,7 @@ class AgentContextBuilderTest(unittest.TestCase):
             ["exact current question"],
         )
 
-    def test_transient_receipt_is_resolved_to_full_model_only_result(self) -> None:
+    async def test_transient_receipt_is_resolved_to_full_model_only_result(self) -> None:
         run = AgentRun(
             "run-1",
             "task-1",
@@ -138,7 +138,7 @@ class AgentContextBuilderTest(unittest.TestCase):
             call_ordinal=0,
         )
         raw_payload = {"records": ["BEGIN-SENTINEL", "x" * 150_000, "END-SENTINEL"]}
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.lookup",
             output_payload=raw_payload,
             call_item_id=call.item_id,
@@ -147,6 +147,7 @@ class AgentContextBuilderTest(unittest.TestCase):
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_TRANSIENT
             ),
+            model_edition="edition-a",
         )
         result = _item(
             "result-1",
@@ -170,8 +171,8 @@ class AgentContextBuilderTest(unittest.TestCase):
                 result_item_id=result.item_id,
                 node_id="node-1",
                 capability_id="skill.lookup",
-                canonical_raw_bytes=projection.canonical_raw_bytes,
-                raw_sha256=projection.raw_sha256,
+                canonical_raw_bytes=projection.transient_content_bytes,
+                raw_sha256=projection.transient_content_sha256,
                 projection_revision=projection.projection_revision,
                 expected_stage_ref=projection.transient_stage_ref,
             )
@@ -276,7 +277,7 @@ class AgentContextBuilderTest(unittest.TestCase):
         self.assertIn("context_summary_only", summary_content or "")
         self.assertNotIn("BEGIN-SENTINEL", summary_content or "")
 
-    def test_artifact_backed_result_is_full_only_with_preloaded_authority(
+    async def test_artifact_backed_result_is_full_only_with_preloaded_authority(
         self,
     ) -> None:
         run = AgentRun(
@@ -322,7 +323,7 @@ class AgentContextBuilderTest(unittest.TestCase):
         raw_payload = {
             "records": ["BEGIN-ARTIFACT", "x" * 150_000, "END-ARTIFACT"]
         }
-        projection = AgentCallResultProjector().project(
+        projection = await make_agent_result_projector().project(
             capability_id="skill.lookup",
             output_payload=raw_payload,
             call_item_id=call.item_id,
@@ -332,6 +333,7 @@ class AgentContextBuilderTest(unittest.TestCase):
             skill_projection_policy=(
                 SKILL_RESULT_PROJECTION_POLICY_FULL_INLINE_THEN_LEGACY
             ),
+            model_edition="edition-a",
         )
         with tempfile.TemporaryDirectory() as directory:
             file_store = LocalArtifactFileStore(Path(directory) / "artifacts")
@@ -342,8 +344,8 @@ class AgentContextBuilderTest(unittest.TestCase):
                 run=run,
                 call_item=call,
                 node_id="node-1",
-                canonical_raw_bytes=projection.canonical_raw_bytes,
-                raw_sha256=projection.raw_sha256,
+                canonical_raw_bytes=projection.spill_content_bytes,
+                raw_sha256=projection.spill_content_sha256,
                 projection_revision=projection.projection_revision,
                 expected_artifact_id=projection.spill_artifact_id,
             )
@@ -494,7 +496,7 @@ class AgentContextBuilderTest(unittest.TestCase):
         self.assertIn("business-artifact", resolved_content or "")
         self.assertIn(staged.artifact_id, resolved_content or "")
         self.assertNotIn("BEGIN-ARTIFACT", legacy_content or "")
-        self.assertIn("skill_result_preview", legacy_content or "")
+        self.assertIn("skill_result_projection_receipt", legacy_content or "")
         self.assertIn("BEGIN-ARTIFACT", reused_content or "")
         self.assertIn("END-ARTIFACT", reused_content or "")
         self.assertIn("business-artifact", reused_content or "")

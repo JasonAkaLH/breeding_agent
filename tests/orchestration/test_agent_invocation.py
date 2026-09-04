@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+from src.integrations.token_counter import TokenBoundedText, TokenizationError
 from src.core.contracts import (
     CapabilityExecutionError,
     CapabilityExecutionRequest,
@@ -43,6 +44,7 @@ from src.orchestration.agent_loop.observability import (
     AgentMetricsRecorder,
     InMemoryAgentMetricSink,
 )
+from src.orchestration.agent_loop.result_projection import AgentCallResultProjector
 from src.orchestration.agent_loop.task_projection import (
     AgentTaskInvocationCommitPort,
 )
@@ -52,7 +54,7 @@ from src.orchestration.agent_loop.transient_results import (
 from src.orchestration.models import ExecutionInstance, InstanceState
 from src.orchestration.registry import InstanceRegistry
 from src.orchestration.instance_selector import InstanceSelector
-from tests.orchestration.support import FakeExecutor
+from tests.orchestration.support import FakeExecutor, make_agent_result_projector
 
 
 class _RecordingCommitPort:
@@ -196,18 +198,21 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             "node-1", task.task_id, capability_id, status=NodeStatus.PENDING
         )
         port = _RecordingCommitPort(task=task, node=node)
+        execution_calls = 0
+
+        def execute_large_result(_request: CapabilityExecutionRequest):
+            nonlocal execution_calls
+            execution_calls += 1
+            return CapabilityExecutionResult(
+                capability_id=capability_id,
+                task_id=task.task_id,
+                node_id=node.node_id,
+                output_payload={"records": ["x" * 150_000]},
+            )
+
         kernel = CapabilityInvocationService(
             instance_selector=InstanceSelector(instances),
-            executor=FakeExecutor(
-                {
-                    capability_id: CapabilityExecutionResult(
-                        capability_id=capability_id,
-                        task_id=task.task_id,
-                        node_id=node.node_id,
-                        output_payload={"records": ["x" * 150_000]},
-                    )
-                }
-            ),
+            executor=FakeExecutor({capability_id: execute_large_result}),
             commit_port=port,
             now_fn=lambda: datetime(2026, 8, 28, 12, 0),
         )
@@ -262,6 +267,12 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
                 return (user_item, call_item, reservation)
 
         transient_calls: list[dict[str, object]] = []
+        tokenization_steps: list[tuple[str, ...]] = []
+
+        async def budget_result(text: str, **_kwargs) -> TokenBoundedText:
+            tokenization_steps.append(tuple(port.steps))
+            self.assertEqual(port.node.status, NodeStatus.COMPLETED)
+            return TokenBoundedText(text, 1, False, len(text))
 
         def stage_transient(**values: object) -> AgentTransientSkillResultStage:
             transient_calls.append(values)
@@ -281,6 +292,9 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             node_loader=AsyncMock(return_value=node),
             request_metadata_loader=lambda _run: {},
             current_user_input_loader=lambda _run: "question",
+            result_projector=AgentCallResultProjector(
+                token_budgeter=budget_result
+            ),
             legacy_result_artifact_stager=lambda **_values: self.fail(
                 "v2 transient result must not call legacy Artifact stager"
             ),
@@ -308,6 +322,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             transient_calls[0]["result_item_id"], reservation.item_id
         )
+        self.assertEqual(tokenization_steps, [("owned", "start", "owned", "completed")])
 
         def fail_stage(**_values: object) -> None:
             raise RuntimeError("injected")
@@ -328,6 +343,28 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             failed.safe_error_code,
             "agent_transient_skill_result_stage_failed",
         )
+
+        async def unavailable_after_completion(
+            _text: str, **_kwargs
+        ) -> TokenBoundedText:
+            self.assertEqual(port.node.status, NodeStatus.COMPLETED)
+            raise TokenizationError("unavailable")
+
+        invoker._result_projector = AgentCallResultProjector(  # noqa: SLF001
+            token_budgeter=unavailable_after_completion
+        )
+        with self.assertRaises(TokenizationError):
+            await invoker.invoke(
+                run=run,
+                call=AgentToolCall("call-1", "skill_large", "{}", 0),
+                call_item=call_item,
+                result_reservation=reservation,
+                capability_id=capability_id,
+                effective_payload={},
+                cancellation=None,
+                allow_result_reuse=False,
+            )
+        self.assertEqual(execution_calls, 3)
 
     async def test_agent_terminal_projection_is_candidate_only_until_outcome_cas(self) -> None:
         storage = SimpleNamespace(
@@ -477,6 +514,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             node_loader=load_node,
             request_metadata_loader=lambda _run: {},
             current_user_input_loader=lambda _run: "",
+            result_projector=make_agent_result_projector(),
         )
 
         outcome = await invoker.invoke(
@@ -556,6 +594,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             node_loader=AsyncMock(),
             request_metadata_loader=lambda _run: {"mcp_dispatch_server_id": "server-1"},
             current_user_input_loader=lambda _run: "",
+            result_projector=make_agent_result_projector(),
         )
         invoker.invoke = AsyncMock(
             return_value=SimpleNamespace(status=AgentCallOutcomeStatus.COMPLETED)
@@ -699,6 +738,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             ),
             request_metadata_loader=lambda _run: {},
             current_user_input_loader=lambda _run: "",
+            result_projector=make_agent_result_projector(),
             result_projection_observer=observe,
             metrics_recorder=AgentMetricsRecorder(metric_sink),
         )
@@ -957,6 +997,7 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
             node_loader=load_node,
             request_metadata_loader=lambda _run: {},
             current_user_input_loader=lambda _run: "",
+            result_projector=make_agent_result_projector(),
             invocation_hook=hook,
         )
 

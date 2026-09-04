@@ -6,13 +6,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from src.integrations.agent_skills.public_profile import PublicSkillProfile
-from src.storage.agent_payload import CanonicalAgentPayload, canonicalize_agent_payload
+from src.storage.agent_payload import (
+    AGENT_PAYLOAD_MAX_BYTES,
+    CanonicalAgentPayload,
+    canonicalize_agent_payload,
+)
 
 from .models import AgentItem, AgentItemKind, AgentItemState, AgentRun
-from .result_projection import (
-    MODEL_RESULT_MAX_BYTES as AGENT_MODEL_RESULT_MAX_BYTES,
-    build_model_result_envelope,
-)
+from .result_projection import build_model_result_envelope
 
 
 DELEGATED_SKILL_INSTRUCTION_MAX_CODE_POINTS = 20_000
@@ -128,7 +129,7 @@ def build_delegated_skill_instruction_result(
         projection_truncated=False,
     )
     canonical_result = canonicalize_agent_payload(result)
-    if canonical_result.size_bytes > AGENT_MODEL_RESULT_MAX_BYTES:
+    if canonical_result.size_bytes > AGENT_PAYLOAD_MAX_BYTES:
         raise ValueError("delegated_skill_instruction_invalid")
     return result
 
