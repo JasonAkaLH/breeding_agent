@@ -4,7 +4,7 @@
 
 - 日期：2026-09-04
 - 分支：`main`
-- 状态：`implemented_verified_backend_only`；Checkpoint A～F已完成
+- 状态：`backend_image_published_not_deployed`；Checkpoint A～F已完成
 - 设计依据：`2026-09-04-unified-tool-result-50k-token-budget-design.md`
 - 设计复审：100/100 Pass，0 Blocking、0 Major、0 Minor
 - 实施范围：Backend-first；Frontend业务卡片20,000字符/80,000-byte限制移除和
@@ -427,7 +427,16 @@ API key或响应正文。对三款配置模型分别验证：
 
 ## 10. 发布、回滚与后续
 
-本计划结束状态是`implemented_verified_backend_only`，不是`published`或`deployed`。
+代码实施终态是`implemented_verified_backend_only`；当前追加发布状态为
+`backend_image_published_not_deployed`，仍不是`deployed`。
+
+后续经用户单独授权，Backend镜像已发布为
+`registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.35`，但仍未部署。远端OCI
+index digest为`sha256:456beb80fe23147d9a5505273f1db8e9f5362d9f880060ef9762138cf918bd41`，
+`linux/amd64` manifest为`sha256:07a469890c99575a16ed6a7a3eb10ff27dec4f363865b2c53a9c624b250f7163`，
+attestation manifest为`sha256:fc4a3187324e650cc52441195dcaa3fc2155e488fe64da9d56377e754a6d2b04`。
+远端digest回拉、无内置配置、50,000-token/`model_unavailable`合同与SQLite隔离healthy `/api-doc`
+smoke均通过；Frontend和Runtime Sidecar镜像未重建。
 
 - Backend后续可独立构建发布；旧Frontend对`model_unavailable`使用现有通用fallback；
 - Frontend另立小范围任务和独立版本，同时删除`frontend/src/domain/artifacts.ts`的

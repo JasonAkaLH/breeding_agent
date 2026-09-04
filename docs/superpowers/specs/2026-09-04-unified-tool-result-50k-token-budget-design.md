@@ -1,6 +1,6 @@
 # 主 Agent 统一 Tool Result 50k Token 预算设计
 
-状态：用户已批准，限定硬伤复审通过；Backend实现与验证已完成，Frontend后续独立发布
+状态：Backend实现、验证及backend-dev `0.1.35`镜像发布已完成但未部署；Frontend后续独立发布
 
 目标分支：`main`；不涉及 `prod` 部署
 
