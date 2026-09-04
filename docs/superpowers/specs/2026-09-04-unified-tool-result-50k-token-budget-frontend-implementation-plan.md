@@ -5,7 +5,7 @@
 - 日期：2026-09-04
 - 目标分支：`main`
 - 基线：`main@4d21bfbf`
-- 状态：`implemented_verified_not_published`
+- 状态：`frontend_image_published_not_deployed`
 - 设计依据：`2026-09-04-unified-tool-result-50k-token-budget-design.md`
 - 已完成前置：Backend Checkpoint A～F和backend-dev `0.1.35`镜像发布
 
@@ -20,7 +20,14 @@
 - Checkpoint D：聚焦Frontend 3文件211项、Frontend全量24文件350项、相关Backend API/文档25项通过；
   typecheck和production build通过。构建主JS保留typed schema、`projection_invalid`与专用错误文案，
   `2e4`/`8e4`及旧MCP业务budget guard均零命中；
-- 当前未构建或推送Frontend镜像，未更新`docker_cmd.md`，未部署或修改数据库/历史结果。
+- Checkpoint E：基于双远端一致源码`8320c790`构建并推送
+  `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.29`；OCI index digest为
+  `sha256:555f60cccfa78bdd4d1c4f53c8c6586bce4bd44a5e4b76e41260c0622fb804a2`，linux/amd64 manifest为
+  `sha256:93b12f9743943cd1ecca9c347784ab8631204c700cb44d5ea01a490e20b033c5`，attestation为
+  `sha256:971119ecf65a245347e20bf8f89e1ef0d47a2494cbbd2d1ee00d2b6174a76327`；远端回拉后的临时
+  容器通过architecture、`nginx -t`、`/seedpilot/`和静态业务合同smoke；
+- `docker_cmd.md`先建立仓库外0600备份，再只把2处frontend-dev `0.1.28`更新为`0.1.29`；整文件
+  预计算哈希完全一致并继续0600、ignored/untracked；未部署或修改数据库/历史结果。
 
 本计划只闭合此前明确延期的Frontend范围。Backend是50,000-token业务预算的唯一权威：每个Tool
 Result完整返回并完成解析、校验和脱敏后，由Backend按Agent Run绑定模型恰好调用一次Provider
