@@ -1,6 +1,6 @@
 # 主 Agent 统一 Tool Result 50k Token 预算设计
 
-状态：用户已批准设计原则，待书面复核
+状态：用户已批准，限定硬伤复审通过，待生成实施计划
 
 目标分支：`main`；不涉及 `prod` 部署
 
@@ -23,7 +23,9 @@ Selector、API DTO、Frontend、Legacy Skill 和 delegated Skill 分别存在 20
   每个业务调用最多保留 50,000 tokens；
 - 50,000 tokens 以内完整保留，超过才截断，并沿用明确的 truncation 标记；
 - 删除所有 20,000 / 100,000 字符和 80,000-byte 业务裁剪；
-- token 计数只使用当前 model edition 对应 Provider 的 `POST /tokenization`；
+- token 计数只使用发起 Tool Call 的 Agent Run 已绑定 model edition 对应 Provider 的
+  `POST /tokenization`；
+- 每个新 Tool Result 在本业务预算阶段只调用一次 `/tokenization`，不重试、不二分、不复算；
 - tokenization 缺少可信配置、请求失败或响应非法时直接 fail closed，不使用 `tiktoken`；
 - 一次业务 Tool Call 对应一个逻辑 Tool Result，不拆成多条 AgentItem 或 provider Tool message；
 - 同轮多个 Tool Result 各自先应用 50,000-token 上限，再受对应模型的总上下文预算约束；
@@ -34,8 +36,7 @@ Selector、API DTO、Frontend、Legacy Skill 和 delegated Skill 分别存在 20
 ## 非目标
 
 - 不删除 MCP raw result 的 64 MiB 输入安全上限；
-- 不删除数据库 AgentItem、Projection Store、临时文件、sandbox、RPC 或进程内存的基础设施
-  安全上限；
+- 不删除数据库 AgentItem、临时文件、sandbox、RPC 或进程内存的基础设施安全上限；
 - 不公开 MCP 私有 raw result、内部路径、storage ref、凭据或未清洗字段；
 - 不修改数据库 schema，不执行历史数据迁移或历史重投影；
 - 不把对话标题生成等 best-effort 模型功能失败升级为整个 Task 失败；
@@ -46,7 +47,7 @@ Selector、API DTO、Frontend、Legacy Skill 和 delegated Skill 分别存在 20
 采用“现有 token counter + Provider-required 模式 + 通用模型不可用错误”方案：
 
 - 扩展现有 token counter 的调用语义，不另写 tokenizer；
-- production hot path 使用现有 async 入口；
+- production hot path 使用泛化后的 async 入口；
 - MCP、Skill、Selector 和完整模型上下文共享相同 model-edition 配置与远端计数合同；
 - 用通用 `model_unavailable` 向前端表达所有必需模型 API 的可用性失败；
 - 不新增数据库表或 projection revision。
@@ -68,8 +69,9 @@ TOOL_RESULT_BUSINESS_MAX_TOKENS = 50_000
 MODEL_UNAVAILABLE_ERROR_CODE = "model_unavailable"
 ```
 
-这里的 50,000 表示当前 model edition 的 Provider `/tokenization` 返回的 `total_tokens`。业务 token
-的计数对象是清洗后实际交给消费者的业务内容：
+这里的 50,000 表示发起 Tool Call 的 Agent Run 已绑定 model edition 对应 Provider
+`/tokenization` 返回的 `total_tokens`。业务 token 的计数对象是 Tool 完整返回后，经本地协议解析、
+schema 校验和脱敏得到的完整安全业务文本：
 
 - 文本结果将正文作为单一 text item 计算；
 - structured JSON 使用 `ensure_ascii=False` 的 canonical JSON 文本，JSON key、数值和结构符号均
@@ -84,17 +86,21 @@ Backend 是 token 数值和裁剪语义的唯一权威。Frontend 不复制 toke
 
 ## 复用现有 `/tokenization` 函数
 
-项目继续复用 `src/integrations/token_counter.py`：
+项目继续复用 `src/integrations/token_counter.py`，不新增 tokenizer：
 
-- production async 路径调用 `get_num_of_tokens_from_messages_async(...)`；
-- 同步入口保留给既有同步调用和测试；
-- 请求继续使用 `{model, text[]}` 批量调用 `POST {base_url}/tokenization`；
-- 响应继续逐项读取整数 `total_tokens`；
-- 现有 `(base_url, model, text)` bounded cache 继续生效。
+- 泛化 Provider 响应类型，至少返回整数 `total_tokens` 和字符偏移 `offset_mapping`；解析时同时
+  校验 `total_tokens == len(token_ids) == len(offset_mapping)`；
+- 新增或泛化同步、异步详细 Tokenization 入口；production Tool Result 路径使用 async 入口；
+- 详细入口必须显式接收 Agent Run 的 `model_edition`，请求使用
+  `{model: model_edition, text: [safe_text]}`；响应中的 model 必须与请求一致；
+- 现有 `get_num_of_tokens_*` public function 继续返回 `int`，由内部适配提取 `total_tokens`，保持
+  既有调用方兼容；被泛化的内部函数及其所有生产、测试调用点必须同步修改；
+- 现有 count-only bounded cache 只服务计数调用；Tool Result 详细路径不得用只有整数的 cache hit
+  代替本次完整 Offset 响应；
+- 每个 Tool Result 的详细路径恰好发送一次 Provider 请求，不自动重试；
+- 有效超时为 `min(configured_timeout, 10 seconds)`，配置不能突破 10 秒硬上限。
 
-为避免改变不在本次范围内的旧调用，现有 public function 增加显式的 provider-required 参数，默认值
-保持兼容。Tool Result 预算、主 Agent context preflight 和 MCP Selector 必须使用 provider-required
-模式。该模式下：
+Tool Result 预算、主 Agent context preflight 和 MCP Selector 使用 provider-required 模式。该模式下：
 
 - tokenization disabled、API key/base URL/model 缺失时抛出 typed model-unavailable 异常；
 - 网络失败、超时、非 2xx、响应非 JSON、`data`/`total_tokens` 合同非法时抛出同一 typed 异常；
@@ -106,14 +112,23 @@ Backend 是 token 数值和裁剪语义的唯一权威。Frontend 不复制 toke
 Parser/Skill runtime 先完成 schema、`isError`、敏感内容和 URL 清洗，再把 safe business candidate
 交给父进程预算层；隔离 Parser worker 不接收模型凭据，也不直接访问网络。
 
-预算层先调用 `/tokenization` 计算完整 candidate：
+预算层对完整 candidate 调用一次 `/tokenization`：
 
 1. `total_tokens <= 50,000` 时完整保留；
-2. 超限时按 Unicode code-point 边界对可缩短正文做确定性二分；
-3. 每个候选正文都使用同一 Provider-required token counter 验证；
-4. 选择 token 数不超过 50,000 的最长前缀并设置 truncation 标记；
-5. structured result 超限时转换为合法 `structured_preview`，不得产生残缺 JSON；
-6. 任何 tokenization 失败立即 `model_unavailable`，不得改用字符数、bytes 或本地 tokenizer 猜测。
+2. `total_tokens > 50,000` 时取第一个超出预算 Token 的开始字符位置
+   `cutoff = offset_mapping[50_000][0]`，保留 `safe_text[:cutoff]`；
+3. 不能使用 `offset_mapping[49_999][1]`：emoji 等单个字符可能由多个 Token 共享同一字符区间，
+   该写法可能保留完整字符并得到 50,001 Token；
+4. 不做二分、重试或第二次 Tokenization 复核；
+5. structured result 超限时把截断后的 canonical JSON 文本放入合法 `structured_preview`，不得把
+   残缺文本作为 structured JSON value；
+6. truncation 提示只写 envelope 字段，不拼入业务正文、不占 50,000-token 业务额度；
+7. 任何 tokenization 失败立即 `model_unavailable`，不得改用字符数、bytes 或本地 tokenizer 猜测。
+
+真实 Provider 合同测试已验证：三款已配置 model edition 均返回 HTTP 200，且每项
+`total_tokens`、`token_ids`、`offset_mapping` 数量一致；中文、emoji 和组合字符的 offset 是可直接
+用于 Python 字符串切片的字符索引。三模型 72,000+ Token 大文本均按上述切点复核为 50,000
+Token；构造的共享 emoji offset 边界证明旧的结束位置公式会得到 50,001 Token。
 
 若安全 candidate 因基础设施容量无法交给父进程或 Provider tokenization endpoint，本次结果 fail
 closed；不得通过隐藏字符上限或 byte 截断伪装成功。
@@ -124,7 +139,8 @@ closed；不得通过隐藏字符上限或 byte 截断伪装成功。
 
 - MCP raw result 继续使用现有 64 MiB 上限；
 - AgentItem 继续使用现有 128 KiB 行载荷上限；
-- Projection Store、临时结果文件、RPC 和 sandbox 继续有容量门禁。
+- 临时结果文件、RPC 和 sandbox 继续有容量门禁；Projection 层取消现有 192 KiB 内容接收限制，
+  不得用另一个字符或 KB 上限替代。
 
 实现必须证明正常 50,000-token 结果能经 inline 或 reference 路径承载。若 AgentItem 无法 inline，
 则写入 identity-bound receipt，模型请求时从既有 private store 复验并恢复同一个逻辑结果。MCP
@@ -140,9 +156,11 @@ result item、revision 和 SHA；任一不符都在 Provider 调用前 fail clos
 
 ### MCP
 
-Result Parser 继续先完成协议解码、`isError`、output schema、敏感内容清洗和 raw SHA 校验。父进程
-预算层再用权威 `/tokenization` 生成最多 50,000 business tokens 的 user view 与 agent projection。
-`source_truncated` 只表示安全业务投影超过 50,000 tokens。
+Result Parser worker 继续先完成协议解码、`isError`、output schema、敏感内容清洗和 raw SHA
+校验，但只向父进程交付一份完整安全业务 candidate 和必要元数据，不在 worker 内生成两份已裁剪
+Projection，也不接收模型凭据或访问网络。父进程使用 Agent Run 绑定的 model edition 调用权威
+`/tokenization`，裁剪后再生成 user view 与 agent projection。`source_truncated` 只表示安全业务
+投影超过 50,000 tokens。
 
 前端 MCP 业务卡片不再有独立字符/byte 限制，直接展示 Backend 已验证的 token-bounded typed view。
 同一个 `mcp.dispatch` 内的每个 completed MCP business Call 保持各自一条 result entry 和各自
@@ -150,10 +168,12 @@ Result Parser 继续先完成协议解码、`isError`、output schema、敏感�
 
 ### Skill
 
-普通 Skill、Legacy Skill 和 delegated Skill 都使用同一 50,000-token policy。能放入 AgentItem 的
-结果继续 inline；不能放入时使用既有 Artifact / transient receipt 路径。普通 Skill transient
-resolver、Legacy Skill Artifact resolver 和 delegated instruction 都必须在注入模型前经过权威
-tokenization，不得把未预算 raw 绕过统一入口直接送给模型。
+普通 Skill、Legacy Skill 和 delegated Skill 都使用同一 50,000-token policy。现有
+`AgentCallResultProjector.project(...)` 直接异步化：Skill 完整返回并完成本地校验、脱敏后，在该函数
+内 await 统一详细 Tokenization 入口，再生成持久化投影；所有生产和测试调用点必须改为 await，不
+增加 prepare/finalize 中间抽象，也不使用同步阻塞包装。能放入 AgentItem 的结果继续 inline；不能
+放入时使用既有 Artifact / transient receipt 路径。各 resolver 不得把未预算 raw 绕过统一入口送给
+模型。
 
 ### MCP Selector
 
@@ -166,20 +186,15 @@ Provider。
 
 ## 同轮多结果与总上下文
 
-主 Agent 沿用 AgentRun 固定模型窗口的 90% total-context budget，并复用同一 Provider-required
-token counter：
+主 Agent 沿用 AgentRun 固定模型窗口的 90% total-context budget，并复用既有 context preflight 与
+compaction：
 
-1. 每个 Result 独立裁到不超过 50,000 business tokens；
-2. 构建包含当前 Tool wave 的真实 candidate；
-3. 先按现有 closed 规则压缩旧历史，不压缩当前 user 正文；
-4. 若仍超限，对当前 wave 的 Tool Result 做确定性公平 token 分配；
-5. 对完整 candidate 重新调用现有 token counter，直到落入 90% 总预算；
-6. 只在本次模型请求设置 `carrier_truncated=true`，不改写 durable 50,000-token result；
-7. 最小 closed result 集合仍放不下时返回既有 context-too-large 错误，不丢弃某个 Result，也不重放
-   Tool。
-
-公平分配保持 result 顺序，短结果优先完整保留，长结果共享剩余 token 空间。一次业务 Call 始终只
-对应一个逻辑 Result；裁剪不会拆分消息。
+1. 当前 Tool wave 中每个 Result 独立应用一次 50,000 business tokens 上限；
+2. 每个业务 Call 始终对应一个逻辑 Result，裁剪不会拆分 AgentItem 或 provider Tool message；
+3. 构建包含当前 Tool wave 的真实完整模型 candidate；
+4. 按既有 closed 规则压缩旧历史，不压缩当前 user 正文；
+5. 完整 candidate 仍超过 AgentRun 的 90% 总预算时，使用既有 context-too-large 失败语义，不在本
+   设计中新增循环 Tokenization、公平分配或再次改写 durable Tool Result。
 
 ## 通用模型不可用错误
 
@@ -196,19 +211,26 @@ Provider transport、timeout、认证/配置、限流、服务端失败，以及
 同样不映射。内部 audit/log 保留 endpoint kind、HTTP status class、异常类型和 model edition，但不
 记录 API key、响应正文、Tool Result 正文或内部路径。
 
-tokenization 在 Tool 已执行后失败时：
+Tool 完整返回并形成可信 durable execution authority后，才进入 `/tokenization`：MCP 以 raw、成功
+Parser checkpoint 和 terminal Call `completed` 为 authority；Skill 以统一 Invocation Service 已提交的
+completed TaskNode/result 为 authority。Agent Tool Result projection 在 Tokenization 成功后生成。
+tokenization 随后失败时：
 
-- 保留已提交的可信 raw / Artifact / projection candidate；
+- 保留已提交的可信 raw / Artifact / projection candidate 和成功 checkpoint；
+- 已完成的 MCP Call 或 Skill Invocation TaskNode 继续保持 `completed`，不得改写为业务失败或状态
+  未知；
 - AgentRun 与 Task fail closed；
 - `agent.run.failed` 和 `task.failed` 的公开 code 均为 `model_unavailable`；
-- 不把 Tool 标记为从未执行，不自动重试或重放 Tool；
+- 不自动重试 Tokenization，不重放 Tool；
 - 后续由用户重新发起新 Task，不在旧 Task 内隐式恢复调用。
 
 对话标题生成等 best-effort 模型调用继续静默保留主 Task 成功，只记录低敏内部诊断。
 
 ## Frontend
 
-Frontend 在统一 `failureMessage` 映射中识别 `model_unavailable`，固定显示：
+Backend 必须先完成 typed error 到 AgentRun、`task.failed` 和 API/SSE 的持久化传播，可独立先发布；
+旧 Frontend 收到未知的 `model_unavailable` 时沿用现有通用失败文案，不得崩溃。后续 Frontend 发布
+在统一 `failureMessage` 映射中识别 `model_unavailable`，固定显示：
 
 > 模型服务暂时不可用，无法完成本次请求，请稍后重试。
 
@@ -220,9 +242,11 @@ fallback；Task 级 `model_unavailable` 提示负责向用户说明本次失败�
 
 ## 兼容、发布与回滚
 
-- 不创建新 projection revision；现有 reader 同时接受旧的短结果和新的 token-bounded 结果；
+- 不创建新 projection revision；内部生成位置和裁剪阈值不是 Projection 数据合同，现有
+  `mcp-result-parser.v2` / `maf.mcp.parsed_result_projection.v2` 结构和字段语义保持不变；
 - 旧结果逐字节保持原样，不读取 raw 重建，不修改 Artifact，不调用远端 Tool；
-- rollout 只验证新结果不再由字符/byte 预算截断，并验证 49,999、50,000、50,001-token 边界；
+- Backend 可先于 Frontend 发布；Backend rollout 验证新结果不再由字符/byte 预算截断，并验证
+  49,999、50,000、50,001-token 边界；Frontend 后续只增加专用错误文案；
 - 回滚恢复旧 writer/reader；旧版本可能把新的大 view 安全降级为 unavailable，但不得读取 raw 或
   改写历史；
 - 不进行数据库 schema/data migration。
@@ -231,18 +255,22 @@ fallback；Task 级 `model_unavailable` 提示负责向用户说明本次失败�
 
 ### Token boundary
 
-- 使用 fake `/tokenization` 精确覆盖 49,999、50,000、50,001；
+- 使用 fake `/tokenization` 精确覆盖 49,999、50,000、50,001，并断言每个 Tool Result 只请求一次；
 - ASCII、中文、emoji、组合字符和 structured JSON 都以 Provider `total_tokens` 为准；
+- 覆盖多个 Token 共享一个 emoji 字符 offset 的边界，断言使用
+  `offset_mapping[50_000][0]`，禁止使用 `offset_mapping[49_999][1]`；
 - 业务路径不存在 20,000/100,000 字符或 80,000-byte truncate 判定；
 - envelope metadata 不占单个 Result 50,000-token 额度，但计入完整 context；
-- 二分裁剪选择 Provider 判定不超过 50,000 的最长合法业务前缀。
+- 三款已配置 model edition 分别覆盖请求/响应 model 一致、offset 合同和 50,000-token 裁剪。
 
 ### Provider required
 
 - tokenization disabled、配置缺失、网络错误、timeout、401/403、429、5xx、非 JSON、item 数量不符和
-  非整数 `total_tokens` 全部 fail closed 为 `model_unavailable`；
+  非整数 `total_tokens`、数组长度不一致、offset 非法或响应 model 不一致，全部 fail closed 为
+  `model_unavailable`；
+- 显式配置大于 10 秒仍按 10 秒超时；Tokenization 层零自动重试；
 - Provider-required 路径对 `_fallback_num_tokens_from_messages()` 为零调用；
-- 正常请求和相同文本 cache hit 使用既有 batching/cache 合同；
+- count-only 调用保持既有 batching/cache 合同；Tool Result 详细路径必须取得完整 offset 响应；
 - 本地 invariant、取消、context-too-large 和协议错误不映射为 `model_unavailable`。
 
 ### Tool Result
@@ -253,12 +281,17 @@ fallback；Task 级 `model_unavailable` 提示负责向用户说明本次失败�
   128 KiB；
 - 同轮多个结果在 Provider token 总预算内确定性收敛，保持顺序且不拆消息；
 - tokenization 在 Tool 执行后失败时保留可信结果、Task 失败且 Tool 零重放；
+- MCP terminal Call 或 Skill Invocation TaskNode 的 durable `completed` 提交发生在 Tokenization
+  之前；Tokenization 等待处于 Agent Lease active phase，MCP Tool heartbeat 在 Tool 返回后停止；
+- Projection envelope 超过旧 192 KiB 时仍可落入 Projection Store，AgentItem 超过 128 KiB 时只
+  切换为 identity-bound reference/receipt，不截断正文；
 - raw、path、storage ref 和凭据泄漏扫描为零。
 
 ### Frontend 与历史
 
-- `agent.run.failed` / `task.failed` 的 `model_unavailable` 显示固定中文文案；
-- 刷新恢复与实时 SSE 文案一致；
+- Backend-first 阶段的 `agent.run.failed` / `task.failed` 和刷新历史均稳定携带
+  `model_unavailable`；旧 Frontend 安全显示通用失败文案；
+- Frontend 后续发布后，实时 SSE 与刷新历史均显示固定中文文案；
 - 历史 fixture 逐字节不变；
 - 零历史 reproject、零 raw 补读、零 Artifact CAS、零数据库迁移、零 Tool 网络重放；
 - Backend token counter、Context preflight、MCP、Skill、API、E2E 与 Frontend task-event 门禁通过。
