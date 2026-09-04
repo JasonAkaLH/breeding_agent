@@ -21,7 +21,7 @@
 | Checkpoint C | `a5b3765c` | MCP Call terminal commit后按Run model生成Projection；Selector移除20k/80k二次预算并按绑定模型preflight；MCP integrations 589项通过、2项平台skip |
 | Checkpoint D | `b97f4906` | Agent Projector异步化；Skill结果按Run模型单次50k-token预算；AgentItem超128 KiB只引用预算后安全Projection；Orchestration 197项和D聚焦48项通过 |
 | Checkpoint E | `adc59956` | 模型transport/timeout/auth/rate-limit/5xx与缺配置按typed边界映射`model_unavailable`；AgentRun、`agent.run.failed`、`task.failed`同码，普通异常保持`execution_crash`；远端MCP terminal后Tokenization失败零重试/零Tool重放；正式门禁175项通过 |
-| Checkpoint F | 本检查点提交 | API 652、E2E 12、Observability 41及其他无关分层通过；三模型真实Tokenization均单请求完成50k offset裁剪；4项既有基线失败如实保留；静态、Ruff、受保护文件门禁闭合 |
+| Checkpoint F | `7292a0df` | API 652、E2E 12、Observability 41及其他无关分层通过；三模型真实Tokenization均单请求完成50k offset裁剪；4项既有基线失败如实保留；静态、Ruff、受保护文件门禁闭合 |
 
 ## 1. 完成声明
 
