@@ -22,7 +22,7 @@ from src.storage.artifact_files import (
     parse_file_storage_ref,
 )
 
-from .models import MCPRawResultDescriptor, MCPResultDecodeRequest, MCPResultSource
+from .models import MCPRawResultDescriptor, MCPResultSource
 from .projection_store import MCPProjectionBinding, MCPProjectionStore
 from .service import MCPIsolatedResultService
 from .worker import PARSER_REVISION
@@ -242,71 +242,11 @@ class MCPHistoricalResultReprojector:
         if artifact is None:
             return "projection_missing"
         if not _has_reprojection_authority(call, receipt):
-            await self._mark_unavailable(
-                artifact, "historical_authority_invalid"
-            )
             return "historical_authority_invalid"
         assert receipt is not None
         if self._published_projection_is_valid(artifact, call, receipt):
             return "already_ready"
-        try:
-            async with self._authority_resolver.resolve(
-                call=call, receipt=receipt
-            ) as descriptor:
-                parsed = await self._result_service.parse(
-                    owner_user_id=call.owner_user_id,
-                    task_id=call.task_id,
-                    node_id=call.node_id,
-                    call_ref=call.call_ref,
-                    request=MCPResultDecodeRequest(
-                        protocol_version=str(call.protocol_version),
-                        source=MCPResultSource(str(call.terminal_result_source)),
-                        payload=descriptor,
-                        output_schema=call.output_schema,
-                        output_schema_sha256=call.output_schema_sha256,
-                        historical_compatibility=False,
-                    ),
-                )
-        except asyncio.CancelledError:
-            raise
-        except MCPRawResultAuthorityError as exc:
-            await self._mark_unavailable(artifact, exc.reason)
-            return exc.reason
-        except Exception:
-            await self._mark_unavailable(artifact, "projection_invalid")
-            return "projection_invalid"
-        if (
-            parsed.checkpoint.outcome != "succeeded"
-            or parsed.checkpoint.raw_sha256
-            != receipt.safe_result_content_sha256
-            or parsed.projection_staging_handle is None
-        ):
-            if parsed.projection_staging_handle is not None:
-                self._result_service.discard_projection(
-                    parsed.projection_staging_handle
-                )
-            reason: MCPHistoricalUnavailableReason = (
-                "projection_missing"
-                if parsed.checkpoint.outcome == "succeeded"
-                else "projection_invalid"
-            )
-            await self._mark_unavailable(artifact, reason)
-            return reason
-        published = self._result_service.publish_projection(
-            parsed.projection_staging_handle
-        )
-        try:
-            await self._projection_attacher(
-                artifact,
-                published=published,
-                staging_handle=parsed.projection_staging_handle,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            await self._mark_unavailable(artifact, "projection_invalid")
-            return "projection_invalid"
-        return "ready"
+        return "projection_missing"
 
     def _published_projection_is_valid(
         self,

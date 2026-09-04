@@ -80,7 +80,7 @@ def request(payload):
 
 
 class MCPToolExecutorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_legacy_result_uses_isolated_decoder_and_consumes_staging_projection(self) -> None:
+    async def test_legacy_result_uses_isolated_decoder_without_early_projection(self) -> None:
         binding = MCPToolBinding(
             capability_id="mcp.crm.search_customer",
             server_id="crm",

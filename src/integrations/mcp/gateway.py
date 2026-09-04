@@ -82,6 +82,7 @@ from .result_parsing.projection_store import (
 )
 from .result_parsing.service import (
     MCPIsolatedResultService,
+    MCPResultProjectionCandidate,
     MCPResultWorkerError,
 )
 from .result_parsing.worker import MCPValidatedResultCheckpoint
@@ -155,7 +156,7 @@ class _ResultParseContext:
 class _GatewayParsedResult:
     raw_result_ref: MCPTemporaryResultRef
     checkpoint: MCPValidatedResultCheckpoint
-    projection_staging_handle: MCPProjectionStagingHandle | None
+    projection_candidate: MCPResultProjectionCandidate | None
 
 
 class MCPAuthenticatedPrincipal(Protocol):
@@ -1290,13 +1291,12 @@ class MCPGateway:
                         raise MCPProtocolError(
                             "MCP workflow control result is malformed."
                         )
-                    if checked.projection_staging_handle is not None:
-                        self._result_service.consume_projection(
-                            checked.projection_staging_handle
-                        )
-                    elif checked.checkpoint.outcome == "succeeded":
+                    if (
+                        checked.checkpoint.outcome == "succeeded"
+                        and checked.projection_candidate is None
+                    ):
                         raise MCPProtocolError(
-                            "MCP workflow control projection is unavailable."
+                            "MCP workflow control result is unavailable."
                         )
                     return normalized_result
 
@@ -1422,7 +1422,7 @@ class MCPGateway:
             external_text=external_text,
             terminal_result_source=parsed.checkpoint.source,
             validated_checkpoint=parsed.checkpoint,
-            projection_staging_handle=parsed.projection_staging_handle,
+            projection_candidate=parsed.projection_candidate,
         )
 
     async def _parse_completed_result(
@@ -1477,24 +1477,34 @@ class MCPGateway:
         return _GatewayParsedResult(
             raw_result_ref=resolved,
             checkpoint=parsed.checkpoint,
-            projection_staging_handle=parsed.projection_staging_handle,
+            projection_candidate=parsed.projection_candidate,
         )
 
-    def finalize_result_assets(
-        self, outcome: MCPCallOutcome
-    ) -> MCPPublishedProjection | None:
+    async def finalize_result_assets(
+        self,
+        outcome: MCPCallOutcome,
+        *,
+        model_edition: str,
+    ) -> tuple[MCPPublishedProjection | None, MCPProjectionStagingHandle | None]:
         if not outcome.result_ref:
-            return None
+            return None, None
         result_ref = self._result_store.resolve_ref(outcome.result_ref)
         self._result_store.mark_promoted(result_ref)
         if (
-            outcome.projection_staging_handle is None
+            outcome.projection_candidate is None
             or self._result_service is None
         ):
-            return None
-        return self._result_service.publish_projection(
-            outcome.projection_staging_handle
+            return None, None
+        handle = await self._result_service.stage_projection(
+            outcome.projection_candidate,
+            model_edition=model_edition,
         )
+        try:
+            published = self._result_service.publish_projection(handle)
+        except BaseException:
+            self._result_service.discard_projection(handle)
+            raise
+        return published, handle
 
     async def continue_call(
         self, scope: MCPTaskServerScope, call_ref: str

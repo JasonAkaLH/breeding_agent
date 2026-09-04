@@ -44,6 +44,7 @@ from src.core.contracts import (
     UserMCPConfigurationStoragePort,
 )
 from src.core.enums import EventVisibility, UserMCPHealthStatus, UserMCPTransport
+from src.core.errors import ModelUnavailableError
 from src.core.models import (
     EventRecord,
     Interrupt,
@@ -2920,8 +2921,19 @@ class UserMCPDispatchCoordinator:
                 call_ref, result_payload_sha256
             )
             published_projection = None
+            projection_staging_handle = None
             try:
-                published_projection = self._gateway.finalize_result_assets(outcome)
+                (
+                    published_projection,
+                    projection_staging_handle,
+                ) = await self._gateway.finalize_result_assets(
+                    outcome,
+                    model_edition=str(
+                        request.metadata.get("agent_model_edition") or ""
+                    ),
+                )
+            except ModelUnavailableError:
+                raise
             except Exception:
                 # The checkpoint already authorized terminal success. Projection
                 # publication is compensatable and cannot roll back or replay it.
@@ -2931,7 +2943,7 @@ class UserMCPDispatchCoordinator:
                     await self._result_artifact_projector(
                         outcome.result_ref,
                         published_projection,
-                        outcome.projection_staging_handle,
+                        projection_staging_handle,
                     )
                 except asyncio.CancelledError:
                     raise

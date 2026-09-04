@@ -66,10 +66,6 @@ class MCPResultServiceOutcome:
     projection_candidate: MCPResultProjectionCandidate | None
     projection_error: str | None = None
 
-    @property
-    def projection_staging_handle(self) -> None:
-        return None
-
 
 @dataclass(frozen=True, slots=True)
 class MCPResultParserObservation:

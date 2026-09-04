@@ -419,7 +419,10 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
 
         port = LeaseCheckingPort()
 
-        def execute(_request: CapabilityExecutionRequest):
+        executed_requests: list[CapabilityExecutionRequest] = []
+
+        def execute(execution_request: CapabilityExecutionRequest):
+            executed_requests.append(execution_request)
             handle.current = AgentTaskLease(
                 "run-1", "task-1", "worker-1", "claim-2", 4, expires
             )
@@ -490,6 +493,10 @@ class CapabilityInvocationServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.status, AgentCallOutcomeStatus.COMPLETED)
         self.assertEqual(port.tokens, [(3, "claim-1"), (4, "claim-2")])
+        self.assertEqual(
+            executed_requests[0].metadata["agent_model_edition"],
+            "edition-a",
+        )
 
     async def test_resume_forwards_recovery_lease_handle_to_invoke(self) -> None:
         run = AgentRun(

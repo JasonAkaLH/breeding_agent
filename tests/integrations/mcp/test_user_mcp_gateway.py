@@ -49,6 +49,7 @@ from src.integrations.mcp.temporary_results import (
     MCPTemporaryResultRef,
     MCPTemporaryResultStore,
 )
+from src.integrations.token_counter import TokenBoundedText
 from src.storage.sqlite import (
     SQLiteStorage,
     bootstrap_sqlite_database,
@@ -120,6 +121,15 @@ class _StreamingResultAdapter(_Adapter):
         )
         result_ref = await sink.finalize()
         return {"_mcpResultRef": result_ref.as_payload()}
+
+
+async def _keep_all_business_text(text: str, **_kwargs) -> TokenBoundedText:
+    return TokenBoundedText(
+        text=text,
+        total_tokens=1,
+        truncated=False,
+        cutoff=len(text),
+    )
 
 
 class _PublicEndpointResolver:
@@ -290,7 +300,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
 
         self.result_store = MCPTemporaryResultStore(root / "results", memory_threshold_bytes=8)
         self.result_service = MCPIsolatedResultService(
-            projection_store=MCPProjectionStore(root / "projections")
+            projection_store=MCPProjectionStore(root / "projections"),
+            token_budgeter=_keep_all_business_text,
         )
         self.gateway = MCPGateway(
             storage=self.storage,
@@ -330,7 +341,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                 free_bytes=lambda path: 10_000_000,
             ),
             result_service=MCPIsolatedResultService(
-                projection_store=MCPProjectionStore(root / "projections")
+                projection_store=MCPProjectionStore(root / "projections"),
+                token_budgeter=_keep_all_business_text,
             ),
             now_fn=lambda: self.now,
         )
@@ -456,11 +468,15 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(outcome.validated_checkpoint.outcome, "succeeded")
             self.assertEqual(outcome.terminal_result_source, "tools_call")
-            self.assertIsNotNone(outcome.projection_staging_handle)
+            self.assertIsNotNone(outcome.projection_candidate)
 
-            published = gateway.finalize_result_assets(outcome)
+            published, handle = await gateway.finalize_result_assets(
+                outcome,
+                model_edition="model-a",
+            )
 
             self.assertIsNotNone(published)
+            self.assertIsNotNone(handle)
             result_ref = result_store.resolve_ref(outcome.result_ref)
             await result_store.discard(result_ref)
             self.assertEqual(result_store.resolve_ref(outcome.result_ref), result_ref)
@@ -1281,6 +1297,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         result_service = MCPIsolatedResultService(
             projection_store=MCPProjectionStore(projection_root),
             observer=parser_observations.append,
+            token_budgeter=_keep_all_business_text,
         )
         gateway = MCPGateway(
             storage=self.storage,
@@ -1323,10 +1340,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(
                 all(item.outcome == "succeeded" for item in parser_observations)
             )
-            self.assertEqual(
-                len(tuple(projection_root.glob(".staged-*.json"))), 1
-            )
-            self.assertIsNotNone(outcome.projection_staging_handle)
+            self.assertEqual(len(tuple(projection_root.glob(".staged-*.json"))), 0)
+            self.assertIsNotNone(outcome.projection_candidate)
             final_schema = {
                 "type": "object",
                 "title": "get_parse_job",
@@ -1343,9 +1358,12 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                     ).encode("utf-8")
                 ).hexdigest(),
             )
-            result_service.discard_projection(
-                outcome.projection_staging_handle
+            published, handle = await gateway.finalize_result_assets(
+                outcome,
+                model_edition="model-a",
             )
+            self.assertIsNotNone(published)
+            self.assertIsNotNone(handle)
         finally:
             await gateway.aclose()
 

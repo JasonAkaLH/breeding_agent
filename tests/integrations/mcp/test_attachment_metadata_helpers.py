@@ -11,7 +11,7 @@ from src.integrations.mcp._attachment_metadata import (
 
 
 class AttachmentMetadataHelpersTest(unittest.TestCase):
-    def test_coordinator_and_selector_share_one_helper_identity(self) -> None:
+    def test_coordinator_and_selector_share_attachment_helper_identity(self) -> None:
         self.assertIs(
             dispatch_coordinator._safe_attachment_basename,
             safe_attachment_basename,
@@ -28,7 +28,6 @@ class AttachmentMetadataHelpersTest(unittest.TestCase):
             selector_context._safe_attachment_content_type,
             safe_attachment_content_type,
         )
-        self.assertIs(selector_context._truncate_utf8, truncate_utf8)
 
     def test_basename_preserves_existing_sanitization_and_byte_limit(self) -> None:
         self.assertEqual(safe_attachment_basename(None), "attachment")

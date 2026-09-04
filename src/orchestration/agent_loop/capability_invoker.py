@@ -229,6 +229,7 @@ class AgentCapabilityInvoker:
                 )
         metadata = dict(self._load_metadata(run))
         metadata["agent_run_id"] = run.run_id
+        metadata["agent_model_edition"] = run.binding.model_edition
         if self._activate_delegated_skill is not None and capability_id.startswith(
             "skill."
         ):

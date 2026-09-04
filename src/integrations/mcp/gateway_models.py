@@ -5,7 +5,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from .result_parsing.projection_store import MCPProjectionStagingHandle
+from .result_parsing.service import MCPResultProjectionCandidate
 from .result_parsing.worker import MCPValidatedResultCheckpoint
 
 
@@ -83,7 +83,7 @@ class MCPCallOutcome:
     external_text: str | None = None
     terminal_result_source: str | None = None
     validated_checkpoint: MCPValidatedResultCheckpoint | None = None
-    projection_staging_handle: MCPProjectionStagingHandle | None = None
+    projection_candidate: MCPResultProjectionCandidate | None = None
 
     @classmethod
     def completed(
@@ -97,7 +97,7 @@ class MCPCallOutcome:
         external_text: str | None = None,
         terminal_result_source: str | None = None,
         validated_checkpoint: MCPValidatedResultCheckpoint | None = None,
-        projection_staging_handle: MCPProjectionStagingHandle | None = None,
+        projection_candidate: MCPResultProjectionCandidate | None = None,
     ) -> "MCPCallOutcome":
         return cls(
             kind=MCPCallOutcomeKind.COMPLETED,
@@ -109,7 +109,7 @@ class MCPCallOutcome:
             external_text=external_text,
             terminal_result_source=terminal_result_source,
             validated_checkpoint=validated_checkpoint,
-            projection_staging_handle=projection_staging_handle,
+            projection_candidate=projection_candidate,
         )
 
     @classmethod

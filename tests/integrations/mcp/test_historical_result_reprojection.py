@@ -36,7 +36,6 @@ from src.integrations.mcp.result_parsing.json_values import canonical_json_bytes
 from src.storage.artifact_files import (
     LocalArtifactFileStore,
     build_file_storage_ref,
-    parse_file_storage_ref,
 )
 
 
@@ -261,24 +260,19 @@ class HistoricalResultReprojectionTest(unittest.IsolatedAsyncioTestCase):
             projection_attacher=projector.attach_published_projection,
         )
 
-    async def test_source_deleted_managed_copy_reprojects_with_zero_network_calls(self) -> None:
+    async def test_existing_result_is_not_reprojected_or_modified(self) -> None:
+        original_ref = self.storage.artifact.storage_ref
+
         summary = await self.reprojector.run_once(limit=1)
 
         self.assertEqual(summary.scanned, 1)
-        self.assertEqual(summary.ready, 1)
+        self.assertEqual(summary.ready, 0)
+        self.assertEqual(summary.projection_missing, 1)
         self.assertEqual(self.storage.scan_cursors, [None, "call-history-1"])
-        metadata = parse_file_storage_ref(self.storage.artifact.storage_ref)
-        self.assertRegex(metadata["projection_ref"], r"^mcp-projection-[0-9a-f]{64}$")
-        self.assertNotIn("mcp_projection_unavailable_reason", metadata)
-        envelope = self.projection_store.load(
-            metadata["projection_ref"],
-            binding=self._binding(metadata),
-            expected_projection_sha256=metadata["projection_sha256"],
+        self.assertEqual(self.storage.artifact.storage_ref, original_ref)
+        self.assertFalse(
+            tuple((Path(self.temporary.name) / "projections").glob("*"))
         )
-        self.assertEqual(
-            envelope["user_view"]["primary"]["value"], {"answer": 42}
-        )
-        self.assertNotIn("content", json.dumps(envelope["user_view"]))
 
     async def test_retired_revision_is_counted_without_loading_or_modifying_artifact(self) -> None:
         original_ref = self.storage.artifact.storage_ref
@@ -308,7 +302,8 @@ class HistoricalResultReprojectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.ready, 0)
         self.assertEqual(self.storage.artifact.storage_ref, original_ref)
 
-    async def test_missing_schema_authority_marks_closed_unavailable_without_parsing(self) -> None:
+    async def test_missing_schema_authority_does_not_modify_history(self) -> None:
+        original_ref = self.storage.artifact.storage_ref
         self.storage.call = replace(
             self.storage.call,
             output_schema=None,
@@ -318,12 +313,7 @@ class HistoricalResultReprojectionTest(unittest.IsolatedAsyncioTestCase):
         summary = await self.reprojector.run_once(limit=1000)
 
         self.assertEqual(summary.historical_authority_invalid, 1)
-        metadata = parse_file_storage_ref(self.storage.artifact.storage_ref)
-        self.assertEqual(
-            metadata["mcp_projection_unavailable_reason"],
-            "historical_authority_invalid",
-        )
-        self.assertNotIn("projection_ref", metadata)
+        self.assertEqual(self.storage.artifact.storage_ref, original_ref)
 
     def _binding(self, metadata):
         from src.integrations.mcp.result_parsing.projection_store import (

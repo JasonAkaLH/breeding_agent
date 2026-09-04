@@ -4,7 +4,7 @@
 
 - 日期：2026-09-04
 - 分支：`main`
-- 状态：`in_progress`；Checkpoint A已完成，Checkpoint B待执行
+- 状态：`in_progress`；Checkpoint A～C已完成，Checkpoint D待执行
 - 设计依据：`2026-09-04-unified-tool-result-50k-token-budget-design.md`
 - 设计复审：100/100 Pass，0 Blocking、0 Major、0 Minor
 - 实施范围：Backend-first；Frontend业务卡片20,000字符/80,000-byte限制移除和
@@ -16,7 +16,9 @@
 
 | 检查点 | 提交 | 结果 |
 |---|---|---|
-| Checkpoint A | 本检查点提交 | model-bound详细Tokenization、Offset裁剪、10秒超时、required fail-closed和14项聚焦测试完成 |
+| Checkpoint A | `bb15b83d` | model-bound详细Tokenization、Offset裁剪、10秒超时、required fail-closed和14项聚焦测试完成 |
+| Checkpoint B | `961dbe61` | worker完整脱敏candidate、父进程50k-token Projection及无192 KiB Store完成；22项聚焦回归通过、2项平台skip |
+| Checkpoint C | 本检查点提交 | MCP Call terminal commit后按Run model生成Projection；Selector移除20k/80k二次预算并按绑定模型preflight；MCP integrations 589项通过、2项平台skip |
 
 ## 1. 完成声明
 

@@ -49,7 +49,7 @@ from src.capabilities.mcp_tool import build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.contracts import MCPRemoteTaskStoragePort
-from src.core.errors import MessageIdentityConflictError
+from src.core.errors import MessageIdentityConflictError, ModelUnavailableError
 from src.core.models import (
     Conversation,
     ConversationAdmissionCloseDisposition,
@@ -14393,7 +14393,11 @@ def build_api_runtime(
         )
         mcp_projection_store = MCPProjectionStore(projection_root)
         mcp_result_service = MCPIsolatedResultService(
-            projection_store=mcp_projection_store
+            projection_store=mcp_projection_store,
+            tokenization_config=_resolve_model_edition_config(
+                main_agent_llm_config=main_agent_llm_config,
+                platform_llm_config=platform_llm_config,
+            ),
         )
         mcp_durable_result_snapshot_authority = MCPDurableResultSnapshotAuthority(
             user_mcp_result_store
@@ -14808,7 +14812,11 @@ def build_api_runtime(
         )
         mcp_projection_store = MCPProjectionStore(legacy_projection_root)
         mcp_result_service = MCPIsolatedResultService(
-            projection_store=mcp_projection_store
+            projection_store=mcp_projection_store,
+            tokenization_config=_resolve_model_edition_config(
+                main_agent_llm_config=main_agent_llm_config,
+                platform_llm_config=platform_llm_config,
+            ),
         )
     if user_mcp_routing_enabled:
         _register_capability_descriptors(
@@ -14938,9 +14946,33 @@ def build_api_runtime(
         if main_agent_stream_generator is not None
         else main_agent_llm_runtime
     )
+    async def preflight_run_bound_mcp_prompt(fragments, binding):
+        model_config = _resolve_model_edition_config(
+            main_agent_llm_config=main_agent_llm_config,
+            platform_llm_config=platform_llm_config,
+        )
+        context_window = trim_max_tokens_for_model_edition(
+            binding.model_edition,
+            config=model_config,
+        )
+        if context_window is None:
+            raise ValueError("agent_context_budget_invalid")
+        token_count = await get_num_of_tokens_from_messages_async(
+            fragments,
+            config=config_for_model_edition(
+                model_config,
+                binding.model_edition,
+            ),
+            provider_required=True,
+        )
+        return token_count <= AgentContextBudget.from_model_context_window(
+            context_window
+        ).total_context_limit_tokens
+
     run_bound_mcp_generator = RunBoundMCPTextGenerator(
         runs=agent_repository,
         model=agent_model_port,
+        prompt_preflight=preflight_run_bound_mcp_prompt,
     )
     resolved_platform_text_generator = _resolve_platform_text_generator(
         platform_llm_text_generator=platform_llm_text_generator,
@@ -15461,23 +15493,45 @@ def build_api_runtime(
                     await runtime._delete_mcp_pending_action_payload_best_effort(
                         call
                     )
-            parsed_outcome = remote_parsed_results.pop(binding.call_ref, None)
+            parsed_outcome = remote_parsed_results.get(binding.call_ref)
             published_projection = None
+            projection_staging_handle = None
             if result_ref is not None:
                 user_mcp_result_store.mark_promoted(
                     user_mcp_result_store.resolve_ref(result_ref)
                 )
             if (
                 parsed_outcome is not None
-                and parsed_outcome.projection_staging_handle is not None
+                and parsed_outcome.projection_candidate is not None
                 and mcp_result_service is not None
             ):
                 try:
-                    published_projection = mcp_result_service.publish_projection(
-                        parsed_outcome.projection_staging_handle
+                    run = await agent_repository.get_run_for_task(binding.task_id)
+                    if run is None:
+                        raise RuntimeError(
+                            "mcp_remote_task_agent_model_binding_missing"
+                        )
+                    projection_staging_handle = (
+                        await mcp_result_service.stage_projection(
+                            parsed_outcome.projection_candidate,
+                            model_edition=run.binding.model_edition,
+                        )
                     )
+                    published_projection = mcp_result_service.publish_projection(
+                        projection_staging_handle
+                    )
+                except ModelUnavailableError:
+                    raise
                 except Exception:
+                    if projection_staging_handle is not None:
+                        mcp_result_service.discard_projection(
+                            projection_staging_handle
+                        )
                     pass
+                finally:
+                    remote_parsed_results.pop(binding.call_ref, None)
+            else:
+                remote_parsed_results.pop(binding.call_ref, None)
             if (
                 result_ref is not None
                 and candidate.terminal_state is MCPTerminalState.COMPLETED
@@ -15491,15 +15545,12 @@ def build_api_runtime(
                     if (
                         projected.artifact is not None
                         and published_projection is not None
-                        and parsed_outcome is not None
-                        and parsed_outcome.projection_staging_handle is not None
+                        and projection_staging_handle is not None
                     ):
                         await mcp_result_artifact_projector.attach_published_projection(
                             projected.artifact,
                             published=published_projection,
-                            staging_handle=(
-                                parsed_outcome.projection_staging_handle
-                            ),
+                            staging_handle=projection_staging_handle,
                         )
                 except asyncio.CancelledError:
                     raise

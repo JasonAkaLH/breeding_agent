@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -25,7 +24,6 @@ from src.core.models import MCPCallRecord, MCPTerminalResultReceipt, TaskInputAt
 from src.integrations.mcp._attachment_metadata import (
     safe_attachment_basename as _safe_attachment_basename,
     safe_attachment_content_type as _safe_attachment_content_type,
-    truncate_utf8 as _truncate_utf8,
 )
 from src.integrations.mcp.cp7_artifacts import (
     mcp_durable_result_artifact_id,
@@ -49,10 +47,7 @@ from src.orchestration.models import UserMCPServerProfile
 
 MAX_MCP_SELECTOR_USER_REQUEST_CHARS = 8000
 MAX_MCP_SELECTOR_ATTACHMENTS = 20
-MAX_MCP_SELECTOR_RESULT_CODE_POINTS = 20_000
-MAX_MCP_SELECTOR_RESULT_BYTES = 80_000
 MCP_AGENT_RESULT_BUNDLE_SCHEMA = "maf.mcp.agent_result_bundle.v1"
-_CARRIER_TRUNCATION_MARKER = "\n[TRUNCATED BY MCP RESULT CARRIER]"
 
 
 class MCPSelectorContextStoragePort(
@@ -660,20 +655,7 @@ def _user_request(content: str, has_attachments: bool) -> str:
 def _budget_agent_projections(
     projections: Sequence[tuple[int, str]],
 ) -> tuple[str, ...]:
-    remaining_code_points = MAX_MCP_SELECTOR_RESULT_CODE_POINTS
-    remaining_bytes = MAX_MCP_SELECTOR_RESULT_BYTES
-    selected: list[tuple[int, str]] = []
-    for sequence, projection in reversed(projections):
-        if remaining_code_points <= 0 or remaining_bytes <= 0:
-            break
-        bounded = projection[:remaining_code_points]
-        bounded = _truncate_utf8(bounded, remaining_bytes)
-        if not bounded:
-            continue
-        selected.append((sequence, bounded))
-        remaining_code_points -= len(bounded)
-        remaining_bytes -= len(bounded.encode("utf-8"))
-    return tuple(value for _, value in sorted(selected))
+    return tuple(value for _, value in sorted(projections))
 
 
 def _build_agent_result_bundle(
@@ -691,58 +673,20 @@ def _build_agent_result_bundle(
         raise MCPSelectorContextAuthorityError(
             "mcp_selector_context_projection_authority_invalid"
         )
-    selected = list(ordered)
-    while len(selected) > 1:
-        candidate = _agent_result_bundle_value(ordered, selected)
-        if _agent_result_bundle_within_budget(candidate):
-            return candidate
-        selected.pop(0)
-    candidate = _agent_result_bundle_value(ordered, selected)
-    if _agent_result_bundle_within_budget(candidate):
-        return candidate
-    source = selected[0]
-    low = 0
-    high = len(source.content)
-    fitted: dict[str, Any] | None = None
-    while low <= high:
-        middle = (low + high) // 2
-        truncated = _MCPCompletedAgentProjection(
-            call_sequence=source.call_sequence,
-            content=source.content[:middle] + _CARRIER_TRUNCATION_MARKER,
-            source_truncated=source.source_truncated,
-        )
-        trial = _agent_result_bundle_value(
-            ordered,
-            [truncated],
-            carrier_truncated_sequences={source.call_sequence},
-        )
-        if _agent_result_bundle_within_budget(trial):
-            fitted = trial
-            low = middle + 1
-        else:
-            high = middle - 1
-    if fitted is None:
-        raise MCPSelectorContextAuthorityError(
-            "mcp_result_projection_carrier_too_large"
-        )
-    return fitted
+    return _agent_result_bundle_value(ordered, ordered)
 
 
 def _agent_result_bundle_value(
     all_projections: Sequence[_MCPCompletedAgentProjection],
     included: Sequence[_MCPCompletedAgentProjection],
-    *,
-    carrier_truncated_sequences: set[int] | None = None,
 ) -> dict[str, Any]:
-    carrier_truncated_sequences = carrier_truncated_sequences or set()
     result_count = len(all_projections)
     results = [
         {
             "call_sequence": item.call_sequence,
             "content": item.content,
             "source_truncated": item.source_truncated,
-            "carrier_truncated": item.call_sequence
-            in carrier_truncated_sequences,
+            "carrier_truncated": False,
         }
         for item in included
     ]
@@ -759,20 +703,6 @@ def _agent_result_bundle_value(
         ),
         "results": results,
     }
-
-
-def _agent_result_bundle_within_budget(bundle: Mapping[str, Any]) -> bool:
-    encoded = json.dumps(
-        bundle,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return (
-        len(encoded.decode("utf-8")) <= MAX_MCP_SELECTOR_RESULT_CODE_POINTS
-        and len(encoded) <= MAX_MCP_SELECTOR_RESULT_BYTES
-    )
-
-
 __all__ = [
     "MCPCompletedResultProjectionAuthority",
     "MCPDurableSelectorContextBuilder",

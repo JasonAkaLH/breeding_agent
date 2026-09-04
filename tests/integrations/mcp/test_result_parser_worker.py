@@ -108,7 +108,6 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.checkpoint.call_ref, "call-1")
         self.assertRegex(outcome.checkpoint.checkpoint_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertIsNotNone(outcome.projection_candidate)
-        self.assertIsNone(outcome.projection_staging_handle)
         handle = await self.service.stage_projection(
             outcome.projection_candidate,
             model_edition="model-a",
@@ -236,7 +235,7 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(malformed.checkpoint.outcome, "malformed")
         self.assertEqual(malformed.checkpoint.reason, "result_shape_invalid")
-        self.assertIsNone(malformed.projection_staging_handle)
+        self.assertIsNone(malformed.projection_candidate)
 
         tool_error = await self.service.parse(
             owner_user_id="alice",
@@ -251,7 +250,7 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
             measured_mapping_bytes=32,
         )
         self.assertEqual(tool_error.checkpoint.outcome, "tool_error")
-        self.assertIsNone(tool_error.projection_staging_handle)
+        self.assertIsNone(tool_error.projection_candidate)
 
     async def test_projection_store_failure_after_checkpoint_keeps_succeeded_outcome(self) -> None:
         outcome = await self.service.parse(

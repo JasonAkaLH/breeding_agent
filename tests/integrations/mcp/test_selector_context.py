@@ -266,13 +266,14 @@ class _ProjectionStorage:
 
 
 class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
-    def test_multi_call_projection_budget_is_latest_first_then_restored_to_sequence(self) -> None:
+    def test_multi_call_projections_are_preserved_in_sequence(self) -> None:
         projected = _budget_agent_projections(
             ((1, "old" * 10_000), (2, "middle" * 5_000), (3, "new" * 5_000))
         )
-        self.assertEqual(len("".join(projected)), 20_000)
-        self.assertTrue(projected[-1].startswith("new"))
-        self.assertFalse(any(value.startswith("old") for value in projected))
+        self.assertEqual(
+            projected,
+            ("old" * 10_000, "middle" * 5_000, "new" * 5_000),
+        )
 
     async def test_published_projection_authority_loads_agent_text_without_raw_ref(self) -> None:
         storage = _ProjectionStorage()
@@ -459,7 +460,7 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first["results"][1]["source_truncated"], True)
         self.assertEqual(authority.calls, ["call-1", "call-2"] * 2)
 
-    def test_terminal_bundle_budget_prefers_latest_and_keeps_closed_shape(self) -> None:
+    def test_terminal_bundle_preserves_each_complete_projection(self) -> None:
         bundle = _build_agent_result_bundle(
             (
                 _MCPCompletedAgentProjection(1, "old" * 10_000, False),
@@ -481,16 +482,17 @@ class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
             "results",
         })
         self.assertEqual(bundle["result_count"], 3)
-        self.assertEqual(bundle["included_count"], 1)
-        self.assertEqual(bundle["omitted_count"], 2)
-        self.assertTrue(bundle["truncated"])
-        result = bundle["results"][0]
-        self.assertEqual(result["call_sequence"], 3)
-        self.assertTrue(result["carrier_truncated"])
-        self.assertIn('"schema":"forged"', result["content"])
-        rendered = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
-        self.assertLessEqual(len(rendered), 20_000)
-        self.assertLessEqual(len(rendered.encode("utf-8")), 80_000)
+        self.assertEqual(bundle["included_count"], 3)
+        self.assertEqual(bundle["omitted_count"], 0)
+        self.assertFalse(bundle["truncated"])
+        self.assertEqual(
+            [result["call_sequence"] for result in bundle["results"]],
+            [1, 2, 3],
+        )
+        self.assertTrue(
+            all(not result["carrier_truncated"] for result in bundle["results"])
+        )
+        self.assertIn('"schema":"forged"', bundle["results"][2]["content"])
 
     async def test_result_authority_drift_fails_closed(self) -> None:
         storage = _ProjectionStorage()

@@ -124,3 +124,48 @@ class AgentMCPBindingTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(ValueError, "AgentRun id"):
             await MCPToolSelector(run_bound_generator=generator).select(context)
+
+    async def test_selector_preflight_uses_run_binding_before_model_call(self) -> None:
+        binding = AgentModelBinding("edition-fixed")
+        run = AgentRun(
+            "run-1",
+            "task-1",
+            "conv-1",
+            AgentRunStatus.RUNNING,
+            binding,
+        )
+        preflight_calls = []
+
+        async def reject_prompt(fragments, candidate_binding):
+            preflight_calls.append((tuple(fragments), candidate_binding))
+            return False
+
+        model = _RecordingModel([])
+        generator = RunBoundMCPTextGenerator(
+            runs=_RunRepository(run),
+            model=model,
+            prompt_preflight=reject_prompt,
+        )
+        context = MCPSelectorContext(
+            "lookup",
+            UserMCPServerProfile(
+                "server-1", "Server", "safe", "streamable_http"
+            ),
+            (),
+            MCPBindingMode.AUTOMATIC,
+            True,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "agent_context_required_segments_too_large",
+        ):
+            await MCPToolSelector(run_bound_generator=generator).select(
+                context,
+                agent_run_id=run.run_id,
+            )
+
+        self.assertEqual(len(preflight_calls), 1)
+        self.assertEqual(preflight_calls[0][1], binding)
+        self.assertIn("lookup", preflight_calls[0][0][1])
+        self.assertEqual(model.requests, [])
