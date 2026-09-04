@@ -1,6 +1,6 @@
 # 主 Agent 统一 Tool Result 50k Token 预算设计
 
-状态：用户已批准，限定硬伤复审通过，待生成实施计划
+状态：用户已批准，限定硬伤复审通过，实施计划已生成
 
 目标分支：`main`；不涉及 `prod` 部署
 
@@ -229,8 +229,11 @@ tokenization 随后失败时：
 ## Frontend
 
 Backend 必须先完成 typed error 到 AgentRun、`task.failed` 和 API/SSE 的持久化传播，可独立先发布；
-旧 Frontend 收到未知的 `model_unavailable` 时沿用现有通用失败文案，不得崩溃。后续 Frontend 发布
-在统一 `failureMessage` 映射中识别 `model_unavailable`，固定显示：
+旧 Frontend 收到未知的 `model_unavailable` 时沿用现有通用失败文案，不得崩溃。Backend-first阶段
+Frontend现有业务卡片20,000字符/80,000-byte裁剪也暂时保留，因此只宣称Backend结果链完成，不宣称
+端到端UI目标完成。后续 Frontend 发布删除`frontend/src/domain/artifacts.ts`的
+`MCP_MAX_CODE_POINTS` / `MCP_MAX_UTF8_BYTES`，并在统一`failureMessage`映射中识别
+`model_unavailable`，固定显示：
 
 > 模型服务暂时不可用，无法完成本次请求，请稍后重试。
 
@@ -246,7 +249,8 @@ fallback；Task 级 `model_unavailable` 提示负责向用户说明本次失败�
   `mcp-result-parser.v2` / `maf.mcp.parsed_result_projection.v2` 结构和字段语义保持不变；
 - 旧结果逐字节保持原样，不读取 raw 重建，不修改 Artifact，不调用远端 Tool；
 - Backend 可先于 Frontend 发布；Backend rollout 验证新结果不再由字符/byte 预算截断，并验证
-  49,999、50,000、50,001-token 边界；Frontend 后续只增加专用错误文案；
+  49,999、50,000、50,001-token 边界；Frontend 后续删除业务卡片旧字符/byte裁剪并增加专用错误
+  文案；
 - 回滚恢复旧 writer/reader；旧版本可能把新的大 view 安全降级为 unavailable，但不得读取 raw 或
   改写历史；
 - 不进行数据库 schema/data migration。
