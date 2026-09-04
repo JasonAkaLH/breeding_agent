@@ -67,6 +67,10 @@ TOOL_RESULT_BUSINESS_MAX_CODE_POINTS = 100_000
 Backend 是数值和裁剪语义的权威。Frontend 保留同值 defensive constant，并由合同测试锁定
 100,000，运行时不新增配置开关。
 
+这里的旧 20,000 和新 100,000 始终表示 Unicode 字符数，不表示 token 数，也不通过 token
+counter 决定单个 Result 的业务上限。token counter 只处理应用字符上限后的完整模型请求是否落入
+上下文窗口。
+
 ## 删除 80,000-byte 业务裁剪
 
 以下路径删除 80,000 UTF-8 bytes 条件及对应按 bytes 截断逻辑：
@@ -124,18 +128,21 @@ transient resolver 和 Legacy Skill 的 Artifact resolver 都必须在注入模�
 Selector 不再使用独立的 20,000 字符 / 80,000-byte 历史结果总预算。每个已验证 historical MCP
 result entry 先按统一 100,000 字符 policy 提供，再由 Selector 自己的模型 token 上下文预算决定
 本次请求可注入多少内容。Runtime 必须把 Selector 实际使用的 model edition、context window 和
-token counter 注入 Selector candidate builder；没有可信 model budget 时 fail closed，不回退字符或
-byte 估算。Selector 继续零网络恢复，只读 identity-bound projection。
+项目现有 token counter 注入 Selector candidate builder；没有可信 model budget 时 fail closed，
+不回退字符或 byte 估算。Selector 继续零网络恢复，只读 identity-bound projection。
 
 ## 同轮多结果与 token 上下文
 
-主 Agent 和 Selector 都以实际 tokenizer 结果控制模型请求，不以 UTF-8 bytes 估算 token。主 Agent
-沿用 AgentRun 固定模型窗口的 90% total-context budget：
+主 Agent 和 Selector 都复用 `src/integrations/token_counter.py` 的现有计数链，不以 UTF-8 bytes
+估算 token。配置可用时，该计数器按绑定 model edition 批量调用模型 Provider 的
+`POST {base_url}/tokenization`，缓存并汇总每段返回的 `total_tokens`；Provider tokenization 失败时
+沿用现有配置决定是否回退本地 `tiktoken`，本次不修改 fallback policy。主 Agent 沿用 AgentRun
+固定模型窗口的 90% total-context budget：
 
 1. 构建包含当前 Tool wave 的真实 candidate；
 2. 先按现有 closed 规则压缩旧历史，不压缩当前 user 正文；
 3. 若仍超限，对当前 wave 的 Tool Result 做确定性公平字符分配；
-4. 使用绑定模型的实际 token counter 验证 candidate，直到落入预算；
+4. 使用上述现有 token counter 验证 candidate，直到落入预算；
 5. 只在本次模型请求标记 `carrier_truncated=true`，不改写 durable 100,000 字符结果；
 6. 最小 closed result 集合仍放不下时返回既有 fatal context error，不丢弃某个 Result，也不重放
    Tool。
@@ -164,6 +171,7 @@ Artifact 同时返回造成的响应总量继续由既有 API/HTTP 基础设施�
 
 - ASCII、中文、emoji、组合字符和转义密集 structured JSON 覆盖 99,999、100,000、100,001；
 - 相同 code-point 数的 ASCII、中文和 emoji 得到相同裁剪位置；
+- 100,000 字符上限不随 Provider tokenization 返回值变化；
 - 业务路径中不存在 80,000-byte 判断或 byte-based truncate helper；
 - envelope metadata 不占业务正文 100,000 字符额度。
 
@@ -174,6 +182,8 @@ Artifact 同时返回造成的响应总量继续由既有 API/HTTP 基础设施�
 - 100,000 中文字符可通过 inline 或 identity-bound receipt 成为一个逻辑 Tool Result，AgentItem
   仍不超过 128 KiB；
 - 同轮多个结果在实际 token 预算内确定性收敛，保持顺序且不拆消息；
+- 主 Agent 与 Selector 的 token 预算测试覆盖 Provider `/tokenization` 成功、缓存命中和现有配置下
+  的 `tiktoken` fallback；
 - raw、path、storage ref 和凭据泄漏扫描为零。
 
 ### 历史与安全
