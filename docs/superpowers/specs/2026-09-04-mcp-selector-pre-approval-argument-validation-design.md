@@ -1,6 +1,6 @@
 # MCP Selector 授权前参数校验设计
 
-状态：`approved_hard_defects_resolved_pending_spec_review`
+状态：`approved_planned`
 日期：2026-09-04
 目标分支：`main`
 
