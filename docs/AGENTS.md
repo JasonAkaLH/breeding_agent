@@ -115,8 +115,8 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-implementation-plan.md` | `planned`；设计已确认，Checkpoint 0～E待实施 | 先锁定真实`{}`红测，再完成共享validator、最终action门禁、单次物化和相关回归；不自动发布或部署。 |
-| `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-design.md` | `approved_planned`；授权前schema校验、附件物化顺序、最终fingerprint门禁和repair边界已成文，限定硬伤复审0 Blocking/0 Major | 实施入口见同日计划；尚未修改生产代码。 |
+| `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-implementation-plan.md` | `implemented_verified`；Checkpoint 0～E、真实SQLite aggregate零副作用和相关全量门禁已闭合 | 后续仅用新Task做环境smoke；本轮不自动发布或部署。 |
+| `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-design.md` | `implemented_verified`；授权前schema校验、附件物化顺序、最终fingerprint门禁和repair边界已实施 | 保持Gateway纵深校验；历史失败Task不重放或复活。 |
 | `superpowers/specs/2026-09-04-completed-task-recoverable-run-direct-convergence-implementation-plan.md` | `published_pending_deploy`；Checkpoint 0～E、相关门禁和backend-dev `0.1.33`发布已闭合 | 执行开发hard cut、真实pre/post audit和旧/新对话smoke；`prod`仍不在范围。 |
 | `superpowers/specs/2026-09-04-skill-bundle-revision-v2-restart-recovery-implementation-plan.md` | `published_pending_deploy`；Checkpoint 0/A～F及终态Task/Run分裂修复已闭合，backend-dev `0.1.32`已发布，受保护部署命令已同步但尚未执行 | 如需继续，执行开发hard cut与真实旧/新对话smoke；`prod`仍不在范围。 |
 | `superpowers/specs/2026-08-25-project-wide-progressive-architecture-cleanup-p0-implementation-plan.md` | 计划`100/100`通过信心门；P0实施`complete`，Checkpoint A～H全部闭合 | P0 handoff已由独立P1计划接管；P0账本保持历史冻结，不回写P1实现状态。 |

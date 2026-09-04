@@ -17,6 +17,7 @@ from src.capabilities.mcp_dispatch.models import (
     MCPSelectorAction,
     MCPSelectorActionType,
 )
+from src.capabilities.mcp_dispatch.selector import MCPToolSelector
 from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import (
     InterruptStatus,
@@ -75,6 +76,9 @@ from src.integrations.mcp.gateway_models import (
     MCPTaskServerScope,
     MCPToolDescriptor,
     ToolCatalogSnapshot,
+)
+from src.integrations.mcp.pending_action_payloads import (
+    pending_action_payload_identity,
 )
 from src.integrations.mcp.temporary_results import MCPTemporaryResultRef
 from tests.api.support import InMemoryTaskRuntimeSidecar
@@ -160,7 +164,14 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
         )
 
-    async def _prepare_mcp_approval(self, runtime, *, suffix: str):
+    async def _dispatch_mcp_approval_candidate(
+        self,
+        runtime,
+        *,
+        suffix: str,
+        selector=None,
+        input_schema=None,
+    ):
         class OneCallSelector:
             async def select(self, _context):
                 return MCPSelectorAction(
@@ -179,7 +190,8 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                         MCPToolDescriptor(
                             name="lookup",
                             description="lookup",
-                            input_schema={
+                            input_schema=input_schema
+                            or {
                                 "type": "object",
                                 "properties": {"query": {"type": "string"}},
                             },
@@ -264,7 +276,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         coordinator = UserMCPDispatchCoordinator(
             storage=runtime.storage,
             gateway=gateway,
-            selector=OneCallSelector(),
+            selector=selector or OneCallSelector(),
             audit_reference_signer=runtime._mcp_audit_reference_signer,
             pending_action_payload_store=runtime._mcp_pending_action_payload_store,
             terminal_candidate_snapshot_authority=(
@@ -288,9 +300,144 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             ),
             server_id=server.server_id,
         )
+        return task, server, outcome, gateway
+
+    async def _prepare_mcp_approval(self, runtime, *, suffix: str):
+        task, server, outcome, gateway = await self._dispatch_mcp_approval_candidate(
+            runtime,
+            suffix=suffix,
+        )
         self.assertEqual(outcome.output_payload["mcp_status"], "approval_required")
         self.assertEqual(gateway.call_count, 0)
         return task, server, outcome.interrupt
+
+    async def test_selector_repairs_arguments_before_aggregate_approval_persistence(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            outputs = iter(
+                (
+                    '{"action":"call_tool","tool_name":"lookup","arguments":{}}',
+                    '{"action":"call_tool","tool_name":"lookup","arguments":{"query":"repaired"}}',
+                )
+            )
+            prompts: list[str] = []
+
+            def generate(prompt: str) -> str:
+                prompts.append(prompt)
+                return next(outputs)
+
+            task, server, outcome, gateway = (
+                await self._dispatch_mcp_approval_candidate(
+                    runtime,
+                    suffix="selector-schema-repair",
+                    selector=MCPToolSelector(text_generator=generate),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                )
+            )
+
+            self.assertEqual(outcome.output_payload["mcp_status"], "approval_required")
+            self.assertEqual(len(prompts), 2)
+            self.assertEqual(gateway.call_count, 0)
+            self.assertEqual(
+                len(await runtime.storage.list_interrupts_for_task(task.task_id)),
+                1,
+            )
+            self.assertEqual(
+                await runtime.storage.list_user_mcp_tool_grants(
+                    "alice", server.server_id
+                ),
+                [],
+            )
+            self.assertEqual(
+                await runtime.storage.list_mcp_call_records("alice", task.task_id),
+                [],
+            )
+            pending = await runtime.storage.get_mcp_pending_tool_action_for_interrupt(
+                outcome.interrupt.interrupt_id
+            )
+            self.assertIsNotNone(pending)
+            async with runtime._mcp_pending_action_payload_store.open_validated(
+                pending_action_payload_identity(pending),
+                pending.arguments_payload_ref,
+            ) as payload:
+                self.assertEqual(dict(payload.arguments), {"query": "repaired"})
+            await runtime.shutdown()
+
+    async def test_selector_double_schema_failure_has_zero_aggregate_side_effects(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            outputs = iter(
+                (
+                    '{"action":"call_tool","tool_name":"lookup","arguments":{}}',
+                    '{"action":"call_tool","tool_name":"lookup","arguments":{}}',
+                )
+            )
+            task, server, outcome, gateway = (
+                await self._dispatch_mcp_approval_candidate(
+                    runtime,
+                    suffix="selector-schema-double-failure",
+                    selector=MCPToolSelector(
+                        text_generator=lambda _prompt: next(outputs)
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                )
+            )
+
+            self.assertEqual(outcome.error.code, "selector_invalid_output")
+            self.assertEqual(gateway.call_count, 0)
+            self.assertEqual(
+                await runtime.storage.list_interrupts_for_task(task.task_id),
+                [],
+            )
+            self.assertEqual(
+                await runtime.storage.list_user_mcp_tool_grants(
+                    "alice", server.server_id
+                ),
+                [],
+            )
+            self.assertEqual(
+                await runtime.storage.list_mcp_call_records("alice", task.task_id),
+                [],
+            )
+            self.assertEqual(
+                await runtime.storage.list_protected_mcp_pending_action_payload_refs(),
+                (),
+            )
+            self.assertEqual(
+                list(runtime._mcp_pending_action_payload_store._root.glob("*.bin")),
+                [],
+            )
+            await runtime.shutdown()
 
     async def test_approval_decided_event_is_persisted_before_resume(self) -> None:
         with (

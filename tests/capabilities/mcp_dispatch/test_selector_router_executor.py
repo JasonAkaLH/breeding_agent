@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 
 import src.capabilities.mcp_dispatch as mcp_dispatch
 import src.capabilities.mcp_dispatch.executor as executor_module
@@ -16,6 +17,7 @@ from src.capabilities.mcp_dispatch import (
     MCPCallFingerprintBlocked,
     MCPDispatchExecutor,
     MCPDispatchOutcome,
+    MCPSelectorAction,
     MCPSelectorActionType,
     MCPSelectorContext,
     MCPSelectorOutputError,
@@ -98,6 +100,104 @@ class MCPSelectorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.action, MCPSelectorActionType.FINISH)
         self.assertEqual(len(prompts), 2)
         self.assertIn("未通过严格校验", prompts[1])
+
+    async def test_selector_repairs_action_rejected_by_final_validator(self) -> None:
+        outputs = iter(
+            (
+                '{"action":"call_tool","tool_name":"search_customer","arguments":{}}',
+                '{"action":"call_tool","tool_name":"search_customer","arguments":{"name":"Alice"}}',
+            )
+        )
+        validated_arguments: list[dict] = []
+
+        def validate(action: MCPSelectorAction) -> MCPSelectorAction:
+            validated_arguments.append(dict(action.arguments))
+            if not action.arguments.get("name"):
+                raise MCPSelectorOutputError("MCP tool arguments are invalid")
+            return action
+
+        action = await MCPToolSelector(
+            text_generator=lambda _prompt: next(outputs)
+        ).select(self.context(), action_validator=validate)
+
+        self.assertEqual(action.arguments, {"name": "Alice"})
+        self.assertEqual(validated_arguments, [{}, {"name": "Alice"}])
+
+    async def test_selector_fails_when_final_validator_rejects_both_attempts(self) -> None:
+        outputs = iter(
+            (
+                '{"action":"call_tool","tool_name":"search_customer","arguments":{}}',
+                '{"action":"call_tool","tool_name":"search_customer","arguments":{}}',
+            )
+        )
+
+        def reject(_action: MCPSelectorAction) -> MCPSelectorAction:
+            raise MCPSelectorOutputError("MCP tool arguments are invalid")
+
+        with self.assertRaisesRegex(
+            MCPSelectorOutputError, "MCP tool arguments are invalid"
+        ):
+            await MCPToolSelector(
+                text_generator=lambda _prompt: next(outputs)
+            ).select(self.context(), action_validator=reject)
+
+    async def test_selector_context_fingerprint_uses_validated_action_only(self) -> None:
+        raw_arguments = {"name": "attachment-placeholder"}
+        final_arguments = {"name": "materialized-content"}
+        raw_fingerprint = build_mcp_call_fingerprint(
+            server_id="server-1",
+            tool_name="search_customer",
+            arguments=raw_arguments,
+        )
+        final_fingerprint = build_mcp_call_fingerprint(
+            server_id="server-1",
+            tool_name="search_customer",
+            arguments=final_arguments,
+        )
+        output = json.dumps(
+            {
+                "action": "call_tool",
+                "tool_name": "search_customer",
+                "arguments": raw_arguments,
+            }
+        )
+
+        accepted = await MCPToolSelector(text_generator=lambda _prompt: output).select(
+            replace(
+                self.context(),
+                failed_call_fingerprints=frozenset({raw_fingerprint}),
+            ),
+            action_validator=lambda action: replace(
+                action, arguments=final_arguments
+            ),
+        )
+        self.assertEqual(accepted.arguments, final_arguments)
+
+        with self.assertRaisesRegex(MCPSelectorOutputError, "failed call fingerprint"):
+            await MCPToolSelector(text_generator=lambda _prompt: output).select(
+                replace(
+                    self.context(),
+                    failed_call_fingerprints=frozenset({final_fingerprint}),
+                ),
+                action_validator=lambda action: replace(
+                    action, arguments=final_arguments
+                ),
+            )
+
+    async def test_selector_rejects_non_action_validator_result(self) -> None:
+        output = json.dumps(
+            {
+                "action": "call_tool",
+                "tool_name": "search_customer",
+                "arguments": {"name": "Alice"},
+            }
+        )
+
+        with self.assertRaisesRegex(MCPSelectorOutputError, "MCPSelectorAction"):
+            await MCPToolSelector(text_generator=lambda _prompt: output).select(
+                self.context(),
+                action_validator=lambda _action: {"not": "an action"},
+            )
 
     async def test_selector_prompt_contains_agent_projection_and_no_raw_result_ref_field(self) -> None:
         prompts: list[str] = []

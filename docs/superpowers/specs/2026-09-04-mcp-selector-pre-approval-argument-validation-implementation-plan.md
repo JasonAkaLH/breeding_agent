@@ -2,7 +2,7 @@
 
 依据：`2026-09-04-mcp-selector-pre-approval-argument-validation-design.md`
 
-状态：`planned`
+状态：`implemented_verified`
 日期：2026-09-04
 目标分支：`main`
 
@@ -86,8 +86,9 @@ MCP Server、Skill revision、镜像、部署或`prod`。不直接修改开发�
 
 ## 完成声明
 
-只有共享校验、最终action门禁、附件单次物化、具体Selector repair、自定义Port兜底、Gateway纵深防线、零副作用回归和相关自动
-门禁全部闭合，才把状态标记为`implemented_verified`。当前真实失败Task保持历史终态，后续验证应使用新Task。
+共享校验、最终action门禁、附件单次物化、具体Selector repair、自定义Port兜底、Gateway纵深防线、零副作用回归和相关自动
+门禁已全部闭合。MCP integrations 587项（2项环境skip）、Orchestration 200项、API 651项、E2E 12项、compileall、变更面
+Ruff、共享实现扫描与`git diff --check`均通过。当前真实失败Task保持历史终态，后续验证应使用新Task。
 
 License Requirement：复用现有Python、`jsonschema`、Selector repair、附件物化、Gateway、unittest与现有测试链；无新增依赖、
 第三方代码或许可变化。

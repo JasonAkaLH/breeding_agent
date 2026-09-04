@@ -1,6 +1,6 @@
 # MCP Selector 授权前参数校验设计
 
-状态：`approved_planned`
+状态：`implemented_verified`
 日期：2026-09-04
 目标分支：`main`
 
@@ -94,6 +94,12 @@ context/fingerprint校验；由于该窄Port没有repair接口，无效参数直
 
 不修改Server Router、主Agent Tool Result承载、approval语义、历史Pending Action、数据库数据/schema、Frontend、Rust/proto、
 外部MCP Server、Skill revision、镜像、部署或`prod`。当前失败Task不自动重放或复活。
+
+## 8. 实施结果
+
+共享参数validator、Selector一次repair、Coordinator授权前物化/schema/最终fingerprint门禁、自定义Port兜底与Gateway纵深校验
+已实施。真实SQLite aggregate authority回归证明repair只持久化最终参数，双失败时Pending Action、approval Interrupt、Grant与
+Call均为零；OCR成功路径只物化一次。未修改数据库、镜像、部署或`prod`。
 
 License Requirement：复用现有Python、`jsonschema`、Selector repair、附件物化、Gateway与unittest；无新增依赖、第三方代码或
 许可变化。

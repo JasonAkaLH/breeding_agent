@@ -25,7 +25,11 @@ from src.capabilities.mcp_dispatch.models import (
     build_mcp_selector_context,
     build_mcp_call_fingerprint,
 )
-from src.capabilities.mcp_dispatch.selector import MCPSelectorOutputError, MCPToolSelector
+from src.capabilities.mcp_dispatch.selector import (
+    MCPSelectorOutputError,
+    MCPToolSelector,
+    validate_selector_action_against_context,
+)
 from src.capabilities.mcp_dispatch.server_router import MCPServerRouter, MCPServerRouterOutputError
 from src.core.contracts import (
     ArtifactStoragePort,
@@ -74,9 +78,18 @@ from src.integrations.mcp.attachment_materialization import (
     identify_mcp_job_workflow,
     materialize_mcp_attachment_action,
 )
+from src.integrations.mcp.argument_validation import (
+    MCPToolArgumentValidationError,
+    validate_mcp_tool_arguments,
+)
 from src.integrations.mcp.job_workflows import MCPJobWorkflowError
 from src.integrations.mcp.credentials import MCPAuditReferenceSigner
-from src.integrations.mcp.gateway_models import MCPCallOutcome, MCPCallOutcomeKind, MCPTaskServerScope
+from src.integrations.mcp.gateway_models import (
+    MCPCallOutcome,
+    MCPCallOutcomeKind,
+    MCPTaskServerScope,
+    ToolCatalogSnapshot,
+)
 from src.integrations.mcp.cp7_artifacts import (
     canonical_json_bytes,
     canonical_sha256,
@@ -319,6 +332,38 @@ class UserMCPDispatchCoordinator:
         detectors: Mapping[MCPSafetyRedLine, AuthoritativeMCPSafetyDetector],
     ) -> None:
         self._safety_detectors = dict(detectors)
+
+    @staticmethod
+    def _validate_selector_action_before_authorization(
+        *,
+        catalog: ToolCatalogSnapshot,
+        attachments: Sequence[TaskInputAttachment],
+        binding_mode: MCPBindingMode,
+        action: MCPSelectorAction,
+    ) -> MCPSelectorAction:
+        if action.action is not MCPSelectorActionType.CALL_TOOL:
+            return action
+        tool_name = action.tool_name or ""
+        descriptor = catalog.get(tool_name)
+        if descriptor is None:
+            return action
+        materialized = materialize_mcp_attachment_action(
+            catalog=catalog,
+            tool_name=tool_name,
+            arguments=action.arguments,
+            attachments=attachments,
+            explicit_binding=binding_mode is MCPBindingMode.EXPLICIT_COMMAND,
+        )
+        if materialized is not None:
+            action = replace(action, arguments=materialized.arguments)
+        try:
+            validate_mcp_tool_arguments(
+                descriptor.input_schema,
+                action.arguments,
+            )
+        except MCPToolArgumentValidationError as exc:
+            raise MCPSelectorOutputError("MCP tool arguments are invalid") from exc
+        return action
 
     def attest_safety_interval(
         self, bucket_started_at: datetime, bucket_ended_at: datetime
@@ -794,9 +839,43 @@ class UserMCPDispatchCoordinator:
                                 request.metadata.get("agent_run_id") or ""
                             ).strip()
                             or None,
+                            action_validator=lambda candidate: (
+                                self._validate_selector_action_before_authorization(
+                                    catalog=catalog,
+                                    attachments=selected_attachments,
+                                    binding_mode=binding_mode,
+                                    action=candidate,
+                                )
+                            ),
                         )
                     else:
                         action = await self._selector.select(selector_context)
+                        action = self._validate_selector_action_before_authorization(
+                            catalog=catalog,
+                            attachments=selected_attachments,
+                            binding_mode=binding_mode,
+                            action=action,
+                        )
+                        try:
+                            validate_selector_action_against_context(
+                                action, selector_context
+                            )
+                        except MCPSelectorOutputError:
+                            if (
+                                action.action
+                                is MCPSelectorActionType.ROUTE_ANOTHER_SERVER
+                                and not selector_context.allow_route_another_server
+                            ):
+                                pass
+                            elif (
+                                action.action is MCPSelectorActionType.CALL_TOOL
+                                and selector_context.remaining_call_budget <= 0
+                            ):
+                                raise _CallReservationError(
+                                    "mcp_call_budget_or_concurrency_exhausted"
+                                )
+                            else:
+                                raise
                     selector_ran = True
                 if (
                     selector_ran
@@ -916,25 +995,11 @@ class UserMCPDispatchCoordinator:
                         outcome="failed",
                         safe_error_code="mcp_tool_not_found",
                     )
-                if pending_action is None:
-                    materialized = materialize_mcp_attachment_action(
-                        catalog=catalog,
-                        tool_name=tool_name,
-                        arguments=action.arguments,
-                        attachments=selected_attachments,
-                        explicit_binding=(
-                            binding_mode is MCPBindingMode.EXPLICIT_COMMAND
-                        ),
-                    )
-                    if materialized is not None:
-                        action = replace(action, arguments=materialized.arguments)
-                        workflow_kind = materialized.workflow_kind
-                else:
-                    workflow_kind = identify_mcp_job_workflow(
-                        catalog=catalog,
-                        tool_name=tool_name,
-                        arguments=action.arguments,
-                    )
+                workflow_kind = identify_mcp_job_workflow(
+                    catalog=catalog,
+                    tool_name=tool_name,
+                    arguments=action.arguments,
+                )
                 business_result_descriptor = descriptor
                 if workflow_kind is MCPJobWorkflowKind.OCR_ASYNC_JOB_V1:
                     final_descriptor = catalog.get("get_parse_job")

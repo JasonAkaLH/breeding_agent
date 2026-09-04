@@ -14,6 +14,7 @@ from .models import (
 )
 
 SelectorTextGenerator = Callable[[str], str | Awaitable[str]]
+SelectorActionValidator = Callable[[MCPSelectorAction], MCPSelectorAction]
 
 
 class MCPSelectorOutputError(ValueError):
@@ -39,6 +40,7 @@ class MCPToolSelector:
         context: MCPSelectorContext,
         *,
         agent_run_id: str | None = None,
+        action_validator: SelectorActionValidator | None = None,
     ) -> MCPSelectorAction:
         original_prompt = build_selector_prompt(context)
         prompt = original_prompt
@@ -55,7 +57,13 @@ class MCPToolSelector:
                 previous_output = raw_output
                 try:
                     action = parse_selector_action(raw_output, allowed_tools={tool.name for tool in context.tools})
-                    self._validate_action_against_context(action, context)
+                    if action_validator is not None:
+                        action = action_validator(action)
+                        if not isinstance(action, MCPSelectorAction):
+                            raise MCPSelectorOutputError(
+                                "Selector action validator must return MCPSelectorAction"
+                            )
+                    validate_selector_action_against_context(action, context)
                     return action
                 except MCPSelectorOutputError as exc:
                     error = exc
@@ -81,26 +89,31 @@ class MCPToolSelector:
         assert self._text_generator is not None
         return self._text_generator(prompt)
 
-    @staticmethod
-    def _validate_action_against_context(action: MCPSelectorAction, context: MCPSelectorContext) -> None:
-        if (
-            action.action is MCPSelectorActionType.ROUTE_ANOTHER_SERVER
-            and not context.allow_route_another_server
-        ):
-            raise MCPSelectorOutputError("route_another_server is forbidden for explicit MCP binding")
-        if action.action is not MCPSelectorActionType.CALL_TOOL:
-            return
-        if context.remaining_call_budget <= 0:
-            raise MCPSelectorOutputError("MCP tools/call budget exhausted")
-        fingerprint = build_mcp_call_fingerprint(
-            server_id=context.server.server_id,
-            tool_name=action.tool_name or "",
-            arguments=action.arguments,
+
+def validate_selector_action_against_context(
+    action: MCPSelectorAction,
+    context: MCPSelectorContext,
+) -> None:
+    if (
+        action.action is MCPSelectorActionType.ROUTE_ANOTHER_SERVER
+        and not context.allow_route_another_server
+    ):
+        raise MCPSelectorOutputError(
+            "route_another_server is forbidden for explicit MCP binding"
         )
-        if fingerprint in context.failed_call_fingerprints:
-            raise MCPSelectorOutputError("Selector repeated a failed call fingerprint")
-        if fingerprint in context.rejected_call_fingerprints:
-            raise MCPSelectorOutputError("Selector repeated a rejected call fingerprint")
+    if action.action is not MCPSelectorActionType.CALL_TOOL:
+        return
+    if context.remaining_call_budget <= 0:
+        raise MCPSelectorOutputError("MCP tools/call budget exhausted")
+    fingerprint = build_mcp_call_fingerprint(
+        server_id=context.server.server_id,
+        tool_name=action.tool_name or "",
+        arguments=action.arguments,
+    )
+    if fingerprint in context.failed_call_fingerprints:
+        raise MCPSelectorOutputError("Selector repeated a failed call fingerprint")
+    if fingerprint in context.rejected_call_fingerprints:
+        raise MCPSelectorOutputError("Selector repeated a rejected call fingerprint")
 
 
 def build_selector_prompt(context: MCPSelectorContext) -> str:

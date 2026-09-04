@@ -588,6 +588,41 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_invalid_arguments_keep_public_error_and_never_reach_adapter(self) -> None:
+        scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"),
+            "task-1",
+            "server-1",
+        )
+        state = self.gateway._require_scope(scope)
+        state.catalog = replace(
+            state.catalog,
+            tools=(
+                replace(
+                    state.catalog.tools[0],
+                    input_schema={
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                    },
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            MCPGatewayError, "mcp_tool_arguments_invalid"
+        ) as raised:
+            await self.gateway.call_tool(
+                scope,
+                "echo",
+                {},
+                authorization_verified=True,
+            )
+
+        self.assertEqual(raised.exception.code, "mcp_tool_arguments_invalid")
+        self.assertEqual(self.adapters[0].call_count, 0)
+        self.assertEqual(state.calls, {})
+
     async def test_readonly_shadow_session_has_zero_durable_mutation(self) -> None:
         grant = UserMCPToolGrant(
             grant_id="grant-1",

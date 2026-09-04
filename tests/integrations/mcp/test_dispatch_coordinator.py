@@ -7,7 +7,7 @@ import json
 import unittest
 from dataclasses import replace
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.capabilities.mcp_dispatch.models import (
     MCPBindingMode,
@@ -17,6 +17,7 @@ from src.capabilities.mcp_dispatch.models import (
     MCPServerRouteAction,
     MCPServerRouteActionType,
 )
+from src.capabilities.mcp_dispatch.selector import MCPToolSelector
 from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import UserMCPHealthStatus, UserMCPTransport
 from src.core.models import (
@@ -36,6 +37,9 @@ from src.integrations.mcp.dispatch_coordinator import (
     _DispatchAuthority,
     _mcp_attachment_summaries,
     build_mcp_call_fingerprint,
+)
+from src.integrations.mcp.attachment_materialization import (
+    materialize_mcp_attachment_action as _materialize_mcp_attachment_action,
 )
 from tests.master_key_support import audit_reference_signer
 from src.integrations.mcp.gateway import MCPGatewayError
@@ -437,7 +441,7 @@ def _call(arguments=None) -> MCPSelectorAction:
     return MCPSelectorAction(
         MCPSelectorActionType.CALL_TOOL,
         tool_name="lookup",
-        arguments=arguments or {"query": "Alice"},
+        arguments=arguments if arguments is not None else {"query": "Alice"},
     )
 
 
@@ -884,6 +888,141 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             discovery.payload, {"server_display_name": "CRM", "tool_count": 1}
         )
 
+    async def test_concrete_selector_repairs_schema_invalid_arguments_before_approval(self) -> None:
+        storage = _FakeStorage()
+        gateway = _FakeGateway()
+        gateway.catalog = replace(
+            gateway.catalog,
+            tools=(
+                replace(
+                    gateway.catalog.tools[0],
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                ),
+            ),
+        )
+        outputs = iter(
+            (
+                '{"action":"call_tool","tool_name":"lookup","arguments":{}}',
+                '{"action":"call_tool","tool_name":"lookup","arguments":{"query":"Alice"}}',
+            )
+        )
+        prompts: list[str] = []
+
+        def generate(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(outputs)
+
+        outcome = await UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=gateway,
+            selector=MCPToolSelector(text_generator=generate),
+        ).dispatch(_request(), server_id="server-a")
+
+        self.assertEqual(outcome.output_payload["mcp_status"], "approval_required")
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(storage.interrupts), 1)
+        self.assertEqual(storage.grants, [])
+        self.assertEqual(gateway.calls, [])
+
+    async def test_concrete_selector_double_schema_failure_has_no_approval_side_effects(self) -> None:
+        storage = _FakeStorage()
+        gateway = _FakeGateway()
+        gateway.catalog = replace(
+            gateway.catalog,
+            tools=(
+                replace(
+                    gateway.catalog.tools[0],
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                ),
+            ),
+        )
+        outputs = iter(
+            (
+                '{"action":"call_tool","tool_name":"lookup","arguments":{}}',
+                '{"action":"call_tool","tool_name":"lookup","arguments":{}}',
+            )
+        )
+
+        outcome = await UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=gateway,
+            selector=MCPToolSelector(text_generator=lambda _prompt: next(outputs)),
+        ).dispatch(_request(), server_id="server-a")
+
+        self.assertEqual(outcome.error.code, "selector_invalid_output")
+        self.assertEqual(storage.interrupts, [])
+        self.assertEqual(storage.grants, [])
+        self.assertEqual(storage.calls, {})
+        self.assertEqual(gateway.calls, [])
+
+    async def test_custom_selector_cannot_bypass_pre_approval_schema_validation(self) -> None:
+        storage = _FakeStorage()
+        gateway = _FakeGateway()
+        gateway.catalog = replace(
+            gateway.catalog,
+            tools=(
+                replace(
+                    gateway.catalog.tools[0],
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                ),
+            ),
+        )
+
+        outcome = await UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=gateway,
+            selector=_SequenceSelector(_call({})),
+        ).dispatch(_request(), server_id="server-a")
+
+        self.assertEqual(outcome.error.code, "selector_invalid_output")
+        self.assertEqual(storage.interrupts, [])
+        self.assertEqual(storage.grants, [])
+        self.assertEqual(storage.calls, {})
+        self.assertEqual(gateway.calls, [])
+
+    async def test_custom_selector_cannot_bypass_final_fingerprint_validation(self) -> None:
+        arguments = {"query": "Alice"}
+        fingerprint = build_mcp_call_fingerprint(
+            server_id="server-a",
+            tool_name="lookup",
+            arguments=arguments,
+        )
+
+        class FailedFingerprintContextBuilder(_InjectedContextBuilder):
+            async def build(self, **kwargs):
+                context = await super().build(**kwargs)
+                return replace(
+                    context,
+                    failed_call_fingerprints=frozenset({fingerprint}),
+                )
+
+        storage = _FakeStorage()
+        gateway = _FakeGateway()
+        outcome = await UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=gateway,
+            selector=_SequenceSelector(_call(arguments)),
+            selector_context_builder=FailedFingerprintContextBuilder(),
+        ).dispatch(_request(), server_id="server-a")
+
+        self.assertEqual(outcome.error.code, "selector_invalid_output")
+        self.assertEqual(storage.interrupts, [])
+        self.assertEqual(storage.grants, [])
+        self.assertEqual(storage.calls, {})
+        self.assertEqual(gateway.calls, [])
+
     async def test_explicit_binding_call_tool_reuses_grant_and_records_dispatched_audit(self) -> None:
         storage = _FakeStorage()
         storage.grants.append(
@@ -1017,10 +1156,14 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             selector=selector,
         )
 
-        outcome = await coordinator.dispatch(
-            _request(metadata={"mcp_binding_mode": "explicit_command"}),
-            server_id="server-a",
-        )
+        with patch(
+            "src.integrations.mcp.dispatch_coordinator.materialize_mcp_attachment_action",
+            wraps=_materialize_mcp_attachment_action,
+        ) as materialize:
+            outcome = await coordinator.dispatch(
+                _request(metadata={"mcp_binding_mode": "explicit_command"}),
+                server_id="server-a",
+            )
 
         self.assertIsNone(outcome.error)
         self.assertEqual(len(gateway.calls), 1)
@@ -1042,6 +1185,7 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             "output-schema-get_parse_job",
         )
         self.assertEqual(len(selector.contexts), 1)
+        self.assertEqual(materialize.call_count, 1)
         self.assertEqual(outcome.output_payload["mcp_status"], "completed")
         self.assertIn("助力双方交往", outcome.output_payload["text"])
         projected = AgentCallResultProjector().project(

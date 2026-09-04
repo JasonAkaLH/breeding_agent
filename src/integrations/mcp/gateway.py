@@ -12,7 +12,7 @@ from time import monotonic
 from typing import Any, AsyncContextManager, Protocol
 from uuid import uuid4
 
-from jsonschema import Draft202012Validator, Draft7Validator, SchemaError, ValidationError
+from jsonschema import Draft202012Validator, Draft7Validator, SchemaError
 
 from src.core.contracts import (
     ConversationStoragePort,
@@ -28,6 +28,10 @@ from .adapter_2026 import (
     MCPCompletedOutcome,
     MCPInputRequiredOutcome,
     MCPTaskCreatedOutcome,
+)
+from .argument_validation import (
+    MCPToolArgumentValidationError,
+    validate_mcp_tool_arguments,
 )
 from .client import MCPClientError, MCPProtocolError, MCPRemoteError
 from .credentials import MCPRecoveryCallContext
@@ -1048,7 +1052,10 @@ class MCPGateway:
         descriptor = state.catalog.get(tool_name)
         if descriptor is None:
             raise MCPGatewayError("mcp_tool_not_found")
-        _validate_arguments(descriptor.input_schema, arguments)
+        try:
+            validate_mcp_tool_arguments(descriptor.input_schema, arguments)
+        except MCPToolArgumentValidationError as exc:
+            raise MCPGatewayError("mcp_tool_arguments_invalid") from exc
         call_ref = f"mcp-call-{uuid4().hex}"
         call_state = _CallState(call_ref=call_ref)
         state.calls[call_ref] = call_state
@@ -2291,14 +2298,6 @@ def _freeze_output_schema(
 
     reject_external_refs(snapshot)
     return snapshot, "sha256:" + hashlib.sha256(canonical).hexdigest()
-
-
-def _validate_arguments(schema: Mapping[str, Any], arguments: Mapping[str, Any]) -> None:
-    try:
-        validator = Draft202012Validator if "$schema" in schema else Draft7Validator
-        validator(dict(schema)).validate(dict(arguments))
-    except (SchemaError, ValidationError) as exc:
-        raise MCPGatewayError("mcp_tool_arguments_invalid") from exc
 
 
 def _metric_bucket_window() -> tuple[datetime, datetime]:
