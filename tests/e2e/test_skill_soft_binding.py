@@ -253,7 +253,11 @@ print(json.dumps({{
             if message.role == "tool"
         )
         tool_payload = json.loads(tool_content)
-        raw = tool_payload["safe_result"]["result"]
+        projected_result = tool_payload["safe_result"]["result"]
+        self.assertEqual(
+            projected_result["schema"], "maf.agent.model_result.v1"
+        )
+        raw = projected_result["model_view"]
         self.assertEqual(len(raw["articles"]), 28)
         self.assertEqual(raw["articles"], raw["structured_content"]["articles"])
         self.assertEqual(raw["articles"][0]["sentinel"], "FIRST-ARTICLE-SENTINEL")
@@ -263,7 +267,7 @@ print(json.dumps({{
         )
         raw_bytes = (
             json.dumps(
-                raw,
+                projected_result,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -481,7 +485,13 @@ print(json.dumps({{
         )
         downloaded = await self.client.get(result_artifact["download_url"])
         self.assertEqual(downloaded.status_code, 200)
-        self.assertEqual(len(downloaded.json()["articles"]), 28)
+        downloaded_projection = downloaded.json()
+        self.assertEqual(
+            downloaded_projection["schema"], "maf.agent.model_result.v1"
+        )
+        self.assertEqual(
+            len(downloaded_projection["model_view"]["articles"]), 28
+        )
 
         resolved_requests = [
             request
@@ -503,7 +513,9 @@ print(json.dumps({{
             tool_payload["artifact_refs"], result_payload["artifact_refs"]
         )
         self.assertEqual(
-            tool_payload["safe_result"]["result"]["articles"][27]["sentinel"],
+            tool_payload["safe_result"]["result"]["model_view"]["articles"][27][
+                "sentinel"
+            ],
             "UNIQUE-ARTICLE-28-SENTINEL",
         )
         self.assertNotIn("storage_ref", tool_content)

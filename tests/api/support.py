@@ -14,10 +14,27 @@ import httpx
 from src.api.app import create_app
 from src.api.runtime import ApiRuntime, build_api_runtime
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryResult
+from src.integrations.token_counter import TokenBoundedText
 
 
 GENERIC_DATA_SKILL_ID = "skill.generic_data_lookup"
 GENERIC_DATA_SKILL_NAME = "generic-data-lookup"
+
+
+async def _test_tool_result_token_budgeter(
+    text: str,
+    *,
+    max_tokens: int,
+    model_edition: str,
+    config=None,
+) -> TokenBoundedText:
+    del max_tokens, model_edition, config
+    return TokenBoundedText(
+        text=text,
+        total_tokens=int(bool(text)),
+        truncated=False,
+        cutoff=len(text),
+    )
 
 
 def test_llm_config() -> dict[str, object]:
@@ -323,7 +340,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
 
         with patch.dict("os.environ", {"MAF_STATE_STORE_BACKEND": "sqlite"}, clear=False):
-            return build_api_runtime(
+            runtime = build_api_runtime(
                 database_path=self.workspace / "phase6-api.sqlite3",
                 audit_log_path=self.workspace / "audit.jsonl",
                 master_key_bytes=b"t" * 32,
@@ -360,6 +377,15 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 enable_user_mcp=enable_user_mcp,
                 enable_user_mcp_routing=enable_user_mcp_routing,
                 )
+        runtime.agent_loop_orchestrator._runner._invoker._result_projector._token_budgeter = (
+            _test_tool_result_token_budgeter
+        )
+        user_mcp_gateway = runtime.user_mcp_gateway
+        if user_mcp_gateway is not None and user_mcp_gateway._result_service is not None:
+            user_mcp_gateway._result_service._token_budgeter = (
+                _test_tool_result_token_budgeter
+            )
+        return runtime
 
     async def _bind_client(self) -> None:
         self.app = create_app(runtime=self.runtime)

@@ -1558,7 +1558,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.shutdown()
 
-    async def test_remote_task_tokenization_failure_is_terminal_without_replay(self) -> None:
+    async def test_remote_task_response_is_adopted_before_dispatch_returns(self) -> None:
         class Selector:
             async def select(self, _context):
                 return MCPSelectorAction(

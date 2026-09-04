@@ -4,7 +4,7 @@
 
 - 日期：2026-09-04
 - 分支：`main`
-- 状态：`in_progress`；Checkpoint A～E已完成，Checkpoint F待执行
+- 状态：`implemented_verified_backend_only`；Checkpoint A～F已完成
 - 设计依据：`2026-09-04-unified-tool-result-50k-token-budget-design.md`
 - 设计复审：100/100 Pass，0 Blocking、0 Major、0 Minor
 - 实施范围：Backend-first；Frontend业务卡片20,000字符/80,000-byte限制移除和
@@ -20,7 +20,8 @@
 | Checkpoint B | `961dbe61` | worker完整脱敏candidate、父进程50k-token Projection及无192 KiB Store完成；22项聚焦回归通过、2项平台skip |
 | Checkpoint C | `a5b3765c` | MCP Call terminal commit后按Run model生成Projection；Selector移除20k/80k二次预算并按绑定模型preflight；MCP integrations 589项通过、2项平台skip |
 | Checkpoint D | `b97f4906` | Agent Projector异步化；Skill结果按Run模型单次50k-token预算；AgentItem超128 KiB只引用预算后安全Projection；Orchestration 197项和D聚焦48项通过 |
-| Checkpoint E | 本检查点提交 | 模型transport/timeout/auth/rate-limit/5xx与缺配置按typed边界映射`model_unavailable`；AgentRun、`agent.run.failed`、`task.failed`同码，普通异常保持`execution_crash`；远端MCP terminal后Tokenization失败零重试/零Tool重放；正式门禁175项通过 |
+| Checkpoint E | `adc59956` | 模型transport/timeout/auth/rate-limit/5xx与缺配置按typed边界映射`model_unavailable`；AgentRun、`agent.run.failed`、`task.failed`同码，普通异常保持`execution_crash`；远端MCP terminal后Tokenization失败零重试/零Tool重放；正式门禁175项通过 |
+| Checkpoint F | 本检查点提交 | API 652、E2E 12、Observability 41及其他无关分层通过；三模型真实Tokenization均单请求完成50k offset裁剪；4项既有基线失败如实保留；静态、Ruff、受保护文件门禁闭合 |
 
 ## 1. 完成声明
 
@@ -399,6 +400,30 @@ API key或响应正文。对三款配置模型分别验证：
 - 最终`git status`只允许计划内变更和用户既有`?? test.json`；
 - 验证`docker_cmd.md`存在、0600、Git-ignored且未跟踪；本轮不得读取或修改其内容；
 - 创建最终implementation commit并推送GitHub/Gitee；不构建镜像、不部署。
+
+### 9.5 实际验证记录
+
+- `compileall`通过；Storage 573项（14 skip）、Lifecycle 48项、Orchestration 198项、
+  main_agent capability 17项、MCP capability 15项、Skill capability 4项、API 652项、E2E 12项、
+  Observability 41项全部通过；`skill/sql-query`本地目录不存在，记为N/A；
+- Integrations 822项中819项通过、2项skip，只保留1项早于本目标的已知transport-family基线失败：
+  `test_client_rejects_negotiated_version_incompatible_with_transport_family`；本轮一度改名导致的
+  fault-matrix失败已恢复原测试入口并单独复跑通过；
+- Core 54项中51项通过，3项失败均来自`97139173`新增
+  `TaskStoragePort.list_skill_recovery_candidate_task_ids`后旧280-method golden未同步；本目标未修改
+  persistence port，按基线规则记录而不扩大范围；
+- API/E2E共享fixture显式注入确定性Tokenization结果；普通业务fixture保持完整Result，专用oversized
+  fixture才模拟50,000-token offset截断。生产Provider-required fail-closed未放宽；
+- 静态扫描仅保留delegated Skill instruction的20,000-code-point输入合同；全部
+  `AgentCallResultProjector.project()`生产/测试调用均已`await`。现有`asyncio.run`只位于MCP runtime
+  同步桥和operator migration，不在本Result投影路径；剩余byte上限均为raw/mapping/checkpoint/manifest
+  基础设施安全边界，不裁剪业务Result；
+- 三模型真实`POST /tokenization`使用同一中英文、emoji和组合字符输入：
+  `deepseek-v4-flash-ga-260731`与`deepseek-v4-pro-ga-260813`均返回180,001 tokens、字符切点50,000；
+  `glm-5-2-260617`返回209,998 tokens、字符切点42,858。三者均`truncated=true`、保留50,000-token
+  budget且每个逻辑Result恰好1次HTTP请求；未输出Endpoint、API key或响应正文；
+- `docker_cmd.md`存在、权限0600、Git-ignored且未跟踪；未读取或修改其内容。最终工作树仅允许本
+  Checkpoint文件与用户既有`?? test.json`。
 
 ## 10. 发布、回滚与后续
 

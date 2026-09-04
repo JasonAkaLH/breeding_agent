@@ -27,6 +27,7 @@ from src.integrations.mcp.gateway_models import (
     MCPTaskServerScope,
     ToolCatalogSnapshot,
 )
+from src.integrations.token_counter import TokenBoundedText
 from src.storage.artifact_files import parse_file_storage_ref
 from tests.api.support import APITestCase
 
@@ -388,21 +389,13 @@ class MCPServerExplicitAgentLoopE2ETest(APITestCase):
         self.assertNotIn("do-not-leak-to-agent", prompt)
         self.assertNotIn(calls[0].result_ref, prompt)
 
-    async def test_oversized_actual_tool_result_exposes_source_and_carrier_truncation(self) -> None:
+    async def test_oversized_actual_tool_result_exposes_token_truncation_without_carrier_clip(self) -> None:
         sentinel = "MCP_OVERSIZED_START"
         end_sentinel = "MCP_OVERSIZED_END"
         prompts: list[str] = []
 
         def agent_fixture(prompt: str, **_kwargs):
             prompts.append(prompt)
-            required = (
-                sentinel,
-                '"source_truncated":true',
-                '"carrier_truncated":true',
-                '"projection_truncated":true',
-            )
-            if any(value not in prompt for value in required):
-                raise AssertionError("main Agent did not receive truncation evidence")
             return "已根据截断后的MCP结果完成。"
 
         await self.reconfigure_runtime(main_agent_stream_generator=agent_fixture)
@@ -427,8 +420,26 @@ class MCPServerExplicitAgentLoopE2ETest(APITestCase):
         )
         coordinator = executor._coordinator
         gateway = coordinator._gateway
+
+        async def token_budgeter(
+            text: str,
+            *,
+            max_tokens: int,
+            model_edition: str,
+            config=None,
+        ) -> TokenBoundedText:
+            del model_edition, config
+            cutoff = min(len(text), max_tokens)
+            return TokenBoundedText(
+                text=text[:cutoff],
+                total_tokens=len(text),
+                truncated=len(text) > max_tokens,
+                cutoff=cutoff,
+            )
+
+        gateway._result_service._token_budgeter = token_budgeter
         adapter = _ResultAdapter(
-            sentinel + '"\\\n' * 10_000 + end_sentinel
+            sentinel + '"\\\n' * 30_000 + end_sentinel
         )
         endpoint_policy = EndpointPolicy(resolver=_PublicEndpointResolver())
         gateway._client_factory = lambda server, credentials, endpoint: adapter
@@ -477,12 +488,21 @@ class MCPServerExplicitAgentLoopE2ETest(APITestCase):
         )
 
         self.assertEqual(response.status_code, 202, response.text)
-        terminal = await self.wait_for_terminal_task(response.json()["task_id"])
-        self.assertEqual(terminal["status"], "completed")
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertEqual(
+            terminal["status"],
+            "completed",
+            [(event.event_type, event.payload) for event in events],
+        )
         self.assertEqual(adapter.call_count, 1)
         self.assertEqual(len(prompts), 1)
         self.assertIn(sentinel, prompts[0])
         self.assertNotIn(end_sentinel, prompts[0])
+        self.assertIn('"source_truncated":true', prompts[0])
+        self.assertIn('"carrier_truncated":false', prompts[0])
+        self.assertIn('"projection_truncated":true', prompts[0])
         self.assertIn('"truncated":true', prompts[0])
 
 

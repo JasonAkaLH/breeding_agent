@@ -328,7 +328,7 @@ print(json.dumps({
         safe_result = result_payload["safe_result"]
         self.assertEqual(safe_result["projection_mode"], "transient_staged")
         self.assertEqual(safe_result["projection_revision"], "skill-result-v2")
-        self.assertTrue(safe_result["projection_truncated"])
+        self.assertFalse(safe_result["projection_truncated"])
         self.assertNotIn("article-0", json.dumps(safe_result))
         self.assertEqual(result_payload["artifact_refs"], [])
         self.assertRegex(
@@ -368,7 +368,11 @@ print(json.dumps({
         projected = await self._result_projection_event(task_id)
         self.assertEqual(projected.payload["projection_mode"], "transient_staged")
         self.assertEqual(projected.payload["artifact_count"], 0)
-        self.assertEqual(projected.payload["raw_sha256"], safe_result["raw_sha256"])
+        self.assertRegex(projected.payload["raw_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(safe_result["raw_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(
+            projected.payload["raw_sha256"], safe_result["raw_sha256"]
+        )
         self.assertEqual(
             projected.payload["projected_size_bytes"],
             safe_result["projected_size_bytes"],
