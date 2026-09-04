@@ -37,6 +37,7 @@ from src.integrations.mcp.result_parsing.worker import (
 )
 from src.integrations.mcp.result_parsing.models import MCPRawResultDescriptor
 from src.integrations.mcp.temporary_results import MCPTemporaryResultStore
+from src.integrations.token_counter import TokenBoundedText
 
 
 def _rlimit_probe(connection) -> None:
@@ -47,6 +48,15 @@ def _rlimit_probe(connection) -> None:
     connection.close()
 
 
+async def _keep_all_business_text(text, **_kwargs) -> TokenBoundedText:
+    return TokenBoundedText(
+        text=text,
+        total_tokens=len(text),
+        truncated=False,
+        cutoff=len(text),
+    )
+
+
 class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -54,7 +64,8 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         root = Path(self.temporary.name)
         self.projection_store = MCPProjectionStore(root / "projections")
         self.service = MCPIsolatedResultService(
-            projection_store=self.projection_store
+            projection_store=self.projection_store,
+            token_budgeter=_keep_all_business_text,
         )
 
     async def test_streaming_model_digest_matches_canonical_json_with_chunk_boundaries(self) -> None:
@@ -96,8 +107,12 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.checkpoint.outcome, "succeeded")
         self.assertEqual(outcome.checkpoint.call_ref, "call-1")
         self.assertRegex(outcome.checkpoint.checkpoint_sha256, r"^sha256:[0-9a-f]{64}$")
-        self.assertIsNotNone(outcome.projection_staging_handle)
-        handle = outcome.projection_staging_handle
+        self.assertIsNotNone(outcome.projection_candidate)
+        self.assertIsNone(outcome.projection_staging_handle)
+        handle = await self.service.stage_projection(
+            outcome.projection_candidate,
+            model_edition="model-a",
+        )
         self.assertTrue(Path(handle.path).name.startswith(".staged-"))
         with self.assertRaises(MCPProjectionStoreError):
             self.projection_store.load(
@@ -155,6 +170,57 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    async def test_parent_budgets_single_complete_sanitized_candidate(self) -> None:
+        calls = []
+
+        async def truncate(text, **kwargs) -> TokenBoundedText:
+            calls.append((text, kwargs))
+            self.assertNotIn("SECRET", text)
+            self.assertNotIn("secret.example", text)
+            return TokenBoundedText(
+                text=text[:12],
+                total_tokens=50_001,
+                truncated=True,
+                cutoff=12,
+            )
+
+        service = MCPIsolatedResultService(
+            projection_store=self.projection_store,
+            token_budgeter=truncate,
+        )
+        outcome = await service.parse(
+            owner_user_id="alice",
+            task_id="task-1",
+            node_id="node-1",
+            call_ref="call-budgeted",
+            request=MCPResultDecodeRequest(
+                protocol_version="2025-11-25",
+                source=MCPResultSource.TOOLS_CALL,
+                payload={
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "token=SECRET visit https://secret.example/a",
+                        }
+                    ]
+                },
+            ),
+            measured_mapping_bytes=128,
+        )
+
+        self.assertIsNotNone(outcome.projection_candidate)
+        handle = await service.stage_projection(
+            outcome.projection_candidate,
+            model_edition="model-a",
+        )
+        envelope = service.consume_projection(handle)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["model_edition"], "model-a")
+        self.assertEqual(envelope["user_view"]["primary"]["text"], calls[0][0][:12])
+        self.assertTrue(envelope["user_view"]["projection_truncated"])
+        self.assertTrue(envelope["agent_projection_truncated"])
+
     async def test_malformed_and_tool_error_checkpoints_do_not_stage_success_projection(self) -> None:
         malformed = await self.service.parse(
             owner_user_id="alice",
@@ -188,27 +254,34 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(tool_error.projection_staging_handle)
 
     async def test_projection_store_failure_after_checkpoint_keeps_succeeded_outcome(self) -> None:
+        outcome = await self.service.parse(
+            owner_user_id="alice",
+            task_id="task-1",
+            node_id="node-1",
+            call_ref="call-projection-failure",
+            request=MCPResultDecodeRequest(
+                protocol_version="2025-11-25",
+                source=MCPResultSource.TOOLS_CALL,
+                payload={"content": [], "structuredContent": {"ok": True}},
+            ),
+            measured_mapping_bytes=64,
+        )
+
+        self.assertEqual(outcome.checkpoint.outcome, "succeeded")
+        self.assertIsNotNone(outcome.projection_candidate)
         with patch.object(
             self.projection_store,
             "stage",
             side_effect=MCPProjectionStoreError("injected"),
         ):
-            outcome = await self.service.parse(
-                owner_user_id="alice",
-                task_id="task-1",
-                node_id="node-1",
-                call_ref="call-projection-failure",
-                request=MCPResultDecodeRequest(
-                    protocol_version="2025-11-25",
-                    source=MCPResultSource.TOOLS_CALL,
-                    payload={"content": [], "structuredContent": {"ok": True}},
-                ),
-                measured_mapping_bytes=64,
-            )
+            with self.assertRaises(MCPProjectionStoreError):
+                await self.service.stage_projection(
+                    outcome.projection_candidate,
+                    model_edition="model-a",
+                )
 
         self.assertEqual(outcome.checkpoint.outcome, "succeeded")
-        self.assertIsNone(outcome.projection_staging_handle)
-        self.assertEqual(outcome.projection_error, "projection_failed")
+        self.assertIsNone(outcome.projection_error)
 
     async def test_mapping_requires_transport_length_evidence_at_64_kib_boundary(self) -> None:
         request = MCPResultDecodeRequest(
@@ -473,6 +546,40 @@ class MCPResultParserWorkerTest(unittest.IsolatedAsyncioTestCase):
                     parser_revision="mcp-result-parser.v1",
                 ),
             )
+
+    async def test_projection_store_accepts_v2_envelope_larger_than_192_kib(self) -> None:
+        binding = MCPProjectionBinding(
+            owner_user_id="alice",
+            task_id="task",
+            node_id="node",
+            call_ref="call-large",
+            raw_sha256="sha256:" + "a" * 64,
+            output_schema_sha256=None,
+            source="tools_call",
+            parser_revision=PARSER_REVISION,
+        )
+        envelope = json.dumps(
+            {
+                "schema": "maf.mcp.parsed_result_projection.v2",
+                "parsed_model_sha256": "sha256:" + "b" * 64,
+                "user_view": {"primary": {"kind": "text", "text": "x" * 220_000}},
+                "agent_projection": "x" * 220_000,
+                "agent_projection_truncated": False,
+                "workflow_control": None,
+            },
+            separators=(",", ":"),
+        ).encode()
+
+        handle = self.projection_store.stage(envelope, binding=binding)
+        published = self.projection_store.publish(handle)
+        loaded = self.projection_store.load(
+            published.projection_ref,
+            binding=binding,
+            expected_projection_sha256=published.projection_sha256,
+        )
+
+        self.assertGreater(len(envelope), 192 * 1024)
+        self.assertEqual(loaded["agent_projection"], "x" * 220_000)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux RLIMIT gate")
     async def test_linux_worker_enforces_512_mib_and_parses_64_mib_boundary(self) -> None:

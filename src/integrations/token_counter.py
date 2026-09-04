@@ -17,6 +17,7 @@ _DEFAULT_ENCODING_NAME = "cl100k_base"
 _TOKENIZATION_ENDPOINT_SUFFIX = "/tokenization"
 _TOKENIZATION_CACHE_MAX_ITEMS = 2048
 _TOKENIZATION_CACHE: OrderedDict[tuple[str, str, str], int] = OrderedDict()
+TOOL_RESULT_BUSINESS_MAX_TOKENS = 50_000
 
 
 class TokenizationError(ModelUnavailableError):

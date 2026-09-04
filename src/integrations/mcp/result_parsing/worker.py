@@ -13,7 +13,7 @@ from typing import Any, Literal, Mapping
 from .errors import MCPResultParseError
 from .json_values import canonical_json_bytes, strict_json_value
 from .models import MCPRawResultDescriptor, MCPResultDecodeRequest, MCPResultOutcome
-from .projections import build_agent_projection, build_user_view, parsed_result_payload
+from .projections import parsed_result_payload, sanitize_result_candidate
 from .registry import decode_result
 
 
@@ -66,7 +66,7 @@ def worker_entry(connection: Connection, job: Mapping[str, Any]) -> None:
                 reason=exc.code,
             )
             connection.send({"checkpoint": asdict(checkpoint)})
-            connection.send({"projection": None})
+            connection.send({"candidate": None})
             return
         del decode_request
         del payload
@@ -83,20 +83,11 @@ def worker_entry(connection: Connection, job: Mapping[str, Any]) -> None:
         )
         connection.send({"checkpoint": asdict(checkpoint)})
         if outcome != "succeeded":
-            connection.send({"projection": None})
+            connection.send({"candidate": None})
             return
         try:
-            phase = "projection"
-            agent_projection = build_agent_projection(parsed)
-            envelope = {
-                "schema": "maf.mcp.parsed_result_projection.v2",
-                "parsed_model_sha256": model_sha256,
-                "user_view": build_user_view(parsed),
-                "agent_projection": agent_projection.content,
-                "agent_projection_truncated": agent_projection.truncated,
-                "workflow_control": None,
-            }
-            connection.send({"projection": canonical_json_bytes(envelope)})
+            phase = "candidate"
+            connection.send({"candidate": sanitize_result_candidate(parsed)})
         except BaseException:
             connection.send({"projection_error": "projection_failed"})
     except BaseException as exc:

@@ -9,7 +9,13 @@ from .models import (
     MCPStructuredContent,
     MCPStructuredSchemaStatus,
 )
-from .projections import MCPBoundedAgentProjection, build_agent_projection, build_user_view
+from .projections import (
+    MCPBoundedAgentProjection,
+    build_agent_projection,
+    build_business_text,
+    build_user_view,
+    sanitize_result_candidate,
+)
 from .historical_reprojection import (
     MCPHistoricalResultReprojector,
     MCPRawResultAuthorityResolver,
@@ -19,6 +25,7 @@ from .registry import decode_result
 from .service import (
     MCPIsolatedResultService,
     MCPResultParserObservation,
+    MCPResultProjectionCandidate,
     MCPResultServiceOutcome,
 )
 from .worker import MCPValidatedResultCheckpoint
@@ -33,6 +40,7 @@ __all__ = [
     "MCPResultParseError",
     "MCPResultSource",
     "MCPResultServiceOutcome",
+    "MCPResultProjectionCandidate",
     "MCPResultParserObservation",
     "MCPIsolatedResultService",
     "MCPHistoricalResultReprojector",
@@ -42,6 +50,8 @@ __all__ = [
     "MCPStructuredSchemaStatus",
     "MCPValidatedResultCheckpoint",
     "build_agent_projection",
+    "build_business_text",
     "build_user_view",
+    "sanitize_result_candidate",
     "decode_result",
 ]

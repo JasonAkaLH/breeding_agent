@@ -323,7 +323,7 @@ class MCPVersionedResultDecoderTest(unittest.TestCase):
                 )
             )
 
-    def test_projection_redacts_sensitive_keys_urls_and_enforces_budgets(self) -> None:
+    def test_projection_redacts_sensitive_keys_urls_without_legacy_size_budget(self) -> None:
         result = decode_result(
             _request(
                 "2025-11-25",
@@ -342,12 +342,10 @@ class MCPVersionedResultDecoderTest(unittest.TestCase):
         agent = build_agent_projection(result)
         self.assertNotIn("top-secret", serialized + agent.content)
         self.assertNotIn("secret.example", serialized + agent.content)
-        self.assertLessEqual(len(serialized), 20_000)
-        self.assertLessEqual(len(serialized.encode("utf-8")), 80_000)
-        self.assertLessEqual(len(agent.content), 20_000)
-        self.assertLessEqual(len(agent.content.encode("utf-8")), 80_000)
-        self.assertTrue(agent.truncated)
-        self.assertTrue(view["projection_truncated"])
+        self.assertIn("界" * 30_000, serialized)
+        self.assertIn("界" * 30_000, agent.content)
+        self.assertFalse(agent.truncated)
+        self.assertFalse(view["projection_truncated"])
         quote_heavy = decode_result(
             _request(
                 "2025-11-25",
@@ -356,8 +354,7 @@ class MCPVersionedResultDecoderTest(unittest.TestCase):
         )
         quote_view = build_user_view(quote_heavy)
         quote_json = json.dumps(quote_view, ensure_ascii=False, separators=(",", ":"))
-        self.assertLessEqual(len(quote_json), 20_000)
-        self.assertLessEqual(len(quote_json.encode("utf-8")), 80_000)
+        self.assertIn('\\\\\\"' * 30_000, quote_json)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-MAX_PROJECTION_ENVELOPE_BYTES = 192 * 1024
 MAX_PROJECTION_MANIFEST_BYTES = 16 * 1024
 PROJECTION_SCHEMA = "maf.mcp.parsed_result_projection.v2"
 PROJECTION_PARSER_REVISION = "mcp-result-parser.v2"
@@ -205,9 +204,14 @@ class MCPProjectionStore:
             "projection_sha256": expected_projection_sha256,
             "size_bytes": manifest.get("size_bytes"),
         }
-        if manifest != expected_manifest or not isinstance(manifest["size_bytes"], int):
+        if (
+            manifest != expected_manifest
+            or isinstance(manifest["size_bytes"], bool)
+            or not isinstance(manifest["size_bytes"], int)
+            or manifest["size_bytes"] < 0
+        ):
             raise MCPProjectionStoreError("projection manifest authority does not match")
-        data = _read_private_file(data_path, MAX_PROJECTION_ENVELOPE_BYTES)
+        data = _read_private_file(data_path, manifest["size_bytes"])
         if len(data) != manifest["size_bytes"] or (
             "sha256:" + hashlib.sha256(data).hexdigest() != expected_projection_sha256
         ):
@@ -240,8 +244,6 @@ def validate_projection_envelope(
     *,
     expected_parsed_model_sha256: str | None = None,
 ) -> Mapping[str, Any]:
-    if len(data) > MAX_PROJECTION_ENVELOPE_BYTES:
-        raise MCPProjectionStoreError("projection envelope exceeds size limit")
     try:
         value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -336,7 +338,7 @@ def _read_bound_file(
     _validate_file(before, expected_size=expected_size)
     if before.st_dev != expected_device or before.st_ino != expected_inode:
         raise MCPProjectionStoreError("projection staging identity changed")
-    data = _read_private_file(path, MAX_PROJECTION_ENVELOPE_BYTES)
+    data = _read_private_file(path, expected_size)
     if "sha256:" + hashlib.sha256(data).hexdigest() != expected_sha256:
         raise MCPProjectionStoreError("projection staging digest changed")
     return data

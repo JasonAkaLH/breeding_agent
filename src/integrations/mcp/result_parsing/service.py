@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import multiprocessing
 import inspect
 from time import monotonic
@@ -13,18 +12,28 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from typing import Any, AsyncIterator
 
-from .models import MCPRawResultDescriptor, MCPResultDecodeRequest
+from src.integrations.token_counter import (
+    TOOL_RESULT_BUSINESS_MAX_TOKENS,
+    TokenBoundedText,
+    truncate_text_to_token_budget_async,
+)
+
+from .models import MCPParsedToolResult, MCPRawResultDescriptor, MCPResultDecodeRequest
 from .projection_store import (
-    MAX_PROJECTION_ENVELOPE_BYTES,
     MCPProjectionBinding,
     MCPProjectionStagingHandle,
     MCPPublishedProjection,
     MCPProjectionStore,
     MCPProjectionStoreError,
-    validate_projection_envelope,
 )
 from .worker import MCPValidatedResultCheckpoint, PARSER_REVISION, worker_entry
 from .json_values import canonical_json_bytes
+from .projections import (
+    build_agent_projection,
+    build_business_text,
+    build_user_view,
+    validate_safe_result_candidate,
+)
 
 
 MAX_MAPPING_INPUT_BYTES = 64 * 1024
@@ -44,11 +53,22 @@ class MCPResultWorkerError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class MCPResultProjectionCandidate:
+    result: MCPParsedToolResult
+    binding: MCPProjectionBinding
+    parsed_model_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class MCPResultServiceOutcome:
     raw_sha256: str
     checkpoint: MCPValidatedResultCheckpoint
-    projection_staging_handle: MCPProjectionStagingHandle | None
+    projection_candidate: MCPResultProjectionCandidate | None
     projection_error: str | None = None
+
+    @property
+    def projection_staging_handle(self) -> None:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,12 +165,18 @@ class MCPIsolatedResultService:
             [MCPResultParserObservation], None | Awaitable[None]
         ]
         | None = None,
+        tokenization_config: Mapping[str, Any] | None = None,
+        token_budgeter: Callable[..., Awaitable[TokenBoundedText]] = (
+            truncate_text_to_token_budget_async
+        ),
     ) -> None:
         self._projection_store = projection_store
         self._gate = gate or MCPResultWorkerGate()
         self._worker_timeout_seconds = worker_timeout_seconds
         self._context = multiprocessing.get_context("spawn")
         self._observer = observer
+        self._tokenization_config = dict(tokenization_config or {})
+        self._token_budgeter = token_budgeter
 
     @property
     def gate(self) -> MCPResultWorkerGate:
@@ -178,6 +204,42 @@ class MCPIsolatedResultService:
         self, handle: MCPProjectionStagingHandle
     ) -> Mapping[str, Any]:
         return self._projection_store.consume_staged(handle)
+
+    async def stage_projection(
+        self,
+        candidate: MCPResultProjectionCandidate,
+        *,
+        model_edition: str,
+    ) -> MCPProjectionStagingHandle:
+        result = validate_safe_result_candidate(candidate.result)
+        business_text = build_business_text(result)
+        bounded = await self._token_budgeter(
+            business_text,
+            max_tokens=TOOL_RESULT_BUSINESS_MAX_TOKENS,
+            model_edition=model_edition,
+            config=self._tokenization_config,
+        )
+        agent_projection = build_agent_projection(
+            result,
+            business_text=bounded.text,
+            truncated=bounded.truncated,
+        )
+        envelope = {
+            "schema": "maf.mcp.parsed_result_projection.v2",
+            "parsed_model_sha256": candidate.parsed_model_sha256,
+            "user_view": build_user_view(
+                result,
+                business_text=bounded.text,
+                truncated=bounded.truncated,
+            ),
+            "agent_projection": agent_projection.content,
+            "agent_projection_truncated": agent_projection.truncated,
+            "workflow_control": None,
+        }
+        return self._projection_store.stage(
+            canonical_json_bytes(envelope),
+            binding=candidate.binding,
+        )
 
     async def parse(
         self,
@@ -229,19 +291,19 @@ class MCPIsolatedResultService:
         async with self._gate.acquire(owner_user_id):
             response = await self._run_worker(job)
         checkpoint = _validate_worker_checkpoint(response.get("checkpoint"), job)
-        projection = response.get("projection")
-        handle = None
+        candidate_value = response.get("candidate")
+        candidate = None
         projection_error = response.get("projection_error")
-        if projection is not None:
+        if checkpoint.outcome == "succeeded" and candidate_value is not None:
             try:
-                if not isinstance(projection, bytes) or len(projection) > MAX_PROJECTION_ENVELOPE_BYTES:
-                    raise MCPResultWorkerError("mcp_result_parser_projection_invalid")
-                validate_projection_envelope(
-                    projection,
-                    expected_parsed_model_sha256=checkpoint.parsed_model_sha256,
-                )
-                handle = self._projection_store.stage(
-                    projection,
+                safe_result = validate_safe_result_candidate(candidate_value)
+                if checkpoint.parsed_model_sha256 is None:
+                    raise MCPResultWorkerError(
+                        "mcp_result_parser_checkpoint_invalid"
+                    )
+                candidate = MCPResultProjectionCandidate(
+                    result=safe_result,
+                    parsed_model_sha256=checkpoint.parsed_model_sha256,
                     binding=MCPProjectionBinding(
                         owner_user_id=owner_user_id,
                         task_id=task_id,
@@ -253,13 +315,15 @@ class MCPIsolatedResultService:
                         parser_revision=PARSER_REVISION,
                     ),
                 )
-            except (MCPResultWorkerError, MCPProjectionStoreError, OSError):
-                handle = None
+            except (MCPResultWorkerError, MCPProjectionStoreError, OSError, ValueError):
+                candidate = None
                 projection_error = "projection_failed"
+        elif checkpoint.outcome == "succeeded":
+            projection_error = "projection_failed"
         outcome = MCPResultServiceOutcome(
             raw_sha256=checkpoint.raw_sha256,
             checkpoint=checkpoint,
-            projection_staging_handle=handle,
+            projection_candidate=candidate,
             projection_error=(
                 "projection_failed" if projection_error is not None else None
             ),
@@ -268,7 +332,7 @@ class MCPIsolatedResultService:
             _build_observation(
                 request=request,
                 checkpoint=checkpoint,
-                projection=projection,
+                candidate=candidate,
                 projection_error=outcome.projection_error,
                 duration_seconds=max(0.0, monotonic() - started_at),
             )
@@ -473,7 +537,7 @@ def _build_observation(
     *,
     request: MCPResultDecodeRequest,
     checkpoint: MCPValidatedResultCheckpoint,
-    projection: object,
+    candidate: MCPResultProjectionCandidate | None,
     projection_error: str | None,
     duration_seconds: float,
 ) -> MCPResultParserObservation:
@@ -482,43 +546,26 @@ def _build_observation(
     structured_present = False
     truncated = False
     projection_sha256 = "none"
-    if isinstance(projection, bytes):
-        projection_sha256 = "sha256:" + hashlib.sha256(projection).hexdigest()
-        try:
-            envelope = json.loads(projection)
-            user_view = envelope.get("user_view", {})
-            primary = user_view.get("primary", {})
-            candidate_kind = primary.get("kind")
-            if candidate_kind in {
-                "structured", "structured_preview", "text", "empty"
-            }:
-                primary_kind = candidate_kind
-            structured_present = primary_kind in {
-                "structured", "structured_preview"
-            }
-            kinds = {
-                str(item.get("kind"))
-                for item in user_view.get("content_metadata") or ()
-                if isinstance(item, Mapping)
-                and item.get("kind")
-                in {
-                    "image",
-                    "audio",
-                    "embedded_blob_resource",
-                    "resource_link",
-                    "embedded_text_resource",
+    if candidate is not None:
+        result = candidate.result
+        structured_present = result.structured_content.present
+        primary_kind = "structured" if structured_present else "text"
+        metadata_kinds = tuple(
+            sorted(
+                {
+                    block.kind
+                    for block in result.content_blocks
+                    if block.kind
+                    in {
+                        "image",
+                        "audio",
+                        "embedded_blob_resource",
+                        "resource_link",
+                        "embedded_text_resource",
+                    }
                 }
-            }
-            metadata_kinds = tuple(sorted(kinds))
-            truncated = bool(
-                user_view.get("projection_truncated")
-                or envelope.get("agent_projection_truncated")
             )
-        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
-            primary_kind = "none"
-            metadata_kinds = ()
-            structured_present = False
-            truncated = False
+        )
     return MCPResultParserObservation(
         protocol_version=request.protocol_version,
         source=str(request.source),
