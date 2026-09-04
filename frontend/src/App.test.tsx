@@ -3139,7 +3139,7 @@ describe('App', () => {
 
   it('renders only the typed MCP business result with accessible expansion and no raw download', async () => {
     const rawResult = '{"authorization":"raw-secret"}';
-    const businessText = `业务返回-${'结果'.repeat(180)}`;
+    const businessText = `业务返回-${'结果'.repeat(10_100)}-BUSINESS-END`;
     const api = makeApi({
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',

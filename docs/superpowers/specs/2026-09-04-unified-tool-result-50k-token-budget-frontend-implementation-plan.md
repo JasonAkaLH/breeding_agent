@@ -5,9 +5,22 @@
 - 日期：2026-09-04
 - 目标分支：`main`
 - 基线：`main@4d21bfbf`
-- 状态：`planned_not_implemented`
+- 状态：`implemented_verified_not_published`
 - 设计依据：`2026-09-04-unified-tool-result-50k-token-budget-design.md`
 - 已完成前置：Backend Checkpoint A～F和backend-dev `0.1.35`镜像发布
+
+### 实际执行记录
+
+- Checkpoint 0/A：新增超过旧20,000字符与80,000 bytes的structured、text、supplemental和Backend
+  truncated preview红测，删除Frontend MCP业务长度guard；同消息多Result均保持ready且末尾sentinel完整；
+- Checkpoint B：`failureMessage()`新增`model_unavailable`固定文案；closed Agent event validator同时接受旧
+  `agent.run.failed`无code历史shape和新Backend带安全code shape；
+- Checkpoint C：Frontend指南、当前API文档、API更新日志与developer-doc断言切到Backend唯一50,000-token
+  authority；
+- Checkpoint D：聚焦Frontend 3文件211项、Frontend全量24文件350项、相关Backend API/文档25项通过；
+  typecheck和production build通过。构建主JS保留typed schema、`projection_invalid`与专用错误文案，
+  `2e4`/`8e4`及旧MCP业务budget guard均零命中；
+- 当前未构建或推送Frontend镜像，未更新`docker_cmd.md`，未部署或修改数据库/历史结果。
 
 本计划只闭合此前明确延期的Frontend范围。Backend是50,000-token业务预算的唯一权威：每个Tool
 Result完整返回并完成解析、校验和脱敏后，由Backend按Agent Run绑定模型恰好调用一次Provider

@@ -276,11 +276,9 @@ const MCP_VIEW_KEYS = new Set([
 const MCP_UNAVAILABLE_REASONS = new Set([
   'safe_hide', 'projection_missing', 'historical_authority_invalid', 'projection_invalid',
 ]);
-const MCP_MAX_CODE_POINTS = 20_000;
-const MCP_MAX_UTF8_BYTES = 80_000;
 
 function parseMCPBusinessResultView(value: unknown): MCPBusinessResultView {
-  if (!isRecord(value) || !hasOnlyKeys(value, MCP_VIEW_KEYS) || !withinMCPViewBudget(value)) {
+  if (!isRecord(value) || !hasOnlyKeys(value, MCP_VIEW_KEYS)) {
     return unavailableMCPResult('projection_invalid');
   }
   if (value.schema !== 'maf.mcp.business_result_view.v1' || value.outcome !== 'succeeded') {
@@ -386,17 +384,6 @@ function isJSONValue(value: unknown): boolean {
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: Set<string>): boolean {
   return Object.keys(value).every((key) => keys.has(key));
-}
-
-function withinMCPViewBudget(value: object): boolean {
-  try {
-    const serialized = JSON.stringify(value);
-    return typeof serialized === 'string'
-      && Array.from(serialized).length <= MCP_MAX_CODE_POINTS
-      && new TextEncoder().encode(serialized).byteLength <= MCP_MAX_UTF8_BYTES;
-  } catch {
-    return false;
-  }
 }
 
 function isNullish(value: unknown): boolean {

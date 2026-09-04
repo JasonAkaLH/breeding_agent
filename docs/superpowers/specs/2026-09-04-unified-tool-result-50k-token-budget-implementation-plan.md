@@ -4,7 +4,7 @@
 
 - 日期：2026-09-04
 - 分支：`main`
-- 状态：`backend_image_published_not_deployed`；Checkpoint A～F已完成
+- 状态：Backend为`backend_image_published_not_deployed`，Frontend为`implemented_verified_not_published`；Checkpoint A～F及Frontend代码检查点已完成
 - 设计依据：`2026-09-04-unified-tool-result-50k-token-budget-design.md`
 - 设计复审：100/100 Pass，0 Blocking、0 Major、0 Minor
 - 实施范围：Backend-first；Frontend业务卡片20,000字符/80,000-byte限制移除和
@@ -440,7 +440,8 @@ smoke均通过；Frontend和Runtime Sidecar镜像未重建。
 
 - Backend后续可独立构建发布；旧Frontend对`model_unavailable`使用现有通用fallback；
 - Frontend另立小范围任务和独立版本，同时删除`frontend/src/domain/artifacts.ts`的
-  `MCP_MAX_CODE_POINTS` / `MCP_MAX_UTF8_BYTES`业务裁剪并增加专用中文错误文案；
+  `MCP_MAX_CODE_POINTS` / `MCP_MAX_UTF8_BYTES`业务裁剪并增加专用中文错误文案；该仓库实现和自动门禁
+  已完成，镜像发布与开发环境部署尚未执行；
 - 回滚按Checkpoint逆序撤销代码；数据库、历史结果和Projection v2无需回滚迁移；
 - 回滚后的旧Backend可能把新写入的大v2 projection安全显示为unavailable，不得读取raw补偿；
 - 开发环境真实MCP/Skill新Task、镜像、部署和`prod`均需要用户另行授权。

@@ -922,9 +922,14 @@ function isClosedAgentFrontendEvent(
       && AGENT_OUTCOMES.has(String(payload.outcome))
       && isNonNegativeInteger(payload.remaining_count);
   }
-  return hasExactKeys(payload, [
+  const terminalKeys = [
     'compaction_count', 'duration_seconds', 'outcome', 'sample_count', 'tool_call_count',
-  ])
+  ];
+  const hasClosedTerminalShape = hasExactKeys(payload, terminalKeys)
+    || (event.event_type === 'agent.run.failed'
+      && hasExactKeys(payload, [...terminalKeys, 'code'])
+      && safeCode(payload.code) === payload.code);
+  return hasClosedTerminalShape
     && isNonNegativeInteger(payload.compaction_count)
     && isNonNegativeFiniteNumber(payload.duration_seconds)
     && AGENT_OUTCOMES.has(String(payload.outcome))
@@ -1578,6 +1583,7 @@ const QUERY_GUARD_BLOCK_CODES = new Set([
 
 function failureMessage(payload: Record<string, unknown>, nodeId: string | null): string {
   const code = typeof payload.code === 'string' ? payload.code : '';
+  if (code === 'model_unavailable') return '模型服务暂时不可用，无法完成本次请求，请稍后重试。';
   if (QUERY_GUARD_BLOCK_CODES.has(code)) {
     return '当前查询不符合只读查询安全边界，请改用查询类问题。';
   }

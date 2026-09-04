@@ -578,6 +578,43 @@ describe('applyTaskEvent', () => {
     expect(state.errorMessage).toContain('没有可用 Skill');
   });
 
+  it('maps model unavailable failures consistently across Agent and Task terminal events', () => {
+    const failedAgentPayload = {
+      code: 'model_unavailable',
+      compaction_count: 0,
+      duration_seconds: 0,
+      outcome: 'failed',
+      sample_count: 1,
+      tool_call_count: 0,
+    };
+    let state = applyTaskEvent(
+      createInitialTaskEventState(),
+      event('agent.run.failed', failedAgentPayload, 'agent-model-unavailable'),
+    );
+
+    expect(state.errorMessage).toBe('模型服务暂时不可用，无法完成本次请求，请稍后重试。');
+
+    state = applyTaskEvent(
+      state,
+      event('task.failed', { code: 'model_unavailable' }, 'task-model-unavailable'),
+    );
+
+    expect(state.errorMessage).toBe('模型服务暂时不可用，无法完成本次请求，请稍后重试。');
+
+    const taskOnly = applyTaskEvent(
+      createInitialTaskEventState(),
+      event('task.failed', { code: 'model_unavailable' }, 'task-only-model-unavailable'),
+    );
+    expect(taskOnly.errorMessage).toBe('模型服务暂时不可用，无法完成本次请求，请稍后重试。');
+
+    const malformedAgentFailure = applyTaskEvent(
+      createInitialTaskEventState(),
+      event('agent.run.failed', { ...failedAgentPayload, code: 'unsafe code' }, 'unsafe-agent-failure'),
+    );
+    expect(malformedAgentFailure.phase).toBe('idle');
+    expect(malformedAgentFailure.seenEventIds).toEqual([]);
+  });
+
   it('marks waiting-input tasks as a resumable clarification state', () => {
     const state = markWaitingInputRequired(createInitialTaskEventState());
     expect(state.phase).toBe('waiting_for_input');

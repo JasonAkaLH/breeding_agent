@@ -8,6 +8,18 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-09-04 增量：Tool Result统一50,000-token预算与Frontend完整展示
+
+每个新MCP或Skill Tool Result完整返回并完成Backend解析、校验和脱敏后，按发起Call的Agent Run绑定
+模型调用一次Provider Tokenization。50,000 tokens以内完整保留，超过后由Backend按Provider字符offset
+裁剪并设置既有truncation标记；Tokenization不可用时Task以`model_unavailable` fail closed。
+
+Frontend不调用Tokenization，不估算Token，也不再以20,000字符、80,000 UTF-8 bytes或其他长度门槛
+拒绝合法`maf.mcp.business_result_view.v1`；Backend返回的typed业务视图有多少展示多少。Frontend继续严格
+校验闭合schema和variant，非法DTO仍安全降级为`projection_invalid`，且禁止从raw `storage_ref`补读。
+AgentItem 131,072-byte与MCP raw 64 MiB继续作为内部承载或输入安全边界，不用于再次裁剪业务正文。
+`model_unavailable`在实时和历史Task状态统一显示模型服务暂时不可用的安全提示。
+
 ## 2026-08-28 增量：Skill 单消息 Soft Binding 与大结果 Artifact
 
 聊天页 Skill picker 与 `/skill-name` 现在显式提交 `routing_mode=hint` 和当前公开的

@@ -281,6 +281,128 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(JSON.stringify(parseCapabilityArtifactDisplays(artifacts))).not.toContain('不得展示的原始返回');
   });
 
+  it('keeps every valid MCP business view regardless of character or UTF-8 byte length', () => {
+    const structuredTail = 'STRUCTURED-END';
+    const textTail = 'TEXT-END';
+    const supplementalTail = 'SUPPLEMENTAL-END';
+    const previewTail = 'PREVIEW-END';
+    const largeStructuredValue = {
+      rows: ['STRUCTURED-BEGIN', 'x'.repeat(20_100), structuredTail],
+    };
+    const largeText = `TEXT-BEGIN${'😀'.repeat(20_100)}${textTail}`;
+    const largeSupplemental = `SUPPLEMENTAL-BEGIN${'😀'.repeat(20_100)}${supplementalTail}`;
+    const largePreview = `PREVIEW-BEGIN${'p'.repeat(20_100)}${previewTail}`;
+
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({
+        artifact_id: 'large-structured',
+        artifact_type: 'mcp_result',
+        storage_ref: 'raw-structured-must-not-be-read',
+        mcp_business_result: {
+          schema: 'maf.mcp.business_result_view.v1',
+          availability: 'ready',
+          outcome: 'succeeded',
+          primary: { kind: 'structured', value: largeStructuredValue, truncated: false },
+          projection_truncated: false,
+        },
+      }),
+      artifact({
+        artifact_id: 'large-text',
+        artifact_type: 'mcp_result',
+        storage_ref: 'raw-text-must-not-be-read',
+        mcp_business_result: {
+          schema: 'maf.mcp.business_result_view.v1',
+          availability: 'ready',
+          outcome: 'succeeded',
+          primary: { kind: 'text', text: largeText, truncated: false },
+          projection_truncated: false,
+        },
+      }),
+      artifact({
+        artifact_id: 'large-supplemental',
+        artifact_type: 'mcp_result',
+        storage_ref: 'raw-supplemental-must-not-be-read',
+        mcp_business_result: {
+          schema: 'maf.mcp.business_result_view.v1',
+          availability: 'ready',
+          outcome: 'succeeded',
+          primary: { kind: 'structured', value: { answer: 42 }, truncated: false },
+          supplemental_texts: [largeSupplemental],
+          projection_truncated: false,
+        },
+      }),
+      artifact({
+        artifact_id: 'large-backend-preview',
+        artifact_type: 'mcp_result',
+        storage_ref: 'raw-preview-must-not-be-read',
+        mcp_business_result: {
+          schema: 'maf.mcp.business_result_view.v1',
+          availability: 'ready',
+          outcome: 'succeeded',
+          primary: { kind: 'structured_preview', preview: largePreview, truncated: true },
+          projection_truncated: true,
+        },
+      }),
+    ]);
+
+    expect(displays).toHaveLength(4);
+    expect(displays.every((display) => (
+      display.kind === 'mcp_business_result' && display.result.result.availability === 'ready'
+    ))).toBe(true);
+    expect(displays[0]).toMatchObject({
+      kind: 'mcp_business_result',
+      result: { result: { primary: { kind: 'structured', value: largeStructuredValue } } },
+    });
+    expect(displays[1]).toMatchObject({
+      kind: 'mcp_business_result',
+      result: {
+        result: {
+          primary: { kind: 'text', text: expect.stringContaining(textTail) },
+        },
+      },
+    });
+    expect(displays[2]).toMatchObject({
+      kind: 'mcp_business_result',
+      result: {
+        result: {
+          supplemental_texts: [expect.stringContaining(supplementalTail)],
+        },
+      },
+    });
+    expect(displays[3]).toMatchObject({
+      kind: 'mcp_business_result',
+      result: {
+        result: {
+          primary: { kind: 'structured_preview', preview: expect.stringContaining(previewTail), truncated: true },
+          projection_truncated: true,
+        },
+      },
+    });
+    expect(JSON.stringify(displays)).not.toContain('must-not-be-read');
+  });
+
+  it('still rejects an invalid large MCP business DTO without reading raw storage', () => {
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({
+        artifact_type: 'mcp_result',
+        storage_ref: 'raw-invalid-must-not-be-read',
+        mcp_business_result: {
+          schema: 'maf.mcp.business_result_view.v1',
+          availability: 'ready',
+          outcome: 'succeeded',
+          primary: { kind: 'structured', value: { invalid: Number.NaN }, truncated: false },
+          projection_truncated: false,
+        },
+      }),
+    ]);
+
+    expect(displays[0]).toMatchObject({
+      kind: 'mcp_business_result',
+      result: { result: { availability: 'unavailable', unavailable_reason: 'projection_invalid' } },
+    });
+    expect(JSON.stringify(displays)).not.toContain('must-not-be-read');
+  });
+
   it('does not infer MCP semantics from an artifact id prefix and safely closes invalid DTOs', () => {
     const prefixedText = artifact({
       artifact_id: `mcp-result-artifact:v1:${'a'.repeat(64)}`,
