@@ -282,6 +282,27 @@ class AgentTaskProjectionAPITest(APITestCase):
 
 
 class AgentEventProjectionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_run_event_exposes_only_the_closed_model_error_code(self) -> None:
+        event = AgentEventProjector().durable(
+            event_id="event-failed",
+            conversation_id="conv-1",
+            task_id="task-1",
+            event_type="agent.run.failed",
+            payload={
+                "code": "model_unavailable",
+                "compaction_count": 0,
+                "duration_seconds": 0,
+                "outcome": "failed",
+                "sample_count": 0,
+                "tool_call_count": 1,
+            },
+        )
+
+        self.assertEqual(event.visibility, EventVisibility.FRONTEND)
+        self.assertEqual(event.payload["code"], "model_unavailable")
+        self.assertNotIn("endpoint", event.payload)
+        self.assertNotIn("response", event.payload)
+
     async def test_durable_waiting_event_is_closed_replayable_and_leak_free(self) -> None:
         event = AgentEventProjector().durable(
             event_id="event-waiting",

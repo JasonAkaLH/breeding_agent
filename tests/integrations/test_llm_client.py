@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 
+from src.core.errors import ModelUnavailableError
 from src.integrations.llm_client import CONFIG_ENV_PREFIX, LLMClient, bootstrap_config_env, load_config
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, PromptSegment
 from src.orchestration.agent_loop.models import (
@@ -136,6 +137,15 @@ def _isolated_config_env():
 class LLMClientTest(unittest.TestCase):
     def make_client(self) -> LLMClient:
         return LLMClient(config=_base_config())
+
+    def test_missing_provider_configuration_is_model_unavailable(self) -> None:
+        config = _base_config()
+        config.pop("api_key")
+
+        with self.assertRaises(ModelUnavailableError) as captured:
+            LLMClient(config=config)
+
+        self.assertEqual(str(captured.exception), "")
 
     def test_agent_sample_rejects_client_edition_fallback(self) -> None:
         client = self.make_client()

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
+import httpx
+
+from src.core.errors import ModelUnavailableError
 from src.integrations.llm_runtime import SharedLLMRuntime
+from src.integrations.model_errors import raise_for_model_unavailable
 from src.orchestration.agent_loop.models import (
     AgentFinishMetadata,
     AgentMessage,
@@ -29,6 +33,56 @@ def _reasoning_efforts() -> dict:
 
 
 class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_status_classification_uses_status_not_response_text(self) -> None:
+        request = httpx.Request("POST", "https://secret.example/v1/chat")
+        for status_code in (401, 403, 408, 429, 500, 503):
+            with self.subTest(status_code=status_code):
+                error = httpx.HTTPStatusError(
+                    "arbitrary private response",
+                    request=request,
+                    response=httpx.Response(status_code, request=request),
+                )
+                with self.assertRaises(ModelUnavailableError):
+                    raise_for_model_unavailable(error)
+
+        error = httpx.HTTPStatusError(
+            "model unavailable",
+            request=request,
+            response=httpx.Response(400, request=request),
+        )
+        self.assertIsNone(raise_for_model_unavailable(error))
+
+    async def test_explicit_provider_transport_failures_map_without_string_inspection(self) -> None:
+        class TextFailureClient:
+            async def generate_text(self, *_args, **_kwargs):
+                raise httpx.ConnectError("secret provider endpoint")
+
+        with self.assertRaises(ModelUnavailableError) as text_error:
+            await SharedLLMRuntime(client=TextFailureClient()).generate_text("prompt")
+        self.assertIsInstance(text_error.exception.__cause__, httpx.ConnectError)
+        self.assertEqual(str(text_error.exception), "")
+
+        class StreamFailureClient:
+            async def generate_text_with_thinking(self, *_args, **_kwargs):
+                yield {"answer": "partial", "reasoning": None}
+                raise TimeoutError("secret provider response")
+
+        runtime = SharedLLMRuntime(client=StreamFailureClient())
+        with self.assertRaises(ModelUnavailableError) as stream_error:
+            _ = [event async for event in runtime.stream_events("prompt")]
+        self.assertIsInstance(stream_error.exception.__cause__, TimeoutError)
+        self.assertEqual(str(stream_error.exception), "")
+
+    async def test_local_model_contract_failures_keep_their_original_type(self) -> None:
+        class LocalFailureClient:
+            async def generate_text(self, *_args, **_kwargs):
+                raise ValueError("local invariant")
+
+        with self.assertRaisesRegex(ValueError, "local invariant"):
+            await SharedLLMRuntime(client=LocalFailureClient()).generate_text(
+                "prompt"
+            )
+
     async def test_agent_sample_uses_exact_binding_edition_and_rejects_binding_change(self) -> None:
         binding = AgentModelBinding("edition-a", reasoning_effort="high", thinking_enabled=True)
         request = AgentModelRequest("req", binding, (AgentMessage("user", "question"),))

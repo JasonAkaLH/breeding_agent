@@ -225,7 +225,6 @@ _AGENT_EVENT_SPECS = {
 }
 for _terminal_event in (
     "agent.run.completed",
-    "agent.run.failed",
     "agent.run.cancelled",
 ):
     _AGENT_EVENT_SPECS[_terminal_event] = _AgentEventSpec(
@@ -240,6 +239,19 @@ for _terminal_event in (
         ),
         EventVisibility.FRONTEND,
     )
+_AGENT_EVENT_SPECS["agent.run.failed"] = _AgentEventSpec(
+    frozenset(
+        {
+            "code",
+            "compaction_count",
+            "duration_seconds",
+            "outcome",
+            "sample_count",
+            "tool_call_count",
+        }
+    ),
+    EventVisibility.FRONTEND,
+)
 
 
 class AgentEventProjector:
@@ -430,7 +442,7 @@ class AgentEventProjector:
                 _bounded_id(value)
             elif key == "routing_mode" and value not in {"auto", "force_capability"}:
                 raise ValueError("agent_event_routing_mode_invalid")
-            elif key in {"error_code", "reason_code"}:
+            elif key in {"code", "error_code", "reason_code"}:
                 if value is not None and (
                     not isinstance(value, str)
                     or re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,127}", value) is None

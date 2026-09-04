@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from src.core.errors import ModelUnavailableError
 from src.integrations.openai_agent_model_adapter import OpenAIAgentModelAdapter
 from src.orchestration.agent_loop.models import (
     AgentCancellationToken,
@@ -357,7 +358,7 @@ class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sample.usage.status, "available")
         self.assertFalse(completions.calls[0]["stream"])
 
-    async def test_transport_error_is_not_protocol_retried(self) -> None:
+    async def test_transport_error_maps_to_model_unavailable_without_protocol_retry(self) -> None:
         class TransportFailureCompletions:
             def __init__(self):
                 self.calls = 0
@@ -368,8 +369,9 @@ class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         completions = TransportFailureCompletions()
         adapter = OpenAIAgentModelAdapter(completions=completions, model="edition-a")
-        with self.assertRaisesRegex(ConnectionError, "provider unavailable"):
+        with self.assertRaises(ModelUnavailableError) as captured:
             await adapter.sample_agent(_request())
+        self.assertIsInstance(captured.exception.__cause__, ConnectionError)
         self.assertEqual(completions.calls, 1)
 
     async def test_closes_zero_one_and_multiple_calls_in_order(self) -> None:
@@ -523,7 +525,7 @@ class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
             completions=_Completions([stream]),
             model="edition-a",
         )
-        with self.assertRaisesRegex(ConnectionError, "stream disconnected"):
+        with self.assertRaises(ModelUnavailableError) as captured:
             await adapter.sample_agent(
                 _request(
                     reasoning_delta_sink=record_reasoning,
@@ -531,6 +533,7 @@ class OpenAIAgentModelAdapterTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+        self.assertIsInstance(captured.exception.__cause__, ConnectionError)
         self.assertTrue(stream.closed)
         self.assertEqual(events, ["partial reasoning", "<reset>"])
 

@@ -4786,16 +4786,25 @@ class ApiRuntime(
         task = await self.storage.get_task(request.task_id)
         if task is None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED} or task.cancel_requested_at is not None:
             return
+        error_code = (
+            ModelUnavailableError.code
+            if isinstance(exc, ModelUnavailableError)
+            else "execution_crash"
+        )
         failed_run = await self.agent_loop_orchestrator.fail(
             request.task_id,
-            error_code="execution_crash",
+            error_code=error_code,
         )
         if failed_run is None:
             failed = replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive())
             await self.storage.save_task(failed)
         payload: dict[str, Any] = {
-            "code": "execution_crash",
-            "message": "Task execution failed safely.",
+            "code": error_code,
+            "message": (
+                "Model service is temporarily unavailable."
+                if error_code == ModelUnavailableError.code
+                else "Task execution failed safely."
+            ),
             "error_type": type(exc).__name__,
         }
         if isinstance(exc, AgentStorageConflict) and re.fullmatch(
@@ -15521,8 +15530,31 @@ def build_api_runtime(
                     published_projection = mcp_result_service.publish_projection(
                         projection_staging_handle
                     )
-                except ModelUnavailableError:
-                    raise
+                except ModelUnavailableError as exc:
+                    if projection_staging_handle is not None:
+                        mcp_result_service.discard_projection(
+                            projection_staging_handle
+                        )
+                    await agent_loop_orchestrator.fail(
+                        binding.task_id,
+                        error_code=ModelUnavailableError.code,
+                    )
+                    task = await storage.get_task(binding.task_id)
+                    if task is not None:
+                        await record_live_event(
+                            make_agent_event(
+                                task_id=binding.task_id,
+                                conversation_id=task.conversation_id,
+                                event_type="task.failed",
+                                payload={
+                                    "code": ModelUnavailableError.code,
+                                    "message": (
+                                        "Model service is temporarily unavailable."
+                                    ),
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                        )
                 except Exception:
                     if projection_staging_handle is not None:
                         mcp_result_service.discard_projection(

@@ -25,6 +25,8 @@ from src.orchestration.agent_loop.models import (
     validate_provider_safe_tool_name,
 )
 
+from .model_errors import raise_for_model_unavailable
+
 
 @dataclass(slots=True)
 class _CallBuffer:
@@ -87,6 +89,7 @@ class OpenAIAgentModelAdapter:
                     raise AgentModelContextLengthError(
                         "agent_model_context_length_exceeded"
                     ) from exc
+                raise_for_model_unavailable(exc)
                 raise
         assert last_violation is not None
         raise AgentProtocolFailure(last_violation.code, attempts=self._retry_policy.max_attempts)

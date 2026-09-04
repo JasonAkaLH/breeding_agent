@@ -70,8 +70,20 @@ class StreamingWriteAfterCompletionAPITest(APITestCase):
         serialized_events = json.dumps([dict(event.payload) for event in events], ensure_ascii=False, default=str)
         self.assertNotIn(PARTIAL_SENTINEL, serialized_events)
         failure_event = next(event for event in events if event.event_type == "task.failed")
-        self.assertEqual(failure_event.payload["code"], "execution_crash")
-        self.assertEqual(failure_event.payload["error_type"], "TimeoutError")
+        self.assertEqual(failure_event.payload["code"], "model_unavailable")
+        self.assertEqual(
+            failure_event.payload["message"],
+            "Model service is temporarily unavailable.",
+        )
+        self.assertEqual(
+            failure_event.payload["error_type"], "ModelUnavailableError"
+        )
+        agent_failure = next(
+            event for event in events if event.event_type == "agent.run.failed"
+        )
+        self.assertEqual(agent_failure.payload["code"], "model_unavailable")
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        self.assertEqual(run.terminal_reason_code, "model_unavailable")
         self.assertFalse(any(event.event_type == "agent.final_output" for event in events))
 
         messages = await self.runtime.storage.list_messages_for_conversation("conv-stream-fail")

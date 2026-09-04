@@ -14,6 +14,8 @@ from src.orchestration.agent_loop.models import (
     AgentUsage,
 )
 
+from .model_errors import raise_for_model_unavailable
+
 
 class StreamAgentModelAdapter:
     """Adapt an explicitly injected text stream fixture to AgentModelPort."""
@@ -75,13 +77,17 @@ class StreamAgentModelAdapter:
             }
         except (TypeError, ValueError):
             accepted = {}
-        value = self._generator(prompt, **accepted)
-        if inspect.isawaitable(value):
-            value = await value
-        text = await _collect_text(
-            value,
-            on_reasoning_delta=request.reasoning_delta_sink,
-        )
+        try:
+            value = self._generator(prompt, **accepted)
+            if inspect.isawaitable(value):
+                value = await value
+            text = await _collect_text(
+                value,
+                on_reasoning_delta=request.reasoning_delta_sink,
+            )
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
         tool_calls = _tool_calls_from_fixture(text, request)
         if tool_calls:
             return AgentSample(

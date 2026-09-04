@@ -442,6 +442,21 @@ class AgentLoopOrchestrator:
             safe_error_code=error_code,
         )
         self._contexts.release(run.run_id)
+        await self._record_event(
+            self._make_event(
+                task_id=failed.task_id,
+                conversation_id=failed.conversation_id,
+                event_type="agent.run.failed",
+                payload={
+                    "code": error_code,
+                    "compaction_count": 0,
+                    "duration_seconds": 0,
+                    "outcome": "failed",
+                    "sample_count": 0,
+                    "tool_call_count": failed.next_batch_call_ordinal,
+                },
+            )
+        )
         return failed
 
     async def complete_from_terminal_task(

@@ -80,7 +80,14 @@ from src.integrations.mcp.gateway_models import (
 from src.integrations.mcp.pending_action_payloads import (
     pending_action_payload_identity,
 )
+from src.integrations.mcp.result_parsing.service import MCPIsolatedResultService
 from src.integrations.mcp.temporary_results import MCPTemporaryResultRef
+from src.integrations.token_counter import TokenizationError
+from src.orchestration.agent_loop.models import (
+    AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
+)
 from tests.api.support import InMemoryTaskRuntimeSidecar
 from tests.master_key_support import recovery_cipher
 
@@ -1551,7 +1558,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.shutdown()
 
-    async def test_remote_task_response_is_adopted_before_dispatch_returns(self) -> None:
+    async def test_remote_task_tokenization_failure_is_terminal_without_replay(self) -> None:
         class Selector:
             async def select(self, _context):
                 return MCPSelectorAction(
@@ -1562,6 +1569,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
 
         class RemoteGateway:
             def __init__(self, storage) -> None:
+                self.call_count = 0
                 self.recovery = MCPRecoveryService(
                     storage, recovery_cipher(b"a" * 32)
                 )
@@ -1594,6 +1602,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             async def call_tool(
                 self, scope, tool_name, arguments, callbacks, **kwargs
             ):
+                self.call_count += 1
                 call_ref = "call-remote-adopt"
                 await callbacks.on_created(call_ref)
                 await callbacks.on_registered(call_ref)
@@ -1675,6 +1684,15 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.storage.save_task(task)
             await runtime.storage.save_task_node(node)
+            await runtime.agent_run_repository.create_run(
+                AgentRun(
+                    run_id="run-remote-adopt",
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    status=AgentRunStatus.RUNNING,
+                    binding=AgentModelBinding("edition-remote-adopt"),
+                )
+            )
             await runtime.storage.create_user_mcp_server(server)
             await runtime.storage.save_user_mcp_tool_grant(
                 UserMCPToolGrant(
@@ -1687,9 +1705,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     granted_at=now,
                 )
             )
+            gateway = RemoteGateway(runtime.storage)
             coordinator = UserMCPDispatchCoordinator(
                 storage=runtime.storage,
-                gateway=RemoteGateway(runtime.storage),
+                gateway=gateway,
                 selector=Selector(),
                 audit_reference_signer=runtime._mcp_audit_reference_signer,
                 pending_action_payload_store=runtime._mcp_pending_action_payload_store,
@@ -1763,12 +1782,50 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             runtime.mcp_remote_task_recovery_worker._continuation_sink = None
 
-            self.assertEqual(
-                await runtime.mcp_remote_task_recovery_worker.run_once(), 1
+            tokenization = AsyncMock(
+                side_effect=TokenizationError("provider unavailable")
             )
+            with patch.object(
+                MCPIsolatedResultService,
+                "stage_projection",
+                tokenization,
+            ):
+                self.assertEqual(
+                    await runtime.mcp_remote_task_recovery_worker.run_once(), 1
+                )
+                self.assertEqual(
+                    await runtime.mcp_remote_task_recovery_worker.run_once(), 0
+                )
+            tokenization.assert_awaited_once()
+            self.assertEqual(gateway.call_count, 1)
             self.assertEqual(
                 list(runtime._mcp_pending_action_payload_store._root.glob("*.bin")),
                 [],
+            )
+            failed_task = await runtime.storage.get_task(task.task_id)
+            failed_run = await runtime.agent_run_repository.get_run_for_task(
+                task.task_id
+            )
+            completed_call = await runtime.storage.get_mcp_call_record(
+                "alice", task.task_id, "call-remote-adopt"
+            )
+            self.assertEqual(str(failed_task.status), "failed")
+            self.assertEqual(
+                failed_run.terminal_reason_code, "model_unavailable"
+            )
+            self.assertEqual(completed_call.status, "completed")
+            failure_events = await runtime.storage.list_events_for_task_filtered(
+                task.task_id,
+                event_types={"agent.run.failed", "task.failed"},
+                limit=4,
+            )
+            self.assertEqual(
+                [event.event_type for event in failure_events],
+                ["agent.run.failed", "task.failed"],
+            )
+            self.assertEqual(
+                {event.payload["code"] for event in failure_events},
+                {"model_unavailable"},
             )
             artifacts = await runtime.storage.list_artifacts_for_task(task.task_id)
             self.assertEqual(len(artifacts), 1)

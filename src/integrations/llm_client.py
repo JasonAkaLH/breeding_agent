@@ -9,6 +9,7 @@ import yaml
 from openai import AsyncOpenAI
 
 from src.core.coercion import coerce_truthy
+from src.core.errors import ModelUnavailableError
 from src.orchestration.agent_loop.models import (
     AgentModelRequest,
     AgentProtocolRetryPolicy,
@@ -17,6 +18,7 @@ from src.orchestration.agent_loop.models import (
 )
 
 from .model_editions import default_model_edition, model_edition_options, validate_model_reasoning_effort_configs
+from .model_errors import raise_for_model_unavailable
 from .openai_agent_model_adapter import OpenAIAgentModelAdapter
 from .provider_cache import (
     provider_cache_capabilities_metadata,
@@ -161,7 +163,7 @@ class LLMClient:
             if value in (None, "")
         ]
         if missing:
-            raise ValueError(f"Missing LLM config values: {', '.join(missing)}")
+            raise ModelUnavailableError()
 
         self.client = AsyncOpenAI(
             api_key=str(api_key),
@@ -238,13 +240,17 @@ class LLMClient:
             cache_capabilities=self._cache_capabilities,
         )
         self._last_provider_cache_hint_status = cache_hint_status
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=self._messages_payload(prompt),
-            stream=False,
-            temperature=self.temperature,
-            **request_options,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=self._messages_payload(prompt),
+                stream=False,
+                temperature=self.temperature,
+                **request_options,
+            )
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
         if not response.choices:
             return ""
         content = response.choices[0].message.content
@@ -279,26 +285,30 @@ class LLMClient:
             cache_capabilities=self._cache_capabilities,
         )
         self._last_provider_cache_hint_status = cache_hint_status
-        stream = await self.client.chat.completions.create(
-            model=self.model,
-            messages=self._messages_payload(prompt),
-            stream=True,
-            temperature=self.temperature,
-            **request_options,
-        )
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=self._messages_payload(prompt),
+                stream=True,
+                temperature=self.temperature,
+                **request_options,
+            )
 
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
 
-            delta = chunk.choices[0].delta
-            reasoning = getattr(delta, "reasoning_content", None)
-            answer = delta.content
+                delta = chunk.choices[0].delta
+                reasoning = getattr(delta, "reasoning_content", None)
+                answer = delta.content
 
-            if reasoning:
-                yield {"answer": None, "reasoning": reasoning}
-            if answer:
-                yield {"answer": answer, "reasoning": None}
+                if reasoning:
+                    yield {"answer": None, "reasoning": reasoning}
+                if answer:
+                    yield {"answer": answer, "reasoning": None}
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
 
     def _messages_payload(self, prompt: str | PromptEnvelope | Sequence[LLMMessage | Mapping[str, Any]]) -> list[dict[str, str]]:
         self._last_message_role_fallbacks = ()

@@ -14,6 +14,7 @@ from .model_editions import (
     default_model_edition,
     model_reasoning_effort_configs,
 )
+from .model_errors import raise_for_model_unavailable
 from .provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, render_prompt_envelope
 
@@ -175,13 +176,17 @@ class SharedLLMRuntime:
         generate_text = getattr(client, "generate_text", None)
         if not callable(generate_text):
             raise TypeError("LLM runtime client must provide generate_text(prompt, ...).")
-        result = generate_text(
-            _runtime_prompt_for_client(prompt, client),
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
-        )
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            result = generate_text(
+                _runtime_prompt_for_client(prompt, client),
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
         return coerce_text_result(result)
 
     async def sample_agent(self, request: AgentModelRequest) -> AgentSample:
@@ -195,9 +200,13 @@ class SharedLLMRuntime:
             sampler,
             {"on_reasoning_delta": request.reasoning_delta_sink},
         )
-        result = sampler(request, **options) if options else sampler(request)
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            result = sampler(request, **options) if options else sampler(request)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
         if not isinstance(result, AgentSample):
             raise TypeError("Agent model client returned a non-AgentSample result.")
         if result.binding != request.binding:
@@ -228,11 +237,15 @@ class SharedLLMRuntime:
             return
 
         options = accepted_options(generator, {"thinking": thinking, "reasoning_effort": reasoning_effort})
-        produced = generator(_runtime_prompt_for_client(prompt, client), **options) if options else generator(_runtime_prompt_for_client(prompt, client))
-        async for event in iter_stream_like(produced):
-            coerced = coerce_stream_event(event)
-            if coerced:
-                yield coerced
+        try:
+            produced = generator(_runtime_prompt_for_client(prompt, client), **options) if options else generator(_runtime_prompt_for_client(prompt, client))
+            async for event in iter_stream_like(produced):
+                coerced = coerce_stream_event(event)
+                if coerced:
+                    yield coerced
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
 
 
 def _runtime_prompt_for_client(prompt: PromptInput, client: Any) -> PromptInput | str:
