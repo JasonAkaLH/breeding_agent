@@ -4,13 +4,19 @@
 
 - 日期：2026-09-04
 - 分支：`main`
-- 状态：`planned`，尚未修改生产代码
+- 状态：`in_progress`；Checkpoint A已完成，Checkpoint B待执行
 - 设计依据：`2026-09-04-unified-tool-result-50k-token-budget-design.md`
 - 设计复审：100/100 Pass，0 Blocking、0 Major、0 Minor
 - 实施范围：Backend-first；Frontend业务卡片20,000字符/80,000-byte限制移除和
   `model_unavailable`专用文案后续独立发布
 - 非范围：历史结果迁移/重投影、数据库 schema、Projection revision、Rust/proto、外部 MCP/Skill、
   镜像、部署与 `prod`
+
+### 实际执行记录
+
+| 检查点 | 提交 | 结果 |
+|---|---|---|
+| Checkpoint A | 本检查点提交 | model-bound详细Tokenization、Offset裁剪、10秒超时、required fail-closed和14项聚焦测试完成 |
 
 ## 1. 完成声明
 

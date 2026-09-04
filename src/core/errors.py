@@ -25,6 +25,12 @@ class MessageIdentityConflictError(CoreError):
         super().__init__(self.code)
 
 
+class ModelUnavailableError(CoreError):
+    """Raised when a model-side API required by the current Task is unavailable."""
+
+    code = "model_unavailable"
+
+
 class RustCoreContractError(ContractValidationError):
     """Raised when the Rust Core contract or PyO3 facade fails closed."""
 

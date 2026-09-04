@@ -1,6 +1,6 @@
 # 主 Agent 统一 Tool Result 50k Token 预算设计
 
-状态：用户已批准，限定硬伤复审通过，实施计划已生成
+状态：用户已批准，限定硬伤复审通过；Backend实施中，Checkpoint A已完成
 
 目标分支：`main`；不涉及 `prod` 部署
 

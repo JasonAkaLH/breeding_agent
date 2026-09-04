@@ -117,7 +117,7 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-09-04-unified-tool-result-50k-token-budget-design.md`与同名implementation plan | 设计100/100通过且实施计划已生成；生产代码尚未实施 | 按计划Checkpoint 0/A～F执行Backend-first实现；每业务Call按Agent Run绑定模型只调用一次Provider-required `/tokenization`，用第50,001个Token的起始offset裁到最多50,000 tokens，保留AgentItem 128 KiB引用承载并移除Projection 192 KiB内容限制；Frontend后续独立删除业务卡片旧字符/byte限制并增加`model_unavailable`文案。不修改历史Tool Result、projection v2、数据库schema、外部MCP/Skill或`prod`。 |
+| `superpowers/specs/2026-09-04-unified-tool-result-50k-token-budget-design.md`与同名implementation plan | `in_progress`；设计100/100通过，Checkpoint A的model-bound详细Tokenization与14项聚焦测试已完成 | 从Checkpoint B继续隔离MCP安全candidate与无192 KiB的v2 Projection承载，随后完成MCP terminal顺序、异步Skill Projector、Backend错误传播和全量门禁；Frontend后续独立删除业务卡片旧字符/byte限制并增加`model_unavailable`文案。不修改历史Tool Result、projection revision、数据库schema、外部MCP/Skill或`prod`。 |
 | `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-implementation-plan.md` | `published_pending_deploy`；Checkpoint 0～E、相关全量门禁和backend-dev `0.1.34`发布已闭合 | 用新Task执行开发环境smoke；尚未部署或修改数据库，`prod`不在范围。 |
 | `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-design.md` | `published_pending_deploy`；授权前schema校验、最终fingerprint门禁和repair边界已实施并发布 | 保持Gateway纵深校验；历史失败Task不重放或复活。 |
 | `superpowers/specs/2026-09-04-completed-task-recoverable-run-direct-convergence-implementation-plan.md` | `published_pending_deploy`；Checkpoint 0～E、相关门禁和backend-dev `0.1.33`发布已闭合 | 执行开发hard cut、真实pre/post audit和旧/新对话smoke；`prod`仍不在范围。 |
