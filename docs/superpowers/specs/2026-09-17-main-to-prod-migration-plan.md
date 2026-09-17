@@ -71,7 +71,7 @@
 | `src/api/app.py` 的 `runtime/dev.sqlite3` | 此路径在 PostgreSQL 分支仍用于取 runtime 父目录；实际数据库由 backend/DSN 决定 | 不机械替换文件名；检查 PostgreSQL 选择和 runtime 路径即可 |
 | `/app/runtime` | 复用旧生产数据挂载；先确认实际是 volume 还是 bind mount | 历史上传、Artifact、审计等可读取，UID/GID/容量符合新容器要求；不创建空卷替代旧数据 |
 | Skill 加载与 bundle gate | 沿用服务器已发布的生产 Skill，只读记录 revision，并由候选后端计算 digest | 挂载权限、合同及新后端兼容性验证通过，演练与生产内容 digest 一致；旧任务/历史 Skill revision 不被强行重放 |
-| MCP routing / rollout | 当前 prod 文档的目标为 enforce、100%、legacy assembly off；这不能直接使用 dev 豁免 | 完成第 4 节路径决定、生产 ledger/权限/真实 activation 验证后才允许启动 |
+| MCP routing / rollout | 用户已确认首次生产部署直接启用与 dev 一致的 MCP 功能：enforce、100%、legacy assembly off；保持真实生产身份 | 完成第 4 节首次启用适配及生产 ledger/权限/真实 activation 验证后才允许启动 |
 | Sidecar trust | 首次引入生产 Sidecar；建立独立 socket/data 卷，准备与发布工件一致的 manifest/allowlist | Unix socket 健康、工件信任检查通过；仅填写文件路径不算验收 |
 | Runtime authority | 沿用本次命令中 PostgreSQL 为主存储、`MAF_RUST_RUNTIME_STORE/EVENT_LOG/TASK_DISPATCHER=off` 等现有开关 | 不顺便把生产任务权威迁到 Sidecar；需验证 MCP 使用 Sidecar 的路径正常 |
 | 网络与本地地址 | prod `breeding-agent-net`；dev `breeding-agent-dev-net`；双方 alias 为 `backend` 可保持 | 停止旧 prod 后再启新 prod，避免同网同 alias/端口冲突；容器 localhost 健康检查和 Docker DNS 不替换为外网 IP |
@@ -80,16 +80,23 @@
 
 若发现生产已有不同根密钥体系加密的数据，必须先设计迁移；不能生成新 key 覆盖旧文件。旧登录 token 更新与用户/会话/文件保全分别验收。
 
-## 4. MCP 首次生产准入：执行前需要选定的路线
+## 4. MCP 首次生产准入：已确认直接启用新版功能
 
-这是已发现的实质阻塞：开发存在明确的本地准入豁免；生产 mode 非 off 时，会检查分角色 PostgreSQL ledger、Sidecar 工件信任，以及与 environment/deployment/stage/config fingerprint 匹配的真实 activation。当前 Docker 命令只验证 activation 参数形状，还没有在替换容器前查询其真实有效性。
+用户已确认：本次首次生产部署直接启用与 dev 一致的用户级 MCP 功能。目标配置为 Gateway 开启、`MCP_ROUTING_MODE=enforce`、`MCP_ENFORCE_PERCENT=100`、cohorts 为空、`MCP_LEGACY_GLOBAL_RUNTIME_ENABLED=false`、`MCP_ROLLOUT_STAGE=legacy_assembly_off`；环境继续使用 `MAF_API_ENV=prod` / `MAF_ENV=production`。
 
-两条路线：
+本次首次启用不采用原有逐级灰度路线，不把其 24h、48h 及后续按周计算的观察窗作为首次部署前置条件。迁移演练、镜像验收、生产配置检查和上线后的运行观察仍需完成；普通用户的逐 Tool 授权规则保持不变。
 
-1. **本次生产首次上线即与 dev 功能一致。** 先设计并验证最小首次生产准入方案，再执行迁移。该方案尚不存在，不能视为只改环境变量即可实现；必须保留真实生产身份、租户隔离、逐 Tool 授权、密钥领域、工件信任和可审计的准入记录，不通过伪造 activation 或将 prod 标成 dev 绕过检查。
-2. **沿用现有分阶段流程。** 使用现成 operator/权限模板，由 off 经 internal shadow、internal enforce、cohort/full enforce 到 assembly-off。现有门禁包含 24h、48h 及后续各阶段 7 天/1000 次真实调用等要求，不能承诺一次停机内全功能开放；部署命令中的固定 assembly-off 参数也必须改为实际阶段。
+当前代码尚无这条首次直接启用流程：生产 mode 非 off 时，仍要求分角色 PostgreSQL ledger、Sidecar 工件信任，以及与 environment/deployment/stage/config fingerprint 匹配的真实 activation；现有 operator 的阶段转换也不能直接从 off 到 assembly-off。因此发布策略已确定，技术适配仍是执行前置条件，不能仅修改环境变量或手工填写 activation ID 就部署。
 
-本计划不把未选择的路线当成已授权改造。路线未确定前可继续分支审查、参数清单和隔离数据库演练，不能推进正式 MCP 准入或生产切换。
+阶段 B 应先形成首次启用适配设计，并按以下边界实现、验证：
+
+1. 为本次首次启用提供受控初始化入口，生成真实、可审计且绑定本次发布的生产启用记录；不得伪造原逐级灰度流程的观察证据，也不得把生产标成 dev 使用开发豁免。
+2. 同一发布的初始化重试必须幂等；不匹配的环境、部署、阶段或配置指纹必须拒绝复用。后续正常启动仍验证既有准入记录，初始化入口不能成为永久绕过检查的开关。
+3. 保留用户隔离、逐 Tool 授权、密钥领域隔离、Sidecar 工件信任、分角色数据库权限，以及对未解决安全 blocker 的检查。
+4. 新 Backend 启动前，以只读方式验证真实 ledger/activation 的存在和匹配关系；当前 Docker 命令只校验参数形状，需随适配补齐。
+5. 在隔离 PostgreSQL 与正式候选镜像上覆盖首次初始化成功、同一发布重试、正常重启，以及身份/配置不匹配、权限不足、工件不受信任和未解决 blocker 的拒绝路径。
+
+上述适配设计、实现和验证尚未完成。本次路线确认不表示生产已准入、已完成灰度观察或已部署，也不扩大到删除现有灰度机制等无关改造。
 
 ## 5. 实施顺序与每步交付
 
@@ -106,7 +113,7 @@
 
 1. 在隔离工作树从 prod 基线创建候选分支，合并固定 main。逐项核对 15 个非等价生产独有提交；保留有效生产行为，采用 main 最新架构和已替代实现。
 2. 完成第 3 节必要参数适配；环境说明按分支和入口准确更新，不把所有 dev 字样全局改为 prod。对应更新 AGENTS、CHANGELOG 和必要测试。
-3. 按第 4 节决定处理 MCP 准入；补充新 Backend 启动前的真实 ledger/activation 只读检查，核对未解决 blocker 和 config fingerprint。生产尚未建表时须明确报告“待迁移后验证”，不能把缺表、缺 activation 判为通过。
+3. 按第 4 节已确认的直接启用路线，先设计、实现并验证首次生产初始化及准入适配；补充新 Backend 启动前的真实 ledger/activation 只读检查，核对未解决 blocker 和 config fingerprint。生产尚未建表时须明确报告“待迁移后验证”，不能把缺表、缺 activation 判为通过。
 4. 完成生产配置/密钥准备方案，核对服务器已发布 Skill 的 revision、digest、挂载权限和兼容性；明确旧全局 MCP 能力转为用户级配置后的设置与逐 Tool 授权流程，不向所有用户复制凭据或 Grant。
 5. 完善本地 prod Docker 命令，保持 dev 的章节与单一 Bash 块格式；长期启动命令只保留前置检查，首次破坏性 DDL 独立记录和执行。
 
@@ -138,7 +145,7 @@
 1. 关闭新请求入口，按既定方案排空在途任务并停止所有指向 `biobin_db` 的应用 writer；停止旧 frontend/backend，保留容器和镜像。仅停止前端不算停写。
 2. 在停写状态获取最终完整 `pg_dump -Fc`，备份 runtime、生产配置、密钥与 Skill。使用 PostgreSQL 17 工具；限制目录/文件权限，校验 SHA-256 和 `pg_restore --list`。恢复可用性由阶段 C 的实际恢复演练证明，不能只凭目录列表判断。
 3. 用真实管理员连接在单个事务中删除准确的 7 个旧对象；使用已演练的 advisory lock `5566807924744996692`、`lock_timeout=3s`、`statement_timeout=30s`。任何锁等待、对象漂移或保全校验异常立即回滚，不扩大删除范围。
-4. 运行候选版本的显式 PostgreSQL bootstrap，补齐目标 schema；按选定 MCP 路线准备权限与真实准入，核对 activation 和环境、部署、阶段、配置指纹及未解决 blocker。此检查必须在新 Backend 启动前通过。管理员/DDL/operator 凭据不留在常驻 Backend 环境中。
+4. 运行候选版本的显式 PostgreSQL bootstrap，补齐目标 schema；执行已通过演练的 MCP 首次启用初始化，准备权限与真实准入，核对 activation 和环境、部署、阶段、配置指纹及未解决 blocker。此检查必须在新 Backend 启动前通过。管理员/DDL/operator 凭据不留在常驻 Backend 环境中。
 5. 对比保留数据，验证 schema reconciliation 无待处理项、应有约束/索引/触发器齐全、防删保护继续有效。DDL 提交后 bootstrap 失败属于“已变更数据库”，按第 6 节恢复，不能直接启动旧容器。
 6. 按阶段 D 锁定的镜像 digest，依次启动 Sidecar → Backend → Frontend 新 `-prod` 容器；核对实际运行工件与验收记录一致，完成 health、生产 DB 身份、挂载、网络代理、真实 activation 及日志检查。仅保留一个生产 `backend` 网络别名提供者。
 7. 维护入口保持关闭时完成受控 smoke，记录验证产生的测试数据；通过后开放流量并持续观察。不要删除旧容器、备份或清理原 runtime。
@@ -161,7 +168,7 @@
 
 当前尚未闭合：
 
-- MCP 选择分阶段发布还是先实现首次生产准入适配；现有固定 assembly-off 命令不能直接视为可执行。
+- MCP 首次直接启用的适配设计、实现及隔离验收；路线已由用户确认，现有固定 assembly-off 命令仍不能直接视为可执行。
 - 生产真实配置、master key、Sidecar trust、ledger 权限及 activation 的现场证据。
 - 旧登录 token 的重新登录安排、旧全局 MCP 的能力迁移范围、在途任务排空结果。
 - 已发布生产 Skill 的服务器实际 revision、bundle digest、挂载权限及新旧后端兼容性验证记录；发布工作本身已由用户确认完成。
