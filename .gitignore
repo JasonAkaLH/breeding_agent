@@ -15,6 +15,7 @@ AGENTS.md
 
 # Local deployment commands (may contain private DSNs/secrets)
 /docker_cmd.md
+/docker_cmd/
 
 # External Skill compatibility checkout; canonical bundles live in the independent repository.
 /skill

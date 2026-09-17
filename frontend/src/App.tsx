@@ -5,7 +5,7 @@ import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPBusinessResultContentMetadata, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { mergeUploadsById, uploadAnswerDisplayText, type DraftAttachment, type UploadedDraftAttachment } from './domain/attachments';
 import { pickComposerPlaceholder } from './domain/composerPlaceholders';
@@ -1830,6 +1830,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const cancelledJustConsumed = eventConsumed && previous.phase !== 'cancelled' && next.phase === 'cancelled';
     const completedJustConsumed = eventConsumed
       && (event.event_type === 'task.completed' || event.event_type === 'agent.run.completed');
+    if (eventConsumed && event.event_type === 'mcp.tool_approval_decided') {
+      const interruptId = event.payload.interrupt_id;
+      // The event can arrive before the approval HTTP response returns.
+      setPendingInterrupt((current) => current?.taskId === taskId && current.interruptId === interruptId ? null : current);
+      setMessages((current) => current.map((message) => (
+        message.id === assistantId
+        && message.interruptPrompt?.taskId === taskId
+        && message.interruptPrompt.interruptId === interruptId
+          ? { ...message, interruptPrompt: undefined }
+          : message
+      )));
+    }
     const previousProgressText = taskProgressDisplayText(previous);
     const nextProgressText = taskProgressDisplayText(next);
     if (next.skillStatuses !== previous.skillStatuses) {
@@ -1887,7 +1899,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (completedJustConsumed) {
       taskPhaseRef.current = 'loading_artifacts';
       clearWaitingInputRetryTimers();
-      updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
+      setPendingInterrupt((current) => current?.taskId === taskId ? null : current);
+      updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true, interruptPrompt: undefined });
       void loadArtifacts(taskId, assistantId);
     }
     if (event.event_type === 'node.waiting_for_input' || event.event_type === 'agent.run.waiting') {
@@ -1932,6 +1945,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (!openInterrupt) {
         scheduleWaitingInputInterruptRetry(event, taskId, assistantId, generation, targetConversationId, attempt);
         return;
+      }
+      if (openInterrupt.reason_code === 'mcp_tool_approval_required') {
+        const approval = taskStateRef.current.mcp.approval;
+        if (
+          taskPhaseRef.current === 'loading_artifacts'
+          || isTaskCancellationOrTerminalPhase()
+          || (approval && (approval.interruptId !== openInterrupt.interrupt_id || !approval.pending))
+        ) {
+          clearWaitingInputRetryTimer(event.event_id);
+          return;
+        }
       }
       clearWaitingInputRetryTimer(event.event_id);
       const interruptionMode = taskPresentationModesRef.current.get(taskId) ?? mode;
@@ -3079,9 +3103,6 @@ function CapabilityArtifactPanel({
   if (display.kind === 'ocr_raw_text') {
     return <OcrRawTextCard result={display.result} />;
   }
-  if (display.kind === 'mcp_business_result') {
-    return <MCPBusinessResultCard result={display.result} />;
-  }
   if (display.kind === 'file') {
     return <FileArtifactCard result={display.result} onDownloadArtifact={onDownloadArtifact} />;
   }
@@ -3102,86 +3123,6 @@ function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): strin
     return `${display.kind}:${display.result.artifactId}`;
   }
   return 'capability-artifact';
-}
-
-function MCPBusinessResultCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'mcp_business_result' }>['result'] }) {
-  const [expanded, setExpanded] = useState(false);
-  const contentId = `mcp-business-result-${result.artifactId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-  if (result.result.availability === 'unavailable') {
-    const messages = {
-      safe_hide: '该工具结果来自旧的安全隐藏路径，暂不可展示。',
-      projection_missing: '工具已完成，但业务结果投影暂不可用。',
-      historical_authority_invalid: '历史结果缺少完整校验依据，无法安全展示。',
-      projection_invalid: '业务结果投影未通过完整性校验，已停止展示。',
-    };
-    return (
-      <Card size="small" className="capability-card mcp-business-result-card" title={result.title}>
-        <Alert type="warning" showIcon message="MCP 业务结果不可用" description={messages[result.result.unavailable_reason]} />
-      </Card>
-    );
-  }
-  const primary = result.result.primary;
-  const primaryText = primary.kind === 'structured'
-    ? JSON.stringify(primary.value, null, 2)
-    : primary.kind === 'structured_preview'
-      ? primary.preview
-      : primary.kind === 'text'
-        ? primary.text
-        : primary.message;
-  const canExpand = primary.kind !== 'empty' && primaryText.length > 240;
-  return (
-    <Card
-      size="small"
-      className="capability-card mcp-business-result-card"
-      title={result.title}
-      extra={canExpand ? (
-        <Button
-          type="link"
-          size="small"
-          aria-expanded={expanded}
-          aria-controls={contentId}
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? '收起业务结果' : '展开业务结果'}
-        </Button>
-      ) : null}
-    >
-      <Space direction="vertical" size="small" className="ocr-raw-text-stack">
-        <pre
-          id={contentId}
-          className={`ocr-raw-text-content mcp-business-result-content ${expanded || !canExpand ? 'ocr-raw-text-content-expanded' : ''}`}
-        >
-          {primaryText}
-        </pre>
-        {result.result.supplemental_texts?.map((text, index) => (
-          <pre className="ocr-raw-text-content mcp-business-result-supplement" key={`${result.artifactId}:text:${index}`}>{text}</pre>
-        ))}
-        {result.result.content_metadata?.length ? (
-          <Space wrap size="small" aria-label="MCP 结果内容元数据">
-            {result.result.content_metadata.map((metadata, index) => (
-              <Tag key={`${result.artifactId}:metadata:${index}`}>
-                {formatMCPContentMetadata(metadata)}
-              </Tag>
-            ))}
-          </Space>
-        ) : null}
-        {(result.result.projection_truncated || primary.truncated) ? (
-          <Typography.Text type="secondary">结果已按安全展示预算截断。</Typography.Text>
-        ) : null}
-      </Space>
-    </Card>
-  );
-}
-
-function formatMCPContentMetadata(metadata: MCPBusinessResultContentMetadata): string {
-  if (metadata.kind === 'resource_link') {
-    return `资源链接 · ${metadata.name} · ${metadata.uri_scheme}`;
-  }
-  if (metadata.kind === 'embedded_text_resource') {
-    return `文本资源 · ${metadata.mime_type || '未知类型'} · ${metadata.uri_scheme}`;
-  }
-  const labels = { image: '图片', audio: '音频', embedded_blob_resource: '二进制资源' };
-  return `${labels[metadata.kind]} · ${metadata.mime_type} · ${metadata.byte_size} bytes`;
 }
 
 function OcrRawTextCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'ocr_raw_text' }>['result'] }) {

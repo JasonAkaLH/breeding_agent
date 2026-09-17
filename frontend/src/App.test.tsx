@@ -3137,13 +3137,14 @@ describe('App', () => {
     expect(api.downloadArtifact).toHaveBeenCalledWith('art-file-1', 'layout.html');
   });
 
-  it('renders only the typed MCP business result with accessible expansion and no raw download', async () => {
+  it('does not render MCP tool responses or raw downloads', async () => {
     const rawResult = '{"authorization":"raw-secret"}';
     const businessText = `业务返回-${'结果'.repeat(10_100)}-BUSINESS-END`;
     const api = makeApi({
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text', storage_ref: 'MCP 调用已完成。', summary: 'final', is_complete: true, created_at: null },
           {
             artifact_id: 'opaque-result-artifact',
             producer_node_id: 'task-1:mcp-tool',
@@ -3169,17 +3170,12 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '调用 MCP' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    const title = await screen.findByText('MCP 工具结果');
-    const messageBody = title.closest('.message-assistant')?.querySelector('.message-body') as HTMLElement;
-    expect(messageBody.querySelector('.markdown-content')).not.toBeInTheDocument();
-    expect(messageBody.querySelector('.mcp-business-result-content')?.textContent).toBe(businessText);
-    const expand = within(messageBody).getByRole('button', { name: '展开业务结果' });
-    expect(expand).toHaveAttribute('aria-expanded', 'false');
-    expect(expand).toHaveAttribute('aria-controls', expect.stringContaining('mcp-business-result-'));
-    fireEvent.click(expand);
-    expect(expand).toHaveAttribute('aria-expanded', 'true');
-    expect(within(messageBody).getByText('图片 · image/png · 24 bytes')).toBeInTheDocument();
-    expect(within(messageBody).getByText('结果已按安全展示预算截断。')).toBeInTheDocument();
+    const answer = await screen.findByText('MCP 调用已完成。');
+    const messageBody = answer.closest('.message-body') as HTMLElement;
+    expect(screen.queryByText('MCP 工具结果')).not.toBeInTheDocument();
+    expect(messageBody.querySelector('.mcp-business-result-content')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '展开业务结果' })).not.toBeInTheDocument();
+    expect(messageBody).not.toHaveTextContent(businessText);
     expect(messageBody).not.toHaveTextContent('raw-secret');
     expect(within(messageBody).queryByRole('button', { name: /下\s*载/ })).not.toBeInTheDocument();
     expect(api.downloadArtifact).not.toHaveBeenCalled();
@@ -4335,6 +4331,7 @@ describe('App', () => {
 
     const firstApprovalDialog = await screen.findByRole('dialog', { name: 'MCP 工具授权' });
     expect(within(firstApprovalDialog).getByText(/get_ocr_capabilities/)).toBeInTheDocument();
+    await screen.findByText(firstInterrupt.question);
     fireEvent.click(screen.getByRole('button', { name: '始终允许' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
@@ -4354,6 +4351,8 @@ describe('App', () => {
       }, 'mcp-approval-capabilities-decided', 'node-mcp'));
     });
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toHaveClass('ant-zoom-leave'));
+    expect(screen.queryByText(firstInterrupt.question)).not.toBeInTheDocument();
+    expect(screen.queryByText('等待补充 · 下一条消息将继续当前任务')).not.toBeInTheDocument();
     await act(async () => {
       subscriptions[1].onMessage(event('mcp.tool_approval_required', {
         interrupt_id: secondInterrupt.interrupt_id,
@@ -4374,8 +4373,94 @@ describe('App', () => {
       await approvalResponse.promise;
     });
     expect(within(screen.getByRole('dialog', { name: 'MCP 工具授权' })).getByText(/start_parse_job/)).toBeInTheDocument();
+    expect(screen.getByText(secondInterrupt.question)).toBeInTheDocument();
+    expect(screen.getByText('等待补充 · 下一条消息将继续当前任务')).toBeInTheDocument();
     expect(subscriptions).toHaveLength(2);
   });
+
+  it.each(['decided', 'next_approval', 'completed'] as const)(
+    'ignores a stale MCP interrupt query after %s', async (transition) => {
+      const firstInterrupt = {
+        interrupt_id: 'mcp-approval-old', conversation_id: 'conv-test', task_id: 'task-1',
+        node_id: 'node-mcp', question: '旧工具的授权问题', reason_code: 'mcp_tool_approval_required',
+        required_fields: { mcp_tool_approval: { options: ['allow_once', 'always_allow', 'deny'] } },
+        status: 'open',
+      };
+      const nextInterrupt = { ...firstInterrupt, interrupt_id: 'mcp-approval-next', question: '新工具的授权问题' };
+      const oldQuery = deferred<{ task_id: string; interrupts: typeof firstInterrupt[] }>();
+      const artifacts = deferred<Awaited<ReturnType<ApiClient['getTaskArtifacts']>>>();
+      const api = makeApi({
+        listInterrupts: vi.fn()
+          .mockImplementationOnce(() => oldQuery.promise)
+          .mockResolvedValue({ task_id: 'task-1', interrupts: [nextInterrupt] }),
+        getTaskArtifacts: vi.fn(() => artifacts.promise),
+      });
+      const subscriptions: Array<{ handlers: TaskEventHandlers; close: ReturnType<typeof vi.fn> }> = [];
+      const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+        const subscription = { handlers, close: vi.fn() };
+        subscriptions.push(subscription);
+        return subscription;
+      };
+      await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+      fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询库存' } });
+      fireEvent.click(screen.getByRole('button', { name: '发送' }));
+      await waitFor(() => expect(subscriptions).toHaveLength(1));
+      const { handlers, close } = subscriptions[0];
+      await act(async () => {
+        handlers.onMessage(event('mcp.tool_approval_required', {
+          interrupt_id: firstInterrupt.interrupt_id, safe_call_ref: 'call-old', tool_display_name: 'old_tool',
+        }, 'old-approval', 'node-mcp'));
+        handlers.onMessage(event('node.waiting_for_input', {
+          interrupt_id: firstInterrupt.interrupt_id,
+        }, 'old-waiting', 'node-mcp'));
+      });
+      await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        if (transition !== 'completed') {
+          handlers.onMessage(event('mcp.tool_approval_decided', {
+            interrupt_id: firstInterrupt.interrupt_id, safe_call_ref: 'call-old', decision: 'always_allow',
+          }, 'old-decided', 'node-mcp'));
+        }
+        if (transition === 'next_approval') {
+          handlers.onMessage(event('mcp.tool_approval_required', {
+            interrupt_id: nextInterrupt.interrupt_id, safe_call_ref: 'call-next', tool_display_name: 'next_tool',
+          }, 'next-approval', 'node-mcp'));
+          handlers.onMessage(event('node.waiting_for_input', {
+            interrupt_id: nextInterrupt.interrupt_id,
+          }, 'next-waiting', 'node-mcp'));
+        } else if (transition === 'completed') {
+          handlers.onMessage(event('agent.run.completed', {
+            outcome: 'completed', sample_count: 0, tool_call_count: 1, compaction_count: 0, duration_seconds: 0,
+          }, 'completed'));
+        }
+      });
+      if (transition === 'next_approval') await screen.findByText(nextInterrupt.question);
+      if (transition === 'completed') await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalledTimes(1));
+      const closeCount = close.mock.calls.length;
+      await act(async () => {
+        oldQuery.resolve({ task_id: 'task-1', interrupts: [firstInterrupt] });
+        await oldQuery.promise;
+      });
+      expect(screen.queryByText(firstInterrupt.question)).not.toBeInTheDocument();
+      expect(close).toHaveBeenCalledTimes(closeCount);
+      if (transition === 'next_approval') {
+        expect(screen.getByText(nextInterrupt.question)).toBeInTheDocument();
+        expect(within(screen.getByRole('dialog', { name: 'MCP 工具授权' })).getByText(/next_tool/)).toBeInTheDocument();
+      } else {
+        expect(screen.queryByText('等待补充 · 下一条消息将继续当前任务')).not.toBeInTheDocument();
+      }
+      if (transition === 'completed') {
+        await act(async () => {
+          artifacts.resolve({ task_id: 'task-1', artifacts: [{
+            artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text',
+            storage_ref: '任务已完成的回答', summary: 'final', is_complete: true, created_at: null,
+          }] });
+          await artifacts.promise;
+        });
+        expect(await screen.findByText('任务已完成的回答')).toBeInTheDocument();
+      }
+    },
+  );
 
   it('keeps MCP approval pending when approval submission fails', async () => {
     const api = makeApi({
@@ -4449,6 +4534,10 @@ describe('App', () => {
       submitMessage: vi.fn()
         .mockResolvedValueOnce({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })
         .mockImplementationOnce(async () => approvalResponse.promise),
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [{ artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text', storage_ref: '工具执行完成后的最终回答', summary: 'final', is_complete: true, created_at: null }],
+      })),
       listInterrupts: vi.fn(async () => ({
         task_id: 'task-1',
         interrupts: [{
@@ -4486,6 +4575,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别图片' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    await screen.findByText('Allow OCR服务 to call start_parse_job?');
     fireEvent.click(screen.getByRole('button', { name: '仅允许一次' }));
     await waitFor(() => expect(subscriptions).toHaveLength(2));
     await act(async () => {
@@ -4500,6 +4590,10 @@ describe('App', () => {
     });
     expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toHaveClass('ant-zoom-leave');
     expect(screen.getByRole('button', { name: '发送' })).toBeInTheDocument();
+    expect(await screen.findByText('工具执行完成后的最终回答')).toBeInTheDocument();
+    expect(screen.queryByText('Allow OCR服务 to call start_parse_job?')).not.toBeInTheDocument();
+    expect(screen.queryByText('等待补充 · 下一条消息将继续当前任务')).not.toBeInTheDocument();
+    expect(api.submitMessage).toHaveBeenCalledTimes(2);
     expect(subscriptions).toHaveLength(2);
   });
 
