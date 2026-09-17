@@ -16,7 +16,7 @@
 | 前端路径 | `/seedpilot/`；API 经 `/seedpilot/api/` 代理 |
 | Docker 网络 | 沿用 `breeding-agent-net`；Backend alias 保持 `backend` |
 | PostgreSQL | 生产 `biobin_db`；远端调查入口 `175.6.25.109:15432`；容器内使用 `postgres:5432` |
-| Skill | `/data/peihai/vibe-breeding-main/skills` 只读挂载到 `/app/skill` |
+| Skill | 用户已确认生产 Skill 发布到服务器；沿用 `/data/peihai/vibe-breeding-main/skills`，只读挂载到 `/app/skill` |
 | 旧生产容器 | `breeding-agent-backend`、`breeding-agent-frontend`；原镜像无 `-prod` 后缀，均为 `0.1.23` |
 | 部署命令 | 本地受保护的 `docker_cmd/docker_cmd_prod.md`，继续严格沿用 dev 文档格式 |
 
@@ -50,17 +50,17 @@
 
 此前本机 PostgreSQL 17 合成数据演练已验证 24→23→66 和保留字段不变；这只是技术可行性证据，尚未替代真实生产备份恢复、生产参数和新镜像的完整演练。
 
-### 2.3 独立 Skill 仓库也有差异
+### 2.3 生产 Skill 已发布
 
-本机只读核对 `vibe-breeding`：开发 `dev@54fb0df`，生产 `main@164cfef`；main 是 dev 的祖先，相差 6 个提交，`skills/` 差异 25 个文件，包括契约调整、开发专用 mini Skill 和 OCR Skill 删除。服务器检出状态尚未核对，不能据此宣称远端已同步。
+用户已确认生产 Skill 完成发布，服务器上已有目标内容。本次主工程迁移沿用现有生产 Skill，不再安排 Skill 分支合并、重复发布或能力增删。
 
-主工程合并不会同步这个仓库。执行阶段须单独确定正式能力清单与 Skill commit，确认哪些开发能力应进入生产、哪些旧能力被用户级 MCP 替代；这一步涉及另一个仓库的发布范围，不能直接将整个 dev 分支推到 Skill main。最终以目标生产目录内容计算 bundle digest，并与后端启动值一致。
+此前本机 `vibe-breeding` 的分支差异不代表服务器的发布状态。执行前只读记录服务器实际 revision、能力清单和目录内容，以候选后端计算 bundle digest，并验证挂载权限及合同兼容性；发布已完成不等同于这些技术验证已通过。演练使用同一内容的副本，生产启动前复核 digest 一致。如发现不兼容，先报告具体差异，不自动修改生产 Skill。回滚演练同时验证旧后端与保留的 Skill 快照配套可用。
 
 ## 3. 生产适配清单
 
 | 检查面与源码入口 | 计划中的处理 | 验证要求 |
 |---|---|---|
-| `Dockerfile`、本地 prod 命令 | 三类镜像使用已确认的 `-prod:0.1.23`；记录候选 commit、linux/amd64 digest | 镜像内代码和版本对应；旧无后缀镜像保留用于回滚 |
+| `Dockerfile`、本地 prod 命令 | 三类镜像保留已确认的 `-prod:0.1.23` 发布标签，实际部署锁定验收过的 digest；记录候选 commit、linux/amd64 manifest digest | 发布、回拉及运行的工件与验收一致；重新构建必须重新验收；旧无后缀镜像保留用于回滚 |
 | `docker-compose.yml` | 当前是 dev/local 默认配置：dev 环境、SQLite、开发 Skill 路径、local 镜像；不能直接作为生产启动入口 | 本次仍以现有 prod Docker 命令为入口；若需 Compose，另行适配后验证 |
 | `src/state/runtime_factory.py`、`src/api/runtime.py` | 明确 `MAF_API_ENV=prod`、`MAF_ENV=production`、PostgreSQL backend、生产 DSN；保持 config bridge 关闭 | `current_database()` 为 `biobin_db`，连接角色符合职责，无 SQLite 回退 |
 | `Dockerfile`、配置加载器 | main 已取消把 `config.yaml` 打入镜像；准备兼容新 schema 的生产外部配置和 env 文件 | 校验文件权限、链接限制、配置格式及模型/Tokenizer/provider/只读业务库配置；不复制开发凭据 |
@@ -70,7 +70,7 @@
 | `src/api/cors.py` | 当前同源 Nginx 路径不必增加 CORS；如真实入口跨域，仅配置明确生产 Origin | 不使用 `*`，不残留开发 Origin |
 | `src/api/app.py` 的 `runtime/dev.sqlite3` | 此路径在 PostgreSQL 分支仍用于取 runtime 父目录；实际数据库由 backend/DSN 决定 | 不机械替换文件名；检查 PostgreSQL 选择和 runtime 路径即可 |
 | `/app/runtime` | 复用旧生产数据挂载；先确认实际是 volume 还是 bind mount | 历史上传、Artifact、审计等可读取，UID/GID/容量符合新容器要求；不创建空卷替代旧数据 |
-| Skill 加载与 bundle gate | 使用已确认生产目录、确定的外部 Skill revision 和新代码计算的 digest | 合同验证通过，能力清单符合上线范围；旧任务/历史 Skill revision 不被强行重放 |
+| Skill 加载与 bundle gate | 沿用服务器已发布的生产 Skill，只读记录 revision，并由候选后端计算 digest | 挂载权限、合同及新后端兼容性验证通过，演练与生产内容 digest 一致；旧任务/历史 Skill revision 不被强行重放 |
 | MCP routing / rollout | 当前 prod 文档的目标为 enforce、100%、legacy assembly off；这不能直接使用 dev 豁免 | 完成第 4 节路径决定、生产 ledger/权限/真实 activation 验证后才允许启动 |
 | Sidecar trust | 首次引入生产 Sidecar；建立独立 socket/data 卷，准备与发布工件一致的 manifest/allowlist | Unix socket 健康、工件信任检查通过；仅填写文件路径不算验收 |
 | Runtime authority | 沿用本次命令中 PostgreSQL 为主存储、`MAF_RUST_RUNTIME_STORE/EVENT_LOG/TASK_DISPATCHER=off` 等现有开关 | 不顺便把生产任务权威迁到 Sidecar；需验证 MCP 使用 Sidecar 的路径正常 |
@@ -107,7 +107,7 @@
 1. 在隔离工作树从 prod 基线创建候选分支，合并固定 main。逐项核对 15 个非等价生产独有提交；保留有效生产行为，采用 main 最新架构和已替代实现。
 2. 完成第 3 节必要参数适配；环境说明按分支和入口准确更新，不把所有 dev 字样全局改为 prod。对应更新 AGENTS、CHANGELOG 和必要测试。
 3. 按第 4 节决定处理 MCP 准入；补充新 Backend 启动前的真实 ledger/activation 只读检查，核对未解决 blocker 和 config fingerprint。生产尚未建表时须明确报告“待迁移后验证”，不能把缺表、缺 activation 判为通过。
-4. 完成生产配置/密钥/Skill 版本准备方案，明确旧全局 MCP 能力转为用户级配置后的设置与逐 Tool 授权流程，不向所有用户复制凭据或 Grant。
+4. 完成生产配置/密钥准备方案，核对服务器已发布 Skill 的 revision、digest、挂载权限和兼容性；明确旧全局 MCP 能力转为用户级配置后的设置与逐 Tool 授权流程，不向所有用户复制凭据或 Grant。
 5. 完善本地 prod Docker 命令，保持 dev 的章节与单一 Bash 块格式；长期启动命令只保留前置检查，首次破坏性 DDL 独立记录和执行。
 
 完成证据：候选 diff 可审阅；没有开发 DSN、Skill 路径、端口、密钥或本地信任豁免泄漏到实际生产参数；部署文件保护检查、Shell 语法、相关参数拒绝/接受测试通过。
@@ -118,17 +118,17 @@
 2. 禁止演练进程访问真实业务写入口或启动外部工具自动恢复；先排查可恢复任务及旧密文，再用受控测试账号/任务验证。记录恢复耗时和空间要求。
 3. 在恢复库执行与正式切换相同的 7 个旧对象删除、当前 bootstrap、权限/准入准备；完整对比保留字段/行数/摘要及 schema，不只检查 66 张表。
 4. 新增对象允许有预期初始化数据；旧表除明确删除的 DAG 结构外，任何业务变化都要单独解释。删除对象的原始内容保留在完整备份中，不伪称所有字段零删除。
-5. 基于候选 commit 构建三类 linux/amd64 镜像，先隔离验收；执行相关 Backend 存储/鉴权/API/MCP/历史恢复回归、Frontend 全量测试/typecheck/build、Sidecar 对应 Rust 质量门禁。真实 PostgreSQL 用例不得用 skip 充当通过。
+5. 基于候选 commit 构建并冻结三类 linux/amd64 镜像工件，记录各自 platform manifest digest，以这些工件完成隔离验收；执行相关 Backend 存储/鉴权/API/MCP/历史恢复回归、Frontend 全量测试/typecheck/build、Sidecar 对应 Rust 质量门禁。真实 PostgreSQL 用例不得用 skip 充当通过。
 6. 验证真实生产环境标记下的启动、登录更新、历史会话/文件、Skill、MCP 授权/结果/重启恢复，以及前端 SSE；外部真实调用仅使用明确授权的测试输入。验证失败时不能靠 dev 豁免放行。
 7. 实际执行一次备份恢复回旧结构和旧版本的演练，验证数据库、runtime、配置、密钥与旧镜像配套可用。
 
-完成证据：候选源码/Skill commit/镜像 digest/配置指纹对应；迁移与回滚演练均通过，记录测试失败、skip 和尚缺的外部证据。预估维护窗口据真实耗时制定，不凭合成演练猜测。
+完成证据：候选源码、服务器 Skill revision/bundle digest、三类验收工件 digest、Sidecar 工件信任材料和配置指纹对应；迁移与回滚演练均通过，记录测试失败、skip 和尚缺的外部证据。任何镜像重新构建都使该镜像此前的工件验收失效，必须重新验收；Sidecar 重建还须同步核对其 manifest/allowlist。预估维护窗口据真实耗时制定，不凭合成演练猜测。
 
 ### 阶段 D：发布准备
 
 1. 候选验收通过后再次确认远端 prod 未变化，将候选合并结果推进 prod；同步 GitHub/Gitee 并复核 HEAD，禁止 force push。
-2. 从该已验证源码发布或提升已验证镜像为约定的三个 `-prod:0.1.23`，记录 registry digest 并预拉取到生产服务器。若同名 tag 已存在，先核对其所属发布，避免无记录覆盖。
-3. 完成外部 Skill 的已批准生产发布，准备生产文件、权限与独立卷；保存旧 Skill 快照。固定整个发布包，迁移期间不临时更换源码、镜像、配置或 Skill。
+2. 只给阶段 C 已验收的同一镜像工件附加约定的三个 `-prod:0.1.23` 标签并发布，不重新构建。记录 registry 引用 digest；若使用 OCI index，同时记录其 linux/amd64 platform manifest digest。按锁定引用回拉，核对 platform manifest 与阶段 C 一致并做启动 smoke，实际部署使用 `仓库名@sha256:…`。如需重建或工件摘要变化，必须返回阶段 C 重新验收，Sidecar 信任材料同时匹配该工件。若同名 tag 已存在，先核对其所属发布，避免无记录覆盖。
+3. 复核服务器已发布 Skill 的 revision、bundle digest、挂载权限及兼容性证据，并保存当前内容快照；不更新生产 Skill 目录。准备生产配置文件与独立卷，固定整个发布包，迁移期间不临时更换源码、镜像、配置或 Skill。
 4. 产出可审阅的正式 DDL、bootstrap 入口、前后校验、停启和恢复命令及准确目标，确认备份空间、管理员连接和回滚材料全部可用。
 
 完成证据：上线材料齐全、镜像已预拉取、维护窗口可执行。停旧生产前完成材料、连接、恢复演练和准入方案检查；依赖新表的真实 activation 校验留到阶段 E，但创建及验证方式必须已在阶段 C 闭合。生产写操作按用户最终确认的执行范围进行。
@@ -140,7 +140,7 @@
 3. 用真实管理员连接在单个事务中删除准确的 7 个旧对象；使用已演练的 advisory lock `5566807924744996692`、`lock_timeout=3s`、`statement_timeout=30s`。任何锁等待、对象漂移或保全校验异常立即回滚，不扩大删除范围。
 4. 运行候选版本的显式 PostgreSQL bootstrap，补齐目标 schema；按选定 MCP 路线准备权限与真实准入，核对 activation 和环境、部署、阶段、配置指纹及未解决 blocker。此检查必须在新 Backend 启动前通过。管理员/DDL/operator 凭据不留在常驻 Backend 环境中。
 5. 对比保留数据，验证 schema reconciliation 无待处理项、应有约束/索引/触发器齐全、防删保护继续有效。DDL 提交后 bootstrap 失败属于“已变更数据库”，按第 6 节恢复，不能直接启动旧容器。
-6. 按 Sidecar → Backend → Frontend 顺序启动新 `-prod` 容器，完成 health、生产 DB 身份、挂载、网络代理、真实 activation 及日志检查。仅保留一个生产 `backend` 网络别名提供者。
+6. 按阶段 D 锁定的镜像 digest，依次启动 Sidecar → Backend → Frontend 新 `-prod` 容器；核对实际运行工件与验收记录一致，完成 health、生产 DB 身份、挂载、网络代理、真实 activation 及日志检查。仅保留一个生产 `backend` 网络别名提供者。
 7. 维护入口保持关闭时完成受控 smoke，记录验证产生的测试数据；通过后开放流量并持续观察。不要删除旧容器、备份或清理原 runtime。
 
 完成证据：用户入口、数据库、文件、Skill、MCP、重启后行为一致，开发环境和共享服务保持正常。
@@ -149,7 +149,7 @@
 
 | 失败时点 | 可执行的恢复方式 |
 |---|---|
-| 尚未提交结构删除 | 停止候选容器，确认数据库未变化；恢复旧 Skill/配置及入口，启动旧容器 |
+| 尚未提交结构删除 | 停止候选容器，确认数据库未变化；恢复旧配置及入口，确认 Skill 仍为已验证兼容旧后端的保留版本，再启动旧容器 |
 | 已提交 DDL，尚未开放流量 | 停止所有新 writer；按演练方案从最终备份恢复旧数据库和一致的 runtime/配置/密钥/Skill，再启动旧镜像；不能只换镜像 |
 | 已产生新的正式业务写入 | 立即停写并保全故障现场；先明确新增数据保全与恢复点，不能直接恢复旧备份造成静默数据丢失。评估前向修复或获准的数据回迁后执行 |
 
@@ -157,14 +157,14 @@
 
 ## 7. 完成标准与尚未闭合事项
 
-迁移完成需同时满足：prod 源码和两远端一致；三类实际镜像与已验证候选对应；生产 PostgreSQL 结构/数据校验通过；历史会话/文件及新任务可用；登录、Skill、MCP、Sidecar 与前端链路验收通过；回滚材料完整且 dev/共享服务未受影响。
+迁移完成需同时满足：prod 源码和两远端一致；三类实际运行镜像的 linux/amd64 工件 digest 与验收记录完全一致；生产 PostgreSQL 结构/数据校验通过；历史会话/文件及新任务可用；登录、Skill、MCP、Sidecar 与前端链路验收通过；回滚材料完整且 dev/共享服务未受影响。
 
 当前尚未闭合：
 
 - MCP 选择分阶段发布还是先实现首次生产准入适配；现有固定 assembly-off 命令不能直接视为可执行。
 - 生产真实配置、master key、Sidecar trust、ledger 权限及 activation 的现场证据。
 - 旧登录 token 的重新登录安排、旧全局 MCP 的能力迁移范围、在途任务排空结果。
-- 外部 Skill 的正式能力清单、发布范围与服务器实际 revision；不能自动发布开发专用内容或删除旧能力。
+- 已发布生产 Skill 的服务器实际 revision、bundle digest、挂载权限及新旧后端兼容性验证记录；发布工作本身已由用户确认完成。
 - 旧 `/app/runtime` 挂载类型、完整生产备份的实际恢复演练和可接受维护窗口。
 
 本轮完成的是迁移规划；以上未闭合项不会被记为已上线或测试通过。

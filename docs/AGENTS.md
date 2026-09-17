@@ -119,7 +119,7 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md` | `draft_for_review`；仅完成调查与迁移规划 | 先确定 MCP 首次准入路线及 Skill 发布范围，再准备候选合并、生产参数和真实恢复演练；未执行生产变更。 |
+| `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md` | `draft_for_review`；生产 Skill 已由用户确认发布，计划已补齐镜像 digest 验收与部署一致性要求 | 确定 MCP 首次准入路线，核验现有生产 Skill，再准备候选合并、生产参数和真实恢复演练；只部署验收过的镜像工件，本轮未执行生产变更。 |
 | `superpowers/specs/2026-09-04-unified-tool-result-50k-token-budget-design.md`、同名Backend implementation plan与Frontend implementation plan | Backend与Frontend均为`image_published_not_deployed`；backend-dev `0.1.35`、frontend-dev `0.1.29`及各自远端digest验证已闭合 | 开发环境部署仍须另行授权；部署后验证大型既有v2 view、新的50k内/超限Result及`model_unavailable`。不修改历史Tool Result、projection revision、数据库schema、外部MCP/Skill或`prod`。 |
 | `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-implementation-plan.md` | `published_pending_deploy`；Checkpoint 0～E、相关全量门禁和backend-dev `0.1.34`发布已闭合 | 用新Task执行开发环境smoke；尚未部署或修改数据库，`prod`不在范围。 |
 | `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-design.md` | `published_pending_deploy`；授权前schema校验、最终fingerprint门禁和repair边界已实施并发布 | 保持Gateway纵深校验；历史失败Task不重放或复活。 |
