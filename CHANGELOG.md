@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 新增 main→prod 首次迁移计划：核对两分支分叉与生产独有变更，固定 `-prod:0.1.23` 镜像、51999/51888 端口和生产 Skill 路径，列明 24→23→66 表升级、外部配置/主密钥/登录兼容、独立 Skill 发布及 MCP 生产准入条件，安排候选验证、真实恢复演练、停写切换与分阶段回滚。当前为 `draft_for_review`，未合并分支、发布镜像或操作生产；部署命令原样保留。License Requirement：无新增依赖或许可变化。
+
 - 补充跟踪本次修改的 `scripts/AGENTS.md` 和 `docker/AGENTS.md`：为两份非敏感目录说明增加精确 Git 忽略例外，使部署文件新路径及保护检查入口随 `main` 同步；部署命令文件继续保持本地保护。License Requirement：无新增依赖或许可变化。
 
 - 本地 `docker_cmd/docker_cmd_prod.md` 已按开发文件的格式整理为“Docker启动命令、生产环境、单一Bash命令块、访问地址、前置条件”：三类镜像使用 `-prod:0.1.23`，前后端端口为 `51999/51888`，Skill只读挂载 `/data/peihai/vibe-breeding-main/skills`。首次停写备份、7个旧DAG对象清理及补齐43张表/8个字段收敛为部署前置条件，启动命令只读校验数据库身份和最终66表结构；此前本机PostgreSQL 17合成数据的24→23→66表迁移/保全演练通过，不等同于生产验收。生产Sidecar验证材料、MCP分角色权限与真实activation仍待现场确认。开发文件保持原样，未发布镜像、执行生产DDL或部署。License Requirement：无新增依赖或许可变化。
