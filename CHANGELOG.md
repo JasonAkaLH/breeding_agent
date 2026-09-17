@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 补充跟踪本次修改的 `scripts/AGENTS.md` 和 `docker/AGENTS.md`：为两份非敏感目录说明增加精确 Git 忽略例外，使部署文件新路径及保护检查入口随 `main` 同步；部署命令文件继续保持本地保护。License Requirement：无新增依赖或许可变化。
+
 - 本地 `docker_cmd/docker_cmd_prod.md` 已按开发文件的格式整理为“Docker启动命令、生产环境、单一Bash命令块、访问地址、前置条件”：三类镜像使用 `-prod:0.1.23`，前后端端口为 `51999/51888`，Skill只读挂载 `/data/peihai/vibe-breeding-main/skills`。首次停写备份、7个旧DAG对象清理及补齐43张表/8个字段收敛为部署前置条件，启动命令只读校验数据库身份和最终66表结构；此前本机PostgreSQL 17合成数据的24→23→66表迁移/保全演练通过，不等同于生产验收。生产Sidecar验证材料、MCP分角色权限与真实activation仍待现场确认。开发文件保持原样，未发布镜像、执行生产DDL或部署。License Requirement：无新增依赖或许可变化。
 
 - 本地部署命令按用户要求整理至 `docker_cmd/`：原根目录 `docker_cmd.md` 在仓库外 `0600` 备份后原样迁移为 `docker_cmd_dev.md`，新增仅含标题的 `docker_cmd_prod.md`，生产部署命令待后续确认后记录。同步更新 Git/Docker 忽略规则、保护说明及仓库策略检查；两个文件保持 `0600`、Git-ignored/untracked，未执行部署或修改数据库。License Requirement：无新增依赖或许可变化。
