@@ -1,0 +1,6 @@
+{
+  "MCP-Protocol-Version": "2026-07-28",
+  "Mcp-Method": "tools/call",
+  "Mcp-Name": "lookup",
+  "Mcp-Param-Tenant": "alpha"
+}

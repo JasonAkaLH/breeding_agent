@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from src.core.enums import TaskStatus
-from src.core.models import EventRecord, Task
-from src.orchestration.models import OrchestrationRequest
+from src.core.models import Conversation, EventRecord, PendingSkillContext, Task
+from src.integrations.agent_skills import SkillBundleRevisionError
+from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract, mode_for_component
+from src.storage.sqlalchemy_models import EventRecordRow
 from tests.api.support import APITestCase
+from tests.api.test_user_mcp_runtime_wiring import (
+    _write_task_authority_migration_evidence,
+)
 
 
 class _RecordingDispatcherSidecarClient:
@@ -98,6 +104,10 @@ class _FailingDispatcherSidecarClient(_RecordingDispatcherSidecarClient):
 
 
 class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.durable_events: dict[str, tuple[str, str, str, bytes]] = {}
+
     def append_event(
         self,
         *,
@@ -107,6 +117,13 @@ class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
         payload_json: bytes,
         idempotency_key: str,
     ) -> dict[str, object]:
+        identity = (conversation_id, task_id, event_type, payload_json)
+        existing = self.durable_events.get(idempotency_key)
+        if existing is not None and existing != identity:
+            raise RuntimeError(
+                "runtime_store_idempotency_conflict: event append payload differs"
+            )
+        self.durable_events.setdefault(idempotency_key, identity)
         self.calls.append(
             (
                 "event_append",
@@ -124,20 +141,48 @@ class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
             "cursor": {
                 "conversation_id": conversation_id,
                 "created_at_ms": 1,
-                "sequence": 1,
+                "sequence": list(self.durable_events).index(idempotency_key) + 1,
                 "task_id": task_id,
             },
+            "duplicate": existing is not None,
             "error": None,
         }
 
+    def append_event_exact(self, **kwargs) -> dict[str, object]:
+        return self.append_event(**kwargs)
+
 
 class RuntimeSidecarContractAPITest(APITestCase):
-    def _request(self, task_id: str = "task-bundle-pin") -> OrchestrationRequest:
-        return OrchestrationRequest(
+    def _request(self, task_id: str = "task-bundle-pin") -> AgentExecutionRequest:
+        return AgentExecutionRequest(
             task_id=task_id,
             conversation_id="conv-bundle-pin",
             root_message_id="msg-bundle-pin",
             user_message="bundle pin",
+            owner_scope="owner:test",
+            metadata={
+                "skill_bundle_revision": self.runtime._skill_runtime_state.active_revision,
+            },
+        )
+
+    async def test_skill_revision_retain_rejects_missing_metadata_without_active_fallback(self) -> None:
+        request = AgentExecutionRequest(
+            task_id="task-bundle-missing",
+            conversation_id="conv-bundle-pin",
+            root_message_id="msg-bundle-missing",
+            user_message="bundle pin",
+            owner_scope="owner:test",
+        )
+
+        with self.assertRaisesRegex(
+            SkillBundleRevisionError,
+            "agent_skill_bundle_revision_retired",
+        ):
+            self.runtime._retain_task_skill_revision(request)  # noqa: SLF001
+
+        self.assertNotIn(
+            request.task_id,
+            self.runtime._task_skill_bundle_revisions,  # noqa: SLF001
         )
 
     async def test_dispatcher_enforce_rejects_python_legacy_bundle_revision_pin_without_sidecar(self) -> None:
@@ -176,7 +221,14 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(self.runtime._task_skill_bundle_revisions[request.task_id], retained_revision)  # noqa: SLF001
 
     async def test_runtime_configures_grpc_sidecar_client_from_deployment_endpoint_env(self) -> None:
-        sentinel_client = object()
+        class AgentReadySentinelClient:
+            commit_agent_state = staticmethod(lambda **_kwargs: None)
+            get_agent_run = staticmethod(lambda **_kwargs: None)
+            get_agent_run_for_task = staticmethod(lambda **_kwargs: None)
+            list_agent_runs = staticmethod(lambda **_kwargs: None)
+            list_agent_items = staticmethod(lambda **_kwargs: None)
+
+        sentinel_client = AgentReadySentinelClient()
         with (
             patch.dict(os.environ, {"MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535"}),
             patch("src.api.runtime.RuntimeSidecarGrpcClient", return_value=sentinel_client) as client_factory,
@@ -233,10 +285,12 @@ class RuntimeSidecarContractAPITest(APITestCase):
         )
 
     async def test_runtime_enforce_requires_allowlisted_sidecar_artifact_manifest(self) -> None:
+        migration_env = _write_task_authority_migration_evidence(self.workspace)
         with (
             patch.dict(
                 os.environ,
                 {
+                    **migration_env,
                     "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
                     "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
                     "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": "",
@@ -254,12 +308,30 @@ class RuntimeSidecarContractAPITest(APITestCase):
         client_factory.assert_not_called()
 
     async def test_runtime_enforce_validates_sidecar_artifact_allowlist_before_client_use(self) -> None:
-        sentinel_client = object()
+        migration_env = _write_task_authority_migration_evidence(self.workspace)
+        class AgentReadySentinelClient:
+            commit_agent_state = staticmethod(lambda **_kwargs: None)
+            get_agent_run = staticmethod(lambda **_kwargs: None)
+            get_agent_run_for_task = staticmethod(lambda **_kwargs: None)
+            list_agent_runs = staticmethod(lambda **_kwargs: None)
+            list_agent_items = staticmethod(lambda **_kwargs: None)
+            admit_submission = staticmethod(lambda **_kwargs: None)
+            claim_pending_submission = staticmethod(lambda **_kwargs: None)
+            renew_submission_claim = staticmethod(lambda **_kwargs: None)
+            acknowledge_submission_projection = staticmethod(lambda **_kwargs: None)
+            prepare_submission_handoff = staticmethod(lambda **_kwargs: None)
+            get_submission_preparation = staticmethod(lambda **_kwargs: None)
+            acknowledge_submission_handoff = staticmethod(lambda **_kwargs: None)
+            close_conversation_admission = staticmethod(lambda **_kwargs: None)
+            reserve_message_identity = staticmethod(lambda **_kwargs: None)
+
+        sentinel_client = AgentReadySentinelClient()
         manifest, allowlist, metadata = self._write_runtime_sidecar_artifact_trust_files()
         with (
             patch.dict(
                 os.environ,
                 {
+                    **migration_env,
                     "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
                     "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
                     "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": str(manifest),
@@ -286,6 +358,7 @@ class RuntimeSidecarContractAPITest(APITestCase):
         )
 
     async def test_runtime_enforce_rejects_manifest_not_exactly_present_in_allowlist(self) -> None:
+        migration_env = _write_task_authority_migration_evidence(self.workspace)
         manifest, allowlist, _metadata = self._write_runtime_sidecar_artifact_trust_files(
             allowlist_overrides={"git_commit": "different-commit"}
         )
@@ -293,6 +366,7 @@ class RuntimeSidecarContractAPITest(APITestCase):
             patch.dict(
                 os.environ,
                 {
+                    **migration_env,
                     "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
                     "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
                     "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": str(manifest),
@@ -361,6 +435,153 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(shadow_records[-1]["payload"]["legacy_status"], "ok")
         self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "ok")
         self.assertNotIn("do-not-log", json.dumps(shadow_records[-1], ensure_ascii=False))
+
+    async def test_pending_supersede_receipt_stays_atomic_with_sql_transition(self) -> None:
+        sidecar = _RecordingRuntimeStoreSidecarClient()
+        await self.reconfigure_runtime(
+            runtime_sidecar_client=sidecar,
+            enable_conversation_memory=False,
+        )
+        for index, mode in enumerate(("enforce", "shadow"), start=1):
+            conversation_id = f"conv-pending-event-{mode}"
+            task_id = f"task-pending-event-{mode}"
+            now = self.runtime._utcnow_naive() + timedelta(seconds=index)  # noqa: SLF001
+            await self.runtime.storage.save_conversation(
+                Conversation(
+                    conversation_id=conversation_id,
+                    username="acc-1",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await self.runtime.storage.save_pending_skill_context(
+                PendingSkillContext(
+                    context_id=f"pending-{mode}",
+                    conversation_id=conversation_id,
+                    username="acc-1",
+                    capability_id="skill.example",
+                    skill_name="example",
+                    source_task_id="old-task",
+                    source_message_id="old-message",
+                    original_user_message="private",
+                    missing_requirements=("value",),
+                    assistant_message="need value",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            event, duplicate = await self.runtime.storage.materialize_submission_pending_skill_transition_exact(
+                username="acc-1",
+                conversation_id=conversation_id,
+                task_id=task_id,
+                prepared_execution_sha256="a" * 64,
+                target_status="superseded",
+                reason="new_forced_capability",
+                pending_context=None,
+                occurred_at=now,
+            )
+            replay_event, replay_duplicate = await self.runtime.storage.materialize_submission_pending_skill_transition_exact(
+                username="acc-1",
+                conversation_id=conversation_id,
+                task_id=task_id,
+                prepared_execution_sha256="a" * 64,
+                target_status="superseded",
+                reason="new_forced_capability",
+                pending_context=None,
+                occurred_at=now,
+            )
+            self.assertFalse(duplicate)
+            self.assertTrue(replay_duplicate)
+            self.assertEqual(replay_event, event)
+            self.assertEqual(event.payload["count"], 1)
+
+            with self.runtime.storage._session_factory() as session:  # noqa: SLF001
+                sql_event = session.get(EventRecordRow, event.event_id)
+            self.assertIsNotNone(sql_event)
+            self.assertNotIn(event.event_id, sidecar.durable_events)
+
+    async def test_event_enforce_retries_exact_append_without_sql_event_loader(self) -> None:
+        sidecar = _RecordingRuntimeStoreSidecarClient()
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "enforce"}):
+            await self.reconfigure_runtime(
+                runtime_sidecar_client=sidecar,
+                enable_conversation_memory=False,
+            )
+            self.assertIsNone(self.runtime.agent_loop_orchestrator._load_event)  # noqa: SLF001
+            task = Task(
+                task_id="task-event-enforce",
+                conversation_id="conv-event-enforce",
+                root_message_id="msg-event-enforce",
+                status=TaskStatus.ACCEPTED,
+            )
+            await self.runtime.storage.save_task(task)
+            request = AgentExecutionRequest(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                root_message_id=task.root_message_id,
+                user_message="run",
+                owner_scope="owner:test",
+            )
+            publish = AsyncMock(wraps=self.runtime.event_broker.publish)
+            with patch.object(self.runtime.event_broker, "publish", publish):
+                first = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+                second = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+
+                started_id = f"evt-agent-run-started:{first.run.run_id}"
+                started = sidecar.durable_events[started_id]
+                sidecar.durable_events[started_id] = (
+                    started[0],
+                    started[1],
+                    started[2],
+                    b'{"routing_mode":"changed"}',
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_idempotency_conflict",
+                ):
+                    await self.runtime.agent_loop_orchestrator.initialize_run(request)
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(publish.await_count, 2)
+            self.assertEqual(len(sidecar.durable_events), 2)
+            self.assertEqual(
+                {call[1]["idempotency_key"] for call in sidecar.calls if call[0] == "event_append"},
+                set(sidecar.durable_events),
+            )
+
+            self.assertEqual(len(sidecar.durable_events), 2)
+
+    async def test_initialization_event_restart_does_not_republish_sql_exact_replay(self) -> None:
+        task = Task(
+            task_id="task-event-restart",
+            conversation_id="conv-event-restart",
+            root_message_id="msg-event-restart",
+            status=TaskStatus.ACCEPTED,
+        )
+        request = AgentExecutionRequest(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            root_message_id=task.root_message_id,
+            user_message="run",
+            owner_scope="owner:test",
+        )
+        await self.runtime.storage.save_task(task)
+        first_publish = AsyncMock(wraps=self.runtime.event_broker.publish)
+        with patch.object(self.runtime.event_broker, "publish", first_publish):
+            first = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+        self.assertEqual(first_publish.await_count, 2)
+
+        await self.reconfigure_runtime(enable_conversation_memory=False)
+        restart_publish = AsyncMock(wraps=self.runtime.event_broker.publish)
+        with patch.object(self.runtime.event_broker, "publish", restart_publish):
+            replay = await self.runtime.agent_loop_orchestrator.initialize_run(request)
+
+        self.assertEqual(replay.run, first.run)
+        self.assertEqual(restart_publish.await_count, 0)
+        self.assertEqual(
+            len(await self.runtime.storage.list_events_for_task(task.task_id)),
+            2,
+        )
 
     async def test_dispatcher_shadow_records_bundle_pin_release_audit_after_legacy_revision(self) -> None:
         sidecar = _RecordingDispatcherSidecarClient()

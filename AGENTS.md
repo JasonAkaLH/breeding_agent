@@ -11,15 +11,20 @@
 - `src/core/`：共享 contract、基础模型、枚举与通用错误。
 - `src/auth/`、`src/state/`、`src/storage/`：鉴权、运行状态与持久化存储。
 - `src/lifecycle/`：任务、节点、邮箱、interrupt、cancel 与会话生命周期。
-- `src/orchestration/`：能力注册、调度、workflow plan、planner、router、validator、expander 等编排逻辑。
+- `src/orchestration/`：统一Agent Loop控制面、能力注册、唯一Invocation lifecycle、Tool catalog、continuation/recovery、Prompt与会话记忆投影。
 - `src/capabilities/`：主代理与各类后端 capability 的业务实现入口。
 - `src/integrations/`：LLM、数据库、审计、Skill runtime、外部服务与适配层。
-- `skill/`：项目级 Skill bundles；每个子目录通常包含 `SKILL.md`、契约、schema、references 与脚本。
+- `skill/`：不再由本仓库跟踪；仅可作为本地、Git-ignored 的外部 Skill 兼容检出目录。开发部署从 `/data/peihai/vibe-breeding-dev/skills` 只读挂载到容器 `/app/skill`。
 - `frontend/`：React + TypeScript + Vite 前端，对话台、API/SSE client、组件与前端测试。
 - `native/`：Rust workspace、runtime/kernel/sidecar/安全 facade 与相关 proto。
 - `tests/`：后端分层回归测试，目录大体对应 `src/` 的模块边界。
 - `docs/`：PRD、API 文档、runbook、设计记录与 checkpoint 文档；未完成的 Future work 参考 `docs/AGENTS.md`。
 - `scripts/`、`docker/`：本地验证、维护脚本、Docker 与部署辅助入口。
+- `docker_cmd/`：Git-ignored 的本地部署命令；`docker_cmd_dev.md`记录开发环境，`docker_cmd_prod.md`记录生产环境，不进入 Docker build context。
+
+Rust 质量门禁统一从 `scripts/run_rust_quality_gates.py` 进入，并遵守
+`native/deny.toml` 的依赖策略。Skill Runtime PyO3 wheel 本地 smoke 面向
+Ubuntu 22.04 / `manylinux_2_35`，属于非默认回归，不应进入服务启动或请求路径。
 - `runtime/`：本地运行产物、日志、artifact 与调试 prompt；通常不作为业务源码入口。
 
 
@@ -33,11 +38,12 @@
 
 - 生产环境代码以 `prod` 分支为准；开发环境代码以 `main` 分支为准。涉及部署、镜像、Skill 挂载或环境差异排查时，必须先确认当前分支与目标环境一致，避免把生产约束误套到开发分支，或把开发配置误发布到生产分支。
 
-## `docker_cmd.md` 绝对保护指令
+## `docker_cmd/` 本地部署文件保护指令
 
-- **不许任何操作删除 `docker_cmd.md`，也不许通过移动、重命名、覆盖为空、清理命令、分支切换、重置、工作树移除或任何其他操作导致根目录 `docker_cmd.md` 消失。**
-- `docker_cmd.md` 含本地敏感部署信息，必须始终保持为 Git-ignored 的本地文件；绝对禁止读取并输出其敏感内容，禁止取消忽略，禁止使用 `git add -f`、`git stash --all` 或其他方式将其加入 Git 对象、提交或推送到任何远端。
-- 涉及仓库清理、工作树切换或历史重写时，必须先在仓库外创建权限不高于 `0600` 的本地备份，操作后验证根目录文件仍存在、仍被忽略且未被 Git 跟踪；如文件意外缺失，必须先从本地备份恢复再继续其他工作。
+- 保护对象为开发部署文件 `docker_cmd/docker_cmd_dev.md` 和生产部署文件 `docker_cmd/docker_cmd_prod.md`。
+- **不许删除上述部署文件，也不许通过移动、重命名、覆盖为空、清理命令、分支切换、重置、工作树移除或其他操作导致文件丢失。**
+- `docker_cmd/` 含本地敏感部署信息，必须始终保持 Git-ignored，并从 Docker build context 排除；绝对禁止读取并输出其敏感内容，禁止取消忽略，禁止使用 `git add -f`、`git stash --all` 或其他方式将其加入 Git 对象、提交或推送到任何远端。旧路径 `/docker_cmd.md` 的忽略规则继续保留，防止旧副本误入 Git。
+- 涉及仓库清理、工作树切换或历史重写时，必须先在仓库外创建权限不高于 `0600` 的本地备份，操作后验证两个文件仍存在、权限为 `0600`、仍被忽略且未被 Git 跟踪；如文件意外缺失，必须先从本地备份恢复再继续其他工作。
 
 ## 1. 编码前先思考
 

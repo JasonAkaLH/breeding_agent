@@ -71,13 +71,13 @@ class SseAuthGenerationInvalidationTest(APITestCase):
                         event_id=f"evt-sse-auth-{index}",
                         conversation_id="conv-sse-auth",
                         task_id="task-sse-auth",
-                        event_type="main_agent.output_delta",
+                        event_type="agent.reasoning_delta",
                         payload={"delta": f"chunk-{index}"},
                         visibility=EventVisibility.FRONTEND,
                     )
                 )
                 event = await asyncio.wait_for(pending, timeout=1)
-                self.assertEqual(event.event_type, "main_agent.output_delta")
+                self.assertEqual(event.event_type, "agent.reasoning_delta")
                 pending = asyncio.create_task(iterator.__anext__())
         finally:
             pending.cancel()
@@ -105,7 +105,7 @@ class SseAuthGenerationInvalidationTest(APITestCase):
                 event_id="evt-after-refresh",
                 conversation_id="conv-sse-auth",
                 task_id="task-sse-auth",
-                event_type="main_agent.output_delta",
+                event_type="agent.reasoning_delta",
                 payload={"delta": "late"},
                 visibility=EventVisibility.FRONTEND,
             )
@@ -133,7 +133,7 @@ class SseAuthGenerationInvalidationTest(APITestCase):
                 event_id="evt-after-logout",
                 conversation_id="conv-sse-auth",
                 task_id="task-sse-auth",
-                event_type="main_agent.output_delta",
+                event_type="agent.reasoning_delta",
                 payload={"delta": "late"},
                 visibility=EventVisibility.FRONTEND,
             )
@@ -165,7 +165,7 @@ class SseAuthGenerationInvalidationTest(APITestCase):
                 event_id="evt-cache-miss",
                 conversation_id="conv-sse-auth",
                 task_id="task-sse-auth",
-                event_type="main_agent.output_delta",
+                event_type="agent.reasoning_delta",
                 payload={"delta": "late"},
                 visibility=EventVisibility.FRONTEND,
             )
@@ -198,7 +198,7 @@ class SseAuthGenerationInvalidationTest(APITestCase):
                 event_id="evt-auth-bus-unhealthy",
                 conversation_id="conv-sse-auth",
                 task_id="task-sse-auth",
-                event_type="main_agent.output_delta",
+                event_type="agent.reasoning_delta",
                 payload={"delta": "late"},
                 visibility=EventVisibility.FRONTEND,
             )

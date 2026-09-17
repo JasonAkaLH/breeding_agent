@@ -11,7 +11,6 @@ MIGRATION_OBJECTS = (
     "message",
     "task",
     "task_node",
-    "task_edge",
     "event",
     "artifact",
     "interrupt",

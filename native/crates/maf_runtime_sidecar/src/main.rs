@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use maf_runtime_sidecar::semantic_probe_runtime_sidecar_unix_socket;
 use maf_runtime_sidecar::{
     DEFAULT_LISTEN_ADDR, RuntimeSidecarKernel, RuntimeSidecarServeConfig, serve_runtime_sidecar,
 };
@@ -73,6 +75,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             serve_runtime_sidecar(config).await?;
             Ok(())
+        }
+        #[cfg(unix)]
+        Some("--probe") => {
+            let endpoint = args
+                .next()
+                .ok_or("missing value for maf-runtime-sidecar --probe")?;
+            if args.next().is_some() {
+                return Err("maf-runtime-sidecar --probe accepts exactly one endpoint".into());
+            }
+            let socket_path = endpoint
+                .strip_prefix("unix://")
+                .ok_or("maf-runtime-sidecar --probe requires a unix:// endpoint")?;
+            semantic_probe_runtime_sidecar_unix_socket(socket_path).await
         }
         Some(other) => Err(format!("unknown maf-runtime-sidecar argument: {other}").into()),
     }

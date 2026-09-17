@@ -74,6 +74,31 @@ class InterruptResumeTest(LifecycleSQLiteTestCase):
         self.assertEqual(ready_events[0].payload["capability_id"], "skill.data_query")
         self.assertEqual(ready_events[0].payload["skill_name"], "data-query")
 
+        replayed_interrupt = asyncio.run(service.record_answer(answer))
+        self.assertEqual(replayed_interrupt, answered_interrupt)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in asyncio.run(
+                        self.storage.list_events_for_task("task-1")
+                    )
+                    if event.event_type == "node.ready_to_resume"
+                ]
+            ),
+            1,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in event_sink.events
+                    if event.event_type == "node.ready_to_resume"
+                ]
+            ),
+            1,
+        )
+
         resumed_node = asyncio.run(service.begin_resume("resume-1"))
         self.assertEqual(resumed_node.status, NodeStatus.RESUMING)
         events = asyncio.run(self.storage.list_events_for_task("task-1"))

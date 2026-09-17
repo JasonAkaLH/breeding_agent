@@ -20,15 +20,8 @@ export type SlashSubmitIntent =
       kind: 'ready';
       command: SlashCommand;
       content: string;
-      capabilityId: 'main_agent.respond';
-      metadata: {
-        forced_by_slash_command: true;
-        slash_command: string;
-        soft_skill_binding: {
-          capability_id: string;
-          command: string;
-        };
-      };
+      capabilityId: string;
+      routingMode: 'hint';
     }
   | { kind: 'blocked'; reason: 'not_found' | 'conflict'; command: string }
   | { kind: 'auto'; content: string };
@@ -106,15 +99,8 @@ function readyIntent(command: SlashCommand, content: string): SlashSubmitIntent 
     kind: 'ready',
     content,
     command,
-    capabilityId: 'main_agent.respond',
-    metadata: {
-      forced_by_slash_command: true,
-      slash_command: command.command,
-      soft_skill_binding: {
-        capability_id: command.capabilityId,
-        command: command.command,
-      },
-    },
+    capabilityId: command.capabilityId,
+    routingMode: 'hint',
   };
 }
 

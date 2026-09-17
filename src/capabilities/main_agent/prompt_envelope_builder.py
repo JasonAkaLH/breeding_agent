@@ -30,6 +30,7 @@ from .prompt_builder import (
     MAIN_AGENT_FILE_DOWNLOAD_CONSTRAINT,
     MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT,
     MAIN_AGENT_SYSTEM_CONTRACT_LINES,
+    _format_capability_gap_context,
     _format_memory_context,
     _format_response_role,
     build_selected_public_skill_profiles,
@@ -42,7 +43,7 @@ from .prompt_builder import (
 PromptEnvelopeMode = Literal["off", "shadow", "string", "messages"]
 
 _ENV_MODE_KEY = "MAF_PROMPT_ENVELOPE_MODE"
-_TEMPLATE_ID = "main_agent.respond.prompt_envelope"
+_TEMPLATE_ID = "agent.final.prompt_envelope"
 _TEMPLATE_VERSION = "p4-tool-profile-v1"
 
 
@@ -76,6 +77,7 @@ def build_main_agent_rendered_prompt(
     answer_scope: str | None = None,
     model_edition: str | None = None,
     trim_max_tokens: int | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
     token_estimator: TokenEstimator | None = None,
     token_estimator_is_fallback: bool = False,
 ) -> RenderedPrompt:
@@ -90,6 +92,7 @@ def build_main_agent_rendered_prompt(
         answer_scope=answer_scope,
         model_edition=model_edition,
         trim_max_tokens=trim_max_tokens,
+        capability_gap_context=capability_gap_context,
     )
     return render_prompt_envelope(
         envelope,
@@ -111,6 +114,7 @@ def build_main_agent_rendered_messages(
     model_edition: str | None = None,
     trim_max_tokens: int | None = None,
     role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
     token_estimator: TokenEstimator | None = None,
     token_estimator_is_fallback: bool = False,
 ) -> RenderedMessages:
@@ -125,6 +129,7 @@ def build_main_agent_rendered_messages(
         answer_scope=answer_scope,
         model_edition=model_edition,
         trim_max_tokens=trim_max_tokens,
+        capability_gap_context=capability_gap_context,
     )
     return render_prompt_envelope_messages(
         envelope,
@@ -146,6 +151,7 @@ def build_main_agent_prompt_envelope(
     answer_scope: str | None = None,
     model_edition: str | None = None,
     trim_max_tokens: int | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
 ) -> PromptEnvelope:
     segments: list[PromptSegment] = [
         PromptSegment(
@@ -171,6 +177,21 @@ def build_main_agent_prompt_envelope(
     ]
 
     public_skill_profiles = build_selected_public_skill_profiles(skill_matches)
+    if capability_gap_context:
+        segments.append(
+            PromptSegment(
+                name="capability_gap_disclosure",
+                role="system",
+                content=_format_capability_gap_context(
+                    capability_gap_context
+                ).lstrip("\n"),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="active_note",
+            )
+        )
     if public_skill_profiles:
         segments.append(
             PromptSegment(
@@ -313,6 +334,7 @@ def resolve_main_agent_prompt_for_mode(
     metadata: Mapping[str, Any] | None = None,
     stream_metadata: Mapping[str, Any] | None = None,
     mode: str | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
     token_estimator: TokenEstimator | None = None,
 ) -> MainAgentPromptResolution:
     requested_mode = resolve_main_agent_prompt_envelope_mode(mode)
@@ -325,6 +347,7 @@ def resolve_main_agent_prompt_for_mode(
         memory_context=memory_context,
         response_role=response_role,
         answer_scope=answer_scope,
+        capability_gap_context=capability_gap_context,
     )
     if requested_mode == "off":
         return MainAgentPromptResolution(
@@ -358,6 +381,7 @@ def resolve_main_agent_prompt_for_mode(
                 model_edition=model_edition,
                 trim_max_tokens=trim_max_tokens,
                 role_capabilities=role_capabilities,
+                capability_gap_context=capability_gap_context,
                 token_estimator=token_estimator,
                 token_estimator_is_fallback=token_estimator is None,
             )
@@ -373,6 +397,7 @@ def resolve_main_agent_prompt_for_mode(
                 answer_scope=answer_scope,
                 model_edition=model_edition,
                 trim_max_tokens=trim_max_tokens,
+                capability_gap_context=capability_gap_context,
                 token_estimator=token_estimator,
                 token_estimator_is_fallback=token_estimator is None,
             )
@@ -518,7 +543,7 @@ def _format_required_tool_results_and_artifacts(
     if dependency_context:
         sections.append(
             "## 上游能力结果上下文（已执行完成）\n"
-            "这些内容来自自动 DAG 中已经完成的能力节点。请优先基于这些事实回答用户，并把技术性字段整理成自然语言。\n"
+            "这些内容来自当前 AgentRun 中已完成的能力调用。请优先基于这些事实回答用户，并把技术性字段整理成自然语言。\n"
             + json.dumps(dependency_context, ensure_ascii=False, indent=2, default=str)
         )
     if script_results:

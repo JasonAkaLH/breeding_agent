@@ -104,7 +104,7 @@ class MCPPhase3RuntimeTaskTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "查询客户。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                                 "task_augmented_mode": "required",
                             }
                         ],
@@ -137,7 +137,7 @@ class MCPPhase3RuntimeTaskTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "查询客户。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                                 "task_augmented_mode": "preferred",
                             }
                         ],
@@ -172,7 +172,7 @@ class MCPPhase3RuntimeTaskTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "查询客户。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                                 "task_augmented_mode": "required",
                             }
                         ],
@@ -233,7 +233,7 @@ class MCPPhase3RuntimeTaskTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "查询客户。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                                 "task_augmented_mode": "required",
                             }
                         ],

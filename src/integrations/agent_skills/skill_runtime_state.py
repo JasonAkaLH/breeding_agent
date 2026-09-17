@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,6 +11,25 @@ from typing import Iterable
 from .catalog import SkillCatalog
 from .contract import SkillContract, SkillContractDiagnostic
 from .skill_capabilities import SkillCapabilityRegistry, build_skill_capability_registry
+
+
+_LEGACY_REVISION_RE = re.compile(r"^skillrev-[0-9]{6,}-[0-9a-f]{12}$")
+_V2_REVISION_RE = re.compile(r"^skillrev-v2-[0-9a-f]{64}$")
+
+
+class SkillBundleRevisionError(LookupError):
+    def __init__(self, safe_error_code: str) -> None:
+        super().__init__(safe_error_code)
+        self.safe_error_code = safe_error_code
+
+
+def classify_skill_bundle_revision(revision: object) -> str:
+    normalized = str(revision or "").strip()
+    if not normalized or _LEGACY_REVISION_RE.fullmatch(normalized):
+        return "retired"
+    if _V2_REVISION_RE.fullmatch(normalized):
+        return "v2"
+    return "invalid"
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,7 +81,6 @@ class SkillRuntimeState:
         self._public_skill_roots = tuple(Path(root).expanduser() for root in public_skill_roots)
         self._reserved_capability_ids = tuple(reserved_capability_ids)
         self._refresh_enabled = refresh_enabled
-        self._revision_counter = 0
         self._retained_counts: dict[str, int] = {}
         self._bundles: dict[str, SkillRuntimeBundle] = {}
         fingerprint = self._fingerprint_roots(self._skill_roots)
@@ -93,12 +112,18 @@ class SkillRuntimeState:
         return self._bundles[self._active_revision]
 
     def bundle_for_revision(self, revision: str | None = None) -> SkillRuntimeBundle:
-        if not revision:
-            return self.active_bundle
+        normalized = str(revision or "").strip()
+        classification = classify_skill_bundle_revision(normalized)
+        if classification == "retired":
+            raise SkillBundleRevisionError("agent_skill_bundle_revision_retired")
+        if classification == "invalid":
+            raise SkillBundleRevisionError("agent_skill_bundle_revision_invalid")
         try:
-            return self._bundles[revision]
+            return self._bundles[normalized]
         except KeyError as exc:
-            raise KeyError(f"Unknown Skill bundle revision: {revision}") from exc
+            raise SkillBundleRevisionError(
+                "agent_skill_bundle_revision_unavailable"
+            ) from exc
 
     def activate_revision(self, revision: str) -> None:
         self.bundle_for_revision(revision)
@@ -121,10 +146,10 @@ class SkillRuntimeState:
         return tuple(sorted(known))
 
     def retain_revision(self, revision: str | None) -> None:
-        if not revision:
-            return
-        self.bundle_for_revision(revision)
-        self._retained_counts[revision] = self._retained_counts.get(revision, 0) + 1
+        bundle = self.bundle_for_revision(revision)
+        self._retained_counts[bundle.revision] = (
+            self._retained_counts.get(bundle.revision, 0) + 1
+        )
 
     def release_revision(self, revision: str | None) -> None:
         if not revision:
@@ -191,8 +216,7 @@ class SkillRuntimeState:
         catalog: SkillCatalog,
         fingerprint: tuple[tuple[str, str], ...],
     ) -> SkillRuntimeBundle:
-        self._revision_counter += 1
-        revision = f"skillrev-{self._revision_counter:06d}-{self._fingerprint_digest(fingerprint)}"
+        revision = f"skillrev-v2-{self._fingerprint_digest(fingerprint)}"
         capabilities = build_skill_capability_registry(
             catalog,
             public_skill_roots=self._public_skill_roots,
@@ -284,4 +308,4 @@ class SkillRuntimeState:
     @staticmethod
     def _fingerprint_digest(fingerprint: tuple[tuple[str, str], ...]) -> str:
         raw = "\n".join(f"{path}\t{digest}" for path, digest in fingerprint)
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()

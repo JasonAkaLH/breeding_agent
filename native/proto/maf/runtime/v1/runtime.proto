@@ -10,9 +10,18 @@ service RuntimeSidecar {
   rpc Version(VersionRequest) returns (VersionResponse);
   rpc CheckCompatibility(CompatibilityCheckRequest) returns (CompatibilityCheckResponse);
   rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+  rpc GetTask(GetTaskRequest) returns (GetTaskResponse);
+  rpc ListTasksForConversation(ListTasksForConversationRequest) returns (ListTasksForConversationResponse);
+  rpc GetActiveTaskForConversation(GetActiveTaskForConversationRequest) returns (GetActiveTaskForConversationResponse);
+  rpc CommitAgentState(CommitAgentStateRequest) returns (AgentStateResponse);
+  rpc GetAgentRun(GetAgentRunRequest) returns (AgentRunResponse);
+  rpc GetAgentRunForTask(GetAgentRunForTaskRequest) returns (AgentRunResponse);
+  rpc ListAgentRuns(ListAgentRunsRequest) returns (ListAgentRunsResponse);
+  rpc ListAgentItems(ListAgentItemsRequest) returns (ListAgentItemsResponse);
+  rpc GetAgentFinalProjection(GetAgentFinalProjectionRequest) returns (AgentFinalProjectionResponse);
+  rpc GetTaskNode(GetTaskNodeRequest) returns (GetTaskNodeResponse);
+  rpc ListTaskNodesForTask(ListTaskNodesForTaskRequest) returns (ListTaskNodesForTaskResponse);
   rpc TransitionNode(TransitionNodeRequest) returns (TransitionNodeResponse);
-  rpc SaveTaskEdge(SaveTaskEdgeRequest) returns (TaskEdgeResponse);
-  rpc ListTaskEdges(ListTaskEdgesRequest) returns (ListTaskEdgesResponse);
   rpc SaveArtifact(SaveArtifactRequest) returns (ArtifactResponse);
   rpc GetArtifact(GetArtifactRequest) returns (ArtifactResponse);
   rpc ListArtifactsForTask(ListArtifactsForTaskRequest) returns (ListArtifactsForTaskResponse);
@@ -24,6 +33,15 @@ service RuntimeSidecar {
   rpc WriteCancellationToken(WriteCancellationTokenRequest) returns (WriteCancellationTokenResponse);
   rpc PinBundleRevision(PinBundleRevisionRequest) returns (BundleRevisionResponse);
   rpc ReleaseBundleRevision(ReleaseBundleRevisionRequest) returns (BundleRevisionResponse);
+  rpc AdmitSubmission(AdmitSubmissionRequest) returns (AdmitSubmissionResponse);
+  rpc ClaimPendingSubmission(ClaimPendingSubmissionRequest) returns (ClaimPendingSubmissionResponse);
+  rpc RenewSubmissionClaim(RenewSubmissionClaimRequest) returns (SubmissionClaimResponse);
+  rpc AcknowledgeSubmissionProjection(AcknowledgeSubmissionProjectionRequest) returns (SubmissionAdmissionResponse);
+  rpc PrepareSubmissionHandoff(PrepareSubmissionHandoffRequest) returns (SubmissionAdmissionResponse);
+  rpc GetSubmissionPreparation(GetSubmissionPreparationRequest) returns (GetSubmissionPreparationResponse);
+  rpc AcknowledgeSubmissionHandoff(AcknowledgeSubmissionHandoffRequest) returns (SubmissionAdmissionResponse);
+  rpc CloseConversationAdmission(CloseConversationAdmissionRequest) returns (CloseConversationAdmissionResponse);
+  rpc ReserveMessageIdentity(ReserveMessageIdentityRequest) returns (ReserveMessageIdentityResponse);
 }
 
 message HealthRequest {}
@@ -80,11 +98,382 @@ message SubmitTaskRequest {
   string task_id = 1;
   string conversation_id = 2;
   Idempotency idempotency = 3;
+  TaskRecord task = 4;
+  optional string expected_from_status = 5;
 }
 
 message SubmitTaskResponse {
   string task_id = 1;
   bool duplicate = 2;
+  maf.common.v1.TypedError error = 3;
+  TaskRecord task = 4;
+}
+
+message TaskRouteAssignment {
+  string route_mode = 1;
+  string real_path = 2;
+  string shadow_path = 3;
+  string config_version = 4;
+  string reason_code = 5;
+  optional string cohort_id = 6;
+  optional string assignment_key_hash = 7;
+  optional string assigned_at = 8;
+}
+
+message TaskRecord {
+  reserved 7;
+  reserved "root_node_id";
+  string task_id = 1;
+  string conversation_id = 2;
+  string root_message_id = 3;
+  string status = 4;
+  string routing_mode = 5;
+  optional string requested_capability_id = 6;
+  optional string summary = 8;
+  optional string cancel_requested_at = 9;
+  optional string created_at = 10;
+  optional string updated_at = 11;
+  TaskRouteAssignment assignment = 12;
+}
+
+enum SubmissionAdmissionDisposition {
+  SUBMISSION_ADMISSION_DISPOSITION_UNSPECIFIED = 0;
+  SUBMISSION_ADMISSION_DISPOSITION_CREATED = 1;
+  SUBMISSION_ADMISSION_DISPOSITION_IDEMPOTENT_REPLAY = 2;
+  SUBMISSION_ADMISSION_DISPOSITION_CONVERSATION_BUSY = 3;
+  SUBMISSION_ADMISSION_DISPOSITION_MESSAGE_ID_CONFLICT = 4;
+  SUBMISSION_ADMISSION_DISPOSITION_CONVERSATION_NOT_AVAILABLE = 5;
+}
+
+enum SubmissionProjectionState {
+  SUBMISSION_PROJECTION_STATE_UNSPECIFIED = 0;
+  SUBMISSION_PROJECTION_STATE_PENDING = 1;
+  SUBMISSION_PROJECTION_STATE_PROJECTED = 2;
+}
+
+enum SubmissionPreparationState {
+  SUBMISSION_PREPARATION_STATE_UNSPECIFIED = 0;
+  SUBMISSION_PREPARATION_STATE_PENDING = 1;
+  SUBMISSION_PREPARATION_STATE_PREPARED = 2;
+}
+
+enum SubmissionHandoffState {
+  SUBMISSION_HANDOFF_STATE_UNSPECIFIED = 0;
+  SUBMISSION_HANDOFF_STATE_PENDING = 1;
+  SUBMISSION_HANDOFF_STATE_HANDED_OFF = 2;
+}
+
+enum MessageIdentityKind {
+  MESSAGE_IDENTITY_KIND_UNSPECIFIED = 0;
+  MESSAGE_IDENTITY_KIND_SUBMISSION = 1;
+  MESSAGE_IDENTITY_KIND_INTERRUPT = 2;
+  MESSAGE_IDENTITY_KIND_SERVER_INTERNAL = 3;
+  MESSAGE_IDENTITY_KIND_FILE_VISIBLE = 4;
+  MESSAGE_IDENTITY_KIND_LEGACY_CONFLICT_ONLY = 5;
+}
+
+enum MessageIdentityDisposition {
+  MESSAGE_IDENTITY_DISPOSITION_UNSPECIFIED = 0;
+  MESSAGE_IDENTITY_DISPOSITION_CREATED = 1;
+  MESSAGE_IDENTITY_DISPOSITION_EXACT_REPLAY = 2;
+  MESSAGE_IDENTITY_DISPOSITION_CONFLICT = 3;
+  MESSAGE_IDENTITY_DISPOSITION_CONVERSATION_NOT_AVAILABLE = 4;
+}
+
+enum ConversationAdmissionCloseDisposition {
+  CONVERSATION_ADMISSION_CLOSE_DISPOSITION_UNSPECIFIED = 0;
+  CONVERSATION_ADMISSION_CLOSE_DISPOSITION_CLOSED = 1;
+  CONVERSATION_ADMISSION_CLOSE_DISPOSITION_EXACT_REPLAY = 2;
+  CONVERSATION_ADMISSION_CLOSE_DISPOSITION_CONVERSATION_NOT_AVAILABLE = 3;
+  CONVERSATION_ADMISSION_CLOSE_DISPOSITION_CONFLICT = 4;
+}
+
+message SubmissionClaim {
+  string owner = 1;
+  string token = 2;
+  int64 expires_at_ms = 3;
+}
+
+message MessageIdentityRecord {
+  string message_id = 1;
+  string conversation_id = 2;
+  string username = 3;
+  MessageIdentityKind identity_kind = 4;
+  optional string role = 5;
+  optional string message_type = 6;
+  optional int64 message_created_at_ms = 7;
+  optional string task_id = 8;
+  optional string request_fingerprint = 9;
+  int64 reserved_at_ms = 10;
+}
+
+message SubmissionAdmissionRecord {
+  string message_id = 1;
+  string task_id = 2;
+  string conversation_id = 3;
+  string username = 4;
+  string request_fingerprint = 5;
+  bytes conversation_projection_json = 6;
+  bytes message_projection_json = 7;
+  string projection_sha256 = 8;
+  bytes continuation_json = 9;
+  string continuation_sha256 = 10;
+  SubmissionProjectionState projection_state = 11;
+  SubmissionPreparationState preparation_state = 12;
+  optional bytes prepared_execution_json = 13;
+  optional string prepared_execution_sha256 = 14;
+  SubmissionHandoffState handoff_state = 15;
+  optional string handoff_kind = 16;
+  optional string handoff_identity = 17;
+  int64 created_at_ms = 18;
+  int64 updated_at_ms = 19;
+  bool closed = 20;
+  TaskRecord task = 21;
+  string idempotency_key = 22;
+}
+
+message AdmitSubmissionRequest {
+  string message_id = 1;
+  string task_id = 2;
+  string conversation_id = 3;
+  string username = 4;
+  string request_fingerprint = 5;
+  bytes conversation_projection_json = 6;
+  bytes message_projection_json = 7;
+  string projection_sha256 = 8;
+  bytes continuation_json = 9;
+  string continuation_sha256 = 10;
+  int64 message_created_at_ms = 11;
+  string workflow_owner = 12;
+  int64 now_ms = 13;
+  int64 claim_ttl_ms = 14;
+  TaskRecord task = 15;
+  string idempotency_key = 16;
+}
+
+message AdmitSubmissionResponse {
+  SubmissionAdmissionDisposition disposition = 1;
+  SubmissionAdmissionRecord admission = 2;
+  SubmissionClaim claim = 3;
+  maf.common.v1.TypedError error = 4;
+}
+
+message ClaimPendingSubmissionRequest {
+  string workflow_owner = 1;
+  int64 now_ms = 2;
+  int64 claim_ttl_ms = 3;
+  optional int64 after_created_at_ms = 4;
+  optional string after_message_id = 5;
+}
+
+message ClaimPendingSubmissionResponse {
+  bool found = 1;
+  SubmissionAdmissionRecord admission = 2;
+  SubmissionClaim claim = 3;
+  string authority_state = 4;
+  optional string finalization_receipt_sha256 = 5;
+  maf.common.v1.TypedError error = 6;
+  uint64 pending_count = 7;
+  optional int64 earliest_claim_expires_at_ms = 8;
+}
+
+message RenewSubmissionClaimRequest {
+  string message_id = 1;
+  string workflow_owner = 2;
+  string claim_token = 3;
+  int64 now_ms = 4;
+  int64 claim_ttl_ms = 5;
+}
+
+message SubmissionClaimResponse {
+  SubmissionClaim claim = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message AcknowledgeSubmissionProjectionRequest {
+  string message_id = 1;
+  string workflow_owner = 2;
+  string claim_token = 3;
+  string projection_sha256 = 4;
+  SubmissionProjectionState expected_state = 5;
+  int64 now_ms = 6;
+}
+
+message PrepareSubmissionHandoffRequest {
+  string message_id = 1;
+  string workflow_owner = 2;
+  string claim_token = 3;
+  bytes prepared_execution_json = 4;
+  string prepared_execution_sha256 = 5;
+  SubmissionPreparationState expected_state = 6;
+  int64 now_ms = 7;
+}
+
+message GetSubmissionPreparationRequest {
+  string username = 1;
+  string conversation_id = 2;
+  string task_id = 3;
+}
+
+message GetSubmissionPreparationResponse {
+  bool found = 1;
+  SubmissionAdmissionRecord admission = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message AcknowledgeSubmissionHandoffRequest {
+  string message_id = 1;
+  string workflow_owner = 2;
+  string claim_token = 3;
+  string prepared_execution_sha256 = 4;
+  string handoff_kind = 5;
+  string handoff_identity = 6;
+  SubmissionHandoffState expected_state = 7;
+  int64 now_ms = 8;
+}
+
+message SubmissionAdmissionResponse {
+  SubmissionAdmissionRecord admission = 1;
+  bool duplicate = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message CloseConversationAdmissionRequest {
+  string username = 1;
+  string conversation_id = 2;
+  string operation_id = 3;
+  int64 now_ms = 4;
+}
+
+message CloseConversationAdmissionResponse {
+  ConversationAdmissionCloseDisposition disposition = 1;
+  uint64 revision = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message ReserveMessageIdentityRequest {
+  MessageIdentityRecord identity = 1;
+}
+
+message ReserveMessageIdentityResponse {
+  MessageIdentityDisposition disposition = 1;
+  MessageIdentityRecord identity = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message GetTaskRequest {
+  string task_id = 1;
+}
+
+message GetTaskResponse {
+  TaskRecord task = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message ListTasksForConversationRequest {
+  string conversation_id = 1;
+  repeated string statuses = 2;
+}
+
+message ListTasksForConversationResponse {
+  repeated TaskRecord tasks = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message GetActiveTaskForConversationRequest {
+  string conversation_id = 1;
+}
+
+message GetActiveTaskForConversationResponse {
+  TaskRecord task = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message AgentRunRecord {
+  string run_id = 1;
+  string task_id = 2;
+  string conversation_id = 3;
+  string status = 4;
+  string model_edition = 5;
+  string reasoning_effort = 6;
+  bool thinking_enabled = 7;
+  bytes binding_option_digests_json = 8;
+  uint64 next_item_sequence = 9;
+  uint64 compacted_through_sequence = 10;
+  optional string active_sample_item_id = 11;
+  repeated string waiting_call_item_ids = 12;
+  uint64 next_batch_call_ordinal = 13;
+  optional string claim_owner = 14;
+  optional string claim_token = 15;
+  optional int64 lease_expires_at_ms = 16;
+  uint64 revision = 17;
+  optional string terminal_reason_code = 18;
+  int64 created_at_ms = 19;
+  int64 updated_at_ms = 20;
+  optional int64 terminal_at_ms = 21;
+}
+
+message AgentItemRecord {
+  string item_id = 1;
+  string run_id = 2;
+  string task_id = 3;
+  uint64 sequence = 4;
+  string kind = 5;
+  string state = 6;
+  bytes payload_json = 7;
+  uint64 payload_size_bytes = 8;
+  string payload_sha256 = 9;
+  optional string parent_item_id = 10;
+  optional string source_call_item_id = 11;
+  optional string provider_sample_id = 12;
+  optional uint64 call_ordinal = 13;
+  int64 created_at_ms = 14;
+  optional int64 committed_at_ms = 15;
+}
+
+message CommitAgentStateRequest {
+  string operation = 1;
+  AgentRunRecord run = 2;
+  repeated AgentItemRecord items = 3;
+  uint64 expected_revision = 4;
+  optional string expected_claim_token = 5;
+  Idempotency idempotency = 6;
+  repeated TaskNodeRecord task_nodes = 7;
+  repeated ArtifactRecord artifacts = 8;
+  optional bytes final_projection_json = 9;
+  optional TaskRecord task = 10;
+}
+
+message AgentStateResponse {
+  AgentRunRecord run = 1;
+  repeated AgentItemRecord items = 2;
+  bool duplicate = 3;
+  maf.common.v1.TypedError error = 4;
+}
+
+message GetAgentRunRequest { string run_id = 1; }
+message GetAgentRunForTaskRequest { string task_id = 1; }
+message AgentRunResponse {
+  AgentRunRecord run = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+message ListAgentRunsRequest { repeated string statuses = 1; }
+message ListAgentRunsResponse {
+  repeated AgentRunRecord runs = 1;
+  maf.common.v1.TypedError error = 2;
+}
+message ListAgentItemsRequest { string run_id = 1; }
+message ListAgentItemsResponse {
+  repeated AgentItemRecord items = 1;
+  maf.common.v1.TypedError error = 2;
+}
+message GetAgentFinalProjectionRequest { string run_id = 1; }
+message AgentFinalProjectionResponse {
+  optional bytes projection_json = 1;
+  bool found = 2;
   maf.common.v1.TypedError error = 3;
 }
 
@@ -94,38 +483,39 @@ message TransitionNodeRequest {
   string from_status = 3;
   string to_status = 4;
   Idempotency idempotency = 5;
+  TaskNodeRecord node = 6;
 }
 
 message TransitionNodeResponse {
   string node_id = 1;
   string status = 2;
   maf.common.v1.TypedError error = 3;
+  TaskNodeRecord node = 4;
 }
 
-message TaskEdgeRecord {
-  string task_id = 1;
-  string from_node_id = 2;
-  string to_node_id = 3;
-  string edge_type = 4;
-  string condition = 5;
+message TaskNodeRecord {
+  reserved 6 to 10;
+  reserved "criticality", "dependency_type", "retry_policy_json", "timeout_policy_json", "resource_class";
+  string node_id = 1;
+  string task_id = 2;
+  string capability_id = 3;
+  optional string assigned_instance_id = 4;
+  string status = 5;
+  repeated string input_refs = 11;
+  repeated string output_refs = 12;
+  optional string started_at = 13;
+  optional string finished_at = 14;
 }
 
-message SaveTaskEdgeRequest {
-  TaskEdgeRecord edge = 1;
-  Idempotency idempotency = 2;
+message GetTaskNodeRequest { string node_id = 1; }
+message GetTaskNodeResponse {
+  TaskNodeRecord node = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
 }
-
-message TaskEdgeResponse {
-  TaskEdgeRecord edge = 1;
-  maf.common.v1.TypedError error = 2;
-}
-
-message ListTaskEdgesRequest {
-  string task_id = 1;
-}
-
-message ListTaskEdgesResponse {
-  repeated TaskEdgeRecord edges = 1;
+message ListTaskNodesForTaskRequest { string task_id = 1; }
+message ListTaskNodesForTaskResponse {
+  repeated TaskNodeRecord nodes = 1;
   maf.common.v1.TypedError error = 2;
 }
 
@@ -175,6 +565,7 @@ message AppendEventRequest {
 message AppendEventResponse {
   EventCursor cursor = 1;
   maf.common.v1.TypedError error = 2;
+  bool duplicate = 3;
 }
 
 message ReplayEventsRequest {

@@ -1,10 +1,21 @@
 from .catalog import SkillCatalog
+from .bundle_digest import (
+    PROJECT_SKILL_BUNDLE_DEADLINE_SECONDS,
+    PROJECT_SKILL_BUNDLE_DIGEST_ENV,
+    PROJECT_SKILL_BUNDLE_MAX_BYTES,
+    PROJECT_SKILL_BUNDLE_MAX_FILES,
+    ProjectSkillBundleDigest,
+    ProjectSkillBundleDigestError,
+    compute_project_skill_bundle_digest,
+    validate_project_skill_bundle_digest,
+)
 from .contract import (
     SkillCapabilityContract,
     SkillContract,
     SkillContractDiagnostic,
     SkillContractParseError,
     SkillEntrypointContract,
+    SkillFileSelection,
     SkillInputSchemaRef,
     SkillOutputContract,
     SkillResourcePolicy,
@@ -43,6 +54,7 @@ from .input_resolution import (
 )
 from .input_schema import (
     SkillInputClarification,
+    SkillInputFileSelection,
     SkillInputField,
     SkillInputSchema,
     SkillInputSchemaParseError,
@@ -90,15 +102,28 @@ from .skill_runtime_gates import (
     validate_skill_runtime_ops_readiness,
     validate_skill_runtime_promotion_readiness,
 )
-from .skill_runtime_state import SkillRuntimeBundle, SkillRuntimeRefreshResult, SkillRuntimeState
+from .skill_runtime_state import (
+    SkillBundleRevisionError,
+    SkillRuntimeBundle,
+    SkillRuntimeRefreshResult,
+    SkillRuntimeState,
+    classify_skill_bundle_revision,
+)
 
 __all__ = [
     "SkillCatalog",
+    "PROJECT_SKILL_BUNDLE_DEADLINE_SECONDS",
+    "PROJECT_SKILL_BUNDLE_DIGEST_ENV",
+    "PROJECT_SKILL_BUNDLE_MAX_BYTES",
+    "PROJECT_SKILL_BUNDLE_MAX_FILES",
+    "ProjectSkillBundleDigest",
+    "ProjectSkillBundleDigestError",
     "SkillExecutionConfig",
     "SkillExecutionConfigError",
     "SkillInputResolutionContext",
     "SkillInputResolutionResult",
     "SkillInputClarification",
+    "SkillInputFileSelection",
     "SkillInputField",
     "SkillInputSchema",
     "SkillInputSchemaParseError",
@@ -131,6 +156,7 @@ __all__ = [
     "SkillContractDiagnostic",
     "SkillContractParseError",
     "SkillEntrypointContract",
+    "SkillFileSelection",
     "SkillInputSchemaRef",
     "SkillOutputContract",
     "SkillResourcePolicy",
@@ -143,6 +169,8 @@ __all__ = [
     "SkillRuntimeBundle",
     "SkillRuntimeRefreshResult",
     "SkillRuntimeState",
+    "SkillBundleRevisionError",
+    "classify_skill_bundle_revision",
     "SkillRuntimePyo3PolicyClient",
     "SlotExtractionCandidate",
     "SlotExtractionResult",
@@ -162,6 +190,7 @@ __all__ = [
     "build_schema_snapshot",
     "call_platform_handler",
     "coerce_skill_response_text",
+    "compute_project_skill_bundle_digest",
     "match_skills",
     "normalize_skill_response_payload",
     "normalize_platform_handler_result",
@@ -182,6 +211,7 @@ __all__ = [
     "should_trigger_history_recall",
     "transition_slot_collection",
     "validate_selected_schema_payload",
+    "validate_project_skill_bundle_digest",
     "try_load_skill_runtime_pyo3_policy_client",
     "validate_skill_runtime_artifact_provenance",
     "validate_skill_runtime_benchmark_report",

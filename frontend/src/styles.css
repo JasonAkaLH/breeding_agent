@@ -406,6 +406,10 @@ body {
   align-items: flex-start;
 }
 
+.message-file-upload {
+  align-items: flex-end;
+}
+
 .message-meta {
   margin-bottom: 6px;
   color: var(--color-muted);
@@ -433,6 +437,37 @@ body {
 .message-assistant .message-body {
   background: var(--color-surface-strong);
   border: 1px solid var(--color-border);
+}
+
+.file-upload-history-card {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: min(180px, 56vw);
+  min-width: 96px;
+  border-radius: 18px;
+  padding: 12px 14px 10px;
+  background: linear-gradient(135deg, var(--color-agri-green-hover) 0%, var(--color-agri-green-dark) 100%);
+  color: #fff;
+  box-shadow: 0 8px 22px rgba(74, 67, 41, 0.08);
+}
+
+.file-upload-history-card .ant-typography,
+.file-upload-history-icon {
+  color: #fff;
+}
+
+.file-upload-history-icon {
+  flex: 0 0 auto;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.file-upload-history-filename {
+  max-width: 100%;
+  text-align: center;
+  word-break: break-word;
 }
 
 .skill-status-lines {
@@ -608,6 +643,34 @@ body {
   background: rgba(255, 255, 255, 0.2);
 }
 
+.math-formula {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  color: currentColor;
+}
+
+.math-formula--inline {
+  display: inline-flex;
+  vertical-align: -0.15em;
+}
+
+.math-formula--display {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  text-align: center;
+}
+
+.math-formula__fallback {
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.math-formula svg {
+  color: currentColor;
+}
+
 .reasoning-box {
   position: relative;
   isolation: isolate;
@@ -730,35 +793,6 @@ body {
 .activity-notice-error-icon {
   color: var(--color-danger);
   font-size: 16px;
-}
-
-.interrupt-card {
-  border: 1px solid var(--color-agri-green-border);
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: linear-gradient(180deg, var(--color-agri-green-soft) 0%, var(--color-surface-strong) 100%);
-}
-
-.interrupt-card-title {
-  margin-bottom: 8px;
-  color: var(--color-agri-green-dark);
-  font-weight: 700;
-}
-
-.interrupt-card-question {
-  margin-bottom: 10px !important;
-}
-
-.interrupt-card-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.interrupt-card-hint {
-  display: block;
-  margin-top: 10px;
 }
 
 .composer-space {
@@ -907,10 +941,6 @@ body {
 
 .floating-composer .ant-card-body {
   padding: 0;
-}
-
-.composer-attachments {
-  padding: 4px 8px 0;
 }
 
 .send-row {
@@ -1397,13 +1427,6 @@ body {
   border: 0;
 }
 
-.upload-file-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding-right: 4px;
-}
-
 .conversation-files-fab {
   position: fixed;
   right: 28px;
@@ -1645,6 +1668,36 @@ body {
   background: transparent !important;
   box-shadow: none !important;
   color: var(--color-muted) !important;
+}
+
+.selected-mcp-server-command {
+  border-color: #9bc89d;
+  background: #edf7ed;
+}
+
+.message-mcp-server-badge {
+  align-self: flex-start;
+  margin: 0 0 6px;
+}
+
+.slash-command-menu-shell {
+  display: grid;
+  gap: 6px;
+}
+
+.slash-command-refresh {
+  justify-self: end;
+  border: 0;
+  background: transparent;
+  color: #2f7d32;
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 4px;
+}
+
+.slash-command-refresh:focus-visible {
+  outline: 2px solid #2f7d32;
+  outline-offset: 2px;
 }
 
 .slash-command-menu {

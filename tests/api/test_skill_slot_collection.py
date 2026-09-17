@@ -55,7 +55,7 @@ class LegacyProjectSkillCompatibilityAPITest(APITestCase):
             encoding="utf-8",
         )
 
-    async def test_no_contract_project_skill_fails_closed_in_agent_runtime(self) -> None:
+    async def test_no_contract_project_skill_is_rejected_without_execution(self) -> None:
         response = await self.submit_message(
             conversation_id="conv-legacy-fail-closed",
             content="请执行旧参数 Skill",
@@ -63,8 +63,7 @@ class LegacyProjectSkillCompatibilityAPITest(APITestCase):
         )
 
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("Unsupported soft_skill_binding capability_id", response.text)
-        self.assertEqual(await self.runtime.storage.list_interrupts_for_task("task-legacy-fail-closed"), [])
+        self.assertIn("Unsupported capability_id", response.text)
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-legacy-fail-closed"))
 
     async def test_no_contract_project_skill_does_not_create_legacy_slot_collection(self) -> None:

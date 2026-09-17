@@ -162,7 +162,8 @@ I. final_recency_guard
 - 定义 `LLMMessage`。
 - `SharedLLMRuntime.generate_text/stream_events` 支持 `str | PromptEnvelope | Sequence[LLMMessage]`。
 - `LLMClient` 对 OpenAI-compatible provider 发送 messages。
-- 不支持 `developer` / `tool` role 的 provider 使用 deterministic role fallback，并写入 audit。
+- provider-visible消息只使用`system/assistant/user/tool`；内部`context`和不受
+  provider支持的`tool`按deterministic role fallback处理并写入audit。
 
 ### 6.6 配置、profile registry 与审计出口
 

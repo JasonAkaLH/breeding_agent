@@ -56,6 +56,67 @@ resources:
         self.assertEqual(contract.outputs["demo_output"].required, ("response_text",))
         self.assertEqual(contract.resources["usage"].audience, ("main_agent", "slot_question"))
 
+    def test_parses_final_file_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = self._write_contract(
+                root,
+                """
+contract_version: '2'
+capability:
+  id: skill.demo
+  display_name: Demo Skill
+runtime:
+  mode: python_subprocess
+entrypoints:
+  run:
+    path: scripts/run.py
+    input_schema: demo
+file_selection:
+  required: true
+  allow_multiple: true
+  expected_content: [材料表]
+  supported_file_types: [csv, spreadsheet]
+  helpful_columns: [ped_id]
+  disambiguation_hint: 优先选择材料表。
+input_schemas:
+  demo:
+    path: schemas/demo.input.yaml
+""",
+            )
+
+            contract = parse_skill_contract_file(path)
+
+        self.assertTrue(contract.file_selection.required)
+        self.assertTrue(contract.file_selection.allow_multiple)
+        self.assertEqual(contract.file_selection.expected_content, ("材料表",))
+        self.assertEqual(contract.file_selection.supported_file_types, ("csv", "spreadsheet"))
+        self.assertEqual(contract.file_selection.helpful_columns, ("ped_id",))
+        self.assertEqual(contract.file_selection.disambiguation_hint, "优先选择材料表。")
+
+    def test_rejects_legacy_file_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = self._write_contract(
+                root,
+                """
+contract_version: '2'
+capability:
+  id: skill.demo
+  display_name: Demo Skill
+runtime:
+  mode: python_subprocess
+entrypoints:
+  run:
+    path: scripts/run.py
+file_intent:
+  requires_file: true
+""",
+            )
+
+            with self.assertRaisesRegex(SkillContractParseError, "file_intent"):
+                parse_skill_contract_file(path)
+
     def test_parses_platform_service_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

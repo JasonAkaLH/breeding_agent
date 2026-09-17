@@ -1,10 +1,23 @@
 # 主代理框架 PRD（后端总览）
 
+> **Phase 7 authority notice（2026-08-23）**：统一同模型Agent Loop已`complete`。本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **项目**：breeding_agent
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至 Rust 化 Runtime 模块评估 PRD；PRD 目录为当前文档基线）
-- **日期**：2026-05-13
-- **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；跨后端与 Rust sidecar 的 MCP 联合实施 Phase PRD 放在 `docs/prd/MCP/`；前端 PRD 放在 `docs/prd/frontend/`。
+- **文档状态**：当前索引（任务编排authority已切换到统一Agent Loop；旧架构段落仅保留历史背景）
+- **日期**：2026-08-23
+- **说明**：本文件为后端专题索引；当前任务编排合同以`docs/prd/backend/unified-agent-loop/`为准。后端专题PRD统一放在`docs/prd/backend/`；跨后端与Rust sidecar的MCP联合实施Phase PRD放在`docs/prd/MCP/`；前端PRD放在`docs/prd/frontend/`。
+
+## 当前架构基线
+
+- 所有普通消息、显式Skill、显式MCP、Interrupt answer、remote completion、取消和startup recovery只进入或恢复唯一`AgentRun`。
+- Provider通过原生Agent message与结构化Tool Call合同采样；Tool outcome按Run revision/claim原子提交，普通Tool失败返回模型继续纠正。
+- `CapabilityInvocationService`是唯一执行生命周期；Skill/MCP继续复用既有安全、审批、Artifact、Result Parser与continuation authority。
+- 成功只由无Tool Call的非空assistant sample触发；唯一`agent.final_output`原子发布Artifact、Message、event与receipt，不存在独立回答finalizer。
+- `/graph`仅返回兼容活动账本且`edges=[]`。P7-B已删除旧任务图物理字段，当前runtime不得读取，也不迁移或恢复旧Task。
+- 当前实现、验证命令和Phase状态见`docs/prd/backend/unified-agent-loop/README.md`；Phase 6删除报告见`dag-runtime-deletion-report.md`，Phase 7备份/迁移证据见`destructive-migration-evidence.md`。
+
+下文2026年5月形成的目标、索引和历史决策用于追溯专题来源；凡涉及旧任务编排、重规划、独立回答能力或依赖图调度的描述，均由上述当前基线和统一Agent Loop PRD取代。
 
 ## 0. 目录定位
 
@@ -89,6 +102,9 @@
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
 | 表格上传编码兼容与表头规范化分步实施 | `docs/prd/backend/table-upload-normalization/README.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt、prompt-safe 摘要上限与 Skill artifact 规范化输入 |
 | 对话文件本地资源文件系统 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件本地持久化、`index.md` 文件索引、Skill workspace manifest / mount_path 与删除清理语义 |
+| 对话文件历史与智能选择分步实施 | `docs/prd/backend/conversation-file-history-selection/README.md` | 将合并后的 PRD 21 拆成数据模型、上传历史、memory 安全、selector shadow、interrupt 绑定、灰度发布六个可独立验收阶段；阶段零至阶段五已实施，父兼容入口保留在 `docs/prd/backend/21-对话文件历史与智能选择PRD.md` |
+| Skill 运行闭环 Workbench 分步实施 | `docs/prd/backend/skill-workbench/README.md` | 将 Workbench 总纲拆成 Policy/runtime state/stage placement、内部 capability/executor、runtime loop/finalizer/Skill refinement、事件 graph prompt 脱敏、contract quality diagnostics 五个阶段；父兼容入口保留在 `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` |
+| 能力缺失 LLM fallback 披露 | `docs/prd/backend/23-能力缺失LLMFallback披露PRD.md` | 无匹配 Skill/MCP/capability 时由 Planner/Replanner 标记 fallback，任务 completed 停止 Workbench，并通过正文、事件、metadata 和前端 notice 披露事实；父兼容入口保留，实施拆分见 `docs/prd/backend/capability-missing-fallback/README.md` |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
 | 大语言模型提示词信封分步实施 | `docs/prd/backend/prompt-envelope/README.md` | 将 prompt 组装拆成测试基线、核心模型、主代理迁移、记忆候选、工具信息分层、多调用场景档案、消息原生运行时、供应商缓存八个可独立验收阶段 |
@@ -205,13 +221,33 @@
 - 单文件删除必须标记 DB `deleted` 并物理删除对应本地资源目录；conversation 删除必须清理该 conversation 文件目录。
 - 图片文件上传阶段不自动生成描述或 OCR；PDF 后续可接受控文本抽取 / OCR adapter，但失败不得阻塞文件作为 Skill 输入。
 
-### 5.14 Rust 化 Runtime 决策
+### 5.14 对话文件历史与智能选择决策
+
+- 该专题已拆为 `docs/prd/backend/conversation-file-history-selection/` 下的总纲与阶段 PRD，实施时必须按阶段门禁推进；原 `docs/prd/backend/21-对话文件历史与智能选择PRD.md` 保留为父兼容入口。
+- `ConversationFileResource` 是 active/deleted、权限、分页和 selector candidate 的事实源；`file_upload` message 只作为 conversation history 中的上传事件快照和展示入口。
+- 上传接口成功即写入 `message_type=file_upload` 的结构化历史消息，记录 `filename`、`upload_id`、`description_summary`、`description_status` 与 `file_status`；上传成功定义包含原始文件、DB resource、file_upload message 和最新 `index.md`。
+- `file_upload` 使用 `role=system`，但历史 API、前端和 memory 只能通过 public `message_type` allowlist 暴露该类 system message；不得泛化展示或注入其他 internal system message。
+- 文件名、摘要、preview/OCR/PDF 文本全部视为不可信 file-derived data，只能作为历史事实和文件定位线索，不能覆盖系统指令或安全约束。
+- 当前 conversation active 文件可作为默认文件上下文；task attachment 只记录显式上传、selector 选择、interrupt answer、sheet selection 等本轮实际 provenance，避免把“文件池存在”误记为“本轮已使用”。
+- selector 是 conversation file context 之上的缩窄、消歧、缺文件和 provenance 写入机制；显式 `metadata.upload_ids` 优先，普通问答不强制 selector，但 required file、明确单文件指代、同名/多候选缩窄、recent usage continuation、interrupt answer 恢复或正文 `upload_id` 精准选择不得被 active context 短路。
+- 多候选、同名文件、低置信或 required file 缺失时复用现有 interrupt，使用 `file_selection_ambiguous` / `no_files_in_conversation` 等稳定 reason_code，不新增公开 API 或前端点选组件。
+- 正文 / interrupt answer 中的 `upload_id` 精准选择只接受当前生成格式 `upl-` + 12 位十六进制字符的完整 token；未知、越权、deleted 或不属于当前 conversation 的 id 不得交给 LLM 猜测或静默忽略。
+- recent usage 必须来自 task attachment / selector binding / interrupt answer / sheet selection 等实际使用 provenance，不得只根据上传时间推断。
+- deleted 文件保留为历史事实，但必须在 API、前端卡片和 prompt 中标记不可复用，且不得进入 active context、selector、binding 或 Skill manifest。
+- `index.md` 是 DB 投影而非权限事实源；重写失败必须写 DB durable repair marker，并按当场重试、后台退避、下次访问懒修复恢复；repair pending 时 selector / rollback 都必须以 DB resource 为准，不得信任旧 index。
+- selector rollout mode 只接受 `disabled`、`shadow`、`enforce_narrow`、`enforce_guarded_multi`；旧 `enforce` 不保留兼容 alias，运行时遇到非法值必须 fail-closed 到 `disabled` 并记录 `conversation_file.file_selector_config_invalid` audit。
+- `disabled` 回滚模式停止 selector attachment 与 selector audit，但保留 active conversation file context、`file_upload` history 展示和 deleted 不可复用约束；`index.md` repair pending 时继续以 DB resource 构造 active context / selector candidates，不得信任旧投影。
+- guarded multi-select 默认关闭；只有 `enforce_guarded_multi` 且 allow_multiple / 明确比较合并意图成立时才允许自动多绑定，audit 必须区分 `multi_select_auto_bound` 与 `multi_select_confirmed_by_user`。
+- 未来 Skill 文件需求必须由 contract/schema 的 `file_selection` 最终字段驱动，平台不得硬编码当前 Skill 名称；不得接受 `file_intent`、旧 schema `type: file/artifact/data` 或别名字段作为交付契约；实施时必须同步更新 `breeding-skill-builder` 的模板、checklist 和指南。
+- 第一阶段不 backfill 旧文件，避免伪造历史上传时序；旧 active resources 仍可通过文件池和 selector 使用。
+
+### 5.15 Rust 化 Runtime 决策
 
 - 主体框架 Rust 化不应为任何具体业务 Skill 重新引入 native capability、专属 route、专属 executor 或前端协议。
 - `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust sidecar / kernel。
 - 优先 Rust 化确定性、安全敏感、并发敏感和可重放模块：`src/core/` contract、`src/lifecycle/` 状态机、`src/storage/` durable store、通用 Skill runtime trust gate、MCP protocol/runtime、artifact/upload/file safety。
 - LLM provider glue、FastAPI route、DTO、主代理 prompt 产品语义和前端 UI 不应整体 Rust 化；只在 sanitizer、token budget、大 payload 处理等热点处抽小 kernel。
-- Skill-owned Rust runtime 必须放在各自 Skill bundle 内部，并按 `Skill构建指南.md` 的 Rust 型 Skill runtime 限制适配框架 contract；框架不反向兼容某个 Skill 的任意 Rust 形态。
+- Skill-owned Rust runtime 必须放在各自 Skill bundle 内部，并按 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md` 的 Rust 型 Skill runtime 限制适配框架 contract；框架不反向兼容某个 Skill 的任意 Rust 形态。
 
 ## 6. 当前验收基线与归档证据
 
@@ -258,6 +294,13 @@
 - 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
 - 表格上传编码兼容与表头规范化 PRD：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
 - 对话文件本地资源文件系统 PRD：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`。
+- 对话文件历史与智能选择兼容入口：`docs/prd/backend/21-对话文件历史与智能选择PRD.md`。
+- 对话文件历史与智能选择分步 PRD：`docs/prd/backend/conversation-file-history-selection/README.md`。
+- Skill 运行闭环 Workbench 兼容入口：`docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md`。
+- Skill 运行闭环 Workbench 分步 PRD：`docs/prd/backend/skill-workbench/README.md`。
+- 能力缺失 LLM fallback 披露兼容入口：`docs/prd/backend/23-能力缺失LLMFallback披露PRD.md`。
+- 能力缺失 LLM fallback 披露分步 PRD：`docs/prd/backend/capability-missing-fallback/README.md`。
+- 统一同模型 Agent Loop 分阶段 PRD：`docs/prd/backend/unified-agent-loop/README.md`（Phase 0～5已`proof_complete`；Phase 6已`cutover_complete`且当前执行控制面只剩Agent Loop；Phase 7备份恢复、physical schema/proto删除和最终证明已`complete`）。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`
 - MCP Runtime 联合改造 Phase PRD：`docs/prd/MCP/README.md`

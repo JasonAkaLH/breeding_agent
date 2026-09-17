@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import unittest
+from pathlib import Path
 
 from src.integrations.mcp import runtime_state, tasks
 from src.integrations.mcp.rust_contract import contract_value, load_mcp_runtime_contract, status_list
 
 
 class MCPRustRuntimeContractTest(unittest.TestCase):
+    def test_checked_in_mcp_runtime_contract_and_proto_bytes_are_frozen(self) -> None:
+        expected_sha256 = {
+            "native/proto/maf/common/v1/common.proto": "35d7c12e5f7112ccfa6e3409522bbd57f17a2cf1825e1084768317dfe5da2a89",
+            "native/proto/maf/mcp/v1/mcp_runtime.proto": "f8951ffcdbd3a673f8a3a7126628d906bdc67ead65bc5902ee7669051e90afbc",
+            "src/integrations/mcp/rust_contracts/mcp_runtime_contract.json": "ab27de5f07098310e1349351fbbb3426a0519db1fbe37d71f7e0334e890d0233",
+        }
+        for path_text, expected in expected_sha256.items():
+            with self.subTest(path=path_text):
+                actual = hashlib.sha256(Path(path_text).read_bytes()).hexdigest()
+                self.assertEqual(actual, expected)
+
     def test_mcp_task_status_policy_comes_from_rust_contract_artifact(self) -> None:
         contract = load_mcp_runtime_contract()
         self.assertEqual(contract["component"], "maf_mcp_runtime_sidecar")

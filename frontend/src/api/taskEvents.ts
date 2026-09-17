@@ -1,5 +1,6 @@
 import { normalizeBaseUrl } from './client';
 import type { TaskEventEnvelope } from './types';
+import { isClosedCP7Event } from '../domain/taskEvents';
 
 export interface TaskEventHandlers {
   onMessage(event: TaskEventEnvelope): void;
@@ -19,12 +20,19 @@ export interface FetchTaskEventSourceOptions {
   credentials?: RequestCredentials;
 }
 
-const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
+const TERMINAL_TASK_EVENT_TYPES = new Set([
+  'task.completed',
+  'task.failed',
+  'task.cancelled',
+  'agent.run.completed',
+  'agent.run.failed',
+  'agent.run.cancelled',
+]);
 
 export function parseTaskEventData(data: string): TaskEventEnvelope | null {
   try {
-    const parsed = JSON.parse(data) as TaskEventEnvelope;
-    if (!parsed || typeof parsed.event_type !== 'string' || typeof parsed.event_id !== 'string') {
+    const parsed = JSON.parse(data) as unknown;
+    if (!isTaskEventEnvelope(parsed) || !isClosedCP7Event(parsed)) {
       return null;
     }
     return parsed;
@@ -33,71 +41,21 @@ export function parseTaskEventData(data: string): TaskEventEnvelope | null {
   }
 }
 
-export function createBrowserEventSourceFactory(): EventSourceFactory {
-  return (url, handlers) => {
-    const expectedTaskId = taskIdFromEventsUrl(url);
-    const source = new EventSource(url);
-    source.onmessage = (event) => {
-      dispatchParsedTaskEvent(event.data, handlers, expectedTaskId);
-    };
-    source.onerror = (event) => {
-      handlers.onError(event);
-    };
-
-    // sse-starlette sets named events. Handle both named and default delivery.
-    const knownEvents = [
-      'auth.invalidated',
-      'task.accepted',
-      'task.graph_created',
-      'task.graph_updated',
-      'task.replan_started',
-      'task.replan_rejected',
-      'task.replan_available',
-      'node.started',
-      'node.completed',
-      'node.failed',
-      'node.waiting_for_input',
-      'node.cancelled',
-      'node.blocked_by_cancellation',
-      'node.orphaned',
-      'node.ready_to_resume',
-      'node.resuming',
-      'task.completed',
-      'task.failed',
-      'task.cancelled',
-      'task.cancellation_requested',
-      'main_agent.output_delta',
-      'main_agent.output_final',
-      'main_agent.reasoning_delta',
-      'memory.reasoning_delta',
-      'planner.reasoning_delta',
-      'interrupt.reasoning_delta',
-      'soft_skill.reasoning_delta',
-      'skill.progress',
-      'task.interrupt_answered',
-      'task.interrupt_clarification_answered',
-      'task.interrupt_turn_planned',
-      'task.interrupt_turn_processed',
-      'task.interrupt_question_answered',
-      'mcp.long_task_started',
-      'mcp.long_task_progress',
-      'mcp.long_task_status',
-      'mcp.long_task_reconnected',
-      'mcp.long_task_completed',
-      'mcp.long_task_failed',
-      'mcp.long_task_cancel_requested',
-      'mcp.long_task_cancelled',
-      'artifact.download_denied',
-      'artifact.download_gone',
-      'artifact.downloaded',
-    ];
-    for (const eventName of knownEvents) {
-      source.addEventListener(eventName, (event) => {
-        dispatchParsedTaskEvent((event as MessageEvent).data, handlers, expectedTaskId);
-      });
-    }
-    return { close: () => source.close() };
-  };
+function isTaskEventEnvelope(value: unknown): value is TaskEventEnvelope {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const event = value as Record<string, unknown>;
+  return typeof event.event_id === 'string'
+    && event.event_id.length > 0
+    && typeof event.task_id === 'string'
+    && event.task_id.length > 0
+    && typeof event.event_type === 'string'
+    && event.event_type.length > 0
+    && typeof event.payload === 'object'
+    && event.payload !== null
+    && !Array.isArray(event.payload)
+    && (event.conversation_id === undefined || typeof event.conversation_id === 'string')
+    && (event.node_id === undefined || event.node_id === null || typeof event.node_id === 'string')
+    && (event.created_at === undefined || event.created_at === null || typeof event.created_at === 'string');
 }
 
 export function createFetchTaskEventSourceFactory(options: FetchTaskEventSourceOptions = {}): EventSourceFactory {

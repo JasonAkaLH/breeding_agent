@@ -4,13 +4,15 @@
     "2024-11-05",
     "2025-03-26",
     "2025-06-18",
-    "2025-11-25"
+    "2025-11-25",
+    "2026-07-28"
   ],
   "expected_transport_families": {
     "2024-11-05": "legacy_http_sse",
     "2025-03-26": "streamable_http",
     "2025-06-18": "streamable_http",
-    "2025-11-25": "streamable_http"
+    "2025-11-25": "streamable_http",
+    "2026-07-28": "streamable_http"
   },
   "required_version_result_fields": [
     "initialize",
@@ -62,6 +64,14 @@
         "2025-11-25"
       ],
       "requirement": "2025+ client conformance uses Streamable HTTP transport evidence for initialize, tools/list, tools/call, batch rejection, raw id redaction, and safe diagnostics."
+    },
+    {
+      "id": "MCP-CONF-CLIENT-2026-STATELESS",
+      "phase": "client_compatibility",
+      "versions": [
+        "2026-07-28"
+      ],
+      "requirement": "2026-07-28 Python adapter conformance covers server/discover, per-request metadata and header routing, stateless JSON/SSE responses, cache hints, MRTR, and Tasks normalization."
     },
     {
       "id": "MCP-CONF-BATCH-REJECTION",
@@ -259,6 +269,43 @@
             "tests/integrations/mcp/test_official_rust_sdk_shadow_compare.py::OfficialRustSDKShadowCompareTest::test_shadow_compare_accepts_2024_skipped_and_2025_status_evidence"
           ],
           "sse_response_gap_reason": "Repo-local official Rust SDK evidence covers Streamable HTTP JSON object responses; SSE response remains covered by the python_legacy visible path until an rmcp-backed SSE response fixture is added."
+        }
+      }
+    },
+    "2026-07-28": {
+      "streamable_http": {
+        "python_2026": {
+          "server_discover": true,
+          "per_request_metadata": true,
+          "header_routing": true,
+          "no_protocol_session": true,
+          "object_response": true,
+          "sse_response": true,
+          "list_cache_hint": true,
+          "mrtr_input_required": true,
+          "tasks_normalization": true,
+          "evidence_refs": [
+            "tests/integrations/mcp/test_2026_07_28_adapter.py::MCP20260728AdapterTests::test_discover_and_list_are_stateless_and_capture_scope_local_cache_hints",
+            "tests/integrations/mcp/test_2026_header_routing.py::MCP2026HeaderRoutingTests::test_validated_primitive_parameters_are_mirrored_and_encoded"
+          ]
+        },
+        "official_rust_sdk": {
+          "server_discover": false,
+          "per_request_metadata": false,
+          "header_routing": false,
+          "no_protocol_session": false,
+          "object_response": false,
+          "sse_response": false,
+          "list_cache_hint": false,
+          "mrtr_input_required": false,
+          "tasks_normalization": false,
+          "shadow_compare": "skipped",
+          "enforce_allowed": false,
+          "operational_status": "pending_adapter_contract",
+          "gap_reason": "The Rust sidecar contract remains pinned to 2025-11-25 and does not claim MCP 2026-07-28 support.",
+          "evidence_refs": [
+            "tests/integrations/mcp/test_phase0_contract_artifacts.py::MCPPhase0ContractArtifactTests::test_sidecar_contract_separates_internal_protocol_from_external_mcp_version"
+          ]
         }
       }
     }

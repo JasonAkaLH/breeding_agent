@@ -13,19 +13,21 @@ from .enums import (
     AckPolicy,
     ArtifactType,
     ConversationStatus,
-    DependencyType,
-    EdgeType,
     EventVisibility,
     InterruptStatus,
     MailboxChannel,
     MailboxDeliveryStatus,
     MessageRole,
-    NodeCriticality,
     NodeStatus,
     RoutingMode,
     TaskStatus,
 )
-from .errors import BoundaryViolationError, ContractValidationError, CoreError
+from .errors import (
+    BoundaryViolationError,
+    ContractValidationError,
+    CoreError,
+    MessageIdentityConflictError,
+)
 from .models import (
     Artifact,
     Checkpoint,
@@ -41,7 +43,6 @@ from .models import (
     SlotCollection,
     SlotEvent,
     Task,
-    TaskEdge,
     TaskNode,
 )
 
@@ -61,8 +62,6 @@ __all__ = [
     "ConversationMemorySummary",
     "ConversationStatus",
     "CoreError",
-    "DependencyType",
-    "EdgeType",
     "EventRecord",
     "EventSink",
     "EventVisibility",
@@ -75,8 +74,8 @@ __all__ = [
     "MailboxDeliveryStatus",
     "MailboxMessage",
     "Message",
+    "MessageIdentityConflictError",
     "MessageRole",
-    "NodeCriticality",
     "NodeStatus",
     "PendingSkillContext",
     "RoutingMode",
@@ -84,7 +83,6 @@ __all__ = [
     "SlotEvent",
     "StoragePort",
     "Task",
-    "TaskEdge",
     "TaskNode",
     "TaskStatus",
     "contracts",

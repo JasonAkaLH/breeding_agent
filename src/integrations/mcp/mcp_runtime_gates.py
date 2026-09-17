@@ -72,7 +72,9 @@ _CONFORMANCE_GLOBAL_SAFETY_GATES = (
     "safe_diagnostics_passed",
 )
 
-_ALLOWED_CLIENT_ADAPTERS = ("official_rust_sdk", "python_legacy")
+_LEGACY_CLIENT_ADAPTERS = ("official_rust_sdk", "python_legacy")
+_MODERN_CLIENT_ADAPTERS = ("official_rust_sdk", "python_2026")
+_ALLOWED_CLIENT_ADAPTERS = (*_LEGACY_CLIENT_ADAPTERS, "python_2026")
 _MATRIX_SCHEMA_VERSION = "maf.mcp.client_compatibility_conformance_matrix.v1"
 _SHADOW_COMPARE_SCHEMA_VERSION = "maf.mcp.official_rust_sdk_shadow_compare.v1"
 _ENFORCE_ALLOWLIST_SCHEMA_VERSION = "maf.mcp.adapter_enforce_allowlist.v1"
@@ -89,6 +91,17 @@ _MATRIX_REQUIRED_ADAPTER_FIELDS = (
 )
 _MATRIX_2024_REQUIRED_FIELDS = ("persistent_sse_response", "request_id_correlation")
 _MATRIX_2025_REQUIRED_FIELDS = ("object_response", "sse_response")
+_MATRIX_2026_REQUIRED_FIELDS = (
+    "server_discover",
+    "per_request_metadata",
+    "header_routing",
+    "no_protocol_session",
+    "object_response",
+    "sse_response",
+    "list_cache_hint",
+    "mrtr_input_required",
+    "tasks_normalization",
+)
 _SHADOW_REQUIRED_COMPARED_FIELDS = frozenset(
     {
         "negotiated_protocol_version",
@@ -103,6 +116,7 @@ _SHADOW_STATUSES = frozenset({"matched", "mismatched", "skipped"})
 _OFFICIAL_SDK_OPERATIONAL_STATUSES = frozenset(
     {"passed", "partial_shadow_verified", "unsupported_transport", "pending_adapter_contract"}
 )
+_OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER = SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]
 _MATRIX_EVIDENCE_REFS_FIELD = "evidence_refs"
 _ENFORCE_ROLLBACK_PATHS = frozenset({"python_legacy_adapter", "deployment_rollback", "legacy_mcp_runtime_flag"})
 
@@ -304,9 +318,9 @@ def validate_mcp_runtime_conformance_report(report: Mapping[str, Any]) -> dict[s
         _raise_conformance_blocked()
     _reject_forbidden_conformance_fields(report)
     supported_versions = _string_tuple(report.get("supported_mcp_spec_versions"))
-    if supported_versions != SUPPORTED_MCP_PROTOCOL_VERSION_ORDER:
+    if supported_versions != _OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER:
         _raise_conformance_blocked()
-    if set(supported_versions) != SUPPORTED_MCP_PROTOCOL_VERSIONS:
+    if set(supported_versions) != set(_OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER):
         _raise_conformance_blocked()
     phase_results = report.get("phase_results")
     if not isinstance(phase_results, Mapping):
@@ -315,10 +329,10 @@ def validate_mcp_runtime_conformance_report(report: Mapping[str, Any]) -> dict[s
     _require_boolean_evidence(report, _CONFORMANCE_GLOBAL_SAFETY_GATES, _raise_conformance_blocked)
     version_results = report.get("version_results")
     if not isinstance(version_results, Mapping) or set(version_results.keys()) != set(
-        SUPPORTED_MCP_PROTOCOL_VERSION_ORDER
+        _OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER
     ):
         _raise_conformance_blocked()
-    for version in SUPPORTED_MCP_PROTOCOL_VERSION_ORDER:
+    for version in _OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER:
         result = version_results.get(version)
         if not isinstance(result, Mapping):
             _raise_conformance_blocked()
@@ -327,10 +341,10 @@ def validate_mcp_runtime_conformance_report(report: Mapping[str, Any]) -> dict[s
             _raise_conformance_blocked()
         _require_boolean_evidence(result, _CONFORMANCE_VERSION_GATES, _raise_conformance_blocked)
     return {
-        "supported_mcp_spec_versions": ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        "supported_mcp_spec_versions": ",".join(_OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER),
         "phase_results": ",".join(_CONFORMANCE_PHASES),
         "transport_families": "2024-11-05=legacy_http_sse,2025+=streamable_http",
-        "version_results": ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        "version_results": ",".join(_OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER),
     }
 
 
@@ -361,16 +375,20 @@ def validate_mcp_official_sdk_conformance_matrix(matrix: Mapping[str, Any]) -> d
         if not isinstance(version_entry, Mapping) or set(version_entry.keys()) != {expected_family}:
             _raise_conformance_blocked()
         transport_entry = version_entry.get(expected_family)
-        if not isinstance(transport_entry, Mapping) or set(transport_entry.keys()) != set(_ALLOWED_CLIENT_ADAPTERS):
+        expected_adapters = _MODERN_CLIENT_ADAPTERS if version == "2026-07-28" else _LEGACY_CLIENT_ADAPTERS
+        if not isinstance(transport_entry, Mapping) or set(transport_entry.keys()) != set(expected_adapters):
             _raise_conformance_blocked()
-        for adapter in _ALLOWED_CLIENT_ADAPTERS:
+        for adapter in expected_adapters:
             adapter_result = transport_entry.get(adapter)
             if not isinstance(adapter_result, Mapping):
                 _raise_conformance_blocked()
             _require_existing_evidence_refs(adapter_result)
-            required_fields = _MATRIX_REQUIRED_ADAPTER_FIELDS
-            required_fields += _MATRIX_2024_REQUIRED_FIELDS if version == "2024-11-05" else _MATRIX_2025_REQUIRED_FIELDS
-            if adapter == "python_legacy":
+            if version == "2026-07-28":
+                required_fields = _MATRIX_2026_REQUIRED_FIELDS
+            else:
+                required_fields = _MATRIX_REQUIRED_ADAPTER_FIELDS
+                required_fields += _MATRIX_2024_REQUIRED_FIELDS if version == "2024-11-05" else _MATRIX_2025_REQUIRED_FIELDS
+            if adapter in {"python_legacy", "python_2026"}:
                 _require_boolean_evidence(adapter_result, required_fields, _raise_conformance_blocked)
                 continue
             operational_status = str(adapter_result.get("operational_status") or "")
@@ -382,7 +400,7 @@ def validate_mcp_official_sdk_conformance_matrix(matrix: Mapping[str, Any]) -> d
                 if shadow_compare != "matched":
                     _raise_conformance_blocked()
             elif operational_status == "partial_shadow_verified":
-                if version == "2024-11-05":
+                if version in {"2024-11-05", "2026-07-28"}:
                     _raise_conformance_blocked()
                 _require_boolean_evidence(
                     adapter_result,
@@ -455,7 +473,7 @@ def validate_mcp_official_rust_sdk_shadow_compare(evidence: Mapping[str, Any]) -
         if item.get("visible_path_unchanged") is not True:
             _raise_conformance_blocked()
         seen.add(version)
-    if seen != set(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER):
+    if seen != set(_OFFICIAL_RUST_SDK_PROTOCOL_VERSION_ORDER):
         _raise_conformance_blocked()
     return {
         "visible_adapter": "python_legacy",

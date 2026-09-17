@@ -6,7 +6,7 @@ from tests.api.support import APITestCase
 
 
 class SkillCapabilityPoolAPITest(APITestCase):
-    async def test_fake_planner_can_select_project_skill_capability_and_force_main_agent_skill(self) -> None:
+    async def test_agent_can_select_project_skill_capability(self) -> None:
         project_skill_root = self.workspace / "skill"
         skill_dir = project_skill_root / "rcbd"
         scripts_dir = skill_dir / "scripts"
@@ -42,18 +42,25 @@ entrypoints:
         )
         prompts: list[str] = []
 
-        def planner(prompt: str, **_kwargs) -> str:
+        def agent_generator(prompt: str, **_kwargs) -> str:
             prompts.append(prompt)
-            return json.dumps({"nodes": [{"node_id": "design", "capability_id": "skill.mini_breedstat_rcbd"}]})
-
-        async def streamer(_prompt: str, **_kwargs):
-            yield "done"
+            if '"outcome":"completed"' in prompt:
+                return "done"
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "capability_id": "skill.mini_breedstat_rcbd",
+                            "arguments": {},
+                        }
+                    ]
+                }
+            )
 
         await self.reconfigure_runtime(
             skill_roots=(project_skill_root,),
             public_skill_roots=(project_skill_root,),
-            planner_text_generator=planner,
-            main_agent_stream_generator=streamer,
+            main_agent_stream_generator=agent_generator,
         )
 
         response = await self.submit_message(content="请帮我处理这个材料表", capability_id=None)
@@ -62,7 +69,7 @@ entrypoints:
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
 
-        self.assertIn("skill.mini_breedstat_rcbd", prompts[0])
+        self.assertGreaterEqual(len(prompts), 2)
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         self.assertIn("skill.mini_breedstat_rcbd", [node.capability_id for node in nodes])
         events = await self.runtime.storage.list_events_for_task(task_id)
@@ -115,7 +122,7 @@ entrypoints:
 
         response = await self.submit_message(
             content="普通问候，不应强制使用 Skill",
-            capability_id="main_agent.respond",
+            capability_id=None,
             metadata={
                 "forced_skill_capability_id": "skill.mini_breedstat_rcbd",
                 "forced_skill_name": "mini-breedstat-rcbd",
@@ -131,4 +138,6 @@ entrypoints:
         event_types = [event.event_type for event in events]
         self.assertNotIn("skill.forced_selected", event_types)
         self.assertNotIn("skill.matched", event_types)
-        self.assertIn("skill.match_fallback", event_types)
+        self.assertNotIn("skill.match_fallback", event_types)
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        self.assertEqual([node.capability_id for node in nodes], ["agent.final_output"])

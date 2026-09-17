@@ -18,7 +18,7 @@ class SQLiteEventFilteringTest(SQLiteStorageTestCase):
         event_id: str,
         task_id: str = "task-filter",
         node_id: str | None = "node-final",
-        event_type: str = "main_agent.output_final",
+        event_type: str = "agent.final_output",
         visibility: EventVisibility = EventVisibility.FRONTEND,
         created_at: datetime | None = None,
         payload: dict | None = None,
@@ -46,7 +46,7 @@ class SQLiteEventFilteringTest(SQLiteStorageTestCase):
                 storage,
                 event_id=f"evt-reasoning-{index:04d}",
                 node_id="node-final",
-                event_type="main_agent.reasoning_delta",
+                event_type="agent.reasoning_delta",
                 payload={"delta": f"reasoning-{index}"},
                 created_at=datetime(2026, 5, 26, 8, 0, 0) + timedelta(seconds=index),
             )
@@ -54,7 +54,7 @@ class SQLiteEventFilteringTest(SQLiteStorageTestCase):
             storage,
             event_id="evt-final",
             node_id="node-final",
-            event_type="main_agent.output_final",
+            event_type="agent.final_output",
             payload={"response_role": "final"},
             created_at=datetime(2026, 5, 26, 9, 0, 0),
         )
@@ -65,7 +65,7 @@ class SQLiteEventFilteringTest(SQLiteStorageTestCase):
         filtered = asyncio.run(
             storage.list_events_for_task_filtered(
                 "task-filter",
-                event_types={"main_agent.output_final"},
+                event_types={"agent.final_output"},
                 visibility=EventVisibility.FRONTEND,
                 limit=32,
             )
@@ -90,7 +90,7 @@ class SQLiteEventFilteringTest(SQLiteStorageTestCase):
             storage,
             event_id="evt-delta",
             node_id="node-final",
-            event_type="main_agent.output_delta",
+            event_type="agent.reasoning_delta",
             created_at=base + timedelta(seconds=1),
         )
         self._save_event(storage, event_id="evt-final-a", node_id="node-final", created_at=base + timedelta(seconds=1))
@@ -98,7 +98,7 @@ class SQLiteEventFilteringTest(SQLiteStorageTestCase):
         filtered = asyncio.run(
             storage.list_events_for_task_filtered(
                 "task-filter",
-                event_types={"main_agent.output_final"},
+                event_types={"agent.final_output"},
                 visibility=EventVisibility.FRONTEND,
                 node_id="node-final",
                 limit=10,
@@ -113,7 +113,7 @@ class SQLiteEventFilteringTest(SQLiteStorageTestCase):
             asyncio.run(
                 storage.list_events_for_task_filtered(
                     "task-filter",
-                    event_types={"main_agent.output_final"},
+                    event_types={"agent.final_output"},
                     limit=resource_limit("replay_page_events") + 1,
                 )
             )

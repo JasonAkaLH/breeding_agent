@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hmac
+import re
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -8,21 +10,1179 @@ from .enums import (
     AckPolicy,
     ArtifactType,
     ConversationStatus,
-    DependencyType,
-    EdgeType,
     EventVisibility,
     InterruptStatus,
     MailboxChannel,
     MailboxDeliveryStatus,
     MessageRole,
-    NodeCriticality,
     NodeStatus,
     RoutingMode,
+    StrEnum,
     TaskStatus,
+    UserMCPAuthType,
+    UserMCPHealthStatus,
+    UserMCPProtocolPreference,
+    UserMCPTransport,
 )
 
 
 JsonMapping = Mapping[str, Any]
+
+MCP_ROLLOUT_DRILLS = frozenset(
+    {
+        "cancellation",
+        "long_call_120_seconds",
+        "disconnect_five_minutes",
+        "restart_unknown",
+        "mrtr_recovery",
+        "tasks_recovery",
+        "fair_queueing",
+        "flag_rollback",
+    }
+)
+MCP_ROLLOUT_DRILL_OUTCOMES = frozenset({"passed", "failed"})
+_MCP_ROLLOUT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPServer:
+    server_id: str
+    owner_user_id: str
+    display_name: str
+    routing_description: str
+    endpoint_url: str
+    transport: UserMCPTransport
+    protocol_preference: UserMCPProtocolPreference = UserMCPProtocolPreference.AUTO
+    auth_type: UserMCPAuthType = UserMCPAuthType.NONE
+    auth_metadata: JsonMapping = field(default_factory=dict)
+    enabled: bool = True
+    health_status: UserMCPHealthStatus = UserMCPHealthStatus.UNTESTED
+    config_version: int = 1
+    security_version: int = 1
+    credential_configured: bool = False
+    last_tested_at: datetime | None = None
+    last_test_error_code: str | None = None
+    deletion_pending: bool = False
+    deleted_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class UserMCPCredentialRecord:
+    owner_user_id: str
+    server_id: str
+    credential_ciphertext: bytes
+    credential_nonce: bytes
+    encryption_version: int = 1
+    credential_updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPToolGrant:
+    grant_id: str
+    owner_user_id: str
+    server_id: str
+    tool_name: str
+    server_security_version: int
+    input_schema_sha256: str
+    granted_at: datetime | None = None
+    invalidated_at: datetime | None = None
+    invalid_reason: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPBranchRecord:
+    branch_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    status: str
+    initial_server_id: str | None = None
+    tool_call_count: int = 0
+    max_tool_calls: int = 20
+    active_call_ref: str | None = None
+    result_ref: str | None = None
+    safe_summary: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    terminal_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCallRecord:
+    call_ref: str
+    branch_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    tool_name: str
+    status: str
+    call_sequence: int
+    arguments_sha256: str
+    server_security_version: int
+    input_schema_sha256: str
+    server_config_version: int | None = None
+    protocol_version: str | None = None
+    output_schema: Mapping[str, Any] | None = None
+    output_schema_sha256: str | None = None
+    terminal_result_source: str | None = None
+    input_field_names: tuple[str, ...] = ()
+    may_have_dispatched: bool = False
+    result_ref: str | None = None
+    output_size_bytes: int | None = None
+    safe_error_code: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    terminal_at: datetime | None = None
+    pending_action_id: str | None = None
+    continuation_of_call_ref: str | None = None
+
+
+class MCPNoServerIntentTrigger(StrEnum):
+    INITIAL_NO_PROFILE = "initial_no_profile"
+    TARGET_SERVER_REVALIDATION = "target_server_revalidation"
+
+
+class MCPNoServerIntentStatus(StrEnum):
+    ARMED = "armed"
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    DISPATCHED = "dispatched"
+    RESOLVED = "resolved"
+    CONVERGED = "converged"
+    UNKNOWN = "unknown"
+
+
+class MCPDispatchResumeOutboxStatus(StrEnum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    ACTIVE = "active"
+    WAITING_APPROVAL = "waiting_approval"
+    WAITING_INPUT = "waiting_input"
+    REMOTE_PENDING = "remote_pending"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+
+
+class MCPDispatchResumeReason(StrEnum):
+    INITIAL = "initial"
+    ORDINARY_TERMINAL = "ordinary_terminal"
+    APPROVAL_ACCEPTED = "approval_accepted"
+    MRTR_ANSWER = "mrtr_answer"
+    REMOTE_TERMINAL = "remote_terminal"
+
+
+class MCPDispatchCompletionMode(StrEnum):
+    COMPLETED = "completed"
+    STOPPED_NO_CALL = "stopped_no_call"
+    STOPPED_AFTER_CALL = "stopped_after_call"
+    FAILED_NO_CALL = "failed_no_call"
+    FAILED_AFTER_CALL = "failed_after_call"
+    CANCELLED_NO_CALL = "cancelled_no_call"
+    CANCELLED_AFTER_CALL = "cancelled_after_call"
+    UNKNOWN_NO_REPLAY = "unknown_no_replay"
+
+
+class MCPPendingToolActionStatus(StrEnum):
+    PROPOSED = "proposed"
+    WAITING_APPROVAL = "waiting_approval"
+    APPROVED = "approved"
+    CONSUMED = "consumed"
+    DENIED = "denied"
+    INVALIDATED = "invalidated"
+
+
+class MCPTerminalCandidateLifecycleStatus(StrEnum):
+    RETAINED = "retained"
+    ARCHIVING = "archiving"
+    ARCHIVED = "archived"
+    DELETING = "deleting"
+    DELETED = "deleted"
+
+
+class MCPDurableResultLifecycleStatus(StrEnum):
+    RETAINED = "retained"
+    ARTIFACT_OWNED = "artifact_owned"
+    DELETING = "deleting"
+    DELETED = "deleted"
+
+
+class MCPDurableResultLifecycleReason(StrEnum):
+    DISPATCH_RESOLVED = "dispatch_resolved"
+    ARTIFACT_PROMOTED = "artifact_promoted"
+    ORPHAN = "orphan"
+
+
+class MCPDispatchAggregateMigrationStatus(StrEnum):
+    PLANNED = "planned"
+    BACKED_UP = "backed_up"
+    APPLYING = "applying"
+    APPLIED = "applied"
+    FAILED = "failed"
+
+
+class MCPTerminalState(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class MCPTerminalResultCompletionMode(StrEnum):
+    NORMAL_TERMINAL_PROJECTION = "normal_terminal_projection"
+    LATE_RESULT_NO_CONTINUATION = "late_result_no_continuation"
+
+
+class MCPExecutionTerminalProjectionStatus(StrEnum):
+    UNKNOWN = "unknown"
+    LATE_RESULT_RESOLVED = "late_result_resolved"
+
+
+class MCPExecutionTerminalReason(StrEnum):
+    TRUSTED_TERMINAL_RESULT_ABSENT = "trusted_terminal_result_absent"
+
+
+class MCPTerminalErrorCode(StrEnum):
+    MCP_RUNTIME_UNAVAILABLE = "mcp_runtime_unavailable"
+
+
+class MCPUnavailableEventType(StrEnum):
+    RUNTIME_UNAVAILABLE = "mcp.runtime_unavailable"
+
+
+class MCPInitialIntentCreateResult(StrEnum):
+    CREATED_UNAVAILABLE = "created_unavailable"
+    RETRY_ROUTE = "retry_route"
+    ALREADY_CREATED = "already_created"
+
+
+class MCPTargetIntentArmResult(StrEnum):
+    ARMED = "armed"
+    UNAVAILABLE = "unavailable"
+    ALREADY_ARMED = "already_armed"
+
+
+class MCPTargetIntentResolveResult(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    ALREADY_RESOLVED = "already_resolved"
+
+
+class MCPNoServerConvergenceResult(StrEnum):
+    CONVERGED = "converged"
+    ALREADY_CONVERGED = "already_converged"
+    ALREADY_TERMINAL = "already_terminal"
+    UNKNOWN_REQUIRES_NO_REPLAY = "unknown_requires_no_replay"
+    TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT = "trusted_terminal_result_requires_commit"
+
+
+class MCPTerminalResultCommitResult(StrEnum):
+    COMMITTED_NORMAL = "committed_normal"
+    COMMITTED_LATE = "committed_late"
+    ALREADY_COMMITTED = "already_committed"
+    CONFLICT = "conflict"
+
+
+class MCPDispatchFinalizeResult(StrEnum):
+    FINALIZED = "finalized"
+    ALREADY_FINALIZED = "already_finalized"
+    CONFLICT = "conflict"
+
+
+class MCPApprovalSuspendResult(StrEnum):
+    SUSPENDED = "suspended"
+    ALREADY_SUSPENDED = "already_suspended"
+    CONFLICT = "conflict"
+
+
+class MCPApprovalDecisionResult(StrEnum):
+    ACCEPTED = "accepted"
+    ALREADY_ACCEPTED = "already_accepted"
+    DENIED_FINALIZED = "denied_finalized"
+    INVALIDATED = "invalidated"
+    CONFLICT = "conflict"
+
+
+class MCPInputSuspendResult(StrEnum):
+    SUSPENDED = "suspended"
+    ALREADY_SUSPENDED = "already_suspended"
+    CONFLICT = "conflict"
+
+
+class MCPMRTRAnswerResult(StrEnum):
+    ACCEPTED = "accepted"
+    ALREADY_ACCEPTED = "already_accepted"
+    INVALIDATED = "invalidated"
+    CONFLICT = "conflict"
+
+
+class MCPLegacyRetirementConvergenceResult(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    CONVERGED = "converged"
+    ALREADY_CONVERGED = "already_converged"
+    ALREADY_TERMINAL = "already_terminal"
+
+
+class MCPCP7SafetyRecordKind(StrEnum):
+    REGISTRATION = "registration"
+    ATTESTATION = "attestation"
+    VIOLATION = "violation"
+    GAP = "gap"
+
+
+class MCPCP7ReadyEpochEventKind(StrEnum):
+    OPENED = "opened"
+    READY = "ready"
+    MAINTENANCE_STARTED = "maintenance_started"
+    CLOSED = "closed"
+    INVALIDATED = "invalidated"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPNoServerIntent:
+    intent_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str | None
+    trigger: MCPNoServerIntentTrigger
+    requested_server_id: str | None
+    requested_server_config_version: int | None
+    requested_server_security_version: int | None
+    owner_server_set_fingerprint: str | None
+    resume_envelope_json: JsonMapping | None
+    resume_envelope_sha256: str | None
+    status: MCPNoServerIntentStatus
+    revision: int
+    evidence_sha256: str
+    created_at: datetime
+    updated_at: datetime
+    terminal_at: datetime | None
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPOwnerMutationGuard:
+    owner_user_id: str
+    revision: int
+    server_set_fingerprint: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDispatchResumeOutbox:
+    outbox_id: str
+    intent_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    resume_envelope_sha256: str
+    payload_sha256: str
+    status: MCPDispatchResumeOutboxStatus
+    claim_owner: str | None
+    claim_token: str | None
+    lease_expires_at: datetime | None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+    result_receipt_id: str | None = None
+    completion_mode: str | None = None
+    resume_reason: MCPDispatchResumeReason = MCPDispatchResumeReason.INITIAL
+    resume_receipt_id: str | None = None
+    resume_answer_id: str | None = None
+    selector_step_total: int = 0
+    approval_round_total: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class MCPPendingToolAction:
+    action_id: str
+    owner_user_id: str
+    conversation_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    tool_name: str
+    arguments_sha256: str
+    approval_fingerprint: str
+    arguments_payload_ref: str
+    payload_file_sha256: str
+    payload_size_bytes: int
+    encryption_version: int
+    server_config_version: int
+    server_security_version: int
+    input_schema_sha256: str
+    status: MCPPendingToolActionStatus
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    approved_at: datetime | None = None
+    consumed_at: datetime | None = None
+    invalidated_at: datetime | None = None
+    approval_interrupt_id: str | None = None
+    accepted_answer_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPPendingActionPayloadSnapshot:
+    action_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    tool_name: str
+    arguments_sha256: str
+    arguments_payload_ref: str
+    payload_file_sha256: str
+    payload_size_bytes: int
+    encryption_version: int
+    server_config_version: int
+    server_security_version: int
+    input_schema_sha256: str
+    file_device: int
+    file_inode: int
+    file_mode: int
+    file_owner_uid: int
+
+
+@dataclass(slots=True, frozen=True)
+class MCPTerminalCandidateSnapshot:
+    candidate: MCPValidatedTerminalResultCandidate
+    candidate_schema: str
+    active_candidate_filename: str
+    active_task_index_filename: str
+    active_call_index_filename: str
+    candidate_file_sha256: str
+    task_index_file_sha256: str
+    call_index_file_sha256: str
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDurableResultSnapshot:
+    result_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_id: str
+    content_sha256: str
+    size_bytes: int
+    store_kind: str
+    data_filename: str
+    manifest_filename: str
+    data_file_sha256: str
+    manifest_file_sha256: str
+    data_file_device: int
+    data_file_inode: int
+    data_file_mode: int
+    data_file_owner_uid: int
+    manifest_file_device: int
+    manifest_file_inode: int
+    manifest_file_mode: int
+    manifest_file_owner_uid: int
+
+
+@dataclass(slots=True, frozen=True)
+class MCPTerminalCandidateLifecycle:
+    candidate_id: str
+    call_id: str
+    task_id: str
+    candidate_schema: str
+    active_candidate_filename: str
+    active_task_index_filename: str
+    active_call_index_filename: str
+    candidate_file_sha256: str
+    task_index_file_sha256: str
+    call_index_file_sha256: str
+    status: MCPTerminalCandidateLifecycleStatus
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    receipt_id: str | None = None
+    archive_candidate_filename: str | None = None
+    archive_task_index_filename: str | None = None
+    archive_call_index_filename: str | None = None
+    consumed_at: datetime | None = None
+    eligible_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDurableResultLifecycle:
+    result_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_id: str
+    content_sha256: str
+    size_bytes: int
+    data_filename: str
+    manifest_filename: str
+    data_file_sha256: str
+    manifest_file_sha256: str
+    store_kind: str
+    status: MCPDurableResultLifecycleStatus
+    reason: MCPDurableResultLifecycleReason
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    eligible_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDispatchAggregateMigration:
+    migration_id: str
+    backend: str
+    schema_version: str
+    report_sha256: str
+    status: MCPDispatchAggregateMigrationStatus
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    backup_basename: str | None = None
+    backup_sha256: str | None = None
+    failure_reason_code: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPNoServerConvergenceReceipt:
+    idempotency_key: str
+    task_id: str
+    intent_id: str
+    owner_user_id: str
+    terminal_code: str
+    evidence_sha256: str
+    runtime_unavailable_event_id: str
+    task_failed_event_id: str
+    committed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyRetirementEvidence:
+    evidence_id: str
+    task_id: str
+    inventory_id: str
+    inventory_sha256: str
+    bundle_revision: str | None
+    capability_id: str | None
+    may_have_dispatched: bool
+    evidence_sha256: str
+    created_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyRetirementReceipt:
+    idempotency_key: str
+    task_id: str
+    inventory_id: str
+    inventory_sha256: str
+    terminal_reason_code: str
+    terminal_evidence_sha256: str
+    event_id: str
+    committed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPValidatedTerminalResultCandidate:
+    candidate_id: str
+    owner_user_id: str
+    conversation_id: str
+    task_id: str
+    node_id: str
+    intent_id: str
+    call_id: str
+    server_id: str
+    server_config_version: int
+    server_security_version: int
+    terminal_state: MCPTerminalState
+    result_payload_sha256: str
+    safe_result_ref: str | None
+    safe_result_ref_sha256: str | None
+    safe_error_code: str | None
+    sealed_at: datetime
+    safe_result_content_sha256: str | None = None
+    safe_result_size_bytes: int | None = None
+    safe_result_store_kind: str | None = None
+    result_parser_revision: str | None = None
+    validated_checkpoint_sha256: str | None = None
+    parsed_model_sha256: str | None = None
+    terminal_result_source: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPTerminalResultReceipt:
+    result_receipt_id: str
+    candidate_id: str
+    owner_user_id: str
+    conversation_id: str
+    task_id: str
+    node_id: str
+    intent_id: str
+    call_id: str
+    server_id: str
+    server_config_version: int
+    server_security_version: int
+    terminal_state: MCPTerminalState
+    result_payload_sha256: str
+    safe_result_ref: str | None
+    safe_result_ref_sha256: str | None
+    safe_error_code: str | None
+    completion_mode: MCPTerminalResultCompletionMode
+    committed_at: datetime
+    safe_result_content_sha256: str | None = None
+    safe_result_size_bytes: int | None = None
+    safe_result_store_kind: str | None = None
+    result_parser_revision: str | None = None
+    validated_checkpoint_sha256: str | None = None
+    parsed_model_sha256: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPExecutionTerminalProjection:
+    projection_id: str
+    owner_user_id: str
+    conversation_id: str
+    intent_id: str
+    call_id: str
+    task_id: str
+    node_id: str
+    status: MCPExecutionTerminalProjectionStatus
+    revision: int
+    no_replay: bool
+    reason_code: MCPExecutionTerminalReason
+    unknown_intent_revision: int
+    unknown_event_id: str
+    task_failed_event_id: str
+    unknown_terminal_at: datetime
+    task_terminal_status: str
+    node_terminal_status: str
+    result_receipt_id: str | None
+    result_payload_sha256: str | None
+    resolved_terminal_state: MCPTerminalState | None
+    safe_result_ref: str | None
+    safe_result_ref_sha256: str | None
+    safe_error_code: str | None
+    resolved_intent_revision: int | None
+    resolution_event_id: str | None
+    correction_event_id: str | None
+    result_committed_at: datetime | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7SafetyLedgerRecord:
+    record_id: str
+    candidate_id: str
+    epoch_id: str
+    config_fingerprint: str
+    record_kind: MCPCP7SafetyRecordKind
+    red_line: str | None
+    hook_id: str | None
+    bucket_started_at: datetime | None
+    bucket_ended_at: datetime | None
+    reason_code: str
+    value: int
+    boundary_source_sha256: str | None
+    payload_sha256: str
+    recorded_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7ReadyEpochEvent:
+    event_id: str
+    candidate_id: str
+    epoch_id: str
+    predecessor_epoch_id: str | None
+    event_kind: MCPCP7ReadyEpochEventKind
+    container_id: str
+    image_id: str
+    config_fingerprint: str
+    boundary_at: datetime
+    audit_device: str
+    audit_inode: int
+    audit_offset: int
+    ledger_record_count: int
+    inflight_state_sha256: str
+    payload_sha256: str
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7CandidateGuard:
+    candidate_id: str
+    invalid_latched: bool
+    first_invalid_record_id: str | None
+    first_invalid_reason: str | None
+    first_invalid_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7SafetySnapshot:
+    schema: str
+    candidate_id: str
+    config_fingerprint: str
+    registry_definition_sha256: str
+    epoch_chain_sha256: str
+    ready_epochs: tuple[str, ...]
+    maintenance_boundary_count: int
+    observation_started_at: datetime
+    observation_ended_at: datetime
+    registration_count_by_red_line: JsonMapping
+    attestation_interval_count_by_red_line: JsonMapping
+    violation_count_by_red_line: JsonMapping
+    gap_count: int
+    invalid_latched: bool
+    record_count: int
+    ordered_record_payload_sha256s: tuple[str, ...]
+    snapshot_sha256: str
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MCPRemoteTaskBinding:
+    safe_remote_task_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    server_id: str
+    protocol_version: str
+    remote_task_ciphertext: bytes
+    remote_task_nonce: bytes
+    encryption_version: int
+    last_status: str
+    next_poll_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    terminal_at: datetime | None = None
+    published_at: datetime | None = None
+    continuation_plan: JsonMapping = field(default_factory=dict)
+    claim_owner: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: datetime | None = None
+    revision: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRemoteTaskOutbox:
+    outbox_id: str
+    kind: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    safe_remote_task_ref: str
+    payload: JsonMapping = field(default_factory=dict)
+    status: str = "pending"
+    claim_owner: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: datetime | None = None
+    revision: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    continuation_admitted_at: datetime | None = None
+    continuation_dispatched_at: datetime | None = None
+    continuation_status: str | None = None
+    continuation_claim_owner: str | None = None
+    continuation_claim_token: str | None = None
+    continuation_lease_expires_at: datetime | None = None
+    continuation_revision: int = 0
+    continuation_node_ids: tuple[str, ...] = ()
+    continuation_safe_error_code: str | None = None
+    completed_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MCPSealedState:
+    sealed_state_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    state_kind: str
+    ciphertext: bytes
+    nonce: bytes
+    encryption_version: int
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MCPMRTRRequestStateEvidence:
+    sealed_state_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    request_state: str
+    tool_name: str
+    arguments_sha256: str
+    input_requests: Mapping[str, Mapping[str, Any]]
+    pending_action_id: str
+    arguments_payload_ref: str
+
+
+@dataclass(slots=True, frozen=True)
+class MCPConnectionLease:
+    connection_id: str
+    owner_user_id: str
+    task_id: str
+    instance_id: str
+    lease_expires_at: datetime
+    disconnected_at: datetime | None = None
+    auth_generation: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPAuditEvent:
+    audit_event_id: str
+    owner_user_id: str
+    event_type: str
+    occurred_at: datetime
+    expires_at: datetime
+    task_id: str | None = None
+    node_id: str | None = None
+    server_id: str | None = None
+    call_ref: str | None = None
+    safe_payload: JsonMapping = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyMigrationRecord:
+    migration_id: str
+    event_type: str
+    plan_fingerprint: str
+    source_server_id: str
+    source_fingerprint: str
+    owner_consumer_ref: str
+    target_server_id: str
+    target_consumer_set_digest: str
+    capability_obligations_fingerprint: str
+    catalog_fingerprint: str
+    capability_fingerprint: str
+    validator_provenance_fingerprint: str
+    credential_digest: str
+    disposition: str
+    occurred_at: datetime
+    evidence_expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyMigrationBatchResult:
+    servers: tuple[UserMCPServer, ...]
+    records: tuple[MCPLegacyMigrationRecord, ...]
+    applied: bool
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutGateScope:
+    environment_id: str
+    rollout_program: str = "user_mcp_phase3"
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutDrillObservation:
+    drill_observation_id: str
+    environment_id: str
+    deployment_id: str
+    config_fingerprint: str
+    drill: str
+    outcome: str
+    observed_at: datetime
+    recorded_at: datetime
+    expires_at: datetime
+    payload_digest: str
+    rollout_program: str = "user_mcp_phase3"
+    stage: str = "internal_enforce"
+
+
+def canonical_mcp_rollout_drill_observation_digest(
+    observation: MCPRolloutDrillObservation,
+) -> str:
+    from src.integrations.mcp.rollout_evidence import canonical_evidence_content_digest
+
+    return canonical_evidence_content_digest(
+        {
+            item.name: getattr(observation, item.name)
+            for item in fields(observation)
+            if item.name != "payload_digest"
+        }
+    )
+
+
+def seal_mcp_rollout_drill_observation(
+    observation: MCPRolloutDrillObservation,
+) -> MCPRolloutDrillObservation:
+    draft = replace(observation, payload_digest="")
+    return replace(
+        draft,
+        payload_digest=canonical_mcp_rollout_drill_observation_digest(draft),
+    )
+
+
+def validate_mcp_rollout_drill_observation(
+    observation: MCPRolloutDrillObservation,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    required = (
+        observation.drill_observation_id,
+        observation.environment_id,
+        observation.deployment_id,
+        observation.config_fingerprint,
+    )
+    if any(not isinstance(value, str) or not value.strip() for value in required):
+        blockers.append("required_field_invalid")
+    if (
+        observation.rollout_program != "user_mcp_phase3"
+        or observation.stage != "internal_enforce"
+    ):
+        blockers.append("scope_invalid")
+    if (
+        not isinstance(observation.config_fingerprint, str)
+        or _MCP_ROLLOUT_SHA256_RE.fullmatch(observation.config_fingerprint) is None
+    ):
+        blockers.append("config_fingerprint_invalid")
+    if not isinstance(observation.drill, str) or observation.drill not in MCP_ROLLOUT_DRILLS:
+        blockers.append("drill_invalid")
+    if (
+        not isinstance(observation.outcome, str)
+        or observation.outcome not in MCP_ROLLOUT_DRILL_OUTCOMES
+    ):
+        blockers.append("outcome_invalid")
+    if not all(
+        _is_aware_timestamp(value)
+        for value in (
+            observation.observed_at,
+            observation.recorded_at,
+            observation.expires_at,
+        )
+    ):
+        blockers.append("timestamp_invalid")
+    elif (
+        observation.recorded_at < observation.observed_at
+        or observation.expires_at <= observation.recorded_at
+    ):
+        blockers.append("timestamp_order_invalid")
+    if (
+        not isinstance(observation.payload_digest, str)
+        or _MCP_ROLLOUT_SHA256_RE.fullmatch(observation.payload_digest) is None
+    ):
+        blockers.append("digest_invalid")
+    else:
+        try:
+            expected_digest = canonical_mcp_rollout_drill_observation_digest(observation)
+        except (TypeError, ValueError):
+            blockers.append("digest_invalid")
+        else:
+            if not hmac.compare_digest(observation.payload_digest, expected_digest):
+                blockers.append("digest_invalid")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _is_aware_timestamp(value: object) -> bool:
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutMetricBucket:
+    metric_bucket_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    metric_name: str
+    bucket_started_at: datetime
+    bucket_ended_at: datetime
+    execution_path: str
+    routing_mode: str
+    transport: str
+    protocol_version: str
+    adapter: str
+    result_category: str
+    error_category: str
+    latency_bucket: str
+    value: int
+    call_kind: str | None = None
+    red_line: str | None = None
+    rollout_program: str = "user_mcp_phase3"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPShadowAuditSample:
+    sample_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    manifest_fingerprint: str
+    fixture_fingerprint: str
+    mapping_fingerprint: str
+    scenario: str
+    nonce: str
+    legacy_outcome: str
+    shadow_outcome: str
+    transport: str
+    endpoint_policy: str
+    comparison: str
+    blockers: tuple[str, ...]
+    payload_digest: str
+    observed_at: datetime
+    recorded_at: datetime
+    expires_at: datetime
+    safe_owner_ref: str | None = None
+    safe_task_ref: str | None = None
+    safe_call_ref: str | None = None
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutEvidenceSnapshot:
+    evidence_id: str
+    environment_id: str
+    git_sha: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    window_started_at: datetime
+    window_ended_at: datetime
+    recorded_at: datetime
+    producer: str
+    source: str
+    snapshot_id: int
+    nonce: str
+    evidence_kind: str
+    payload: JsonMapping
+    payload_digest: str
+    rollout_program: str = "user_mcp_phase3"
+    attestation_key_id: str | None = None
+    attestation_signature: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutStageApproval:
+    approval_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    evidence_id: str
+    reason: str
+    approver: str
+    created_at: datetime
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutDeploymentActivation:
+    activation_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    approval_id: str
+    evidence_id: str
+    previous_activation_id: str | None
+    operator_reason: str
+    is_rollback: bool
+    created_at: datetime
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutPromotionBlock:
+    block_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    evidence_id: str
+    reason_code: str
+    created_at: datetime
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutBlockResolution:
+    resolution_id: str
+    block_id: str
+    approval_id: str
+    evidence_id: str
+    reason: str
+    approver: str
+    created_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutInstanceConfigLease:
+    instance_config_id: str
+    environment_id: str
+    deployment_id: str
+    instance_id: str
+    stage: str
+    config_fingerprint: str
+    activation_id: str
+    lease_expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPHealthAttempt:
+    attempt_id: str
+    owner_user_id: str
+    server_id: str
+    config_version: int
+    security_version: int
+    runner_instance_id: str
+    lease_expires_at: datetime
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPScopeLease:
+    scope_id: str
+    owner_user_id: str
+    server_id: str
+    security_version: int
+    gateway_instance_id: str
+    lease_expires_at: datetime
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MAFMasterKeyValidation:
+    singleton_key: int
+    validation_nonce: bytes
+    validation_ciphertext: bytes
+    derivation_version: int
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.singleton_key != 1:
+            raise ValueError("MAF master key validation singleton_key must be 1")
+        if not isinstance(self.validation_nonce, bytes) or len(self.validation_nonce) != 12:
+            raise ValueError("MAF master key validation nonce must be 12 bytes")
+        if self.derivation_version != 1:
+            raise ValueError("unsupported MAF master key derivation version")
+        if not isinstance(self.created_at, datetime) or self.created_at.utcoffset() is None:
+            raise ValueError("MAF master key validation created_at must be UTC")
+        if self.created_at.utcoffset().total_seconds() != 0:
+            raise ValueError("MAF master key validation created_at must be UTC")
 
 
 @dataclass(slots=True, frozen=True)
@@ -89,6 +1249,21 @@ class ConversationFileResource:
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
+
+@dataclass(slots=True, frozen=True)
+class ConversationFileIndexRepairMarker:
+    conversation_id: str
+    repair_kind: str = "conversation_file_index"
+    status: str = "pending"
+    reason_code: str = ""
+    affected_upload_ids: tuple[str, ...] = ()
+    attempt_count: int = 0
+    next_retry_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
 @dataclass(slots=True, frozen=True)
 class AuthUserToken:
     username: str
@@ -101,6 +1276,257 @@ class AuthUserToken:
     updated_at: datetime | None = None
 
 
+class SubmissionAdmissionDisposition(StrEnum):
+    CREATED = "created"
+    IDEMPOTENT_REPLAY = "idempotent_replay"
+    CONVERSATION_BUSY = "conversation_busy"
+    MESSAGE_ID_CONFLICT = "message_id_conflict"
+    CONVERSATION_NOT_AVAILABLE = "conversation_not_available"
+
+
+class SubmissionAdmissionState(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class SubmissionProjectionState(StrEnum):
+    PENDING = "pending"
+    PROJECTED = "projected"
+
+
+class SubmissionPreparationState(StrEnum):
+    PENDING = "pending"
+    PREPARED = "prepared"
+
+
+class SubmissionHandoffState(StrEnum):
+    PENDING = "pending"
+    HANDED_OFF = "handed_off"
+
+
+class SubmissionPreparationReceiptComponent(StrEnum):
+    ROUTE_DECISION = "route_decision"
+    MEMORY_CONTEXT = "memory_context"
+    SELECTOR_DECISION = "selector_decision"
+
+
+class SubmissionAuthorityState(StrEnum):
+    UNINITIALIZED = "uninitialized"
+    FINALIZED = "finalized"
+
+
+class MessageIdentityKind(StrEnum):
+    SUBMISSION = "submission"
+    INTERRUPT = "interrupt"
+    SERVER_INTERNAL = "server_internal"
+    FILE_VISIBLE = "file_visible"
+    LEGACY_CONFLICT_ONLY = "legacy_conflict_only"
+
+
+class MessageIdentityDisposition(StrEnum):
+    CREATED = "created"
+    EXACT_REPLAY = "exact_replay"
+    CONFLICT = "conflict"
+    CONVERSATION_NOT_AVAILABLE = "conversation_not_available"
+
+
+class ConversationAdmissionCloseDisposition(StrEnum):
+    CLOSED = "closed"
+    EXACT_REPLAY = "exact_replay"
+    CONVERSATION_NOT_AVAILABLE = "conversation_not_available"
+    CONFLICT = "conflict"
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionAdmissionPhase:
+    admission_state: SubmissionAdmissionState
+    projection_state: SubmissionProjectionState
+    preparation_state: SubmissionPreparationState
+    handoff_state: SubmissionHandoffState
+
+
+class SubmissionAdmissionHandle:
+    """Data-free capability whose claim secret remains adapter-owned."""
+
+    __slots__ = ("__weakref__",)
+
+    def __repr__(self) -> str:
+        return "SubmissionAdmissionHandle(<opaque>)"
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionAdmissionRequest:
+    username: str
+    conversation_id: str
+    message_id: str
+    task: Task
+    idempotency_key: str
+    request_fingerprint: str
+    conversation_projection: bytes
+    message_projection: bytes
+    projection_sha256: str
+    continuation: bytes
+    continuation_sha256: str
+    message_created_at: datetime
+    claim_owner: str
+    claim_expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionAdmissionResult:
+    disposition: SubmissionAdmissionDisposition
+    conversation_id: str
+    message_id: str | None = None
+    task_id: str | None = None
+    message_created_at: datetime | None = None
+    task_created_at: datetime | None = None
+    phase: SubmissionAdmissionPhase | None = None
+    record: SubmissionRecoveryRecord | None = field(default=None, repr=False)
+    handle: SubmissionAdmissionHandle | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionRecoveryRecord:
+    username: str
+    conversation_id: str
+    message_id: str
+    task_id: str
+    conversation_projection: bytes
+    message_projection: bytes
+    projection_sha256: str
+    continuation: bytes
+    continuation_sha256: str
+    prepared_execution: bytes | None
+    prepared_execution_sha256: str | None
+    phase: SubmissionAdmissionPhase
+    created_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionClaimRequest:
+    claim_owner: str
+    now: datetime
+    claim_expires_at: datetime
+    after_created_at: datetime | None = None
+    after_message_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionClaimResult:
+    found: bool
+    authority_state: SubmissionAuthorityState
+    finalization_receipt_sha256: str | None
+    pending_count: int = 0
+    earliest_claim_expires_at: datetime | None = None
+    record: SubmissionRecoveryRecord | None = None
+    handle: SubmissionAdmissionHandle | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionClaimRenewalRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    now: datetime
+    claim_expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionProjectionAcknowledgementRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    projection_sha256: str
+    acknowledged_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    prepared_execution: bytes
+    prepared_execution_sha256: str
+    prepared_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationLookup:
+    username: str
+    conversation_id: str
+    task_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationRecord:
+    conversation_id: str
+    message_id: str
+    task_id: str
+    prepared_execution: bytes
+    prepared_execution_sha256: str
+    handoff_state: SubmissionHandoffState
+    handoff_kind: str | None = None
+    handoff_identity: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionPreparationReceipt:
+    task_id: str
+    conversation_id: str
+    route_decision: bytes | None
+    route_decision_sha256: str | None
+    memory_context: bytes | None
+    memory_context_sha256: str | None
+    selector_decision: bytes | None
+    selector_decision_sha256: str | None
+    receipt_sha256: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionHandoffAcknowledgementRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    prepared_execution_sha256: str
+    handoff_kind: str
+    handoff_identity: str
+    acknowledged_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class ConversationAdmissionCloseRequest:
+    username: str
+    conversation_id: str
+    operation_id: str
+    closed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class ConversationAdmissionCloseResult:
+    disposition: ConversationAdmissionCloseDisposition
+    conversation_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class MessageIdentityReservationRequest:
+    username: str
+    conversation_id: str
+    message_id: str
+    identity_kind: MessageIdentityKind
+    role: MessageRole | None
+    message_type: str | None
+    message_created_at: datetime | None
+    task_id: str | None
+    request_fingerprint: str | None
+    reserved_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MessageIdentityReservationResult:
+    disposition: MessageIdentityDisposition
+    message_id: str
+    conversation_id: str
+    identity_kind: MessageIdentityKind
+    role: MessageRole | None
+    message_type: str | None
+    message_created_at: datetime | None
+    task_id: str | None
+
+
 @dataclass(slots=True, frozen=True)
 class Message:
     message_id: str
@@ -109,6 +1535,18 @@ class Message:
     content: str
     task_id: str | None = None
     stream_status: str | None = None
+    created_at: datetime | None = None
+    message_type: str = "chat"
+    metadata: JsonMapping = field(default_factory=dict)
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class FileUploadMessageProjection:
+    upload_id: str
+    conversation_id: str
+    content: str
+    metadata: JsonMapping = field(default_factory=dict)
     created_at: datetime | None = None
 
 
@@ -120,11 +1558,15 @@ class Task:
     status: TaskStatus = TaskStatus.ACCEPTED
     routing_mode: RoutingMode = RoutingMode.AUTO
     requested_capability_id: str | None = None
-    root_node_id: str | None = None
     summary: str | None = None
     cancel_requested_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    mcp_execution_mode: str | None = None
+    mcp_shadow_enabled: bool | None = None
+    mcp_rollout_config_version: str | None = None
+    mcp_route_reason_code: str | None = None
+    mcp_rollout_mode: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -151,23 +1593,10 @@ class TaskNode:
     capability_id: str
     assigned_instance_id: str | None = None
     status: NodeStatus = NodeStatus.PENDING
-    criticality: NodeCriticality = NodeCriticality.REQUIRED
-    dependency_type: DependencyType = DependencyType.HARD
-    retry_policy: JsonMapping = field(default_factory=dict)
-    timeout_policy: JsonMapping = field(default_factory=dict)
-    resource_class: str | None = None
     input_refs: tuple[str, ...] = ()
     output_refs: tuple[str, ...] = ()
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-
-@dataclass(slots=True, frozen=True)
-class TaskEdge:
-    from_node_id: str
-    to_node_id: str
-    edge_type: EdgeType = EdgeType.DATA
-    condition: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

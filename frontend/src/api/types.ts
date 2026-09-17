@@ -1,5 +1,6 @@
 export type ChatMode = 'chat';
-export type ReasoningEffort = 'minimal' | 'high' | 'max';
+export type RoutingMode = 'auto' | 'hint' | 'force_capability';
+export type ReasoningEffort = string;
 export type ModelEdition = string;
 
 export interface UserResponse {
@@ -18,9 +19,30 @@ export interface LogoutResponse {
   logged_out: boolean;
 }
 
+export interface ReasoningEffortOption {
+  value: ReasoningEffort;
+  label: string;
+}
+
+export interface ReasoningEffortStatePolicy {
+  default: ReasoningEffort | null;
+  supported: ReasoningEffort[];
+}
+
+export interface ReasoningEffortThinkingPolicy {
+  enabled: ReasoningEffortStatePolicy;
+  disabled: ReasoningEffortStatePolicy;
+}
+
+export interface ReasoningEffortConfig {
+  options: ReasoningEffortOption[];
+  thinking: ReasoningEffortThinkingPolicy;
+}
+
 export interface ModelEditionOption {
   value: ModelEdition;
   label: string;
+  reasoning_efforts: ReasoningEffortConfig;
 }
 
 export interface ModelEditionsResponse {
@@ -31,11 +53,18 @@ export interface ModelEditionsResponse {
 export interface SubmitMessageRequest {
   conversation_id: string;
   content: string;
-  routing_mode: 'auto' | string;
+  routing_mode: RoutingMode;
   capability_id: string | null;
   client_message_id?: string | null;
   model_edition?: ModelEdition | null;
   metadata: Record<string, unknown>;
+}
+
+export interface MCPServerBadge {
+  server_id: string;
+  display_name: string;
+  command: string;
+  binding_mode: 'explicit_command';
 }
 
 export interface CapabilityResponse {
@@ -97,6 +126,8 @@ export interface UploadFileResponse {
   size_bytes: number;
   sha256: string;
   expires_at: string;
+  status?: string | null;
+  description_status?: string | null;
   preview: UploadPreviewResponse;
 }
 
@@ -108,6 +139,17 @@ export interface UploadListResponse {
 export interface DeleteUploadResponse {
   upload_id: string;
   deleted: boolean;
+}
+
+export type MCPResultArtifactProjectionStatus = 'ready' | 'deferred' | 'permanent_failure';
+export type MCPResultArtifactProjectionReason = 'promoted' | 'already_promoted' | 'capacity_unavailable' | 'projection_failed' | 'source_expired';
+
+export interface MCPResultArtifactProjection {
+  schema: 'maf.user_mcp.result_artifact_projection.v1';
+  safe_call_ref: string;
+  status: MCPResultArtifactProjectionStatus;
+  reason_code: MCPResultArtifactProjectionReason;
+  artifact_count: 0 | 1;
 }
 
 export interface TaskSummaryResponse {
@@ -123,6 +165,8 @@ export interface TaskSummaryResponse {
   cancel_requested: boolean;
   created_at: string | null;
   updated_at: string | null;
+  mcp_terminal_projection?: Record<string, unknown> | null;
+  mcp_result_artifact_projections?: MCPResultArtifactProjection[];
 }
 
 export interface TaskListResponse {
@@ -144,11 +188,6 @@ export interface ConversationListResponse {
   conversations: ConversationSummaryResponse[];
 }
 
-export interface RenameConversationRequest {
-  conversation_id: string;
-  title: string;
-}
-
 export interface MessageResponse {
   message_id: string;
   conversation_id: string;
@@ -157,7 +196,11 @@ export interface MessageResponse {
   task_id: string | null;
   stream_status: string | null;
   created_at: string | null;
+  message_type?: string;
+  metadata?: Record<string, unknown>;
+  updated_at?: string | null;
   artifacts?: ArtifactResponse[];
+  mcp_result_artifact_projections?: MCPResultArtifactProjection[];
 }
 
 export interface ConversationMessagesResponse {
@@ -201,6 +244,39 @@ export interface TaskGraphResponse {
   edges: TaskEdgeResponse[];
 }
 
+export type MCPBusinessResultPrimary =
+  | { kind: 'structured'; value: unknown; truncated: false }
+  | { kind: 'structured_preview'; preview: string; truncated: true }
+  | { kind: 'text'; text: string; truncated: boolean }
+  | { kind: 'empty'; message: string; truncated: false };
+
+export type MCPBusinessResultContentMetadata =
+  | { kind: 'image' | 'audio' | 'embedded_blob_resource'; mime_type: string; byte_size: number; sha256: string }
+  | { kind: 'resource_link'; name: string; title?: string | null; description?: string | null; mime_type?: string | null; uri_scheme: string }
+  | { kind: 'embedded_text_resource'; mime_type?: string | null; uri_scheme: string };
+
+export type MCPBusinessResultView =
+  | {
+      schema: 'maf.mcp.business_result_view.v1';
+      availability: 'ready';
+      outcome: 'succeeded';
+      primary: MCPBusinessResultPrimary;
+      unavailable_reason?: null;
+      supplemental_texts?: string[] | null;
+      content_metadata?: MCPBusinessResultContentMetadata[] | null;
+      projection_truncated: boolean;
+    }
+  | {
+      schema: 'maf.mcp.business_result_view.v1';
+      availability: 'unavailable';
+      outcome: 'succeeded';
+      primary?: null;
+      unavailable_reason: 'safe_hide' | 'projection_missing' | 'historical_authority_invalid' | 'projection_invalid';
+      supplemental_texts?: null;
+      content_metadata?: null;
+      projection_truncated: false;
+    };
+
 export interface ArtifactResponse {
   artifact_id: string;
   producer_node_id: string;
@@ -217,6 +293,7 @@ export interface ArtifactResponse {
   source_file_count?: number | null;
   archive_format?: string | null;
   retention_status?: string | null;
+  mcp_business_result?: MCPBusinessResultView | null;
 }
 
 export interface TaskArtifactsResponse {
@@ -242,6 +319,89 @@ export interface TaskInterruptsResponse {
 
 export interface CancelTaskResponse {
   task_id: string;
+  status: string;
+  accepted: boolean;
+}
+
+export type MCPTransport = 'streamable_http' | 'legacy_http_sse';
+export type MCPAuthType = 'none' | 'bearer' | 'api_key_header' | 'static_headers';
+
+export interface MCPCredentialInput {
+  secret_value?: string;
+  static_headers?: Record<string, string>;
+}
+
+export interface CreateMCPServerRequest {
+  display_name: string;
+  routing_description: string;
+  endpoint_url: string;
+  transport?: MCPTransport;
+  protocol_preference?: string;
+  auth_type?: MCPAuthType;
+  auth_metadata?: Record<string, unknown>;
+  credential?: MCPCredentialInput;
+  enabled?: boolean;
+}
+
+export interface PatchMCPServerRequest {
+  display_name?: string;
+  routing_description?: string;
+  endpoint_url?: string;
+  transport?: MCPTransport;
+  protocol_preference?: string;
+  auth_type?: MCPAuthType;
+  auth_metadata?: Record<string, unknown>;
+  enabled?: boolean;
+  credential_action?: 'retain' | 'replace' | 'clear';
+  credential?: MCPCredentialInput;
+}
+
+export interface MCPServerResponse {
+  server_id: string;
+  display_name: string;
+  routing_description: string;
+  endpoint_url: string;
+  transport: MCPTransport | string;
+  protocol_preference: string;
+  auth_type: MCPAuthType | string;
+  auth_metadata: Record<string, unknown>;
+  enabled: boolean;
+  health_status: string;
+  credential_configured: boolean;
+  config_version: number;
+  security_version: number;
+  last_tested_at: string | null;
+  last_test_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MCPServerListResponse {
+  servers: MCPServerResponse[];
+}
+
+export interface MCPDeleteServerResponse {
+  server_id: string;
+  deletion_pending: boolean;
+}
+
+export interface MCPToolGrantResponse {
+  grant_id: string;
+  server_id: string;
+  server_display_name: string;
+  tool_name: string;
+  granted_at: string | null;
+  valid: boolean;
+  invalid_reason: string | null;
+}
+
+export interface MCPToolGrantListResponse {
+  grants: MCPToolGrantResponse[];
+}
+
+export interface MCPCallControlResponse {
+  task_id: string;
+  call_ref: string;
   status: string;
   accepted: boolean;
 }

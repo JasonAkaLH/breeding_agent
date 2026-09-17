@@ -6,17 +6,22 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260515_edge_artifact";
-pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_decommission_policy_20260515";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260515_edge_artifact";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260826_event_append_exact_a4";
+pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260826_event_append_exact_a4";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
-pub const FEATURE_TASK_GRAPH: &str = "task_graph";
 pub const FEATURE_ARTIFACT_METADATA: &str = "artifact_metadata";
+pub const FEATURE_TASK_READ: &str = "task_read";
+pub const FEATURE_AGENT_STATE: &str = "agent_state";
+pub const FEATURE_SUBMISSION_ADMISSION: &str = "submission_admission";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
 pub const MAX_IN_FLIGHT_CPU_MULTIPLIER: u64 = 4;
+pub const SUBMISSION_IMPORT_PAGE_ROWS: u64 = 1_000;
+pub const SUBMISSION_IMPORT_RECORD_BYTES: u64 = 64 * 1024;
+pub const SUBMISSION_IMPORT_STDIN_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationPolicy {
@@ -89,6 +94,9 @@ pub struct MigrationPolicy {
     pub required_components: Vec<String>,
     pub required_evidence: Vec<String>,
     pub require_target_schema_version: bool,
+    pub task_authority_evidence_schema: String,
+    pub task_authority_evidence_path_env: String,
+    pub task_authority_hmac_key_path_env: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +150,7 @@ pub enum RuntimeSidecarErrorCode {
     RuntimeStoreDecommissionBlocked,
     RuntimeStoreLeaseConflict,
     RuntimeStoreLeaseExpired,
+    RuntimeStoreIdempotencyConflict,
     RuntimeStoreWriteFailed,
     EventLogUnavailable,
     EventLogPayloadTooLarge,
@@ -167,6 +176,7 @@ impl RuntimeSidecarErrorCode {
             Self::RuntimeStoreDecommissionBlocked => "runtime_store_decommission_blocked",
             Self::RuntimeStoreLeaseConflict => "runtime_store_lease_conflict",
             Self::RuntimeStoreLeaseExpired => "runtime_store_lease_expired",
+            Self::RuntimeStoreIdempotencyConflict => "runtime_store_idempotency_conflict",
             Self::RuntimeStoreWriteFailed => "runtime_store_write_failed",
             Self::EventLogUnavailable => "event_log_unavailable",
             Self::EventLogPayloadTooLarge => "event_log_payload_too_large",
@@ -180,6 +190,7 @@ impl RuntimeSidecarErrorCode {
     #[must_use]
     pub const fn category(self) -> &'static str {
         match self {
+            Self::RuntimeStoreIdempotencyConflict => "internal",
             Self::RuntimeStoreProtocolIncompatible => "compatibility",
             Self::RuntimeStoreResponseInvalid => "protocol",
             Self::RuntimeStoreConfigUntrusted | Self::RuntimeStoreArtifactUntrusted => "security",
@@ -349,7 +360,6 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
     [
         "task_submit",
         "node_state_transition",
-        "task_edge_save",
         "artifact_save",
         "event_append",
         "lease_acquire",
@@ -358,15 +368,32 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
         "cancellation_token_write",
         "bundle_revision_pin",
         "bundle_revision_release",
+        "agent_state_commit",
+        "submission_admit",
+        "submission_pending_claim",
+        "submission_claim_renew",
+        "submission_projection_acknowledge",
+        "submission_handoff_prepare",
+        "submission_handoff_acknowledge",
+        "conversation_admission_close",
+        "message_identity_reserve",
     ]
     .into_iter()
     .map(write_operation)
     .chain(
         [
-            "task_edge_list",
+            "task_get",
+            "task_list_for_conversation",
+            "task_get_active_for_conversation",
+            "task_node_get",
+            "task_node_list",
             "artifact_get",
             "artifact_list",
             "event_replay",
+            "agent_run_get",
+            "agent_item_list",
+            "agent_final_projection_get",
+            "submission_preparation_get",
         ]
         .into_iter()
         .map(|name| OperationPolicy {
@@ -395,6 +422,7 @@ pub fn error_code_table() -> Vec<ErrorCodeEntry> {
         RuntimeSidecarErrorCode::RuntimeStoreDecommissionBlocked,
         RuntimeSidecarErrorCode::RuntimeStoreLeaseConflict,
         RuntimeSidecarErrorCode::RuntimeStoreLeaseExpired,
+        RuntimeSidecarErrorCode::RuntimeStoreIdempotencyConflict,
         RuntimeSidecarErrorCode::RuntimeStoreWriteFailed,
         RuntimeSidecarErrorCode::EventLogUnavailable,
         RuntimeSidecarErrorCode::EventLogPayloadTooLarge,
@@ -502,7 +530,6 @@ pub fn benchmark_policy() -> BenchmarkPolicy {
         required_operations: [
             "task_submit",
             "node_state_transition",
-            "task_edge_save",
             "artifact_save",
             "event_append",
             "lease_acquire",
@@ -566,7 +593,6 @@ pub fn migration_policy() -> MigrationPolicy {
             "event_log",
             "lease",
             "cursor",
-            "task_edge",
             "artifact_metadata",
             "bundle_pin",
         ]
@@ -588,6 +614,11 @@ pub fn migration_policy() -> MigrationPolicy {
         .map(|evidence| (*evidence).to_owned())
         .collect(),
         require_target_schema_version: true,
+        task_authority_evidence_schema: "maf.runtime_sidecar.task_authority_migration_evidence.v2"
+            .to_owned(),
+        task_authority_evidence_path_env: "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH".to_owned(),
+        task_authority_hmac_key_path_env: "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH"
+            .to_owned(),
     }
 }
 
@@ -624,7 +655,6 @@ pub fn decommission_policy() -> DecommissionPolicy {
         required_removed_legacy_paths: [
             "python_storage_task_write",
             "python_storage_node_write",
-            "python_storage_task_edge_write",
             "python_storage_artifact_write",
             "python_event_append_write",
             "python_bundle_pin_write",
@@ -671,8 +701,10 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             FEATURE_RUNTIME_STORE.to_owned(),
             FEATURE_EVENT_LOG.to_owned(),
             FEATURE_TASK_DISPATCHER.to_owned(),
-            FEATURE_TASK_GRAPH.to_owned(),
             FEATURE_ARTIFACT_METADATA.to_owned(),
+            FEATURE_TASK_READ.to_owned(),
+            FEATURE_AGENT_STATE.to_owned(),
+            FEATURE_SUBMISSION_ADMISSION.to_owned(),
         ],
         modes: vec!["off".to_owned(), "shadow".to_owned(), "enforce".to_owned()],
         mode_env: BTreeMap::from([
@@ -699,7 +731,6 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             ("queue_wait_ms".to_owned(), 2_000),
             ("task_submit_deadline_ms".to_owned(), 3_000),
             ("state_transition_deadline_ms".to_owned(), 2_000),
-            ("task_edge_deadline_ms".to_owned(), 2_000),
             ("artifact_metadata_deadline_ms".to_owned(), 2_000),
             ("event_append_deadline_ms".to_owned(), 2_000),
             ("lease_deadline_ms".to_owned(), 1_000),
@@ -708,6 +739,29 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             ("replay_page_events".to_owned(), 1_000),
             ("replay_page_bytes".to_owned(), 1024 * 1024),
             ("shutdown_drain_ms".to_owned(), 30_000),
+            (
+                "submission_conversation_projection_bytes".to_owned(),
+                64 * 1024,
+            ),
+            (
+                "submission_message_projection_bytes".to_owned(),
+                64 * 1024 * 1024,
+            ),
+            ("submission_continuation_bytes".to_owned(), 64 * 1024 * 1024),
+            ("submission_prepared_execution_bytes".to_owned(), 128 * 1024),
+            (
+                "submission_import_page_rows".to_owned(),
+                SUBMISSION_IMPORT_PAGE_ROWS,
+            ),
+            (
+                "submission_import_record_bytes".to_owned(),
+                SUBMISSION_IMPORT_RECORD_BYTES,
+            ),
+            (
+                "submission_import_stdin_bytes".to_owned(),
+                SUBMISSION_IMPORT_STDIN_BYTES,
+            ),
+            ("grpc_max_message_bytes".to_owned(), 140 * 1024 * 1024),
         ]),
         retry_policy: retry_policy(),
         config_policy: config_policy(),
@@ -738,7 +792,14 @@ mod tests {
 
     #[test]
     fn write_operations_fail_closed_without_python_fallback() {
-        for operation in operation_policies()
+        let operations = operation_policies();
+        let claim = operations
+            .iter()
+            .find(|operation| operation.name == "submission_pending_claim")
+            .expect("pending submission claim operation");
+        assert_eq!(claim.kind, "write");
+        assert!(claim.idempotency_required);
+        for operation in operations
             .into_iter()
             .filter(|operation| operation.kind == "write")
         {
@@ -789,7 +850,6 @@ mod tests {
             artifact.resource_limits["state_transition_deadline_ms"],
             2_000
         );
-        assert_eq!(artifact.resource_limits["task_edge_deadline_ms"], 2_000);
         assert_eq!(
             artifact.resource_limits["artifact_metadata_deadline_ms"],
             2_000
@@ -878,11 +938,6 @@ mod tests {
         assert!(
             policy
                 .required_operations
-                .contains(&"task_edge_save".to_owned())
-        );
-        assert!(
-            policy
-                .required_operations
                 .contains(&"artifact_save".to_owned())
         );
         assert!(
@@ -957,7 +1012,6 @@ mod tests {
                 "event_log".to_owned(),
                 "lease".to_owned(),
                 "cursor".to_owned(),
-                "task_edge".to_owned(),
                 "artifact_metadata".to_owned(),
                 "bundle_pin".to_owned(),
             ]
@@ -966,6 +1020,10 @@ mod tests {
             policy
                 .required_evidence
                 .contains(&"schema_version".to_owned())
+        );
+        assert_eq!(
+            policy.task_authority_evidence_path_env,
+            "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH"
         );
         assert!(
             policy
@@ -1061,7 +1119,6 @@ mod tests {
             vec![
                 "python_storage_task_write".to_owned(),
                 "python_storage_node_write".to_owned(),
-                "python_storage_task_edge_write".to_owned(),
                 "python_storage_artifact_write".to_owned(),
                 "python_event_append_write".to_owned(),
                 "python_bundle_pin_write".to_owned(),
@@ -1115,6 +1172,26 @@ mod tests {
         assert_eq!(
             artifact,
             runtime_sidecar_contract_json().expect("serialize runtime sidecar contract"),
+        );
+    }
+
+    #[test]
+    fn migration_evidence_contract_requires_submission_authority_v2() {
+        assert_eq!(
+            migration_policy().task_authority_evidence_schema,
+            "maf.runtime_sidecar.task_authority_migration_evidence.v2"
+        );
+        assert_eq!(
+            SCHEMA_HASH,
+            "maf_runtime_v1_schema_20260826_event_append_exact_a4"
+        );
+        assert_eq!(
+            PROTO_HASH,
+            "maf_runtime_proto_v1_20260826_event_append_exact_a4"
+        );
+        assert_eq!(
+            ERROR_CODE_TABLE_HASH,
+            "maf_runtime_error_table_v1_idempotency_conflict_20260812"
         );
     }
 }

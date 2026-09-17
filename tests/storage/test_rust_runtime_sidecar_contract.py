@@ -1,15 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import inspect
+import json
 import os
+import tempfile
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from src.core.enums import ArtifactType, NodeStatus, TaskStatus
-from src.core.models import Artifact, EventRecord, Task, TaskEdge, TaskNode
+from src.core.enums import ArtifactType, InterruptStatus, NodeStatus, TaskStatus
+from src.core.models import (
+    Artifact,
+    EventRecord,
+    Interrupt,
+    InterruptAnswer,
+    MCPBranchRecord,
+    MCPCallRecord,
+    MCPRemoteTaskBinding,
+    Task,
+    TaskNode,
+)
 from src.lifecycle.cancellation_service import CancellationService
+from src.lifecycle.errors import LifecycleTransitionError
+from src.lifecycle.interrupt_service import InterruptService
+from src.orchestration.agent_loop.models import (
+    AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
+)
 from src.storage.rust_contract import (
     artifact_policy,
     benchmark_policy,
@@ -29,6 +52,8 @@ from src.storage.runtime_sidecar_facade import (
     RuntimeLeaseFacade,
     build_sidecar_retry_plan,
     ensure_sidecar_write_allowed,
+    load_runtime_sidecar_migration_evidence_artifact,
+    load_runtime_sidecar_task_authority_v1_for_upgrade,
     runtime_sidecar_max_in_flight,
     validate_runtime_sidecar_artifact_provenance,
     validate_runtime_sidecar_benchmark_report,
@@ -36,36 +61,197 @@ from src.storage.runtime_sidecar_facade import (
     validate_runtime_sidecar_decommission_readiness,
     validate_runtime_sidecar_endpoint,
     validate_runtime_sidecar_handshake,
+    validate_runtime_sidecar_migration_evidence_artifact,
     validate_runtime_sidecar_migration_plan,
     validate_runtime_sidecar_ops_readiness,
     validate_runtime_sidecar_promotion_readiness,
     validate_runtime_sidecar_response,
 )
-from src.storage.sqlite import SQLiteStorage
+from src.storage.sqlite import SQLiteAgentRepository, SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
+
+
+def _valid_task_authority_cutover() -> dict[str, object]:
+    empty_digest = hashlib.sha256(b"[]").hexdigest()
+    inventory_digest = hashlib.sha256(b"canonical-inventory").hexdigest()
+    return {
+        "backfill_import_complete": True,
+        "task_inventory": {
+            "legacy_count": 1,
+            "sidecar_count": 1,
+            "legacy_canonical_digest": inventory_digest,
+            "sidecar_canonical_digest": inventory_digest,
+        },
+        "task_node_inventory": {
+            "legacy_count": 1,
+            "sidecar_count": 1,
+            "legacy_canonical_digest": inventory_digest,
+            "sidecar_canonical_digest": inventory_digest,
+        },
+        "legacy_null_assignment_resolution": {
+            "resolution_complete": True,
+            "active_count": 0,
+            "active_canonical_digest": empty_digest,
+            "terminal_historical_count": 1,
+            "terminal_historical_canonical_digest": inventory_digest,
+            "terminal_historical_remains_unassigned": True,
+        },
+    }
+
+
+def _valid_submission_inventory(*, count: int = 1) -> dict[str, object]:
+    digest = hashlib.sha256(f"inventory:{count}".encode()).hexdigest()
+    side = {
+        "count": count,
+        "pk_sha256": digest,
+        "canonical_sha256": digest,
+        "finalize_empty": count == 0,
+    }
+    return {
+        "source": dict(side),
+        "destination": dict(side),
+        "ambiguity_count": 0,
+    }
+
+
+def _valid_submission_authority_cutover() -> dict[str, object]:
+    contract = load_runtime_sidecar_contract()
+    features = json.dumps(
+        contract["supported_features"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return {
+        "source_backend": "sqlite",
+        "source_identity_sha256": "1" * 64,
+        "snapshot_boundary_sha256": "2" * 64,
+        "writer_fence_sha256": "3" * 64,
+        "report_sha256": "4" * 64,
+        "tested_commit": "5" * 40,
+        "tested_tree": "6" * 40,
+        "destination_contract": {
+            "schema_hash": contract["schema_hash"],
+            "proto_hash": contract["artifact_policy"]["expected_proto_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "supported_features_sha256": hashlib.sha256(features).hexdigest(),
+        },
+        "conversation_inventory": _valid_submission_inventory(),
+        "message_identity_inventory": _valid_submission_inventory(),
+        "active_task_inventory": _valid_submission_inventory(),
+        "finalization_receipt_sha256": "7" * 64,
+        "finalized_at_ms": 1,
+    }
 
 
 class _RecordingRuntimeSidecarClient:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, str]]] = []
-        self.edges: dict[str, list[dict[str, object]]] = {}
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.tasks: dict[str, dict[str, object]] = {}
         self.artifacts: dict[str, dict[str, object]] = {}
+        self.nodes: dict[str, dict[str, object]] = {}
+        self.events: dict[str, tuple[str, str, str, bytes]] = {}
 
-    async def submit_task(self, *, task_id: str, conversation_id: str, idempotency_key: str) -> dict[str, object]:
+    async def submit_task(
+        self,
+        *,
+        task_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        node: dict[str, object] | None = None,
+        task: dict[str, object],
+        expected_from_status: str | None = None,
+    ) -> dict[str, object]:
         self.calls.append(
             (
                 "task_submit",
                 {
                     "conversation_id": conversation_id,
                     "idempotency_key": idempotency_key,
+                    "task": task,
                     "task_id": task_id,
+                    "expected_from_status": expected_from_status,
                 },
             )
         )
+        current = self.tasks.get(task_id)
+        current_status = None if current is None else str(current["status"])
+        if expected_from_status != current_status:
+            return {
+                "operation": "task_submit",
+                "task_id": "",
+                "duplicate": False,
+                "task": None,
+                "error": {
+                    "code": "runtime_store_idempotency_conflict",
+                    "message": "stale expected status",
+                    "category": "internal",
+                    "retriable": False,
+                    "safe_metadata": {},
+                },
+            }
+        self.tasks[task_id] = task
         return {
             "operation": "task_submit",
             "task_id": task_id,
             "duplicate": False,
+            "task": task,
+            "error": None,
+        }
+
+    async def get_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_get", {"task_id": task_id}))
+        task = self.tasks.get(task_id)
+        return {
+            "operation": "task_get",
+            "found": task is not None,
+            "task": task,
+            "error": None,
+        }
+
+    async def list_tasks_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+        statuses: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "task_list_for_conversation",
+                {"conversation_id": conversation_id, "statuses": statuses},
+            )
+        )
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task["conversation_id"] == conversation_id
+            and (not statuses or task["status"] in statuses)
+        ]
+        tasks.sort(key=lambda task: (task.get("created_at") or "", task["task_id"]), reverse=True)
+        return {
+            "operation": "task_list_for_conversation",
+            "tasks": tasks,
+            "error": None,
+        }
+
+    async def get_active_task_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            ("task_get_active_for_conversation", {"conversation_id": conversation_id})
+        )
+        active_statuses = ("accepted", "planning", "running", "cancelling")
+        response = await self.list_tasks_for_conversation(
+            conversation_id=conversation_id,
+            statuses=active_statuses,
+        )
+        self.calls.pop()
+        task = response["tasks"][0] if response["tasks"] else None
+        return {
+            "operation": "task_get_active_for_conversation",
+            "found": task is not None,
+            "task": task,
             "error": None,
         }
 
@@ -75,7 +261,9 @@ class _RecordingRuntimeSidecarClient:
         task_id: str,
         node_id: str,
         to_status: str,
+        expected_from_status: str,
         idempotency_key: str,
+        node: dict[str, object] | None = None,
     ) -> dict[str, object]:
         self.calls.append(
             (
@@ -85,57 +273,49 @@ class _RecordingRuntimeSidecarClient:
                     "node_id": node_id,
                     "task_id": task_id,
                     "to_status": to_status,
+                    "expected_from_status": expected_from_status,
+                    "node": node,
                 },
             )
         )
+        current = self.nodes.get(node_id)
+        current_status = "" if current is None else str(current["status"])
+        if expected_from_status != current_status:
+            return {
+                "operation": "node_state_transition",
+                "node_id": "",
+                "status": "",
+                "error": {
+                    "code": "runtime_store_idempotency_conflict",
+                    "message": "stale expected status",
+                    "category": "internal",
+                    "retriable": False,
+                    "safe_metadata": {},
+                },
+                "node": None,
+            }
+        if node is not None:
+            self.nodes[node_id] = node
         return {
             "operation": "node_state_transition",
             "node_id": node_id,
             "status": to_status,
             "error": None,
+            "node": node,
         }
 
-    async def save_task_edge(
-        self,
-        *,
-        task_id: str,
-        from_node_id: str,
-        to_node_id: str,
-        edge_type: str,
-        condition: str,
-        idempotency_key: str,
-    ) -> dict[str, object]:
-        self.calls.append(
-            (
-                "task_edge_save",
-                {
-                    "edge_type": edge_type,
-                    "from_node_id": from_node_id,
-                    "idempotency_key": idempotency_key,
-                    "task_id": task_id,
-                    "to_node_id": to_node_id,
-                },
-            )
+    async def get_task_node(self, *, node_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_get", {"node_id": node_id}))
+        node = self.nodes.get(node_id)
+        return {"operation": "task_node_get", "found": node is not None, "node": node, "error": None}
+
+    async def list_task_nodes_for_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_list", {"task_id": task_id}))
+        nodes = sorted(
+            (node for node in self.nodes.values() if node["task_id"] == task_id),
+            key=lambda node: str(node["node_id"]),
         )
-        edge = {
-            "task_id": task_id,
-            "from_node_id": from_node_id,
-            "to_node_id": to_node_id,
-            "edge_type": edge_type,
-            "condition": condition,
-        }
-        self.edges.setdefault(task_id, [])
-        self.edges[task_id] = [
-            existing
-            for existing in self.edges[task_id]
-            if not (existing["from_node_id"] == from_node_id and existing["to_node_id"] == to_node_id)
-        ]
-        self.edges[task_id].append(edge)
-        return {"operation": "task_edge_save", "edge": edge, "error": None}
-
-    async def list_task_edges(self, *, task_id: str) -> dict[str, object]:
-        self.calls.append(("task_edge_list", {"task_id": task_id}))
-        return {"operation": "task_edge_list", "edges": list(self.edges.get(task_id, [])), "error": None}
+        return {"operation": "task_node_list", "nodes": nodes, "error": None}
 
     async def save_artifact(
         self,
@@ -194,6 +374,13 @@ class _RecordingRuntimeSidecarClient:
         payload_json: bytes,
         idempotency_key: str,
     ) -> dict[str, object]:
+        identity = (conversation_id, task_id, event_type, payload_json)
+        existing = self.events.get(idempotency_key)
+        if existing is not None and existing != identity:
+            raise RuntimeError(
+                "runtime_store_idempotency_conflict: event append payload differs"
+            )
+        self.events.setdefault(idempotency_key, identity)
         self.calls.append(
             (
                 "event_append",
@@ -213,8 +400,12 @@ class _RecordingRuntimeSidecarClient:
                 "sequence": 1,
                 "created_at_ms": 1,
             },
+            "duplicate": existing is not None,
             "error": None,
         }
+
+    async def append_event_exact(self, **kwargs) -> dict[str, object]:
+        return await self.append_event(**kwargs)
 
     async def write_cancellation_token(
         self,
@@ -315,6 +506,37 @@ class _RecordingRuntimeSidecarClient:
         }
 
 
+class _MismatchedTaskNodeSidecar(_RecordingRuntimeSidecarClient):
+    async def transition_node(self, **payload: object) -> dict[str, object]:
+        response = await super().transition_node(**payload)  # type: ignore[arg-type]
+        response["node_id"] = "different-node"
+        return response
+
+    async def get_task_node(self, *, node_id: str) -> dict[str, object]:
+        response = await super().get_task_node(node_id=node_id)
+        if response["node"] is not None:
+            response["node"] = {**response["node"], "node_id": "different-node"}  # type: ignore[misc]
+        return response
+
+    async def list_task_nodes_for_task(self, *, task_id: str) -> dict[str, object]:
+        response = await super().list_task_nodes_for_task(task_id=task_id)
+        response["nodes"] = [
+            {**node, "task_id": "different-task"} for node in response["nodes"]  # type: ignore[union-attr]
+        ]
+        return response
+
+
+class _FailAfterNodeTransitionSidecar(_RecordingRuntimeSidecarClient):
+    fail_after_next_transition = False
+
+    async def transition_node(self, **payload: object) -> dict[str, object]:
+        response = await super().transition_node(**payload)  # type: ignore[arg-type]
+        if self.fail_after_next_transition:
+            self.fail_after_next_transition = False
+            raise RuntimeError("injected_after_node")
+        return response
+
+
 class _RecordingAuditSink:
     def __init__(self) -> None:
         self.records: list[tuple[str, dict[str, object]]] = []
@@ -400,7 +622,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         for name in [
             "task_submit",
             "node_state_transition",
-            "task_edge_save",
             "artifact_save",
             "event_append",
             "lease_acquire",
@@ -409,10 +630,38 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             "cancellation_token_write",
             "bundle_revision_pin",
             "bundle_revision_release",
+            "agent_state_commit",
         ]:
             self.assertIn(name, write_ops)
             self.assertEqual(write_ops[name]["enforce_failure"], "fail_closed")
             self.assertFalse(write_ops[name]["python_legacy_write_fallback"])
+
+    def test_task_authority_contract_exposes_read_and_non_retriable_conflict(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        self.assertIn("task_read", contract["supported_features"])
+        self.assertIn("agent_state", contract["supported_features"])
+        self.assertIn("submission_admission", contract["supported_features"])
+        task_get = next(operation for operation in contract["operations"] if operation["name"] == "task_get")
+        self.assertEqual(task_get["kind"], "read")
+        self.assertFalse(task_get["idempotency_required"])
+        self.assertEqual(operation_policy("task_list_for_conversation")["kind"], "read")
+        self.assertEqual(operation_policy("task_get_active_for_conversation")["kind"], "read")
+        self.assertEqual(operation_policy("task_node_get")["kind"], "read")
+        self.assertEqual(operation_policy("task_node_list")["kind"], "read")
+        self.assertEqual(operation_policy("agent_run_get")["kind"], "read")
+        self.assertEqual(operation_policy("agent_item_list")["kind"], "read")
+        self.assertEqual(operation_policy("agent_final_projection_get")["kind"], "read")
+        conflict = next(error for error in contract["error_codes"] if error["code"] == "runtime_store_idempotency_conflict")
+        self.assertEqual(conflict["category"], "internal")
+        self.assertFalse(conflict["retriable"])
+        self.assertEqual(
+            contract["schema_hash"],
+            "maf_runtime_v1_schema_20260826_event_append_exact_a4",
+        )
+        self.assertEqual(
+            contract["artifact_policy"]["expected_proto_hash"],
+            "maf_runtime_proto_v1_20260826_event_append_exact_a4",
+        )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:
         event_append = operation_policy("event_append")
@@ -484,6 +733,96 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             ],
         )
         self.assertEqual(asyncio.run(SQLiteStorage(self.session_factory).list_event_page_for_task("task-sidecar")), [])
+
+    def test_initialization_event_exact_reports_sql_and_sidecar_replay(self) -> None:
+        event = EventRecord(
+            event_id="evt-initialization-exact",
+            conversation_id="conv-initialization-exact",
+            task_id="task-initialization-exact",
+            event_type="agent.run.started",
+            payload={
+                "services": ("mysql_readonly",),
+                "binding": {"mode": "readonly", "version": 1},
+            },
+        )
+        reordered_event = replace(
+            event,
+            payload={
+                "binding": {"version": 1, "mode": "readonly"},
+                "services": ["mysql_readonly"],
+            },
+        )
+        sql_storage = SQLiteStorage(self.session_factory)
+
+        _, created_duplicate = asyncio.run(sql_storage.append_event_exact(event))
+        _, replay_duplicate = asyncio.run(
+            sql_storage.append_event_exact(reordered_event)
+        )
+        self.assertFalse(created_duplicate)
+        self.assertTrue(replay_duplicate)
+
+        sidecar = _RecordingRuntimeSidecarClient()
+        enforce_storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+        )
+        sidecar_event = replace(
+            event,
+            event_id="evt-initialization-sidecar-exact",
+            task_id="task-initialization-sidecar-exact",
+        )
+        reordered_sidecar_event = replace(
+            reordered_event,
+            event_id=sidecar_event.event_id,
+            task_id=sidecar_event.task_id,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "enforce"}):
+            _, created_duplicate = asyncio.run(
+                enforce_storage.append_event_exact(sidecar_event)
+            )
+            _, replay_duplicate = asyncio.run(
+                enforce_storage.append_event_exact(reordered_sidecar_event)
+            )
+        self.assertFalse(created_duplicate)
+        self.assertTrue(replay_duplicate)
+
+        self.assertEqual(len(sidecar.events), 1)
+        expected_payload = (
+            b'{"binding":{"mode":"readonly","version":1},'
+            b'"services":["mysql_readonly"]}'
+        )
+        self.assertEqual(next(iter(sidecar.events.values()))[3], expected_payload)
+
+        shadow_sidecar = _RecordingRuntimeSidecarClient()
+        shadow_storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=shadow_sidecar,
+            runtime_sidecar_shadow_sink=lambda _payload: None,
+        )
+        shadow_event = replace(
+            event,
+            event_id="evt-initialization-shadow-exact",
+            task_id="task-initialization-shadow-exact",
+        )
+        reordered_shadow_event = replace(
+            reordered_event,
+            event_id=shadow_event.event_id,
+            task_id=shadow_event.task_id,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "shadow"}):
+            _, created_duplicate = asyncio.run(
+                shadow_storage.append_event_exact(shadow_event)
+            )
+            _, replay_duplicate = asyncio.run(
+                shadow_storage.append_event_exact(reordered_shadow_event)
+            )
+        self.assertFalse(created_duplicate)
+        self.assertTrue(replay_duplicate)
+        self.assertEqual(len(shadow_sidecar.events), 1)
+        self.assertEqual(
+            next(iter(shadow_sidecar.events.values()))[3],
+            expected_payload,
+        )
 
     def test_event_log_enforce_rejects_python_sqlite_replay_even_when_append_sidecar_is_configured(self) -> None:
         sidecar = _RecordingRuntimeSidecarClient()
@@ -660,33 +999,675 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
             saved_task = asyncio.run(storage.save_task(task))
             saved_node = asyncio.run(storage.save_task_node(node))
+            loaded_node = asyncio.run(storage.get_task_node(node.node_id))
+            listed_nodes = asyncio.run(storage.list_task_nodes_for_task(task.task_id))
 
         self.assertEqual(saved_task, task)
         self.assertEqual(saved_node, node)
+        self.assertEqual(loaded_node, node)
+        self.assertEqual(listed_nodes, [node])
         self.assertEqual(
-            sidecar.calls,
+            [call[0] for call in sidecar.calls],
             [
-                (
-                    "task_submit",
-                    {
-                        "conversation_id": "conv-sidecar-store",
-                        "idempotency_key": "task-sidecar-store",
-                        "task_id": "task-sidecar-store",
-                    },
-                ),
-                (
-                    "node_state_transition",
-                    {
-                        "idempotency_key": "node-sidecar-store:running",
-                        "node_id": "node-sidecar-store",
-                        "task_id": "task-sidecar-store",
-                        "to_status": "running",
-                    },
-                ),
+                "task_get",
+                "task_submit",
+                "task_node_get",
+                "node_state_transition",
+                "task_node_get",
+                "task_node_list",
             ],
         )
+        submit_payload = sidecar.calls[1][1]
+        self.assertEqual(submit_payload["conversation_id"], "conv-sidecar-store")
+        self.assertEqual(submit_payload["task_id"], "task-sidecar-store")
+        self.assertTrue(str(submit_payload["idempotency_key"]).startswith("task-sidecar-store:"))
+        self.assertEqual(submit_payload["task"]["root_message_id"], "msg-sidecar-store")
+        self.assertTrue(str(sidecar.calls[3][1]["idempotency_key"]).startswith("node-sidecar-store:"))
+        self.assertEqual(sidecar.calls[3][1]["node"]["capability_id"], "main_agent.respond")
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task(task.task_id)))
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
+
+    def test_remote_terminal_outbox_transitions_authoritative_sidecar_node_in_enforce(self) -> None:
+        now = datetime(2026, 8, 13, 12, 0, 0)
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        task = Task("task-mcp-enforce", "conv-mcp-enforce", "msg-mcp-enforce")
+        node = TaskNode(
+            node_id="node-mcp-enforce",
+            task_id=task.task_id,
+            capability_id="mcp.dispatch",
+            status=NodeStatus.WAITING_FOR_DEPENDENCY,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            asyncio.run(storage.save_task_node(node))
+
+        asyncio.run(
+            storage.save_mcp_branch_record(
+                MCPBranchRecord(
+                    branch_id="branch-mcp-enforce",
+                    owner_user_id="alice",
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    status="ready",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        )
+        self.assertTrue(
+            asyncio.run(
+                storage.reserve_mcp_call(
+                    MCPCallRecord(
+                        call_ref="call-mcp-enforce",
+                        branch_id="branch-mcp-enforce",
+                        owner_user_id="alice",
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        server_id="server-a",
+                        tool_name="lookup",
+                        status="active",
+                        call_sequence=1,
+                        arguments_sha256="args",
+                        server_security_version=1,
+                        input_schema_sha256="schema",
+                        protocol_version="2026-07-28",
+                        may_have_dispatched=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            )
+        )
+        binding = MCPRemoteTaskBinding(
+            safe_remote_task_ref="remote-mcp-enforce",
+            owner_user_id="alice",
+            task_id=task.task_id,
+            node_id=node.node_id,
+            call_ref="call-mcp-enforce",
+            server_id="server-a",
+            protocol_version="2026-07-28",
+            remote_task_ciphertext=b"ciphertext",
+            remote_task_nonce=b"nonce",
+            encryption_version=1,
+            last_status="working",
+            next_poll_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        asyncio.run(storage.save_mcp_remote_task_binding(binding))
+        claimed_binding = asyncio.run(
+            storage.claim_due_mcp_remote_task_bindings(
+                claim_owner="worker",
+                claim_token="binding-token",
+                now=now,
+                lease_expires_at=now + timedelta(seconds=30),
+            )
+        )[0]
+        asyncio.run(
+            storage.finish_mcp_remote_task_binding(
+                "alice",
+                task.task_id,
+                binding.safe_remote_task_ref,
+                claim_owner="worker",
+                claim_token="binding-token",
+                expected_revision=claimed_binding.revision,
+                remote_status="completed",
+                call_status="completed",
+                terminal_at=now + timedelta(seconds=1),
+                result_ref="mcp-result-safe",
+            )
+        )
+        outbox = asyncio.run(
+            storage.claim_mcp_remote_task_outbox(
+                claim_owner="worker",
+                claim_token="outbox-token",
+                now=now + timedelta(seconds=1),
+                lease_expires_at=now + timedelta(seconds=31),
+            )
+        )[0]
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            applied = asyncio.run(
+                storage.apply_mcp_remote_task_continuation(
+                    outbox.outbox_id,
+                    claim_owner="worker",
+                    claim_token="outbox-token",
+                    expected_revision=outbox.revision,
+                    updated_at=now + timedelta(seconds=2),
+                )
+            )
+            authoritative = asyncio.run(storage.get_task_node(node.node_id))
+
+        self.assertIsNotNone(applied)
+        self.assertEqual(authoritative.status, NodeStatus.COMPLETED)
+        self.assertIsNone(
+            asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id))
+        )
+
+    def test_task_node_sidecar_responses_must_match_requested_identity(self) -> None:
+        sidecar = _MismatchedTaskNodeSidecar()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        node = TaskNode(
+            node_id="node-response-id",
+            task_id="task-response-id",
+            capability_id="main_agent.respond",
+            status=NodeStatus.RUNNING,
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_response_invalid"):
+                asyncio.run(storage.save_task_node(node))
+            sidecar.nodes[node.node_id] = {
+                "node_id": node.node_id,
+                "task_id": node.task_id,
+                "capability_id": node.capability_id,
+                "assigned_instance_id": None,
+                "status": str(node.status),
+                "input_refs": [],
+                "output_refs": [],
+                "started_at": None,
+                "finished_at": None,
+            }
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_response_invalid"):
+                asyncio.run(storage.get_task_node(node.node_id))
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_response_invalid"):
+                asyncio.run(storage.list_task_nodes_for_task(node.task_id))
+
+    def test_enforce_compare_and_set_rejects_competing_stale_task_and_node_updates(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-sidecar-cas",
+            conversation_id="conv-sidecar-cas",
+            root_message_id="msg-sidecar-cas",
+            status=TaskStatus.RUNNING,
+        )
+        node = TaskNode(
+            node_id="node-sidecar-cas",
+            task_id=task.task_id,
+            capability_id="main_agent.respond",
+            status=NodeStatus.RUNNING,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            asyncio.run(storage.save_task_node(node))
+            self.assertEqual(
+                asyncio.run(
+                    storage.compare_and_set_task(
+                        replace(task, status=TaskStatus.COMPLETED),
+                        expected_from_status=TaskStatus.RUNNING,
+                    )
+                ).status,
+                TaskStatus.COMPLETED,
+            )
+            self.assertEqual(
+                asyncio.run(
+                    storage.compare_and_set_task_node(
+                        replace(node, status=NodeStatus.COMPLETED),
+                        expected_from_status=NodeStatus.RUNNING,
+                    )
+                ).status,
+                NodeStatus.COMPLETED,
+            )
+            self.assertIsNone(
+                asyncio.run(
+                    storage.compare_and_set_task(
+                        replace(task, status=TaskStatus.FAILED),
+                        expected_from_status=TaskStatus.RUNNING,
+                    )
+                )
+            )
+            self.assertIsNone(
+                asyncio.run(
+                    storage.compare_and_set_task_node(
+                        replace(node, status=NodeStatus.FAILED),
+                        expected_from_status=NodeStatus.RUNNING,
+                    )
+                )
+            )
+
+    def test_runtime_store_enforce_queries_authoritative_sidecar_without_python_task_rows(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        accepted = Task(
+            task_id="task-query-accepted",
+            conversation_id="conv-query-sidecar",
+            root_message_id="msg-accepted",
+            status=TaskStatus.ACCEPTED,
+            created_at=datetime(2026, 8, 13, 10, 0, 0),
+        )
+        completed = Task(
+            task_id="task-query-completed",
+            conversation_id="conv-query-sidecar",
+            root_message_id="msg-completed",
+            status=TaskStatus.COMPLETED,
+            created_at=datetime(2026, 8, 13, 11, 0, 0),
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(accepted))
+            asyncio.run(storage.save_task(completed))
+            listed = asyncio.run(storage.list_tasks_for_conversation("conv-query-sidecar"))
+            unfinished = asyncio.run(
+                storage.list_tasks_for_conversation(
+                    "conv-query-sidecar",
+                    statuses={TaskStatus.ACCEPTED, TaskStatus.RUNNING},
+                )
+            )
+            active = asyncio.run(storage.get_active_task_for_conversation("conv-query-sidecar"))
+
+        self.assertEqual([task.task_id for task in listed], [completed.task_id, accepted.task_id])
+        self.assertEqual(unfinished, [accepted])
+        self.assertEqual(active, accepted)
+        python_storage = SQLiteStorage(self.session_factory)
+        self.assertEqual(asyncio.run(python_storage.list_tasks_for_conversation("conv-query-sidecar")), [])
+        self.assertIsNone(asyncio.run(python_storage.get_active_task_for_conversation("conv-query-sidecar")))
+
+    def test_runtime_store_enforce_task_queries_fail_closed_without_sidecar(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            for query in (
+                lambda: storage.list_tasks_for_conversation("conv-query-unavailable"),
+                lambda: storage.get_active_task_for_conversation("conv-query-unavailable"),
+                lambda: storage.get_task_node("node-query-unavailable"),
+                lambda: storage.list_task_nodes_for_task("task-query-unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
+                ):
+                    asyncio.run(query())
+
+    def test_cancel_and_interrupt_read_authoritative_sidecar_nodes_in_enforce(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-lifecycle-sidecar",
+            conversation_id="conv-lifecycle-sidecar",
+            root_message_id="msg-lifecycle-sidecar",
+            status=TaskStatus.RUNNING,
+        )
+        node = TaskNode(
+            node_id="node-lifecycle-sidecar",
+            task_id=task.task_id,
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-lifecycle-sidecar",
+            conversation_id=task.conversation_id,
+            task_id=task.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            asyncio.run(storage.save_task_node(node))
+            opened = asyncio.run(InterruptService(storage).open_interrupt(interrupt))
+            cancelled = asyncio.run(
+                CancellationService(storage, runtime_sidecar_client=sidecar).cancel_task_context(task.task_id)
+            )
+
+        self.assertEqual(opened.status, "open")
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertIn("task_node_get", [call[0] for call in sidecar.calls])
+        self.assertIn("task_node_list", [call[0] for call in sidecar.calls])
+        self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
+
+    def test_interrupt_answer_repairs_each_split_authority_partial_state(self) -> None:
+        for fault_point in (None, "after_answer", "after_node"):
+            with self.subTest(fault_point=fault_point):
+                suffix = fault_point or "success"
+                sidecar = _FailAfterNodeTransitionSidecar()
+                storage = SQLiteStorage(
+                    self.session_factory,
+                    runtime_sidecar_client=sidecar,
+                )
+                service = InterruptService(storage)
+                node = TaskNode(
+                    node_id=f"node-interrupt-split-{suffix}",
+                    task_id=f"task-interrupt-split-{suffix}",
+                    capability_id="skill.data_query",
+                    status=NodeStatus.RUNNING,
+                )
+                interrupt = Interrupt(
+                    interrupt_id=f"interrupt-split-{suffix}",
+                    conversation_id=f"conv-interrupt-split-{suffix}",
+                    task_id=node.task_id,
+                    node_id=node.node_id,
+                    source_agent="skill.data-query",
+                    source_message_id="mail-1",
+                    question="region?",
+                    reason_code="missing_region",
+                )
+                answer = InterruptAnswer(
+                    interrupt_answer_id=f"answer-split-{suffix}",
+                    interrupt_id=interrupt.interrupt_id,
+                    answer_payload={"region": "east"},
+                    source_message_id=f"message-split-{suffix}",
+                    created_at=datetime(2026, 8, 26, 12, 1, 0),
+                )
+                answer_time = datetime(2026, 8, 26, 12, 1, 1)
+
+                with patch.dict(
+                    os.environ,
+                    {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"},
+                ):
+                    asyncio.run(storage.save_task_node(node))
+                    asyncio.run(
+                        service.open_interrupt(
+                            interrupt,
+                            now=datetime(2026, 8, 26, 12, 0, 0),
+                        )
+                    )
+                    if fault_point == "after_answer":
+                        with patch.object(
+                            storage,
+                            "save_task_node",
+                            new=AsyncMock(
+                                side_effect=RuntimeError("injected_after_answer")
+                            ),
+                        ):
+                            with self.assertRaisesRegex(
+                                RuntimeError,
+                                "injected_after_answer",
+                            ):
+                                asyncio.run(
+                                    service.record_answer(
+                                        answer,
+                                        now=answer_time,
+                                    )
+                                )
+                        partial_node = asyncio.run(
+                            storage.get_task_node(node.node_id)
+                        )
+                        self.assertEqual(
+                            partial_node.status,
+                            NodeStatus.WAITING_FOR_INPUT,
+                        )
+                        partial_interrupt = asyncio.run(
+                            storage.get_interrupt(interrupt.interrupt_id)
+                        )
+                        self.assertEqual(
+                            partial_interrupt.status,
+                            InterruptStatus.ANSWERED,
+                        )
+                    elif fault_point == "after_node":
+                        sidecar.fail_after_next_transition = True
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "injected_after_node",
+                        ):
+                            asyncio.run(
+                                service.record_answer(
+                                    answer,
+                                    now=answer_time,
+                                )
+                            )
+                        partial_node = asyncio.run(
+                            storage.get_task_node(node.node_id)
+                        )
+                        self.assertEqual(
+                            partial_node.status,
+                            NodeStatus.READY_TO_RESUME,
+                        )
+
+                    answered = asyncio.run(
+                        service.record_answer(answer, now=answer_time)
+                    )
+                    replayed = asyncio.run(
+                        service.record_answer(answer, now=answer_time)
+                    )
+                    authoritative_node = asyncio.run(
+                        storage.get_task_node(node.node_id)
+                    )
+
+                self.assertEqual(answered.status, InterruptStatus.ANSWERED)
+                self.assertEqual(replayed, answered)
+                self.assertEqual(
+                    authoritative_node.status,
+                    NodeStatus.READY_TO_RESUME,
+                )
+                self.assertEqual(
+                    len(
+                        asyncio.run(
+                            storage.list_interrupt_answers(
+                                interrupt.interrupt_id
+                            )
+                        )
+                    ),
+                    1,
+                )
+                ready_events = [
+                    event
+                    for event in asyncio.run(
+                        storage.list_events_for_task(node.task_id)
+                    )
+                    if event.event_type == "node.ready_to_resume"
+                ]
+                if fault_point != "after_node":
+                    self.assertEqual(len(ready_events), 1)
+                self.assertIsNone(
+                    asyncio.run(
+                        SQLiteStorage(self.session_factory).get_task_node(
+                            node.node_id
+                        )
+                    )
+                )
+
+    def test_split_authority_concurrent_answers_have_one_final_winner(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+        )
+        service = InterruptService(storage)
+        node = TaskNode(
+            node_id="node-interrupt-concurrent-final",
+            task_id="task-interrupt-concurrent-final",
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-concurrent-final",
+            conversation_id="conv-interrupt-concurrent-final",
+            task_id=node.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        answers = (
+            InterruptAnswer(
+                interrupt_answer_id="answer-concurrent-final-east",
+                interrupt_id=interrupt.interrupt_id,
+                answer_payload={"region": "east"},
+                source_message_id="message-concurrent-final-east",
+            ),
+            InterruptAnswer(
+                interrupt_answer_id="answer-concurrent-final-west",
+                interrupt_id=interrupt.interrupt_id,
+                answer_payload={"region": "west"},
+                source_message_id="message-concurrent-final-west",
+            ),
+        )
+
+        async def race_answers() -> tuple[object, object]:
+            return tuple(
+                await asyncio.gather(
+                    *(
+                        storage.answer_interrupt_atomic(
+                            answer,
+                            now=datetime(2026, 8, 26, 13, 0, index),
+                        )
+                        for index, answer in enumerate(answers)
+                    ),
+                    return_exceptions=True,
+                )
+            )  # type: ignore[return-value]
+
+        with patch.dict(
+            os.environ,
+            {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"},
+        ):
+            asyncio.run(storage.save_task_node(node))
+            asyncio.run(
+                service.open_interrupt(
+                    interrupt,
+                    now=datetime(2026, 8, 26, 12, 59, 0),
+                )
+            )
+            results = asyncio.run(race_answers())
+
+        self.assertEqual(
+            sum(isinstance(result, LifecycleTransitionError) for result in results),
+            1,
+        )
+        self.assertEqual(
+            sum(isinstance(result, tuple) for result in results),
+            1,
+        )
+        stored_answers = asyncio.run(
+            storage.list_interrupt_answers(interrupt.interrupt_id)
+        )
+        self.assertEqual(len(stored_answers), 1)
+        stored_interrupt = asyncio.run(
+            storage.get_interrupt(interrupt.interrupt_id)
+        )
+        self.assertEqual(stored_interrupt.status, InterruptStatus.ANSWERED)
+        self.assertEqual(stored_interrupt.answered_at, stored_answers[0].accepted_at)
+
+    def test_split_authority_concurrent_exact_answer_converges(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+        )
+        service = InterruptService(storage)
+        node = TaskNode(
+            node_id="node-interrupt-concurrent-exact",
+            task_id="task-interrupt-concurrent-exact",
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-concurrent-exact",
+            conversation_id="conv-interrupt-concurrent-exact",
+            task_id=node.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        answer = InterruptAnswer(
+            interrupt_answer_id="answer-concurrent-exact",
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload={"region": "east"},
+            source_message_id="message-concurrent-exact",
+        )
+
+        async def race_exact_answer() -> list[tuple[Interrupt, TaskNode, bool]]:
+            return await asyncio.gather(
+                storage.answer_interrupt_atomic(
+                    answer,
+                    now=datetime(2026, 8, 26, 14, 0, 0),
+                ),
+                storage.answer_interrupt_atomic(
+                    answer,
+                    now=datetime(2026, 8, 26, 14, 0, 1),
+                ),
+            )
+
+        with patch.dict(
+            os.environ,
+            {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"},
+        ):
+            asyncio.run(storage.save_task_node(node))
+            asyncio.run(
+                service.open_interrupt(
+                    interrupt,
+                    now=datetime(2026, 8, 26, 13, 59, 0),
+                )
+            )
+            results = asyncio.run(race_exact_answer())
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(
+            all(result[0].status == InterruptStatus.ANSWERED for result in results)
+        )
+        self.assertEqual(
+            len(asyncio.run(storage.list_interrupt_answers(interrupt.interrupt_id))),
+            1,
+        )
+
+    def test_interrupt_answer_preserves_one_shadow_node_transition_without_replay(self) -> None:
+        audit_events: list[dict[str, str]] = []
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=audit_events.append,
+        )
+        service = InterruptService(storage)
+        node = TaskNode(
+            node_id="node-interrupt-shadow-answer",
+            task_id="task-interrupt-shadow-answer",
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-shadow-answer",
+            conversation_id="conv-interrupt-shadow-answer",
+            task_id=node.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        answer = InterruptAnswer(
+            interrupt_answer_id="answer-shadow-answer",
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload={"region": "east"},
+            source_message_id="message-shadow-answer",
+        )
+        answer_time = datetime(2026, 8, 26, 12, 1, 1)
+
+        with patch.dict(
+            os.environ,
+            {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"},
+        ):
+            asyncio.run(storage.save_task_node(node))
+            asyncio.run(
+                service.open_interrupt(
+                    interrupt,
+                    now=datetime(2026, 8, 26, 12, 0, 0),
+                )
+            )
+            sidecar.calls.clear()
+            audit_events.clear()
+
+            answered = asyncio.run(
+                service.record_answer(answer, now=answer_time)
+            )
+            replayed = asyncio.run(
+                service.record_answer(answer, now=answer_time)
+            )
+
+        self.assertEqual(answered.status, InterruptStatus.ANSWERED)
+        self.assertEqual(replayed, answered)
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            ["node_state_transition"],
+        )
+        self.assertEqual(len(audit_events), 1)
+        self.assertEqual(audit_events[0]["rust_status"], "ok")
 
     def test_runtime_store_shadow_routes_to_sidecar_and_keeps_python_visible_write(self) -> None:
         audit_events: list[dict[str, str]] = []
@@ -712,18 +1693,45 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
             saved_task = asyncio.run(storage.save_task(task))
             saved_node = asyncio.run(storage.save_task_node(node))
+            listed_tasks = asyncio.run(storage.list_tasks_for_conversation(task.conversation_id))
+            active_task = asyncio.run(storage.get_active_task_for_conversation(task.conversation_id))
+            loaded_node = asyncio.run(storage.get_task_node(node.node_id))
+            listed_nodes = asyncio.run(storage.list_task_nodes_for_task(task.task_id))
 
         self.assertEqual(saved_task, task)
         self.assertEqual(saved_node, node)
+        self.assertEqual(listed_tasks, [task])
+        self.assertEqual(active_task, task)
+        self.assertEqual(loaded_node, node)
+        self.assertEqual(listed_nodes, [node])
         self.assertIsNotNone(asyncio.run(storage.get_task(task.task_id)))
         self.assertIsNotNone(asyncio.run(storage.get_task_node(node.node_id)))
-        self.assertEqual([call[0] for call in sidecar.calls], ["task_submit", "node_state_transition"])
-        self.assertEqual([event["operation"] for event in audit_events], ["task_submit", "node_state_transition"])
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            [
+                "task_submit",
+                "node_state_transition",
+                "task_list_for_conversation",
+                "task_get_active_for_conversation",
+                "task_node_get",
+                "task_node_list",
+            ],
+        )
+        self.assertEqual(
+            [event["operation"] for event in audit_events],
+            [
+                "task_submit",
+                "node_state_transition",
+                "task_list_for_conversation",
+                "task_get_active_for_conversation",
+                "task_node_get",
+                "task_node_list",
+            ],
+        )
         self.assertTrue(all(event["rust_status"] == "ok" for event in audit_events))
 
-    def test_runtime_store_enforce_mode_rejects_python_legacy_graph_writes_without_sidecar(self) -> None:
+    def test_runtime_store_enforce_mode_rejects_python_artifact_write_without_sidecar(self) -> None:
         storage = SQLiteStorage(self.session_factory)
-        edge = TaskEdge(from_node_id="node-from", to_node_id="node-to")
         artifact = Artifact(
             artifact_id="artifact-enforce-store",
             task_id="task-enforce-store",
@@ -737,20 +1745,13 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                 RuntimeError,
                 "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
             ):
-                asyncio.run(storage.save_task_edge("task-enforce-store", edge))
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
-            ):
                 asyncio.run(storage.save_artifact(artifact))
 
-        self.assertEqual(asyncio.run(storage.list_task_edges("task-enforce-store")), [])
         self.assertIsNone(asyncio.run(storage.get_artifact(artifact.artifact_id)))
 
-    def test_runtime_store_enforce_routes_graph_writes_to_configured_sidecar_without_python_sqlite_write(self) -> None:
+    def test_runtime_store_enforce_routes_artifact_writes_to_configured_sidecar(self) -> None:
         sidecar = _RecordingRuntimeSidecarClient()
         storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
-        edge = TaskEdge(from_node_id="node-from", to_node_id="node-to")
         artifact = Artifact(
             artifact_id="artifact-sidecar-store",
             task_id="task-sidecar-store",
@@ -762,25 +1763,20 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
 
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
-            saved_edge = asyncio.run(storage.save_task_edge("task-sidecar-store", edge))
             saved_artifact = asyncio.run(storage.save_artifact(artifact))
-            listed_edges = asyncio.run(storage.list_task_edges("task-sidecar-store"))
             loaded_artifact = asyncio.run(storage.get_artifact(artifact.artifact_id))
             listed_artifacts = asyncio.run(storage.list_artifacts_for_task(artifact.task_id))
 
-        self.assertEqual(saved_edge, edge)
         self.assertEqual(saved_artifact, artifact)
-        self.assertEqual(listed_edges, [edge])
         self.assertEqual(loaded_artifact, artifact)
         self.assertEqual(listed_artifacts, [artifact])
         self.assertEqual(
             [call[0] for call in sidecar.calls],
-            ["task_edge_save", "artifact_save", "task_edge_list", "artifact_get", "artifact_list"],
+            ["artifact_save", "artifact_get", "artifact_list"],
         )
-        self.assertEqual(asyncio.run(SQLiteStorage(self.session_factory).list_task_edges("task-sidecar-store")), [])
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_artifact(artifact.artifact_id)))
 
-    def test_runtime_store_shadow_records_graph_sidecar_audit_without_leaking_artifact_ref(self) -> None:
+    def test_runtime_store_shadow_records_artifact_audit_without_leaking_ref(self) -> None:
         audit_events: list[dict[str, str]] = []
         sidecar = _RecordingRuntimeSidecarClient()
         storage = SQLiteStorage(
@@ -788,7 +1784,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             runtime_sidecar_client=sidecar,
             runtime_sidecar_shadow_sink=audit_events.append,
         )
-        edge = TaskEdge(from_node_id="node-shadow-from", to_node_id="node-shadow-to")
         artifact = Artifact(
             artifact_id="artifact-shadow-store",
             task_id="task-shadow-graph",
@@ -800,15 +1795,12 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
 
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
-            saved_edge = asyncio.run(storage.save_task_edge(artifact.task_id, edge))
             saved_artifact = asyncio.run(storage.save_artifact(artifact))
 
-        self.assertEqual(saved_edge, edge)
         self.assertEqual(saved_artifact, artifact)
-        self.assertEqual(asyncio.run(storage.list_task_edges(artifact.task_id)), [edge])
         self.assertEqual(asyncio.run(storage.get_artifact(artifact.artifact_id)), artifact)
-        self.assertEqual([call[0] for call in sidecar.calls], ["task_edge_save", "artifact_save"])
-        self.assertEqual([event["operation"] for event in audit_events], ["task_edge_save", "artifact_save"])
+        self.assertEqual([call[0] for call in sidecar.calls], ["artifact_save"])
+        self.assertEqual([event["operation"] for event in audit_events], ["artifact_save"])
         self.assertTrue(all(event["rust_status"] == "ok" for event in audit_events))
         self.assertNotIn("memory://artifact/do-not-log", str(audit_events))
 
@@ -827,12 +1819,25 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertIn("cancellation_token_write", cancellation_source)
         self.assertEqual(operation_policy("cancellation_token_write")["enforce_failure"], "fail_closed")
 
-        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}),
+            patch.object(storage, "save_task", wraps=storage.save_task) as save_task,
+            patch.object(storage, "append_event", wraps=storage.append_event) as append_event,
+            patch.object(
+                storage,
+                "list_task_nodes_for_task",
+                wraps=storage.list_task_nodes_for_task,
+            ) as list_nodes,
+        ):
             with self.assertRaisesRegex(
                 RuntimeError,
                 "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
             ):
                 asyncio.run(service.cancel_task_context(task.task_id))
+
+        save_task.assert_not_awaited()
+        append_event.assert_not_awaited()
+        list_nodes.assert_not_awaited()
 
         reloaded = asyncio.run(storage.get_task(task.task_id))
         self.assertEqual(reloaded.status, TaskStatus.RUNNING)
@@ -848,14 +1853,47 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             root_message_id="msg-cancel-sidecar",
             status=TaskStatus.RUNNING,
         )
-        asyncio.run(storage.save_task(task))
-
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            sidecar.calls.clear()
             cancelled = asyncio.run(service.cancel_task_context(task.task_id))
 
         self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
-        self.assertEqual(sidecar.calls[0][0], "cancellation_token_write")
-        self.assertEqual(sidecar.calls[0][1]["task_id"], task.task_id)
+        cancellation_call = next(call for call in sidecar.calls if call[0] == "cancellation_token_write")
+        self.assertEqual(cancellation_call[1]["task_id"], task.task_id)
+        write_operations = [
+            call[0]
+            for call in sidecar.calls
+            if call[0] in {"cancellation_token_write", "task_submit"}
+        ]
+        self.assertEqual(
+            write_operations,
+            ["cancellation_token_write", "task_submit", "task_submit"],
+        )
+
+    def test_cancellation_token_off_keeps_legacy_writes_and_skips_sidecar(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory)
+        service = CancellationService(storage, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-cancel-off",
+            conversation_id="conv-cancel-off",
+            root_message_id="msg-cancel-off",
+            status=TaskStatus.RUNNING,
+        )
+        asyncio.run(storage.save_task(task))
+
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "off"}),
+            patch.object(storage, "save_task", wraps=storage.save_task) as save_task,
+            patch.object(storage, "append_event", wraps=storage.append_event) as append_event,
+        ):
+            cancelled = asyncio.run(service.cancel_task_context(task.task_id))
+
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertEqual(save_task.await_count, 2)
+        self.assertEqual(append_event.await_count, 2)
+        self.assertEqual(sidecar.calls, [])
 
     def test_cancellation_token_shadow_records_sidecar_audit_after_legacy_write(self) -> None:
         sidecar = _RecordingRuntimeSidecarClient()
@@ -870,7 +1908,27 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         asyncio.run(storage.save_task(task))
 
-        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
+        order: list[str] = []
+        save_task = storage.save_task
+        write_token = sidecar.write_cancellation_token
+
+        async def ordered_save_task(*args, **kwargs):
+            order.append("legacy_task_write")
+            return await save_task(*args, **kwargs)
+
+        async def ordered_write_token(**kwargs):
+            order.append("sidecar_token_write")
+            return await write_token(**kwargs)
+
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}),
+            patch.object(storage, "save_task", side_effect=ordered_save_task),
+            patch.object(
+                sidecar,
+                "write_cancellation_token",
+                side_effect=ordered_write_token,
+            ),
+        ):
             cancelled = asyncio.run(service.cancel_task_context(task.task_id))
 
         shadow_records = [record for record in audit_sink.records if record[0] == "runtime.sidecar_shadow_diff"]
@@ -882,6 +1940,10 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(shadow_records[-1][1]["operation"], "cancellation_token_write")
         self.assertEqual(shadow_records[-1][1]["legacy_status"], "ok")
         self.assertEqual(shadow_records[-1][1]["rust_status"], "ok")
+        self.assertEqual(
+            order,
+            ["legacy_task_write", "sidecar_token_write", "legacy_task_write"],
+        )
 
     def test_cancellation_token_shadow_sidecar_error_does_not_block_legacy_cancel(self) -> None:
         sidecar = _FailingCancellationRuntimeSidecarClient()
@@ -904,6 +1966,49 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(sidecar.calls[0][0], "cancellation_token_write")
         self.assertEqual(shadow_records[-1][1]["rust_status"], "error")
         self.assertEqual(shadow_records[-1][1]["error_code"], "runtime_store_unavailable")
+
+    def test_agent_run_cancellation_uses_repository_admission_without_legacy_graph_writes(
+        self,
+    ) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        repository = SQLiteAgentRepository(self.session_factory)
+        task = Task(
+            task_id="task-agent-cancel-admission",
+            conversation_id="conv-agent-cancel-admission",
+            root_message_id="msg-agent-cancel-admission",
+            status=TaskStatus.RUNNING,
+        )
+        asyncio.run(storage.save_task(task))
+        run = asyncio.run(
+            repository.create_run(
+                AgentRun(
+                    run_id="run-agent-cancel-admission",
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    status=AgentRunStatus.RUNNING,
+                    binding=AgentModelBinding("edition-a"),
+                )
+            )
+        )
+        service = CancellationService(storage, agent_runs=repository)
+
+        with (
+            patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "off"}),
+            patch.object(storage, "save_task", wraps=storage.save_task) as save_task,
+            patch.object(
+                storage,
+                "list_task_nodes_for_task",
+                wraps=storage.list_task_nodes_for_task,
+            ) as list_nodes,
+        ):
+            cancelled = asyncio.run(service.cancel_task_context(task.task_id))
+
+        cancelled_run = asyncio.run(repository.get_run(run.run_id))
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertEqual(cancelled_run.status, AgentRunStatus.CANCELLED)
+        self.assertEqual(cancelled_run.terminal_reason_code, "user_cancel")
+        save_task.assert_not_awaited()
+        list_nodes.assert_not_awaited()
 
     def test_lease_operations_have_no_python_legacy_fallback_without_sidecar(self) -> None:
         facade = RuntimeLeaseFacade()
@@ -1068,26 +2173,11 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                     "sequence": 1,
                     "created_at_ms": 123,
                 },
+                "duplicate": False,
                 "error": None,
             },
         )
         self.assertEqual(accepted["cursor"]["sequence"], 1)
-
-        edge_accepted = validate_runtime_sidecar_response(
-            "task_edge_save",
-            {
-                "operation": "task_edge_save",
-                "edge": {
-                    "task_id": "task-response",
-                    "from_node_id": "node-a",
-                    "to_node_id": "node-b",
-                    "edge_type": "data",
-                    "condition": "",
-                },
-                "error": None,
-            },
-        )
-        self.assertEqual(edge_accepted["edge"]["from_node_id"], "node-a")
 
         artifact_accepted = validate_runtime_sidecar_response(
             "artifact_save",
@@ -1125,8 +2215,17 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
 
         for invalid_response in [
             {"operation": "lease_acquire", "cursor": {"task_id": "task-response", "sequence": 1}},
+            {
+                "operation": "event_append",
+                "cursor": {
+                    "conversation_id": "conv-response",
+                    "task_id": "task-response",
+                    "sequence": 1,
+                    "created_at_ms": 123,
+                },
+                "error": None,
+            },
             {"operation": "event_append", "cursor": {"task_id": "task-response", "sequence": 1}},
-            {"operation": "task_edge_save", "edge": {"task_id": "task-response"}},
             {"operation": "artifact_save", "artifact": {"artifact_id": "artifact-response"}},
             {
                 "operation": "event_append",
@@ -1220,7 +2319,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
 
         self.assertEqual(resource_limit("task_submit_deadline_ms"), 3000)
         self.assertEqual(resource_limit("state_transition_deadline_ms"), 2000)
-        self.assertEqual(resource_limit("task_edge_deadline_ms"), 2000)
         self.assertEqual(resource_limit("artifact_metadata_deadline_ms"), 2000)
         self.assertEqual(resource_limit("event_append_deadline_ms"), 2000)
         self.assertEqual(resource_limit("lease_deadline_ms"), 1000)
@@ -1346,7 +2444,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             [
                 "task_submit",
                 "node_state_transition",
-                "task_edge_save",
                 "artifact_save",
                 "event_append",
                 "lease_acquire",
@@ -1438,7 +2535,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
                 "event_log",
                 "lease",
                 "cursor",
-                "task_edge",
                 "artifact_metadata",
                 "bundle_pin",
             ],
@@ -1448,12 +2544,17 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             for component in policy["required_components"]
         }
         plan = {
-            "target_schema_version": "runtime_store_schema_v2",
+            "target_schema_version": load_runtime_sidecar_contract()["schema_hash"],
             "components": component_evidence,
+            "task_authority_cutover": _valid_task_authority_cutover(),
+            "submission_authority_cutover": _valid_submission_authority_cutover(),
         }
         safe = validate_runtime_sidecar_migration_plan(plan)
         self.assertEqual(safe["migration"], "ready")
-        self.assertEqual(safe["target_schema_version"], "runtime_store_schema_v2")
+        self.assertEqual(
+            safe["target_schema_version"],
+            load_runtime_sidecar_contract()["schema_hash"],
+        )
         self.assertEqual(safe["components"], ",".join(policy["required_components"]))
 
         invalid_plan = {
@@ -1468,6 +2569,333 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             "runtime_store_migration_blocked: Rust runtime sidecar migration plan is incomplete",
         ):
             validate_runtime_sidecar_migration_plan(invalid_plan)
+
+        for hostile_cutover in (
+            {**_valid_task_authority_cutover(), "backfill_import_complete": False},
+            {
+                **_valid_task_authority_cutover(),
+                "task_inventory": {
+                    **_valid_task_authority_cutover()["task_inventory"],
+                    "sidecar_count": 2,
+                },
+            },
+            {
+                **_valid_task_authority_cutover(),
+                "task_node_inventory": {
+                    **_valid_task_authority_cutover()["task_node_inventory"],
+                    "sidecar_canonical_digest": "f" * 64,
+                },
+            },
+            {
+                **_valid_task_authority_cutover(),
+                "legacy_null_assignment_resolution": {
+                    **_valid_task_authority_cutover()["legacy_null_assignment_resolution"],
+                    "active_count": 1,
+                },
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                validate_runtime_sidecar_migration_plan(
+                    {**plan, "task_authority_cutover": hostile_cutover}
+                )
+
+        submission_cutover = _valid_submission_authority_cutover()
+        for hostile_submission_cutover in (
+            {
+                **submission_cutover,
+                "conversation_inventory": {
+                    **submission_cutover["conversation_inventory"],
+                    "ambiguity_count": 1,
+                },
+            },
+            {
+                **submission_cutover,
+                "message_identity_inventory": {
+                    **submission_cutover["message_identity_inventory"],
+                    "destination": {
+                        **submission_cutover["message_identity_inventory"]["destination"],
+                        "count": 2,
+                    },
+                },
+            },
+            {
+                **submission_cutover,
+                "destination_contract": {
+                    **submission_cutover["destination_contract"],
+                    "schema_hash": "f" * 64,
+                },
+            },
+            {**submission_cutover, "tested_commit": "not-a-commit"},
+            {**submission_cutover, "unknown": True},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                validate_runtime_sidecar_migration_plan(
+                    {
+                        **plan,
+                        "submission_authority_cutover": hostile_submission_cutover,
+                    }
+                )
+
+        with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+            validate_runtime_sidecar_migration_plan(
+                {
+                    key: value
+                    for key, value in plan.items()
+                    if key != "submission_authority_cutover"
+                }
+            )
+
+    def test_task_authority_migration_artifact_is_contract_bound_and_authenticated(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        key = b"deployment-owned-migration-key-32bytes"
+        artifact = {
+            "schema": migration_policy()["task_authority_evidence_schema"],
+            "component": contract["component"],
+            "protocol_version": contract["protocol_version"],
+            "schema_hash": contract["schema_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "key_id": "deployment-key-v1",
+            "migration_plan": {
+                "target_schema_version": contract["schema_hash"],
+                "components": {
+                    component: {
+                        evidence: True
+                        for evidence in migration_policy()["required_evidence"]
+                    }
+                    for component in migration_policy()["required_components"]
+                },
+                "task_authority_cutover": _valid_task_authority_cutover(),
+                "submission_authority_cutover": _valid_submission_authority_cutover(),
+            },
+        }
+        def sign(unsigned: dict[str, object]) -> dict[str, object]:
+            return {
+                **unsigned,
+                "hmac_sha256": hmac.new(
+                    key,
+                    json.dumps(
+                        unsigned,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
+                    hashlib.sha256,
+                ).hexdigest(),
+            }
+
+        signed = sign(artifact)
+        self.assertEqual(
+            validate_runtime_sidecar_migration_evidence_artifact(
+                signed, authentication_key=key
+            )["finalization_receipt_sha256"],
+            "7" * 64,
+        )
+        with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+            validate_runtime_sidecar_migration_evidence_artifact(
+                {
+                    **signed,
+                    "migration_plan": {
+                        **signed["migration_plan"],
+                        "target_schema_version": "tampered",
+                    },
+                },
+                authentication_key=key,
+            )
+
+        for invalid_unsigned in (
+            {
+                **artifact,
+                "schema": "maf.runtime_sidecar.task_authority_migration_evidence.v1",
+            },
+            {
+                **artifact,
+                "schema": "maf.runtime_sidecar.task_authority_migration_evidence.v3",
+            },
+            {**artifact, "unknown": True},
+            {
+                **artifact,
+                "migration_plan": {
+                    key: value
+                    for key, value in artifact["migration_plan"].items()
+                    if key != "submission_authority_cutover"
+                },
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                validate_runtime_sidecar_migration_evidence_artifact(
+                    sign(invalid_unsigned),
+                    authentication_key=key,
+                )
+
+    def test_task_authority_migration_artifact_loader_requires_two_regular_0600_files(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        policy = migration_policy()
+        key = b"deployment-owned-migration-key-32bytes"
+        unsigned = {
+            "schema": policy["task_authority_evidence_schema"],
+            "component": contract["component"],
+            "protocol_version": contract["protocol_version"],
+            "schema_hash": contract["schema_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "key_id": "deployment-key-v1",
+            "migration_plan": {
+                "target_schema_version": contract["schema_hash"],
+                "components": {
+                    component: {
+                        evidence: True
+                        for evidence in policy["required_evidence"]
+                    }
+                    for component in policy["required_components"]
+                },
+                "task_authority_cutover": _valid_task_authority_cutover(),
+                "submission_authority_cutover": _valid_submission_authority_cutover(),
+            },
+        }
+        artifact = {
+            **unsigned,
+            "hmac_sha256": hmac.new(
+                key,
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_path = root / "evidence.json"
+            key_path = root / "evidence.key"
+            evidence_path.write_text(json.dumps(artifact), encoding="utf-8")
+            key_path.write_bytes(key)
+            evidence_path.chmod(0o600)
+            key_path.chmod(0o600)
+            loaded = load_runtime_sidecar_migration_evidence_artifact(
+                evidence_path,
+                authentication_key_path=key_path,
+            )
+            self.assertEqual(loaded["finalization_receipt_sha256"], "7" * 64)
+
+            evidence_path.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+            evidence_path.chmod(0o600)
+            key_path.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+            key_path.chmod(0o600)
+            evidence_target = root / "evidence-target.json"
+            evidence_path.replace(evidence_target)
+            evidence_path.symlink_to(evidence_target)
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+    def test_task_authority_v1_upgrade_loader_authenticates_exact_legacy_plan(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        policy = migration_policy()
+        key = b"deployment-owned-migration-key-32bytes"
+        legacy_plan = {
+            "target_schema_version": contract["schema_hash"],
+            "components": {
+                component: {
+                    evidence: True for evidence in policy["required_evidence"]
+                }
+                for component in policy["required_components"]
+            },
+            "task_authority_cutover": _valid_task_authority_cutover(),
+        }
+        unsigned = {
+            "schema": "maf.runtime_sidecar.task_authority_migration_evidence.v1",
+            "component": contract["component"],
+            "protocol_version": contract["protocol_version"],
+            "schema_hash": contract["schema_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "key_id": "deployment-key-v1",
+            "migration_plan": legacy_plan,
+        }
+        artifact = {
+            **unsigned,
+            "hmac_sha256": hmac.new(
+                key,
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_path = root / "legacy-evidence.json"
+            key_path = root / "legacy-evidence.key"
+            evidence_path.write_text(json.dumps(artifact), encoding="utf-8")
+            key_path.write_bytes(key)
+            evidence_path.chmod(0o600)
+            key_path.chmod(0o600)
+
+            self.assertEqual(
+                load_runtime_sidecar_task_authority_v1_for_upgrade(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                ),
+                legacy_plan,
+            )
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_migration_evidence_artifact(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
+
+            for invalid_plan in (
+                {**legacy_plan, "unknown": True},
+                {
+                    **legacy_plan,
+                    "task_authority_cutover": {
+                        **legacy_plan["task_authority_cutover"],
+                        "task_inventory": {
+                            **legacy_plan["task_authority_cutover"]["task_inventory"],
+                            "sidecar_count": 2,
+                        },
+                    },
+                },
+            ):
+                invalid_unsigned = {**unsigned, "migration_plan": invalid_plan}
+                invalid_artifact = {
+                    **invalid_unsigned,
+                    "hmac_sha256": hmac.new(
+                        key,
+                        json.dumps(
+                            invalid_unsigned,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode(),
+                        hashlib.sha256,
+                    ).hexdigest(),
+                }
+                evidence_path.write_text(
+                    json.dumps(invalid_artifact),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_migration_blocked",
+                ):
+                    load_runtime_sidecar_task_authority_v1_for_upgrade(
+                        evidence_path,
+                        authentication_key_path=key_path,
+                    )
+
+            artifact["hmac_sha256"] = "0" * 64
+            evidence_path.write_text(json.dumps(artifact), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                load_runtime_sidecar_task_authority_v1_for_upgrade(
+                    evidence_path,
+                    authentication_key_path=key_path,
+                )
 
     def test_runtime_sidecar_ops_readiness_requires_runbooks_and_drills(self) -> None:
         self.assertEqual(error_policy("runtime_store_ops_readiness_blocked")["category"], "quality_gate")
@@ -1504,7 +2932,6 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             [
                 "python_storage_task_write",
                 "python_storage_node_write",
-                "python_storage_task_edge_write",
                 "python_storage_artifact_write",
                 "python_event_append_write",
                 "python_bundle_pin_write",

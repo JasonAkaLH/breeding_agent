@@ -537,7 +537,7 @@ class PromptEnvelopeCoreRendererTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, audit_text)
 
-    def test_messages_renderer_keeps_developer_role_only_when_provider_declares_support(self) -> None:
+    def test_messages_renderer_maps_active_note_to_system_without_rewriting_content(self) -> None:
         envelope = _envelope(
             _segment("stable_system_contract", "系统规则", security_role="instruction", role="system"),
             _segment("active_continuity_notes", "连续性约束", security_role="active_note", role="system"),
@@ -545,22 +545,19 @@ class PromptEnvelopeCoreRendererTest(unittest.TestCase):
             trim_max_tokens=4_000,
         )
 
-        native = render_prompt_envelope_messages(
-            envelope,
-            role_capabilities={"roles": ["system", "developer", "user"]},
-            token_estimator=_word_tokens,
-        )
-        fallback = render_prompt_envelope_messages(
+        rendered = render_prompt_envelope_messages(
             envelope,
             role_capabilities={"roles": ["system", "user"]},
             token_estimator=_word_tokens,
         )
 
-        self.assertIn("developer", [message.role for message in native.messages])
-        self.assertFalse(native.audit.role_fallbacks)
-        self.assertNotIn("developer", [message.role for message in fallback.messages])
-        self.assertEqual(fallback.audit.role_fallbacks[0].segment_name, "active_continuity_notes")
-        self.assertEqual(fallback.audit.role_fallbacks[0].reason, "developer_to_system")
+        self.assertEqual([message.role for message in rendered.messages], ["system", "system", "user"])
+        self.assertEqual(rendered.messages[1].content, "连续性约束")
+        self.assertFalse(rendered.audit.role_fallbacks)
+
+    def test_prompt_segment_rejects_developer_role(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported prompt segment role"):
+            _segment("legacy", "legacy", security_role="history", role="developer")
 
     def test_messages_preflight_retries_once_after_wrapper_overhead_then_fails_closed_only_if_still_oversized(self) -> None:
         def estimator(text: str) -> int:

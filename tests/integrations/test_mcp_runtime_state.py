@@ -11,6 +11,7 @@ class FakeClient:
         self.tools = list(tools or [])
         self.fail = fail
         self.calls = []
+        self.close_calls = 0
         self.closed = False
 
     async def list_tools(self):
@@ -23,6 +24,7 @@ class FakeClient:
         return {"content": [{"type": "text", "text": "called"}], "structuredContent": {"ok": True}}
 
     async def close(self):
+        self.close_calls += 1
         self.closed = True
 
 
@@ -43,7 +45,7 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "通过 CRM MCP 服务查询客户基础信息。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                             },
                             {"tool_name": "hidden_tool", "expose": False},
                         ],
@@ -71,8 +73,8 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(descriptor.source, "mcp")
         self.assertEqual(descriptor.name, "Customer Search")
         self.assertNotIn("server text", descriptor.description)
-        self.assertEqual(bundle.payload_policies["mcp.crm.search_customer"].planner_allowed_fields, ("keyword",))
         binding = state.binding_for_capability("mcp.crm.search_customer")
+        self.assertEqual(binding.model_allowed_fields, ("keyword",))
         self.assertEqual(binding.server_id, "crm")
         self.assertEqual(binding.tool_name, "search_customer")
 
@@ -133,7 +135,7 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(state.active_bundle.descriptors, ())
-        self.assertEqual(state.active_bundle.diagnostics[0].reason, "invalid_planner_allowlist")
+        self.assertEqual(state.active_bundle.diagnostics[0].reason, "invalid_model_allowlist")
 
     async def test_prepare_refresh_does_not_activate_bundle_until_commit(self) -> None:
         first_client = FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}}}])
@@ -150,6 +152,34 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(pending.bundle.revision, first_revision)
         await state.commit_activation(pending)
         self.assertEqual(state.active_revision, pending.bundle.revision)
+
+    async def test_release_revision_evicts_inactive_bundle(self) -> None:
+        clients = iter(
+            [
+                FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}]),
+                FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}]),
+            ]
+        )
+        state = MCPRuntimeState(config=self._config(), client_factory=lambda server: next(clients), reserved_capability_ids=())
+        await state.refresh(reason="startup", force=True)
+        retained_revision = state.active_revision
+        state.retain_revision(retained_revision)
+        await state.refresh(reason="manual", force=True)
+
+        state.release_revision(retained_revision)
+
+        with self.assertRaisesRegex(KeyError, "Unknown MCP bundle revision"):
+            state.bundle_for_revision(retained_revision)
+
+    async def test_aclose_closes_active_client_once(self) -> None:
+        client = FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}])
+        state = MCPRuntimeState(config=self._config(), client_factory=lambda server: client, reserved_capability_ids=())
+        await state.refresh(reason="startup", force=True)
+
+        await state.aclose()
+        await state.aclose()
+
+        self.assertEqual(client.close_calls, 1)
 
     async def test_call_tool_uses_binding_client_and_filtered_arguments(self) -> None:
         client = FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}])

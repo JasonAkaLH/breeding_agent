@@ -19,12 +19,38 @@ MessageRole = _rust_enum("MessageRole")
 TaskStatus = _rust_enum("TaskStatus")
 RoutingMode = _rust_enum("RoutingMode")
 NodeStatus = _rust_enum("NodeStatus")
-NodeCriticality = _rust_enum("NodeCriticality")
-DependencyType = _rust_enum("DependencyType")
-EdgeType = _rust_enum("EdgeType")
 ArtifactType = _rust_enum("ArtifactType")
 EventVisibility = _rust_enum("EventVisibility")
 MailboxChannel = _rust_enum("MailboxChannel")
 AckPolicy = _rust_enum("AckPolicy")
 MailboxDeliveryStatus = _rust_enum("MailboxDeliveryStatus")
 InterruptStatus = _rust_enum("InterruptStatus")
+
+
+class UserMCPTransport(StrEnum):
+    STREAMABLE_HTTP = "streamable_http"
+    LEGACY_HTTP_SSE = "legacy_http_sse"
+
+
+class UserMCPProtocolPreference(StrEnum):
+    AUTO = "auto"
+    V2024_11_05 = "2024-11-05"
+    V2025_03_26 = "2025-03-26"
+    V2025_06_18 = "2025-06-18"
+    V2025_11_25 = "2025-11-25"
+    V2026_07_28 = "2026-07-28"
+
+
+class UserMCPAuthType(StrEnum):
+    NONE = "none"
+    BEARER = "bearer"
+    API_KEY_HEADER = "api_key_header"
+    STATIC_HEADERS = "static_headers"
+
+
+class UserMCPHealthStatus(StrEnum):
+    UNTESTED = "untested"
+    TESTING = "testing"
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    DISABLED = "disabled"

@@ -45,7 +45,7 @@ class MCPClientAdapter(Protocol):
     async def list_tools(self) -> list[Mapping[str, Any]]:
         ...
 
-    async def call_tool(self, tool_name: str, arguments: Mapping[str, Any], **kwargs: Any) -> Mapping[str, Any]:
+    async def call_tool(self, tool_name: str, arguments: Mapping[str, Any], **kwargs: Any) -> Any:
         ...
 
     async def close(self) -> None:

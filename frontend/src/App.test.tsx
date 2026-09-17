@@ -1,12 +1,68 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
+import App, { mergeHistoryWithLiveFallbackNotices } from './App';
 import type { ApiClient } from './api/client';
 import type { ConversationMessagesResponse, DeleteConversationResponse, TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
 import { COMPOSER_PLACEHOLDERS } from './domain/composerPlaceholders';
 import { WELCOME_PROMPTS } from './domain/welcomePrompts';
+
+vi.mock('./components/MathFormula', () => ({
+  MathFormula: ({ language, source, display, fallbackSource }: {
+    language: string;
+    source: string;
+    display: boolean;
+    fallbackSource: string;
+  }) => (
+    <span
+      data-testid="app-formula"
+      data-language={language}
+      data-display={String(display)}
+      data-source={source}
+    >
+      {fallbackSource}
+    </span>
+  ),
+}));
+
+const deepseekReasoningEfforts = {
+  options: [
+    { value: 'minimal', label: '最低' },
+    { value: 'low', label: '低' },
+    { value: 'medium', label: '中' },
+    { value: 'high', label: '高' },
+    { value: 'xhigh', label: '更高' },
+    { value: 'max', label: '最高' },
+  ],
+  thinking: {
+    enabled: { default: 'high', supported: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+    disabled: { default: 'minimal', supported: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  },
+};
+
+const doubaoReasoningEfforts = {
+  options: [
+    { value: 'minimal', label: '最低' },
+    { value: 'low', label: '低' },
+    { value: 'medium', label: '中' },
+    { value: 'high', label: '高' },
+  ],
+  thinking: {
+    enabled: { default: 'high', supported: ['minimal', 'low', 'medium', 'high'] },
+    disabled: { default: 'minimal', supported: ['minimal'] },
+  },
+};
+
+const forceThinkingReasoningEfforts = {
+  options: [
+    { value: 'high', label: '高' },
+  ],
+  thinking: {
+    enabled: { default: 'high', supported: ['high'] },
+    disabled: { default: null, supported: [] },
+  },
+};
 
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
@@ -21,14 +77,13 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       capabilities: [
         { capability_id: 'skill.data_lookup', name: 'data-lookup', display_name: '数据查询', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' },
         { capability_id: 'skill.mini_breedstat_rcbd', name: 'mini-breedstat-rcbd', display_name: '试验设计', description: '生成 RCBD 随机区组设计', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'mini_breedstat_rcbd_skill/SKILL.md' },
-        { capability_id: 'main_agent.respond', name: '普通对话', description: '主代理', version: '1', status: 'active', kind: 'builtin', source: 'builtin', source_path: '' },
       ],
     })),
     getModelEditions: vi.fn(async () => ({
       default_model_edition: 'deepseek-v4-flash-260425',
       options: [
-        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash' },
-        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro' },
+        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
+        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro', reasoning_efforts: deepseekReasoningEfforts },
       ],
     })),
     listConversationUploads: vi.fn(async () => ({ conversation_id: 'conv-test', uploads: [] })),
@@ -70,6 +125,17 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     })),
     listConversationTasks: vi.fn(async () => ({ conversation_id: 'conv-test', tasks: [] })),
     listInterrupts: vi.fn(async () => ({ task_id: 'task-1', interrupts: [] })),
+    listMCPServers: vi.fn(async () => ({ servers: [] })),
+    createMCPServer: vi.fn(),
+    getMCPServer: vi.fn(),
+    patchMCPServer: vi.fn(),
+    testMCPServer: vi.fn(),
+    deleteMCPServer: vi.fn(),
+    listMCPGrants: vi.fn(async () => ({ grants: [] })),
+    deleteMCPGrant: vi.fn(async () => undefined),
+    clearMCPServerGrants: vi.fn(async () => undefined),
+    continueMCPCall: vi.fn(),
+    cancelMCPCall: vi.fn(),
     getTask: vi.fn(),
     getTaskArtifacts: vi.fn(async () => ({ task_id: 'task-1', artifacts: [] })),
     downloadArtifact: vi.fn(async () => undefined),
@@ -104,6 +170,26 @@ function event(event_type: string, payload: Record<string, unknown> = {}, event_
     payload,
     created_at: '2026-04-27T00:00:00',
   };
+}
+
+function terminalProjectionEvents(): TaskEventEnvelope[] {
+  const unknownId = 'mcp-execution-status-unknown:v1:call-1:4:01-unknown';
+  const failedId = 'mcp-execution-status-unknown:v1:call-1:4:02-task-failed';
+  const resolutionId = 'mcp-late-terminal:v1:call-1:1:01-resolution';
+  return [
+    { ...event('mcp.execution_status_unknown', {
+      schema: 'maf.user_mcp.execution_status_unknown.v1', projection_id: 'mcp-terminal-projection:v1:call-1', intent_id: 'intent-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', projection_revision: 0, intent_revision: 4, unknown_terminal_at: '2026-04-27T00:00:00Z', reason_code: 'trusted_terminal_result_absent', no_replay: true, result_receipt_id: null, predecessor_event_id: null,
+    }, unknownId, 'node-1'), created_at: '2026-04-27T00:00:00Z' },
+    { ...event('task.failed', {
+      schema: 'maf.user_mcp.unknown_task_failed.v1', projection_id: 'mcp-terminal-projection:v1:call-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', code: 'execution_status_unknown', no_replay: true, unknown_event_id: unknownId, predecessor_event_id: unknownId,
+    }, failedId, 'node-1'), created_at: '2026-04-27T00:00:00.000001Z' },
+    { ...event('mcp.execution_status_resolution', {
+      schema: 'maf.user_mcp.execution_status_resolution.v1', projection_id: 'mcp-terminal-projection:v1:call-1', intent_id: 'intent-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', unknown_event_id: unknownId, task_failed_event_id: failedId, result_receipt_id: 'receipt-1', from_projection_revision: 0, to_projection_revision: 1, from_intent_revision: 4, to_intent_revision: 5, unknown_terminal_at: '2026-04-27T00:00:00Z', resolved_at: '2026-04-27T00:01:00Z', predecessor_event_id: failedId,
+    }, resolutionId, 'node-1'), created_at: '2026-04-27T00:01:00Z' },
+    { ...event('mcp.late_terminal_result_recovered', {
+      schema: 'maf.user_mcp.late_terminal_result_recovered.v1', projection_id: 'mcp-terminal-projection:v1:call-1', intent_id: 'intent-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', unknown_event_id: unknownId, resolution_event_id: resolutionId, result_receipt_id: 'receipt-1', result_payload_sha256: 'sha256:result', projection_revision: 1, terminal_state: 'completed', safe_result_ref: 'artifact:safe-result', safe_result_ref_sha256: 'sha256:ref', safe_error_code: null, resolved_at: '2026-04-27T00:01:00Z', task_remains_failed: true, node_remains_failed: true, no_replay: true, predecessor_event_id: resolutionId,
+    }, 'mcp-late-terminal:v1:call-1:1:02-correction', 'node-1'), created_at: '2026-04-27T00:01:00.000001Z' },
+  ];
 }
 
 function taskSummary(taskId: string, status: string) {
@@ -170,6 +256,19 @@ function makeSequencedEventSourceFactory(eventBatches: TaskEventEnvelope[][]): E
   };
 }
 
+function makeEndingEventSourceFactory(events: TaskEventEnvelope[]) {
+  let subscriptionCount = 0;
+  const factory: EventSourceFactory = (_url, handlers) => {
+    subscriptionCount += 1;
+    queueMicrotask(() => {
+      for (const item of events) handlers.onMessage(item);
+      handlers.onError(new Error('replay ended'));
+    });
+    return { close: vi.fn() };
+  };
+  return { factory, subscriptionCount: () => subscriptionCount };
+}
+
 function makeErrorEventSourceFactory(): EventSourceFactory {
   return (_url, handlers) => {
     handlers.onError(new Error('stream disconnected'));
@@ -184,6 +283,63 @@ async function expectComposerFocused() {
 }
 
 describe('App', () => {
+  it('merges live fallback notices only onto matching assistant task history', () => {
+    const notice = {
+      scope: 'full' as const,
+      reasonCode: 'skill_missing',
+      missingCapabilitySummary: '缺少绘图 Skill',
+      fallbackContentScope: '只能给出手工建议',
+    };
+
+    const merged = mergeHistoryWithLiveFallbackNotices(
+      [
+        { id: 'assistant-other', kind: 'chat', role: 'assistant', content: '其它回答', mode: 'chat', taskId: 'task-other' },
+        { id: 'assistant-target', kind: 'chat', role: 'assistant', content: '目标回答', mode: 'chat', taskId: 'task-target' },
+      ],
+      [
+        { id: 'live', kind: 'chat', role: 'assistant', content: 'live', mode: 'chat', taskId: 'task-target', fallbackNotice: notice },
+      ],
+    );
+
+    expect(merged[0].fallbackNotice).toBeUndefined();
+    expect(merged[1].fallbackNotice).toEqual(notice);
+  });
+
+  it('canonically merges live and history MCP result artifact projections by call', () => {
+    const deferred = {
+      schema: 'maf.user_mcp.result_artifact_projection.v1' as const,
+      safe_call_ref: 'a'.repeat(64),
+      status: 'deferred' as const,
+      reason_code: 'projection_failed' as const,
+      artifact_count: 0 as const,
+    };
+    const ready = {
+      ...deferred,
+      status: 'ready' as const,
+      reason_code: 'promoted' as const,
+      artifact_count: 1 as const,
+    };
+    const permanent = {
+      ...deferred,
+      safe_call_ref: 'b'.repeat(64),
+      status: 'permanent_failure' as const,
+      reason_code: 'source_expired' as const,
+    };
+
+    const merged = mergeHistoryWithLiveFallbackNotices(
+      [{
+        id: 'history', kind: 'chat', role: 'assistant', content: 'done', mode: 'chat',
+        taskId: 'task-target', mcpResultArtifactProjections: [ready],
+      }],
+      [{
+        id: 'live', kind: 'chat', role: 'assistant', content: 'live', mode: 'chat',
+        taskId: 'task-target', mcpResultArtifactProjections: [deferred, permanent],
+      }],
+    );
+
+    expect(merged[0].mcpResultArtifactProjections).toEqual([ready, permanent]);
+  });
+
   afterEach(() => {
     localStorage.clear();
     vi.useRealTimers();
@@ -246,7 +402,10 @@ describe('App', () => {
     expect(within(userCard).getByRole('button', { name: '退出登录' })).toBeInTheDocument();
     expect(within(workspace).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument();
     fireEvent.click(accountSettingsButton);
-    expect(await screen.findByText('用户账户设置功能会在后续版本开放。')).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'MCP 服务与授权' })).toBeInTheDocument();
+    expect(await screen.findByText('尚未配置 MCP 服务')).toBeInTheDocument();
+    expect(api.listMCPServers).toHaveBeenCalledTimes(2);
+    expect(api.listMCPGrants).toHaveBeenCalledTimes(1);
     expect(conversationList).toBeInTheDocument();
     expect(conversationList.parentElement).toHaveClass('app-content');
     expect(conversationList.closest('.conversation-card')).toBeNull();
@@ -397,6 +556,109 @@ describe('App', () => {
     expect(within(assistantBubble).getByText('SeedPilot')).toBeInTheDocument();
   });
 
+  it('renders file_upload history as safe cards and hides internal system messages', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history-files',
+          username: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '文件历史',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-files',
+        messages: [
+          {
+            message_id: 'file_upload:upl-pending',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'MALICIOUS_RAW_CONTENT storage_key=/tmp/secret content_base64=abc',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'file_upload',
+            metadata: {
+              upload_id: 'upl-pending',
+              filename: 'pending.csv',
+              description_status: 'pending',
+              file_status: 'active',
+              storage_key: '/tmp/secret/pending.csv',
+              content_base64: 'abc',
+            },
+          },
+          {
+            message_id: 'file_upload:upl-failed',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'SHOULD_NOT_RENDER',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'file_upload',
+            metadata: {
+              upload_id: 'upl-failed',
+              filename: 'failed.csv',
+              description_status: 'failed',
+              file_status: 'active',
+            },
+          },
+          {
+            message_id: 'file_upload:upl-deleted',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'DELETED_RAW_CONTENT',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'file_upload',
+            metadata: {
+              upload_id: 'upl-deleted',
+              filename: 'deleted.csv',
+              description_status: 'ready',
+              description_summary: 'deleted summary should not matter',
+              file_status: 'deleted',
+            },
+          },
+          {
+            message_id: 'sys-internal',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'INTERNAL_SECRET_MESSAGE',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'internal_note',
+            metadata: {},
+          },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '文件历史' }));
+
+    const pendingCard = (await screen.findByText('pending.csv')).closest('.message-file-upload') as HTMLElement;
+    expect(pendingCard).toHaveClass('message-user');
+    expect(within(pendingCard).getByText('你')).toBeInTheDocument();
+    expect(screen.getByLabelText('已上传文件 pending.csv')).toBeInTheDocument();
+    expect(screen.getByText('failed.csv')).toBeInTheDocument();
+    expect(screen.getByText('deleted.csv')).toBeInTheDocument();
+    expect(screen.queryByText('文件摘要生成中')).not.toBeInTheDocument();
+    expect(screen.queryByText('摘要不可用')).not.toBeInTheDocument();
+    expect(screen.queryByText('文件已删除 / 不可再用于任务')).not.toBeInTheDocument();
+    expect(screen.queryByText('upload_id: upl-pending')).not.toBeInTheDocument();
+    expect(screen.queryByText(/MALICIOUS_RAW_CONTENT/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SHOULD_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/INTERNAL_SECRET_MESSAGE/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/storage_key/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/content_base64/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
+  });
+
   it('shows an icon-only copy action below completed assistant replies and copies their text', async () => {
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     const writeText = vi.fn(async () => undefined);
@@ -448,6 +710,58 @@ describe('App', () => {
         delete (navigator as { clipboard?: unknown }).clipboard;
       }
     }
+  });
+
+  it('restores capability fallback notice from assistant history metadata', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-fallback-history',
+          username: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '能力缺口历史',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-fallback-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-fallback-history', role: 'user', content: '生成田间图文件', task_id: 'task-fallback', stream_status: null, created_at: null },
+          {
+            message_id: 'msg-assistant',
+            conversation_id: 'conv-fallback-history',
+            role: 'assistant',
+            content: '【能力缺口说明】缺少田间图 Skill。以下是手工建议。',
+            task_id: 'task-fallback',
+            stream_status: 'complete',
+            created_at: null,
+            metadata: {
+              capability_missing_fallback: {
+                enabled: true,
+                scope: 'full',
+                reason_code: 'skill_missing',
+                missing_capability_summary: '缺少田间图 Skill',
+                fallback_content_scope: '只能给出手工建议',
+                artifact_generation_allowed: false,
+                disclosure_required: true,
+                handler: 'must-not-render',
+              },
+            },
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '能力缺口历史' }));
+
+    expect(await screen.findByText('能力缺口')).toBeInTheDocument();
+    expect(screen.getAllByText(/缺少田间图 Skill/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/只能给出手工建议/)).toBeInTheDocument();
+    expect(screen.queryByText(/must-not-render/)).not.toBeInTheDocument();
   });
 
   it('falls back to document copy when clipboard write is rejected', async () => {
@@ -604,19 +918,69 @@ describe('App', () => {
     const events = [
       event('task.accepted', {}, 'restore-accepted'),
       event('task.graph_created', {}, 'restore-graph'),
-      event('node.started', { capability_id: 'main_agent.respond' }, 'restore-node', 'node-main'),
-      event('main_agent.output_delta', { delta: '已生成内容', response_role: 'final' }, 'restore-output'),
+      event('node.started', { capability_id: 'agent.final_output' }, 'restore-node', 'node-main'),
+      event('agent.reasoning_delta', { delta: '恢复分析', ordinal: 1, sample_id: 'sample-restore' }, 'restore-reasoning'),
     ].map((item) => ({ ...item, task_id: 'task-running' }));
     const eventSource = makeInspectableEventSourceFactory(events);
 
     await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
 
     expect(await screen.findByText('以前的问题')).toBeInTheDocument();
-    expect(await screen.findByText('已生成内容')).toBeInTheDocument();
+    expect(await screen.findByText('恢复分析')).toBeInTheDocument();
     expect(screen.getByLabelText('请输入问题')).toBeDisabled();
     expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
     expect(api.getTask).toHaveBeenCalledWith('task-running');
     expect(eventSource.urls).toEqual(['/api/v1/tasks/task-running/events']);
+  });
+
+  it('restores a failed MCP terminal projection and replays its late result without reopening the task', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-1', title: '迟到结果', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({ conversation_id: 'conv-history', messages: [] })),
+      getTask: vi.fn(async () => ({
+        ...taskSummary('task-1', 'failed'),
+        mcp_terminal_projection: { projection_id: 'mcp-terminal-projection:v1:call-1' },
+      })),
+    });
+    const eventSource = makeInspectableEventSourceFactory(terminalProjectionEvents());
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('已恢复可信迟到结果')).toBeInTheDocument();
+    expect(screen.getAllByText(/任务仍因未知执行状态失败/)).toHaveLength(2);
+    expect(screen.getByLabelText('请输入问题')).not.toBeDisabled();
+    expect(eventSource.urls).toEqual(['/api/v1/tasks/task-1/events']);
+  });
+
+  it.each([
+    ['correction only', [terminalProjectionEvents()[3]]],
+    ['resolution and correction', terminalProjectionEvents().slice(2)],
+  ])('shows a bounded recoverable sync error when terminal replay ends with a predecessor gap: %s', async (_name, replayEvents) => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-1', title: '缺失前序', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({ conversation_id: 'conv-history', messages: [] })),
+      getTask: vi.fn(async () => ({
+        ...taskSummary('task-1', 'failed'),
+        mcp_terminal_projection: { projection_id: 'mcp-terminal-projection:v1:call-1' },
+      })),
+    });
+    const eventSource = makeEndingEventSourceFactory(replayEvents);
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('任务事件需要重新同步')).toBeInTheDocument();
+    expect(screen.getByText(/缺少前序记录/)).toBeInTheDocument();
+    expect(screen.queryByText('已恢复可信迟到结果')).not.toBeInTheDocument();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    });
+    expect(eventSource.subscriptionCount()).toBe(1);
   });
 
   it('restores an active current task after explicit login', async () => {
@@ -637,7 +1001,7 @@ describe('App', () => {
       getTask: vi.fn(async () => taskSummary('task-running', 'running')),
     });
     const eventSource = makeInspectableEventSourceFactory([
-      { ...event('main_agent.output_delta', { delta: '登录后恢复内容', response_role: 'final' }, 'restore-login-output'), task_id: 'task-running' },
+      { ...event('agent.reasoning_delta', { delta: '登录后恢复分析', ordinal: 1, sample_id: 'sample-login' }, 'restore-login-reasoning'), task_id: 'task-running' },
     ]);
 
     render(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
@@ -647,7 +1011,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
 
     expect(await screen.findByText('登录前的问题')).toBeInTheDocument();
-    expect(await screen.findByText('登录后恢复内容')).toBeInTheDocument();
+    expect(await screen.findByText('登录后恢复分析')).toBeInTheDocument();
     expect(api.getTask).toHaveBeenCalledWith('task-running');
   });
 
@@ -796,6 +1160,8 @@ describe('App', () => {
       conversationId: 'conv-history',
       content: '水稻',
       mode: 'chat',
+      routingMode: 'auto',
+      capabilityId: null,
       clientMessageId: expect.stringMatching(/^user-/),
       metadata: { interrupt_id: 'interrupt-1' },
     })));
@@ -996,6 +1362,8 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       conversationId: 'conv-history',
       content: '继续问一个问题',
+      routingMode: 'auto',
+      capabilityId: null,
     })));
   });
 
@@ -1306,13 +1674,11 @@ describe('App', () => {
     confirm.mockRestore();
   });
 
-  it('submits normal chat and renders streaming answer', async () => {
+  it('submits normal chat and renders transient Agent reasoning', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
-      event('main_agent.reasoning_delta', { delta: '先分析。', ordinal: 1 }, 'reasoning-1'),
-      event('main_agent.output_delta', { delta: '**你好**，', ordinal: 1 }, 'delta-1'),
-      event('main_agent.output_delta', { delta: '已接通。', ordinal: 2 }, 'delta-2'),
+      event('agent.reasoning_delta', { delta: '先分析。', ordinal: 1, sample_id: 'sample-chat' }, 'reasoning-1'),
       event('task.completed'),
     ])} />);
 
@@ -1320,7 +1686,13 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '你好' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'chat' })));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'chat',
+      routingMode: 'auto',
+      capabilityId: null,
+      deepThinking: false,
+      reasoningEffort: 'high',
+    })));
     expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-flash-260425' }));
     await screen.findByText('思考内容');
     await screen.findByText('先分析。');
@@ -1331,7 +1703,44 @@ describe('App', () => {
     fireEvent.click(within(reasoningBox as HTMLElement).getByRole('button', { name: '收起思考内容' }));
     expect(reasoningBox).toHaveClass('reasoning-box-collapsed');
     await waitFor(() => expect(screen.getAllByText('你好').length).toBeGreaterThan(0));
-    await screen.findByText(/已接通。/);
+  });
+
+  it('renders formulas in user and transient Agent reasoning surfaces', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    let streamHandlers: TaskEventHandlers | null = null;
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+
+    try {
+      await renderAuthed(<App apiClient={makeApi()} eventSourceFactory={eventSourceFactory} />);
+      fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用户 $u$' } });
+      fireEvent.click(screen.getByRole('button', { name: '发送' }));
+      await waitFor(() => expect(streamHandlers).not.toBeNull());
+      expect(await screen.findByTestId('app-formula')).toHaveAttribute('data-source', 'u');
+
+      await act(async () => {
+        streamHandlers?.onMessage(event('agent.reasoning_delta', { delta: '推理 $r$', ordinal: 1, sample_id: 'sample-formula' }, 'formula-reasoning'));
+      });
+      expect(screen.getAllByTestId('app-formula').map((formula) => formula.dataset.source)).toEqual(['u', 'r']);
+
+      await act(async () => {
+        streamHandlers?.onMessage(event('task.completed', {}, 'formula-complete'));
+      });
+      await waitFor(() => expect(screen.getAllByTestId('app-formula').map((formula) => formula.dataset.source)).toEqual(['u', 'r']));
+    } finally {
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        delete (navigator as { clipboard?: unknown }).clipboard;
+      }
+    }
   });
 
   it('composer safe autofocus focuses the composer after task completion', async () => {
@@ -1493,6 +1902,35 @@ describe('App', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('waits for reducer consumption before applying terminal side effects to an out-of-order MCP chain', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const close = vi.fn();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close };
+    };
+    await renderAuthed(<App apiClient={makeApi()} eventSourceFactory={eventSourceFactory} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '乱序终态' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    const [unknown, failed, resolution, correction] = terminalProjectionEvents();
+
+    await act(async () => {
+      streamHandlers?.onMessage(correction);
+      streamHandlers?.onMessage(resolution);
+      streamHandlers?.onMessage(failed);
+    });
+    expect(close).not.toHaveBeenCalled();
+    expect(screen.queryByText('已恢复可信迟到结果')).not.toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(unknown);
+    });
+    expect(await screen.findByText('已恢复可信迟到结果')).toBeInTheDocument();
+    expect(screen.getByLabelText('任务失败')).toBeInTheDocument();
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it('composer safe autofocus focuses the composer when an interrupt prompt is ready', async () => {
     let streamHandlers: TaskEventHandlers | null = null;
     const api = makeApi({
@@ -1597,58 +2035,7 @@ describe('App', () => {
     })));
   });
 
-  it('only follows streaming output when the conversation view is already at the bottom', async () => {
-    let streamHandlers: TaskEventHandlers | null = null;
-    const api = makeApi();
-    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
-      streamHandlers = handlers;
-      return { close: vi.fn() };
-    };
-    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
-
-    const conversationList = screen.getByLabelText('对话内容') as HTMLDivElement;
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 1200 });
-    Object.defineProperty(conversationList, 'clientHeight', { configurable: true, value: 600 });
-    conversationList.scrollTop = 600;
-    fireEvent.scroll(conversationList);
-
-    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '生成一段长回答' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送' }));
-
-    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
-    expect(conversationList.scrollTop).toBe(1200);
-
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 1600 });
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '第一段内容。', ordinal: 1 }, 'delta-1'));
-    });
-
-    await screen.findByText('第一段内容。');
-    expect(conversationList.scrollTop).toBe(1600);
-
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 2000 });
-    conversationList.scrollTop = 200;
-    fireEvent.scroll(conversationList);
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '继续生成。', ordinal: 2 }, 'delta-2'));
-    });
-
-    await screen.findByText(/第一段内容。继续生成。/);
-    expect(conversationList.scrollTop).toBe(200);
-
-    conversationList.scrollTop = 1400;
-    fireEvent.scroll(conversationList);
-    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 2400 });
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '回到底部后继续。', ordinal: 3 }, 'delta-3'));
-    });
-
-    await screen.findByText(/回到底部后继续。/);
-    expect(conversationList.scrollTop).toBe(2400);
-  });
-
-
-  it('opens the slash Skill picker, selects a Skill with the keyboard, and submits a soft-bound main-agent route from the badge', async () => {
+  it('opens the slash Skill picker and submits a soft Skill hint from the badge', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -1663,18 +2050,37 @@ describe('App', () => {
 
     expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/data-lookup');
     expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('数据查询');
+    expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('优先使用');
     fireEvent.change(input, { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'main_agent.respond',
-      metadata: expect.objectContaining({
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
-      }),
+      routingMode: 'hint',
+      capabilityId: 'skill.data_lookup',
+      metadata: {},
     })));
+    await waitFor(() => expect(screen.queryByRole('status', { name: '已选择 Skill' })).not.toBeInTheDocument());
+  });
+
+  it('clears the one-shot Skill hint after submit failure', async () => {
+    const api = makeApi({
+      submitMessage: vi.fn(async () => { throw new Error('submit failed'); }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: '/data' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
+    expect(await screen.findByRole('status', { name: '已选择 Skill' })).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      routingMode: 'hint',
+      capabilityId: 'skill.data_lookup',
+    })));
+    await waitFor(() => expect(screen.queryByRole('status', { name: '已选择 Skill' })).not.toBeInTheDocument());
   });
 
   it('removes the selected slash Skill badge and returns to auto routing', async () => {
@@ -1692,6 +2098,7 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '普通问题',
+      routingMode: 'auto',
       capabilityId: null,
     })));
   });
@@ -1713,7 +2120,7 @@ describe('App', () => {
     expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('试验设计');
   });
 
-  it('submits direct slash command input as a soft-bound main-agent call with cleaned content', async () => {
+  it('submits direct slash command input as a soft Skill hint with cleaned content', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -1723,12 +2130,9 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'main_agent.respond',
-      metadata: expect.objectContaining({
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
-      }),
+      routingMode: 'hint',
+      capabilityId: 'skill.data_lookup',
+      metadata: {},
     })));
   });
 
@@ -1742,12 +2146,9 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '',
-      capabilityId: 'main_agent.respond',
-      metadata: expect.objectContaining({
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
-      }),
+      routingMode: 'hint',
+      capabilityId: 'skill.data_lookup',
+      metadata: {},
     })));
   });
 
@@ -1764,8 +2165,29 @@ describe('App', () => {
     expect(await screen.findByText('未找到 Skill')).toBeInTheDocument();
   });
 
-  it('submits uploaded files and slash soft-binding metadata together', async () => {
-    const api = makeApi();
+  it('submits uploaded files and a soft Skill hint together', async () => {
+    const api = makeApi({
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        messages: [{
+          message_id: 'file_upload:upl-1',
+          conversation_id: 'conv-test',
+          role: 'system',
+          content: 'raw uploaded content should not render',
+          task_id: null,
+          stream_status: 'complete',
+          created_at: null,
+          message_type: 'file_upload',
+          metadata: {
+            upload_id: 'upl-1',
+            filename: 'materials.csv',
+            description_status: 'ready',
+            description_summary: 'Materials summary',
+            file_status: 'active',
+          },
+        }],
+      })),
+    });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
@@ -1782,14 +2204,15 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '用这个文件做3个区组RCBD',
-      capabilityId: 'main_agent.respond',
+      routingMode: 'hint',
+      capabilityId: 'skill.mini_breedstat_rcbd',
       metadata: expect.objectContaining({
         upload_ids: ['upl-1'],
-        forced_by_slash_command: true,
-        slash_command: '/mini-breedstat-rcbd',
-        soft_skill_binding: { capability_id: 'skill.mini_breedstat_rcbd', command: '/mini-breedstat-rcbd' },
       }),
     })));
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
+    expect(await screen.findByLabelText('已上传文件 materials.csv')).toBeInTheDocument();
+    expect(screen.queryByText('Materials summary')).not.toBeInTheDocument();
   });
 
   it('does not submit while IME composition is confirming text with Enter', async () => {
@@ -1826,6 +2249,25 @@ describe('App', () => {
         }],
       })),
       deleteConversationUpload: vi.fn(async () => ({ upload_id: 'upl-existing', deleted: true })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        messages: [{
+          message_id: 'file_upload:upl-existing',
+          conversation_id: 'conv-test',
+          role: 'system',
+          content: 'raw deleted content should not render',
+          task_id: null,
+          stream_status: 'complete',
+          created_at: null,
+          message_type: 'file_upload',
+          metadata: {
+            upload_id: 'upl-existing',
+            filename: 'existing.csv',
+            description_status: 'ready',
+            file_status: 'deleted',
+          },
+        }],
+      })),
     });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
@@ -1834,7 +2276,10 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: '删除文件 existing.csv' }));
 
     await waitFor(() => expect(api.deleteConversationUpload).toHaveBeenCalledWith(expect.any(String), 'upl-existing'));
-    await waitFor(() => expect(screen.queryByText(/existing.csv/)).not.toBeInTheDocument());
+    await waitFor(() => expect(within(getConversationFilesDrawer()).queryByText(/existing.csv/)).not.toBeInTheDocument());
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
+    expect(await screen.findByLabelText('已上传文件 existing.csv')).toBeInTheDocument();
+    expect(screen.queryByText('文件已删除 / 不可再用于任务')).not.toBeInTheDocument();
   });
 
   it('labels saved TSV uploads by filename while preserving csv file type', async () => {
@@ -2147,21 +2592,117 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'chat',
       deepThinking: true,
-      reasoningEffort: 'minimal',
+      reasoningEffort: 'high',
+    })));
+  });
+
+  it('keeps current thinking and effort when starting a new conversation', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('最高'));
+
+    const previousConversationId = localStorage.getItem('maf.frontend.conversation_id.alice');
+    expect(previousConversationId).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '新建对话' }));
+    await waitFor(() => expect(localStorage.getItem('maf.frontend.conversation_id.alice')).not.toBe(previousConversationId));
+    const nextConversationId = localStorage.getItem('maf.frontend.conversation_id.alice');
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '继承当前设置' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: nextConversationId,
+      deepThinking: true,
+      reasoningEffort: 'max',
     })));
   });
 
 
-  it('disables reasoning effort selection while deep thinking is off', async () => {
+  it('allows reasoning effort selection while deep thinking is off', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
     const effortSelect = screen.getAllByLabelText('思考强度')[0];
-    expect(effortSelect).toHaveClass('ant-select-disabled');
+    expect(effortSelect).not.toHaveClass('ant-select-disabled');
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('最高'));
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '普通回答' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      deepThinking: false,
+      reasoningEffort: 'max',
+    })));
+  });
+
+  it('keeps a supported effort when deep thinking is turned off', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    const thinkingSwitch = await screen.findByLabelText('深度思考');
+    fireEvent.click(thinkingSwitch);
+    fireEvent.click(thinkingSwitch);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '关闭思考但保留高强度' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      deepThinking: false,
+      reasoningEffort: 'high',
+    })));
+  });
+
+  it('renders model-specific Doubao reasoning effort options', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'doubao-seed-2-1-pro-260628',
+        options: [
+          { value: 'doubao-seed-2-1-pro-260628', label: '豆包Seed 2.1 Pro', reasoning_efforts: doubaoReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
+    const effortSelect = screen.getAllByLabelText('思考强度')[0].closest('.ant-select') as HTMLElement;
+    fireEvent.mouseDown(effortSelect.querySelector('.ant-select-selector') as HTMLElement);
+
+    expect(await screen.findByText('低')).toBeInTheDocument();
+    expect(await screen.findByText('中')).toBeInTheDocument();
+    expect(screen.queryByText('最高')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the Doubao disabled default and keeps the select enabled', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'doubao-seed-2-1-pro-260628',
+        options: [
+          { value: 'doubao-seed-2-1-pro-260628', label: '豆包Seed 2.1 Pro', reasoning_efforts: doubaoReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    const thinkingSwitch = await screen.findByLabelText('深度思考');
+    fireEvent.click(thinkingSwitch);
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('高'));
+    fireEvent.click(thinkingSwitch);
+
+    expect(effortSelect).not.toHaveClass('ant-select-disabled');
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '豆包关闭思考' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -2170,10 +2711,91 @@ describe('App', () => {
     })));
   });
 
+  it('falls back when switching to a model that does not support the current disabled effort', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'deepseek-v4-flash-260425',
+        options: [
+          { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
+          { value: 'doubao-seed-2-1-pro-260628', label: '豆包Seed 2.1 Pro', reasoning_efforts: doubaoReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('最高'));
+
+    const modelSelect = screen.getAllByLabelText('模型版本')[0];
+    fireEvent.mouseDown((modelSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
+    fireEvent.click(await screen.findByText('豆包Seed 2.1 Pro'));
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '切换模型' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      modelEdition: 'doubao-seed-2-1-pro-260628',
+      deepThinking: false,
+      reasoningEffort: 'minimal',
+    })));
+  });
+
+  it('forces deep thinking when the selected model has no disabled-safe effort', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'force-thinking-model',
+        options: [
+          { value: 'force-thinking-model', label: 'Force Thinking', reasoning_efforts: forceThinkingReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect(await screen.findByLabelText('深度思考：已开启')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '强制思考' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      deepThinking: true,
+      reasoningEffort: 'high',
+    })));
+  });
+
+  it('blocks submission when the model reasoning config is invalid', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'invalid-model',
+        options: [
+          {
+            value: 'invalid-model',
+            label: 'Invalid Model',
+            reasoning_efforts: {
+              options: [],
+              thinking: {
+                enabled: { default: 'high', supported: ['high'] },
+                disabled: { default: null, supported: [] },
+              },
+            },
+          },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect(await screen.findByText('模型 reasoning_efforts 配置缺失或非法，请刷新或联系管理员。')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '不应提交' } });
+
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    expect(api.submitMessage).not.toHaveBeenCalled();
+  });
+
   it('shows a reasoning box placeholder when deep thinking is enabled but no reasoning content arrives', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
-      event('main_agent.output_delta', { delta: '最终回答', ordinal: 1 }, 'delta-1'),
       event('task.completed'),
     ])} />);
 
@@ -2184,7 +2806,6 @@ describe('App', () => {
 
     await screen.findByText('思考内容');
     expect(await screen.findByText(/等待模型返回 reasoning_content|本次模型未返回 reasoning_content/)).toBeInTheDocument();
-    await screen.findByText('最终回答');
   });
 
 
@@ -2226,6 +2847,74 @@ describe('App', () => {
     expect(await screen.findByText('隆平381')).toBeInTheDocument();
   });
 
+  it('restores MCP raw-result artifact failure notices from assistant history', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history-mcp-artifact');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-history-mcp-artifact', username: 'alice', status: 'active', current_task_id: null, title: 'MCP 历史结果', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-mcp-artifact',
+        messages: [
+          {
+            message_id: 'msg-assistant-mcp',
+            conversation_id: 'conv-history-mcp-artifact',
+            role: 'assistant',
+            content: '工具调用已完成。',
+            task_id: 'task-history-mcp',
+            stream_status: 'complete',
+            created_at: null,
+            mcp_result_artifact_projections: [{
+              schema: 'maf.user_mcp.result_artifact_projection.v1',
+              safe_call_ref: 'a'.repeat(64),
+              status: 'permanent_failure',
+              reason_code: 'source_expired',
+              artifact_count: 0,
+            }],
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(await screen.findByText('工具调用已完成，但完整结果文件未能保留')).toBeInTheDocument();
+    expect(screen.queryByText('source_expired')).not.toBeInTheDocument();
+  });
+
+  it('moves a live MCP raw-result artifact notice into the completed assistant message', async () => {
+    const api = makeApi({
+      getTaskArtifacts: vi.fn(async () => ({ task_id: 'task-1', artifacts: [] })),
+    });
+    const projectionEvent = event(
+      'mcp.result_artifact_projection',
+      {
+        schema: 'maf.user_mcp.result_artifact_projection.v1',
+        safe_call_ref: 'a'.repeat(64),
+        status: 'deferred',
+        reason_code: 'projection_failed',
+        artifact_count: 0,
+      },
+      'mcp-result-artifact-projection:v1:artifact-live:deferred:projection_failed',
+      'node-mcp',
+    );
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
+      projectionEvent,
+      event('task.completed'),
+    ])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '运行 MCP 工具' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByText('工具调用已完成，完整结果文件正在生成，可稍后刷新')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'MCP 运行状态' })).not.toBeInTheDocument();
+    });
+    expect(screen.getAllByText('工具调用已完成，完整结果文件正在生成，可稍后刷新')).toHaveLength(1);
+  });
+
   it('keeps restored task artifact cards after reloading conversation messages on completion', async () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-restored-artifacts');
     const api = makeApi({
@@ -2263,7 +2952,7 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '实时最终回答', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '实时最终回答', summary: 'final', is_complete: true, created_at: null },
           { artifact_id: 'filtered_query_result:live', producer_node_id: 'task-1:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ artifact_role: 'filtered_query_result', columns: ['品种名称'], rows: [{ 品种名称: '隆平381' }], row_count: 1, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
         ],
       })),
@@ -2297,7 +2986,7 @@ describe('App', () => {
             stream_status: 'complete',
             created_at: null,
             artifacts: [
-              { artifact_id: 'art-file-history', producer_node_id: 'task-file:main_agent.respond', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-history/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
+              { artifact_id: 'art-file-history', producer_node_id: 'task-file:agent.final_output', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-history/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
             ],
           },
         ],
@@ -2402,7 +3091,7 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'main_agent.respond', artifact_type: 'text', storage_ref: '主代理已自动调用数据查询能力，龙粳33共 1 行。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text', storage_ref: '主代理已自动调用数据查询能力，龙粳33共 1 行。', summary: 'final', is_complete: true, created_at: null },
           { artifact_id: 'query_result_preview:1', producer_node_id: 'task-1:query_data:execute_query', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [{ variety_name: '龙粳33' }], row_count: 1, truncated: false }), summary: 'preview', is_complete: true, created_at: null },
         ],
       })),
@@ -2430,8 +3119,8 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '已生成文件。', summary: 'final', is_complete: true, created_at: null },
-          { artifact_id: 'art-file-1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-1/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '已生成文件。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'art-file-1', producer_node_id: 'agent-node:task-1:final', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-1/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
         ],
       })),
     });
@@ -2448,12 +3137,56 @@ describe('App', () => {
     expect(api.downloadArtifact).toHaveBeenCalledWith('art-file-1', 'layout.html');
   });
 
+  it('does not render MCP tool responses or raw downloads', async () => {
+    const rawResult = '{"authorization":"raw-secret"}';
+    const businessText = `业务返回-${'结果'.repeat(10_100)}-BUSINESS-END`;
+    const api = makeApi({
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text', storage_ref: 'MCP 调用已完成。', summary: 'final', is_complete: true, created_at: null },
+          {
+            artifact_id: 'opaque-result-artifact',
+            producer_node_id: 'task-1:mcp-tool',
+            artifact_type: 'mcp_result',
+            storage_ref: rawResult,
+            summary: 'MCP 工具结果',
+            is_complete: true,
+            created_at: null,
+            mcp_business_result: {
+              schema: 'maf.mcp.business_result_view.v1',
+              availability: 'ready',
+              outcome: 'succeeded',
+              primary: { kind: 'text', text: businessText, truncated: true },
+              content_metadata: [{ kind: 'image', mime_type: 'image/png', byte_size: 24, sha256: `sha256:${'a'.repeat(64)}` }],
+              projection_truncated: true,
+            },
+          },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '调用 MCP' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const answer = await screen.findByText('MCP 调用已完成。');
+    const messageBody = answer.closest('.message-body') as HTMLElement;
+    expect(screen.queryByText('MCP 工具结果')).not.toBeInTheDocument();
+    expect(messageBody.querySelector('.mcp-business-result-content')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '展开业务结果' })).not.toBeInTheDocument();
+    expect(messageBody).not.toHaveTextContent(businessText);
+    expect(messageBody).not.toHaveTextContent('raw-secret');
+    expect(within(messageBody).queryByRole('button', { name: /下\s*载/ })).not.toBeInTheDocument();
+    expect(api.downloadArtifact).not.toHaveBeenCalled();
+  });
+
   it('renders OCR raw text artifacts as a collapsible card inside the assistant bubble', async () => {
     const api = makeApi({
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '主代理总结：图片中包含品种和处理信息。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '主代理总结：图片中包含品种和处理信息。', summary: 'final', is_complete: true, created_at: null },
           {
             artifact_id: 'task-1:skill_display:abc:ocr_raw_text',
             producer_node_id: 'task-1:ocr:skill_execute',
@@ -2509,7 +3242,7 @@ describe('App', () => {
     expect(within(assistantMessage.querySelector('.message-body') as HTMLElement).queryByText(/data-query/)).not.toBeInTheDocument();
   });
 
-  it('renders multiple skill status lines while keeping the final answer in the assistant bubble', async () => {
+  it('renders multiple skill status lines and completes them with the Agent task', async () => {
     let streamHandlers: TaskEventHandlers | null = null;
     const api = makeApi();
     const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
@@ -2540,42 +3273,11 @@ describe('App', () => {
     expect(rcbdStatus.closest('.message-body')).toBeNull();
 
     await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '最终汇总回答', ordinal: 1, response_role: 'final' }, 'final-delta', 'node-final'));
-      streamHandlers?.onMessage(event('main_agent.output_final', { response_role: 'final' }, 'final-output', 'node-final'));
       streamHandlers?.onMessage(event('task.completed', {}, 'task-completed'));
     });
 
-    const finalAnswer = await screen.findByText('最终汇总回答');
-    expect(finalAnswer.closest('.message-body')).not.toBeNull();
     expect(await screen.findByText('data-query：已完成')).toBeInTheDocument();
     expect(await screen.findByText('RCBD：已完成')).toBeInTheDocument();
-  });
-
-  it('does not show the assistant copy action until the reply is completed', async () => {
-    let streamHandlers: TaskEventHandlers | null = null;
-    const api = makeApi();
-    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
-      streamHandlers = handlers;
-      return { close: vi.fn() };
-    };
-    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
-
-    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送' }));
-    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
-    await waitFor(() => expect(streamHandlers).not.toBeNull());
-
-    await act(async () => {
-      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '流式主代理回答', ordinal: 1 }));
-    });
-    const streamingBubble = (await screen.findByText('流式主代理回答')).closest('.message-assistant') as HTMLElement;
-    expect(streamingBubble).not.toBeNull();
-    expect(within(streamingBubble).queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
-
-    await act(async () => {
-      streamHandlers?.onMessage(event('task.completed'));
-    });
-    expect(await within(streamingBubble).findByRole('button', { name: '复制' })).toBeInTheDocument();
   });
 
   it('replaces the waiting-for-event hint with live task progress inside the assistant bubble', async () => {
@@ -2664,7 +3366,7 @@ describe('App', () => {
           conversation_id: 'conv-test',
           task_id: 'task-1',
           node_id: 'task-1:skill_data_query',
-          question: '请补充要查询的作物类型。',
+          question: '请补充要查询的作物类型 $q$。',
           reason_code: 'crop_not_resolved',
           required_fields: { crop: { options: ['corn', 'rice', 'cotton', 'wheat', 'soybean'] } },
           status: 'open',
@@ -2707,9 +3409,10 @@ describe('App', () => {
     expect(within(composer).getByText(/下一条消息将继续当前任务/)).toBeInTheDocument();
     expect(document.querySelector('.interrupt-input-banner')).not.toBeInTheDocument();
     expect(document.querySelector('.interrupt-composer-status')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('请补充要查询的作物类型。')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请补充要查询的作物类型 $q$。')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '结束任务' })).toBeInTheDocument();
     expect(await screen.findByText(/请补充要查询的作物类型/)).toBeInTheDocument();
+    expect(screen.getByTestId('app-formula')).toHaveAttribute('data-source', 'q');
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -2726,6 +3429,80 @@ describe('App', () => {
     expect(resumedProgress.closest('.message-body')).toBeNull();
     expect(screen.queryByText('已收到补充信息，继续当前任务...')).not.toBeInTheDocument();
     expect(api.cancelTask).not.toHaveBeenCalled();
+  });
+
+  it('presents Agent multi-waiting interrupts one at a time and keeps the task waiting', async () => {
+    const firstInterrupt = {
+      interrupt_id: 'interrupt-agent-1',
+      conversation_id: 'conv-test',
+      task_id: 'task-1',
+      node_id: 'node-agent-1',
+      question: '请先补充作物类型。',
+      reason_code: 'crop_not_resolved',
+      required_fields: { crop: { options: ['rice', 'corn'] } },
+      status: 'open',
+    };
+    const secondInterrupt = {
+      ...firstInterrupt,
+      interrupt_id: 'interrupt-agent-2',
+      node_id: 'node-agent-2',
+      question: '请继续补充试验地点。',
+      reason_code: 'location_not_resolved',
+      required_fields: { location: { type: 'string' } },
+    };
+    const listInterrupts = vi.fn()
+      .mockResolvedValueOnce({ task_id: 'task-1', interrupts: [firstInterrupt, secondInterrupt] })
+      .mockResolvedValue({ task_id: 'task-1', interrupts: [secondInterrupt] });
+    const api = makeApi({
+      listInterrupts,
+      getTaskGraph: vi.fn(async () => ({ task_id: 'task-1', nodes: [], edges: [] })),
+      getTask: vi.fn(async () => ({
+        task_id: 'task-1',
+        conversation_id: 'conv-test',
+        status: 'running',
+        root_node_id: null,
+        active_node_count: 2,
+        completed_node_count: 0,
+        failed_node_count: 0,
+        cancel_requested: false,
+        created_at: null,
+        updated_at: null,
+      })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [
+          event('task.graph_created', { node_count: 0, edge_count: 0, root_node_id: null }, 'agent-graph-created'),
+          event('agent.run.waiting', {
+            interrupt_id: 'interrupt-agent-1', reason_kind: 'skill_input', remaining_count: 2,
+          }, 'agent-waiting-1', 'node-agent-1'),
+        ],
+        [
+          event('agent.run.resumed', { outcome: 'resumed', remaining_count: 1 }, 'agent-resumed-1', 'node-agent-1'),
+          event('agent.run.waiting', {
+            interrupt_id: 'interrupt-agent-2', reason_kind: 'skill_input', remaining_count: 1,
+          }, 'agent-waiting-2', 'node-agent-2'),
+        ],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '开始多补参任务' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByPlaceholderText('请先补充作物类型。')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      content: '水稻',
+      metadata: { interrupt_id: 'interrupt-agent-1' },
+    })));
+    expect(await screen.findByPlaceholderText('请继续补充试验地点。')).toBeInTheDocument();
+    expect(screen.getByText(/下一条消息将继续当前任务/)).toBeInTheDocument();
+    expect(screen.queryByText('任务已完成')).not.toBeInTheDocument();
+    await expectComposerFocused();
   });
 
   it('keeps an upload-accepting interrupt open when draft upload fails', async () => {
@@ -2848,11 +3625,89 @@ describe('App', () => {
     })));
   });
 
+  it('renders file-selection ambiguity as natural-language interrupt with replacement upload enabled', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:file_selection', capability_id: 'agent.final_output', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => waitingGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:file_selection',
+          question: '我找到了多个可能的数据文件：\n\n1. materials.csv（upl-a1b2，120 行）\n2. materials.csv（upl-c3d4，2000 行）\n\n你可以直接回复 upload_id，或说“用 120 行那个”。',
+          reason_code: 'file_selection_ambiguous',
+          required_fields: {
+            _file_selection: {
+              version: 1,
+              type: 'conversation_file_selection',
+              presentation: 'natural_language',
+              allow_multiple: false,
+            },
+            file_selection_answer: {
+              type: 'text',
+              description: '请说明要使用哪个文件。',
+            },
+            replacement_file: {
+              type: 'artifact',
+              required: false,
+              accepts_upload: true,
+              description: '如候选文件都不合适，可上传新文件并说明“用这个”。',
+            },
+          },
+          status: 'open',
+        }],
+      })),
+      submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-file-select', task_id: 'task-1', status: 'accepted', action: 'interrupt_resumed', interrupt_id: 'interrupt-1' })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [
+          event('task.accepted', {}, 'accepted-before-file-selection'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-file-selection', 'task-1:file_selection'),
+        ],
+        [event('task.accepted', {}, 'accepted-after-file-selection')],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '继续用刚才的数据' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
+    expect(await screen.findByText(/我找到了多个可能的数据文件/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/你可以直接回复 upload_id/)).toBeInTheDocument();
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
+    expect(uploadInput).not.toBeDisabled();
+
+    const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'replacement.csv', { type: 'text/csv' });
+    fireEvent.change(uploadInput, { target: { files: [file] } });
+    await screen.findByText(/replacement.csv/);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: expect.stringMatching(/^conv-/),
+      content: '用这个',
+      mode: 'chat',
+      clientMessageId: expect.stringMatching(/^user-/),
+      metadata: { interrupt_id: 'interrupt-1', upload_ids: ['upl-1'] },
+    })));
+  });
+
   it('renders sheet selection interrupt and submits upload_sheet_selections only', async () => {
     const waitingGraph = {
       task_id: 'task-1',
       nodes: [
-        { node_id: 'task-1:sheet_selection', capability_id: 'main_agent.respond', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'task-1:sheet_selection', capability_id: 'agent.final_output', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
     };
@@ -3248,7 +4103,7 @@ describe('App', () => {
       task_id: 'task-1',
       nodes: [
         { node_id: 'task-1:skill_data_query', capability_id: 'skill.data_query', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
-        { node_id: 'task-1:main_agent.respond', capability_id: 'main_agent.respond', status: 'pending', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'agent-node:task-1:final', capability_id: 'agent.final_output', status: 'pending', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
     };
@@ -3276,7 +4131,7 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '最终主代理回答：没有找到符合条件的记录。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent-node:task-1:final', artifact_type: 'text', storage_ref: '最终主代理回答：没有找到符合条件的记录。', summary: 'final', is_complete: true, created_at: null },
           { artifact_id: 'filtered_query_result:1', producer_node_id: 'task-1:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [], row_count: 0, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
         ],
       })),
@@ -3289,7 +4144,6 @@ describe('App', () => {
           event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-final-answer-interrupt', 'task-1:skill_data_query'),
         ],
         [
-          event('main_agent.output_delta', { delta: '流式主代理回答', ordinal: 1 }, 'delta-resumed-1'),
           event('task.completed', {}, 'task-completed-resumed'),
         ],
       ])}
@@ -3381,9 +4235,9 @@ describe('App', () => {
 
     await waitFor(() => expect(subscriptions).toHaveLength(2), { timeout: 2_000 });
     await act(async () => {
-      subscriptions[1].onMessage(event('main_agent.output_delta', { delta: '重连后的内容', response_role: 'final' }, 'delta-after-reconnect'));
+      subscriptions[1].onMessage(event('agent.reasoning_delta', { delta: '重连后的分析', ordinal: 1, sample_id: 'sample-reconnect' }, 'reasoning-after-reconnect'));
     });
-    expect(await screen.findByText('重连后的内容')).toBeInTheDocument();
+    expect(await screen.findByText('重连后的分析')).toBeInTheDocument();
   });
 
   it('keeps reconnecting the task event stream when status recovery is temporarily unavailable', async () => {
@@ -3412,9 +4266,378 @@ describe('App', () => {
     await waitFor(() => expect(api.getTask).toHaveBeenCalledWith('task-1'));
     await waitFor(() => expect(subscriptions).toHaveLength(2), { timeout: 2_000 });
     await act(async () => {
-      subscriptions[1].onMessage(event('main_agent.output_delta', { delta: '状态接口恢复前的 SSE 内容', response_role: 'final' }, 'delta-after-status-failure'));
+      subscriptions[1].onMessage(event('agent.reasoning_delta', { delta: '状态接口恢复前的分析', ordinal: 1, sample_id: 'sample-status-recovery' }, 'reasoning-after-status-failure'));
     });
-    expect(await screen.findByText('状态接口恢复前的 SSE 内容')).toBeInTheDocument();
+    expect(await screen.findByText('状态接口恢复前的分析')).toBeInTheDocument();
+  });
+
+  it('resubscribes after MCP approval and surfaces the next Tool approval', async () => {
+    const firstInterrupt = {
+      interrupt_id: 'mcp-approval-capabilities',
+      conversation_id: 'conv-test',
+      task_id: 'task-1',
+      node_id: 'node-mcp',
+      question: 'Allow OCR服务 to call get_ocr_capabilities?',
+      reason_code: 'mcp_tool_approval_required',
+      required_fields: {
+        mcp_tool_approval: { options: ['allow_once', 'always_allow', 'deny'] },
+      },
+      status: 'open',
+    };
+    const secondInterrupt = {
+      ...firstInterrupt,
+      interrupt_id: 'mcp-approval-start-job',
+      question: 'Allow OCR服务 to call start_parse_job?',
+    };
+    const approvalResponse = deferred<{
+      conversation_id: string;
+      message_id: string;
+      task_id: string;
+      status: string;
+    }>();
+    const api = makeApi({
+      submitMessage: vi.fn()
+        .mockResolvedValueOnce({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })
+        .mockImplementationOnce(async () => approvalResponse.promise),
+      listInterrupts: vi.fn()
+        .mockResolvedValueOnce({ task_id: 'task-1', interrupts: [firstInterrupt] })
+        .mockResolvedValue({ task_id: 'task-1', interrupts: [secondInterrupt] }),
+    });
+    const batches = [[
+        event('task.accepted', {}, 'mcp-task-accepted'),
+        event('mcp.tool_approval_required', {
+          interrupt_id: firstInterrupt.interrupt_id,
+          safe_call_ref: 'safe-call-capabilities',
+          server_display_name: 'OCR服务',
+          tool_display_name: 'get_ocr_capabilities',
+        }, 'mcp-approval-capabilities-event', 'node-mcp'),
+        event('node.waiting_for_input', {
+          interrupt_id: firstInterrupt.interrupt_id,
+        }, 'mcp-waiting-capabilities-event', 'node-mcp'),
+      ]];
+    const subscriptions: TaskEventHandlers[] = [];
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      const batch = batches[subscriptions.length] ?? [];
+      subscriptions.push(handlers);
+      queueMicrotask(() => {
+        for (const item of batch) handlers.onMessage(item);
+      });
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别图片' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const firstApprovalDialog = await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    expect(within(firstApprovalDialog).getByText(/get_ocr_capabilities/)).toBeInTheDocument();
+    await screen.findByText(firstInterrupt.question);
+    fireEvent.click(screen.getByRole('button', { name: '始终允许' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
+    expect(api.submitMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      clientMessageId: `mcp-approval-answer-v1-${firstInterrupt.interrupt_id}`,
+      metadata: {
+        interrupt_id: firstInterrupt.interrupt_id,
+        mcp_tool_approval: 'always_allow',
+      },
+    }));
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    await act(async () => {
+      subscriptions[1].onMessage(event('mcp.tool_approval_decided', {
+        interrupt_id: firstInterrupt.interrupt_id,
+        safe_call_ref: 'safe-call-capabilities',
+        decision: 'always_allow',
+      }, 'mcp-approval-capabilities-decided', 'node-mcp'));
+    });
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toHaveClass('ant-zoom-leave'));
+    expect(screen.queryByText(firstInterrupt.question)).not.toBeInTheDocument();
+    expect(screen.queryByText('等待补充 · 下一条消息将继续当前任务')).not.toBeInTheDocument();
+    await act(async () => {
+      subscriptions[1].onMessage(event('mcp.tool_approval_required', {
+        interrupt_id: secondInterrupt.interrupt_id,
+        safe_call_ref: 'safe-call-start-job',
+        server_display_name: 'OCR服务',
+        tool_display_name: 'start_parse_job',
+      }, 'mcp-approval-start-job-event', 'node-mcp'));
+      subscriptions[1].onMessage(event('node.waiting_for_input', {
+        interrupt_id: secondInterrupt.interrupt_id,
+      }, 'mcp-waiting-start-job-event', 'node-mcp'));
+      await Promise.resolve();
+    });
+    const secondApprovalDialog = await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    expect(within(secondApprovalDialog).getByText(/start_parse_job/)).toBeInTheDocument();
+    await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      approvalResponse.resolve({ conversation_id: 'conv-test', message_id: 'msg-approval', task_id: 'task-1', status: 'accepted' });
+      await approvalResponse.promise;
+    });
+    expect(within(screen.getByRole('dialog', { name: 'MCP 工具授权' })).getByText(/start_parse_job/)).toBeInTheDocument();
+    expect(screen.getByText(secondInterrupt.question)).toBeInTheDocument();
+    expect(screen.getByText('等待补充 · 下一条消息将继续当前任务')).toBeInTheDocument();
+    expect(subscriptions).toHaveLength(2);
+  });
+
+  it.each(['decided', 'next_approval', 'completed'] as const)(
+    'ignores a stale MCP interrupt query after %s', async (transition) => {
+      const firstInterrupt = {
+        interrupt_id: 'mcp-approval-old', conversation_id: 'conv-test', task_id: 'task-1',
+        node_id: 'node-mcp', question: '旧工具的授权问题', reason_code: 'mcp_tool_approval_required',
+        required_fields: { mcp_tool_approval: { options: ['allow_once', 'always_allow', 'deny'] } },
+        status: 'open',
+      };
+      const nextInterrupt = { ...firstInterrupt, interrupt_id: 'mcp-approval-next', question: '新工具的授权问题' };
+      const oldQuery = deferred<{ task_id: string; interrupts: typeof firstInterrupt[] }>();
+      const artifacts = deferred<Awaited<ReturnType<ApiClient['getTaskArtifacts']>>>();
+      const api = makeApi({
+        listInterrupts: vi.fn()
+          .mockImplementationOnce(() => oldQuery.promise)
+          .mockResolvedValue({ task_id: 'task-1', interrupts: [nextInterrupt] }),
+        getTaskArtifacts: vi.fn(() => artifacts.promise),
+      });
+      const subscriptions: Array<{ handlers: TaskEventHandlers; close: ReturnType<typeof vi.fn> }> = [];
+      const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+        const subscription = { handlers, close: vi.fn() };
+        subscriptions.push(subscription);
+        return subscription;
+      };
+      await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+      fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询库存' } });
+      fireEvent.click(screen.getByRole('button', { name: '发送' }));
+      await waitFor(() => expect(subscriptions).toHaveLength(1));
+      const { handlers, close } = subscriptions[0];
+      await act(async () => {
+        handlers.onMessage(event('mcp.tool_approval_required', {
+          interrupt_id: firstInterrupt.interrupt_id, safe_call_ref: 'call-old', tool_display_name: 'old_tool',
+        }, 'old-approval', 'node-mcp'));
+        handlers.onMessage(event('node.waiting_for_input', {
+          interrupt_id: firstInterrupt.interrupt_id,
+        }, 'old-waiting', 'node-mcp'));
+      });
+      await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        if (transition !== 'completed') {
+          handlers.onMessage(event('mcp.tool_approval_decided', {
+            interrupt_id: firstInterrupt.interrupt_id, safe_call_ref: 'call-old', decision: 'always_allow',
+          }, 'old-decided', 'node-mcp'));
+        }
+        if (transition === 'next_approval') {
+          handlers.onMessage(event('mcp.tool_approval_required', {
+            interrupt_id: nextInterrupt.interrupt_id, safe_call_ref: 'call-next', tool_display_name: 'next_tool',
+          }, 'next-approval', 'node-mcp'));
+          handlers.onMessage(event('node.waiting_for_input', {
+            interrupt_id: nextInterrupt.interrupt_id,
+          }, 'next-waiting', 'node-mcp'));
+        } else if (transition === 'completed') {
+          handlers.onMessage(event('agent.run.completed', {
+            outcome: 'completed', sample_count: 0, tool_call_count: 1, compaction_count: 0, duration_seconds: 0,
+          }, 'completed'));
+        }
+      });
+      if (transition === 'next_approval') await screen.findByText(nextInterrupt.question);
+      if (transition === 'completed') await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalledTimes(1));
+      const closeCount = close.mock.calls.length;
+      await act(async () => {
+        oldQuery.resolve({ task_id: 'task-1', interrupts: [firstInterrupt] });
+        await oldQuery.promise;
+      });
+      expect(screen.queryByText(firstInterrupt.question)).not.toBeInTheDocument();
+      expect(close).toHaveBeenCalledTimes(closeCount);
+      if (transition === 'next_approval') {
+        expect(screen.getByText(nextInterrupt.question)).toBeInTheDocument();
+        expect(within(screen.getByRole('dialog', { name: 'MCP 工具授权' })).getByText(/next_tool/)).toBeInTheDocument();
+      } else {
+        expect(screen.queryByText('等待补充 · 下一条消息将继续当前任务')).not.toBeInTheDocument();
+      }
+      if (transition === 'completed') {
+        await act(async () => {
+          artifacts.resolve({ task_id: 'task-1', artifacts: [{
+            artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text',
+            storage_ref: '任务已完成的回答', summary: 'final', is_complete: true, created_at: null,
+          }] });
+          await artifacts.promise;
+        });
+        expect(await screen.findByText('任务已完成的回答')).toBeInTheDocument();
+      }
+    },
+  );
+
+  it('keeps MCP approval pending when approval submission fails', async () => {
+    const api = makeApi({
+      submitMessage: vi.fn()
+        .mockResolvedValueOnce({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })
+        .mockRejectedValueOnce(new Error('approval failed'))
+        .mockResolvedValueOnce({ conversation_id: 'conv-test', message_id: 'msg-approval', task_id: 'task-1', status: 'accepted' }),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'mcp-approval-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'node-mcp',
+          question: 'Allow OCR服务 to call start_parse_job?',
+          reason_code: 'mcp_tool_approval_required',
+          required_fields: {
+            mcp_tool_approval: { options: ['allow_once', 'always_allow', 'deny'] },
+          },
+          status: 'open',
+        }],
+      })),
+    });
+    const subscriptions: TaskEventHandlers[] = [];
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      if (subscriptions.length === 1) {
+        queueMicrotask(() => {
+          handlers.onMessage(event('mcp.tool_approval_required', {
+            interrupt_id: 'mcp-approval-1',
+            safe_call_ref: 'safe-call-1',
+            server_display_name: 'OCR服务',
+            tool_display_name: 'start_parse_job',
+          }, 'mcp-approval-1-event', 'node-mcp'));
+          handlers.onMessage(event('node.waiting_for_input', {
+            interrupt_id: 'mcp-approval-1',
+          }, 'mcp-waiting-1-event', 'node-mcp'));
+        });
+      }
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别图片' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    const approvalDialog = await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    expect(within(approvalDialog).getByText(/start_parse_job/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '仅允许一次' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toBeInTheDocument();
+    expect(subscriptions).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: '仅允许一次' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(3));
+    const approvalCalls = vi.mocked(api.submitMessage).mock.calls.slice(1);
+    expect(approvalCalls[0][0].clientMessageId).toBe(`mcp-approval-answer-v1-mcp-approval-1`);
+    expect(approvalCalls[1][0].clientMessageId).toBe(approvalCalls[0][0].clientMessageId);
+    expect(subscriptions).toHaveLength(3);
+  });
+
+  it('does not revive a terminal task when an MCP approval response resolves late', async () => {
+    const approvalResponse = deferred<{
+      conversation_id: string;
+      message_id: string;
+      task_id: string;
+      status: string;
+    }>();
+    const api = makeApi({
+      submitMessage: vi.fn()
+        .mockResolvedValueOnce({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })
+        .mockImplementationOnce(async () => approvalResponse.promise),
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [{ artifact_id: 'agent-artifact:task-1:final', producer_node_id: 'agent.final_output', artifact_type: 'text', storage_ref: '工具执行完成后的最终回答', summary: 'final', is_complete: true, created_at: null }],
+      })),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'mcp-approval-terminal',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'node-mcp',
+          question: 'Allow OCR服务 to call start_parse_job?',
+          reason_code: 'mcp_tool_approval_required',
+          required_fields: { mcp_tool_approval: { options: ['allow_once', 'always_allow', 'deny'] } },
+          status: 'open',
+        }],
+      })),
+    });
+    const subscriptions: TaskEventHandlers[] = [];
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      if (subscriptions.length === 1) {
+        queueMicrotask(() => {
+          handlers.onMessage(event('mcp.tool_approval_required', {
+            interrupt_id: 'mcp-approval-terminal',
+            safe_call_ref: 'safe-call-terminal',
+            server_display_name: 'OCR服务',
+            tool_display_name: 'start_parse_job',
+          }, 'mcp-approval-terminal-event', 'node-mcp'));
+          handlers.onMessage(event('node.waiting_for_input', {
+            interrupt_id: 'mcp-approval-terminal',
+          }, 'mcp-waiting-terminal-event', 'node-mcp'));
+        });
+      }
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别图片' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    await screen.findByText('Allow OCR服务 to call start_parse_job?');
+    fireEvent.click(screen.getByRole('button', { name: '仅允许一次' }));
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    await act(async () => {
+      subscriptions[1].onMessage(event('task.completed', {}, 'task-completed-before-approval-response'));
+    });
+    await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalledWith('task-1'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toHaveClass('ant-zoom-leave'));
+
+    await act(async () => {
+      approvalResponse.resolve({ conversation_id: 'conv-test', message_id: 'msg-approval', task_id: 'task-1', status: 'accepted' });
+      await approvalResponse.promise;
+    });
+    expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toHaveClass('ant-zoom-leave');
+    expect(screen.getByRole('button', { name: '发送' })).toBeInTheDocument();
+    expect(await screen.findByText('工具执行完成后的最终回答')).toBeInTheDocument();
+    expect(screen.queryByText('Allow OCR服务 to call start_parse_job?')).not.toBeInTheDocument();
+    expect(screen.queryByText('等待补充 · 下一条消息将继续当前任务')).not.toBeInTheDocument();
+    expect(api.submitMessage).toHaveBeenCalledTimes(2);
+    expect(subscriptions).toHaveLength(2);
+  });
+
+  it.each([
+    ['completed', null],
+    ['failed', null],
+    ['cancelled', null],
+    ['failed', { projection_id: 'mcp-terminal-projection:v1:call-approval' }],
+  ])('clears MCP approval when getTask reconciles %s without a terminal event', async (status, mcpTerminalProjection) => {
+    const subscriptions: TaskEventHandlers[] = [];
+    let returnTerminalStatus = false;
+    const api = makeApi({
+      getTask: vi.fn(async () => ({
+        ...taskSummary('task-1', returnTerminalStatus ? status : 'running'),
+        conversation_id: 'conv-test',
+        mcp_terminal_projection: returnTerminalStatus ? mcpTerminalProjection : null,
+      })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '终态对账' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    await act(async () => {
+      subscriptions[0].onMessage(event('mcp.tool_approval_required', {
+        interrupt_id: 'mcp-approval-reconcile',
+        safe_call_ref: 'safe-call-reconcile',
+        server_display_name: 'OCR服务',
+        tool_display_name: 'start_parse_job',
+      }, 'mcp-approval-reconcile-event', 'node-mcp'));
+    });
+    expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toBeInTheDocument();
+    returnTerminalStatus = true;
+    await act(async () => {
+      subscriptions[0].onError(new Error('terminal event missed'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(api.getTask).toHaveBeenCalledWith('task-1'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toHaveClass('ant-zoom-leave'));
   });
 
   it('retries loading open interrupts after a waiting-input event when the interrupt list lags', async () => {
@@ -3810,7 +5033,7 @@ describe('App', () => {
 
     await act(async () => {
       streamHandlers?.onMessage(event('task.cancellation_requested', { status: 'cancelling' }, 'stale-cancel-request'));
-      streamHandlers?.onMessage(event('node.started', { capability_id: 'main_agent.respond' }, 'stale-node-started', 'n1'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'agent.final_output' }, 'stale-node-started', 'n1'));
       streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-stale' }, 'stale-waiting', 'n1'));
     });
 
@@ -3858,7 +5081,7 @@ describe('App', () => {
     expect(screen.getByText('正在停止当前对话任务')).toBeInTheDocument();
 
     await act(async () => {
-      streamHandlers?.onMessage(event('node.started', { capability_id: 'main_agent.respond' }, 'stale-start-during-cancel', 'n1'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'agent.final_output' }, 'stale-start-during-cancel', 'n1'));
       streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-stale' }, 'stale-wait-during-cancel', 'n1'));
       await Promise.resolve();
     });
@@ -3979,6 +5202,149 @@ describe('App', () => {
     expect(api.cancelTask).toHaveBeenNthCalledWith(1, 'task-1');
     expect(api.cancelTask).toHaveBeenNthCalledWith(2, 'task-2');
     expect(await screen.findByText('请求未完成，请稍后重试。')).toBeInTheDocument();
+  });
+
+  it('selects a dollar MCP Server command and submits only its stable server id', async () => {
+    const api = makeApi({
+      listMCPServers: vi.fn(async () => ({
+        servers: [{
+          server_id: 'mcp-ocr',
+          display_name: 'OCR服务',
+          routing_description: '识别图片和PDF',
+          endpoint_url: 'https://secret.example.test/rpc',
+          transport: 'streamable_http',
+          protocol_preference: 'auto',
+          auth_type: 'bearer',
+          auth_metadata: { header_name: 'Authorization' },
+          enabled: true,
+          health_status: 'available',
+          credential_configured: true,
+          config_version: 1,
+          security_version: 1,
+          last_tested_at: null,
+          last_test_error_code: null,
+          created_at: '2026-08-17T00:00:00Z',
+          updated_at: '2026-08-17T00:00:00Z',
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    await waitFor(() => expect(api.listMCPServers).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '$' } });
+    expect(api.listMCPServers).toHaveBeenCalledTimes(1);
+    const listbox = await screen.findByRole('listbox', { name: 'MCP Server 命令列表' });
+    expect(within(listbox).getByText('$OCR服务')).toBeInTheDocument();
+    expect(listbox).not.toHaveTextContent('secret.example.test');
+    fireEvent.click(within(listbox).getByRole('option'));
+    expect(await screen.findByLabelText('已选择 MCP Server')).toHaveTextContent('$OCR服务');
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别这份材料' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '识别这份材料',
+      routingMode: 'force_capability',
+      capabilityId: 'mcp.dispatch',
+      metadata: { mcp_server_binding: { server_id: 'mcp-ocr' } },
+    })));
+    expect(screen.queryByLabelText('已选择 MCP Server')).not.toBeInTheDocument();
+  });
+
+  it('clears the one-shot MCP Server badge after submit failure and refreshes candidates', async () => {
+    const server = {
+      server_id: 'mcp-ocr', display_name: 'OCR服务', routing_description: 'OCR',
+      endpoint_url: 'https://secret.example.test', transport: 'streamable_http', protocol_preference: 'auto',
+      auth_type: 'none', auth_metadata: {}, enabled: true, health_status: 'available', credential_configured: false,
+      config_version: 1, security_version: 1, last_tested_at: null, last_test_error_code: null,
+      created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+    };
+    const api = makeApi({
+      listMCPServers: vi.fn(async () => ({ servers: [server] })),
+      submitMessage: vi.fn(async () => { throw new Error('submit failed'); }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '$' } });
+    fireEvent.click(within(await screen.findByRole('listbox', { name: 'MCP Server 命令列表' })).getByRole('option'));
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByLabelText('已选择 MCP Server')).not.toBeInTheDocument());
+    await waitFor(() => expect(api.listMCPServers).toHaveBeenCalledTimes(2));
+  });
+
+  it('allows a selected MCP Server to submit an attachment without task text', async () => {
+    const api = makeApi({
+      listMCPServers: vi.fn(async () => ({
+        servers: [{
+          server_id: 'mcp-ocr', display_name: 'OCR服务', routing_description: 'OCR',
+          endpoint_url: 'https://secret.example.test', transport: 'streamable_http', protocol_preference: 'auto',
+          auth_type: 'none', auth_metadata: {}, enabled: true, health_status: 'available', credential_configured: false,
+          config_version: 1, security_version: 1, last_tested_at: null, last_test_error_code: null,
+          created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '$OCR服务' } });
+    fireEvent.click((await screen.findByRole('listbox', { name: 'MCP Server 命令列表' })).querySelector('[role="option"]') as HTMLElement);
+    const file = new File(['image'], 'scan.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    await screen.findByText(/scan.png/);
+
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '',
+      routingMode: 'force_capability',
+      capabilityId: 'mcp.dispatch',
+      metadata: {
+        upload_ids: ['upl-1'],
+        mcp_server_binding: { server_id: 'mcp-ocr' },
+      },
+    })));
+  });
+
+  it('restores a safe MCP Server badge from user message history', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-mcp-history',
+          username: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: 'MCP历史',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-mcp-history',
+        messages: [{
+          message_id: 'msg-mcp',
+          conversation_id: 'conv-mcp-history',
+          role: 'user',
+          content: '识别材料',
+          task_id: 'task-mcp',
+          stream_status: null,
+          created_at: null,
+          metadata: {
+            mcp_server_badge: {
+              server_id: 'mcp-ocr',
+              display_name: 'OCR服务',
+              command: '$OCR服务',
+              binding_mode: 'explicit_command',
+            },
+          },
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'MCP历史' }));
+
+    expect(await screen.findByText('$OCR服务')).toBeInTheDocument();
+    expect(screen.getByText('识别材料')).toBeInTheDocument();
   });
 
 });

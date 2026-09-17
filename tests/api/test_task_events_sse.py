@@ -86,8 +86,14 @@ class TaskEventsSSEAPITest(APITestCase):
                 event_id="evt-bearer-sse",
                 conversation_id="conv-bearer-sse",
                 task_id="task-bearer-sse",
-                event_type="task.completed",
-                payload={},
+                event_type="agent.run.completed",
+                payload={
+                    "compaction_count": 0,
+                    "duration_seconds": 0,
+                    "outcome": "completed",
+                    "sample_count": 1,
+                    "tool_call_count": 0,
+                },
                 visibility=EventVisibility.FRONTEND,
             )
         )
@@ -101,7 +107,7 @@ class TaskEventsSSEAPITest(APITestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("text/event-stream", response.headers.get("content-type", ""))
         self.assertIn("evt-bearer-sse", response.text)
-        self.assertIn("task.completed", response.text)
+        self.assertIn("agent.run.completed", response.text)
 
     async def test_task_events_live_subscription_covers_replay_to_live_gap(self) -> None:
         created_at = datetime(2026, 5, 15, 12, 0, 0)
@@ -132,7 +138,7 @@ class TaskEventsSSEAPITest(APITestCase):
             conversation_id="conv-gap",
             task_id="task-gap",
             event_type="node.started",
-            payload={"capability_id": "main_agent.respond"},
+            payload={"capability_id": "skill.example"},
             visibility=EventVisibility.FRONTEND,
             created_at=created_at + timedelta(microseconds=1),
         )
@@ -285,9 +291,9 @@ class TaskEventsSSEAPITest(APITestCase):
         release.set()
 
         seen_types = set(replay_types)
-        while "task.completed" not in seen_types:
+        while "agent.run.completed" not in seen_types:
             event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
             seen_types.add(event.event_type)
 
         self.assertIn("node.started", seen_types)
-        self.assertIn("task.completed", seen_types)
+        self.assertIn("agent.run.completed", seen_types)

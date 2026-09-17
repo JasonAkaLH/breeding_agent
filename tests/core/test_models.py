@@ -7,11 +7,9 @@ from src.core.enums import (
     AckPolicy,
     ArtifactType,
     ConversationStatus,
-    DependencyType,
     EventVisibility,
     MailboxChannel,
     MailboxDeliveryStatus,
-    NodeCriticality,
     NodeStatus,
     RoutingMode,
     TaskStatus,
@@ -20,14 +18,15 @@ from src.core.models import (
     Artifact,
     Checkpoint,
     Conversation,
+    ConversationFileIndexRepairMarker,
     EventRecord,
+    FileUploadMessageProjection,
     Interrupt,
     InterruptAnswer,
     MailboxDelivery,
     MailboxMessage,
     Message,
     Task,
-    TaskEdge,
     TaskNode,
 )
 
@@ -72,6 +71,46 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "task_id",
                 "stream_status",
                 "created_at",
+                "message_type",
+                "metadata",
+                "updated_at",
+            ],
+        )
+
+    def test_message_metadata_default_is_not_shared(self) -> None:
+        first = Message("msg-1", "conv-1", "user", "hello")
+        second = Message("msg-2", "conv-1", "assistant", "hi")
+
+        self.assertEqual(first.message_type, "chat")
+        self.assertEqual(dict(first.metadata), {})
+        self.assertIsNot(first.metadata, second.metadata)
+
+    def test_file_upload_message_projection_fields_match_prd(self) -> None:
+        self.assert_dataclass_contract(
+            FileUploadMessageProjection,
+            [
+                "upload_id",
+                "conversation_id",
+                "content",
+                "metadata",
+                "created_at",
+            ],
+        )
+
+    def test_conversation_file_index_repair_marker_fields_match_prd(self) -> None:
+        self.assert_dataclass_contract(
+            ConversationFileIndexRepairMarker,
+            [
+                "conversation_id",
+                "repair_kind",
+                "status",
+                "reason_code",
+                "affected_upload_ids",
+                "attempt_count",
+                "next_retry_at",
+                "created_at",
+                "updated_at",
+                "resolved_at",
             ],
         )
 
@@ -85,11 +124,15 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "status",
                 "routing_mode",
                 "requested_capability_id",
-                "root_node_id",
                 "summary",
                 "cancel_requested_at",
                 "created_at",
                 "updated_at",
+                "mcp_execution_mode",
+                "mcp_shadow_enabled",
+                "mcp_rollout_config_version",
+                "mcp_route_reason_code",
+                "mcp_rollout_mode",
             ],
         )
 
@@ -102,22 +145,11 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "capability_id",
                 "assigned_instance_id",
                 "status",
-                "criticality",
-                "dependency_type",
-                "retry_policy",
-                "timeout_policy",
-                "resource_class",
                 "input_refs",
                 "output_refs",
                 "started_at",
                 "finished_at",
             ],
-        )
-
-    def test_task_edge_fields_match_prd(self) -> None:
-        self.assert_dataclass_contract(
-            TaskEdge,
-            ["from_node_id", "to_node_id", "edge_type", "condition"],
         )
 
     def test_artifact_fields_match_prd(self) -> None:
@@ -316,8 +348,6 @@ class CoreModelDefaultValueTest(unittest.TestCase):
         self.assertEqual(task.status, TaskStatus.ACCEPTED)
         self.assertEqual(task.routing_mode, RoutingMode.AUTO)
         self.assertEqual(node.status, NodeStatus.PENDING)
-        self.assertEqual(node.criticality, NodeCriticality.REQUIRED)
-        self.assertEqual(node.dependency_type, DependencyType.HARD)
         self.assertEqual(artifact.summary, None)
         self.assertEqual(event.visibility, EventVisibility.INTERNAL)
         self.assertEqual(mailbox.ack_policy, AckPolicy.LIGHT)

@@ -5,11 +5,13 @@
 - **日期**：2026-05-14
 - **前置基线**：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`
 - **联合实施 Phase**：`docs/prd/MCP/README.md`
-- **协议参考版本**：Model Context Protocol 2025-11-25
+- **协议参考版本**：Model Context Protocol 2025-11-25（session-era 历史基线）
 
 ## 1. 一句话结论
 
 本 PRD 是 `2025-11-25 latest-feature` 长任务 / Tasks / 完整 Streamable HTTP-SSE 轨道，不是四版本普通 tools 兼容的首版目标；普通 tools 的 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25` client compatibility 由 `docs/prd/MCP/compatibility/` 管理。
+
+已批准的 `2026-07-28` 第五版本不沿用本 PRD 的 initialize、MCP Session、GET stream、Last-Event-ID 或 2025 实验 Tasks Wire Contract。其无状态请求、MRTR 与 Tasks Extension 由 `docs/prd/MCP/user-scoped-on-demand/` 三阶段 PRD 单独实现；两条轨道共享平台任务/事件抽象，但不得共享版本相关请求 DTO。
 
 本项目需要把 MCP 通信升级到完整的 **长任务流式 SSE** 能力：不再只解析单条 SSE 响应，而是要支持 MCP Streamable HTTP 的多事件流、断线恢复、server-to-client notification / request、progress、task status、取消、最终结果拉取与本项目 API/SSE 事件桥接。
 

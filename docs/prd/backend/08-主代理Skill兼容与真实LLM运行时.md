@@ -1,5 +1,7 @@
 # 主代理 Skill 兼容与真实 LLM 运行时
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **范围**：后端 / 主代理 capability / LLM runtime
 - **文档状态**：正式版（补齐主代理 Skill 兼容与真实 LLM runtime 实现事实）
 - **日期**：2026-04-27
@@ -169,4 +171,4 @@ Smoke 验收重点：
 
 ## 11. Skill 构建指南
 
-面向 OMX `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 本地 runtime 能力。
+面向 OMX `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 本地 runtime 能力。

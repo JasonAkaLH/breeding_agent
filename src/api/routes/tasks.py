@@ -12,7 +12,13 @@ from sse_starlette.sse import EventSourceResponse
 
 from src.core.enums import ArtifactType, EventVisibility, NodeStatus, TaskStatus
 from src.core.models import Artifact, EventRecord
-from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
+from src.lifecycle.mcp_presence import MCPPresenceConnection
+from src.integrations.mcp.gateway_models import MCPCancelStatus, MCPContinueStatus
+from src.storage.artifact_files import (
+    is_active_managed_output_file,
+    is_active_skill_output_file,
+    parse_file_storage_ref,
+)
 
 from ..artifact_responses import artifact_response, should_return_task_artifact
 from ..auth import get_optional_owned_conversation, require_authenticated_user, require_task_owner
@@ -21,14 +27,15 @@ from ..dto import (
     CancelTaskResponse,
     InterruptResponse,
     TaskArtifactsResponse,
-    TaskEdgeResponse,
     TaskGraphResponse,
     TaskInterruptsResponse,
+    MCPCallControlResponse,
     TaskListResponse,
     TaskNodeResponse,
     TaskSummaryResponse,
 )
 from ..runtime import ApiRuntime
+from ..runtime_access import runtime_from_request as _runtime
 from ..sse import encode_sse_event
 
 router = APIRouter()
@@ -51,10 +58,6 @@ UNFINISHED_TASK_STATUSES = {
     TaskStatus.RUNNING,
     TaskStatus.CANCELLING,
 }
-
-
-def _runtime(request: Request) -> ApiRuntime:
-    return request.app.state.runtime
 
 
 def _count_active_nodes(nodes) -> int:
@@ -82,6 +85,9 @@ def _count_failed_nodes(nodes) -> int:
 
 
 async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
+    agent_projection = getattr(runtime, "agent_task_projection", None)
+    if agent_projection is not None:
+        await agent_projection.get_agent_run(task.task_id)
     if task.status == TaskStatus.COMPLETED:
         await runtime.try_sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
     nodes = await runtime.storage.list_task_nodes_for_task(task.task_id)
@@ -89,7 +95,7 @@ async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
         task_id=task.task_id,
         conversation_id=task.conversation_id,
         status=str(task.status),
-        root_node_id=task.root_node_id,
+        root_node_id=None,
         summary=task.summary,
         requested_capability_id=task.requested_capability_id,
         active_node_count=_count_active_nodes(nodes),
@@ -98,6 +104,10 @@ async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
         cancel_requested=task.cancel_requested_at is not None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED},
         created_at=task.created_at,
         updated_at=task.updated_at,
+        mcp_terminal_projection=await runtime.mcp_terminal_projection_for_task(task),
+        mcp_result_artifact_projections=(
+            await runtime.mcp_result_artifact_projections_for_task(task.task_id)
+        ),
     )
 
 
@@ -173,6 +183,16 @@ async def _iter_authorized_frontend_events(
         )
     event_iterator = runtime.iter_frontend_events(context.task_id).__aiter__()
     pending_next = asyncio.create_task(event_iterator.__anext__())
+    presence_service = runtime.user_mcp_presence_service
+    if presence_service is not None:
+        await presence_service.connect(
+            MCPPresenceConnection(
+                connection_id=context.connection_id,
+                task_id=context.task_id,
+                owner_user_id=context.username,
+                auth_generation=context.auth_generation_at_connect,
+            )
+        )
     try:
         while True:
             done, _pending = await asyncio.wait(
@@ -182,6 +202,12 @@ async def _iter_authorized_frontend_events(
             )
             postgres_auth_bus = runtime.postgres_auth_invalidation_bus
             if postgres_auth_bus is not None and not postgres_auth_bus.health.ready:
+                if presence_service is not None:
+                    await presence_service.invalidate_owner(
+                        context.username,
+                        auth_generation=context.auth_generation_at_connect,
+                        reason="auth_generation_unavailable",
+                    )
                 yield _auth_invalidated_event(
                     runtime,
                     context,
@@ -191,6 +217,16 @@ async def _iter_authorized_frontend_events(
                 return
             auth_check = runtime.auth_generation_cache.is_current(context.username, context.auth_generation_at_connect)
             if not auth_check.current:
+                if presence_service is not None:
+                    await presence_service.invalidate_owner(
+                        context.username,
+                        auth_generation=context.auth_generation_at_connect,
+                        reason=(
+                            "auth_generation_unknown"
+                            if not auth_check.known
+                            else "auth_generation_mismatch"
+                        ),
+                    )
                 yield _auth_invalidated_event(
                     runtime,
                     context,
@@ -198,6 +234,8 @@ async def _iter_authorized_frontend_events(
                     current_auth_generation=auth_check.current_generation,
                 )
                 return
+            if presence_service is not None:
+                await presence_service.heartbeat(context.connection_id)
             if not done:
                 continue
             try:
@@ -207,6 +245,8 @@ async def _iter_authorized_frontend_events(
             yield event
             pending_next = asyncio.create_task(event_iterator.__anext__())
     finally:
+        if presence_service is not None:
+            await presence_service.disconnect(context.connection_id)
         if not pending_next.done():
             pending_next.cancel()
             with suppress(asyncio.CancelledError):
@@ -254,6 +294,70 @@ async def cancel_task(body: CancelTaskRequest, request: Request) -> CancelTaskRe
     return CancelTaskResponse(task_id=task.task_id, status=str(task.status), accepted=True)
 
 
+@router.post(
+    "/api/v1/tasks/{task_id}/mcp-calls/{call_ref}/continue",
+    response_model=MCPCallControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def continue_mcp_call(
+    task_id: str,
+    call_ref: str,
+    request: Request,
+) -> MCPCallControlResponse:
+    runtime = _runtime(request)
+    user = await require_authenticated_user(request)
+    await require_task_owner(runtime, task_id, user)
+    if runtime.user_mcp_gateway is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "mcp_feature_unavailable"},
+        )
+    outcome = await runtime.user_mcp_gateway.continue_call_for_task(task_id, call_ref)
+    if str(outcome.status) == str(MCPContinueStatus.UNKNOWN_CALL):
+        raise HTTPException(status_code=404, detail={"code": "mcp_call_not_found"})
+    if str(outcome.status) == str(MCPContinueStatus.ALREADY_TERMINAL):
+        raise HTTPException(status_code=409, detail={"code": "mcp_call_already_terminal"})
+    return MCPCallControlResponse(
+        task_id=task_id,
+        call_ref=call_ref,
+        status=str(outcome.status),
+    )
+
+
+@router.post(
+    "/api/v1/tasks/{task_id}/mcp-calls/{call_ref}/cancel",
+    response_model=MCPCallControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def cancel_mcp_call(
+    task_id: str,
+    call_ref: str,
+    request: Request,
+) -> MCPCallControlResponse:
+    runtime = _runtime(request)
+    user = await require_authenticated_user(request)
+    await require_task_owner(runtime, task_id, user)
+    if runtime.user_mcp_gateway is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "mcp_feature_unavailable"},
+        )
+    outcome = await runtime.user_mcp_gateway.cancel_call_for_task(
+        task_id,
+        call_ref,
+        "user_cancelled",
+    )
+    if str(outcome.status) == str(MCPCancelStatus.UNKNOWN_CALL):
+        raise HTTPException(status_code=404, detail={"code": "mcp_call_not_found"})
+    if str(outcome.status) == str(MCPCancelStatus.ALREADY_TERMINAL):
+        raise HTTPException(status_code=409, detail={"code": "mcp_call_already_terminal"})
+    return MCPCallControlResponse(
+        task_id=task_id,
+        call_ref=call_ref,
+        status=str(outcome.status),
+    )
+
+
 @router.get("/api/v1/tasks/{task_id}/interrupts", response_model=TaskInterruptsResponse)
 async def list_task_interrupts(task_id: str, request: Request) -> TaskInterruptsResponse:
     runtime = _runtime(request)
@@ -271,8 +375,12 @@ async def get_task_graph(task_id: str, request: Request) -> TaskGraphResponse:
     runtime = _runtime(request)
     user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
+    agent_projection = getattr(runtime, "agent_task_projection", None)
+    if agent_projection is not None:
+        projected = await agent_projection.project_graph(task_id)
+        if projected is not None:
+            return projected
     nodes = await runtime.storage.list_task_nodes_for_task(task_id)
-    edges = await runtime.storage.list_task_edges(task_id)
     return TaskGraphResponse(
         task_id=task_id,
         nodes=[
@@ -280,23 +388,15 @@ async def get_task_graph(task_id: str, request: Request) -> TaskGraphResponse:
                 node_id=node.node_id,
                 capability_id=node.capability_id,
                 status=str(node.status),
-                criticality=str(node.criticality),
-                dependency_type=str(node.dependency_type),
+                criticality="required",
+                dependency_type="hard",
                 assigned_instance_id=node.assigned_instance_id,
                 started_at=node.started_at,
                 finished_at=node.finished_at,
             )
             for node in nodes
         ],
-        edges=[
-            TaskEdgeResponse(
-                from_node_id=edge.from_node_id,
-                to_node_id=edge.to_node_id,
-                edge_type=str(edge.edge_type),
-                condition=edge.condition,
-            )
-            for edge in edges
-        ],
+        edges=[],
     )
 
 
@@ -306,14 +406,17 @@ async def get_task_artifacts(task_id: str, request: Request) -> TaskArtifactsRes
     user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
     artifacts = await runtime.storage.list_artifacts_for_task(task_id)
-    return TaskArtifactsResponse(
-        task_id=task_id,
-        artifacts=[
-            artifact_response(artifact)
-            for artifact in artifacts
-            if should_return_task_artifact(artifact)
-        ],
-    )
+    responses = []
+    for artifact in artifacts:
+        if should_return_task_artifact(artifact):
+            responses.append(
+                await artifact_response(
+                    artifact,
+                    artifact_file_store=runtime.artifact_file_store,
+                    projection_store=runtime._mcp_projection_store,
+                )
+            )
+    return TaskArtifactsResponse(task_id=task_id, artifacts=responses)
 
 
 @router.get("/api/v1/artifacts/{artifact_id}/download")
@@ -325,7 +428,12 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     await require_task_owner(runtime, artifact.task_id, user)
     metadata = parse_file_storage_ref(artifact.storage_ref)
-    if not is_active_skill_output_file(metadata):
+    is_skill_result = bool(
+        metadata
+        and metadata.get("source_kind") == "skill_result"
+        and is_active_managed_output_file(metadata)
+    )
+    if not is_active_skill_output_file(metadata) and not is_skill_result:
         await runtime.storage.append_event(
             _artifact_event(
                 artifact=artifact,
@@ -336,8 +444,12 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     storage_key = str(metadata.get("storage_key"))
     try:
-        file_path = runtime.artifact_file_store.open_path(storage_key)
-    except ValueError as exc:
+        file_path = runtime.artifact_file_store.open_verified_path(
+            storage_key,
+            expected_size_bytes=int(metadata.get("size_bytes")),
+            expected_sha256=str(metadata.get("sha256")),
+        )
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
         await runtime.storage.append_event(
             _artifact_event(
                 artifact=artifact,
@@ -346,15 +458,6 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}") from exc
-    if not file_path.exists() or not file_path.is_file():
-        await runtime.storage.append_event(
-            _artifact_event(
-                artifact=artifact,
-                event_type="artifact.download_denied",
-                payload={"artifact_id": artifact.artifact_id, "reason": "file_missing"},
-            )
-        )
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
     await runtime.storage.append_event(
         _artifact_event(
             artifact=artifact,

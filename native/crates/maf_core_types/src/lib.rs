@@ -9,8 +9,7 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
-pub const SCHEMA_HASH: &str =
-    "maf_core_types_core_v1_schema_20260526_auth_generation_strong_conversation_delete";
+pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260822_auth_generation_agent_state";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,12 +112,36 @@ pub fn supported_features() -> Vec<String> {
         "core_model_snapshot",
         "core_typed_error_table",
         "pyo3_core_facade",
+        "agent_state_contract",
     ])
 }
 
 #[must_use]
 pub fn enum_contracts() -> BTreeMap<String, Vec<NamedValue>> {
     BTreeMap::from([
+        (
+            "AgentRunStatus".to_owned(),
+            named(&[
+                ("RUNNING", "running"),
+                ("WAITING_FOR_INPUT", "waiting_for_input"),
+                ("WAITING_FOR_DEPENDENCY", "waiting_for_dependency"),
+                ("COMPLETED", "completed"),
+                ("FAILED", "failed"),
+                ("CANCELLED", "cancelled"),
+            ]),
+        ),
+        (
+            "AgentItemKind".to_owned(),
+            named(&[
+                ("USER_MESSAGE", "user_message"),
+                ("ASSISTANT_MESSAGE", "assistant_message"),
+                ("TOOL_CALL", "tool_call"),
+                ("TOOL_RESULT", "tool_result"),
+                ("SKILL_ACTIVATION", "skill_activation"),
+                ("CONTEXT_SUMMARY", "context_summary"),
+                ("CONTINUATION", "continuation"),
+            ]),
+        ),
         (
             "AckPolicy".to_owned(),
             named(&[("STRONG", "strong"), ("LIGHT", "light")]),
@@ -141,18 +164,6 @@ pub fn enum_contracts() -> BTreeMap<String, Vec<NamedValue>> {
                 ("LOCKED", "locked"),
                 ("DELETING", "deleting"),
                 ("DELETING_FAILED", "deleting_failed"),
-            ]),
-        ),
-        (
-            "DependencyType".to_owned(),
-            named(&[("HARD", "hard"), ("SOFT", "soft")]),
-        ),
-        (
-            "EdgeType".to_owned(),
-            named(&[
-                ("DATA", "data"),
-                ("CONTROL", "control"),
-                ("FALLBACK", "fallback"),
             ]),
         ),
         (
@@ -200,14 +211,6 @@ pub fn enum_contracts() -> BTreeMap<String, Vec<NamedValue>> {
             ]),
         ),
         (
-            "NodeCriticality".to_owned(),
-            named(&[
-                ("REQUIRED", "required"),
-                ("OPTIONAL", "optional"),
-                ("FALLBACK", "fallback"),
-            ]),
-        ),
-        (
             "NodeStatus".to_owned(),
             named(&[
                 ("PENDING", "pending"),
@@ -251,6 +254,52 @@ pub fn enum_contracts() -> BTreeMap<String, Vec<NamedValue>> {
 #[must_use]
 pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
     BTreeMap::from([
+        (
+            "AgentRun".to_owned(),
+            fields(&[
+                "run_id",
+                "task_id",
+                "conversation_id",
+                "status",
+                "model_edition",
+                "reasoning_effort",
+                "thinking_enabled",
+                "binding_option_digests",
+                "next_item_sequence",
+                "compacted_through_sequence",
+                "active_sample_item_id",
+                "waiting_call_item_ids",
+                "next_batch_call_ordinal",
+                "claim_owner",
+                "claim_token",
+                "lease_expires_at",
+                "revision",
+                "terminal_reason_code",
+                "created_at",
+                "updated_at",
+                "terminal_at",
+            ]),
+        ),
+        (
+            "AgentItem".to_owned(),
+            fields(&[
+                "item_id",
+                "run_id",
+                "task_id",
+                "sequence",
+                "kind",
+                "state",
+                "payload_json",
+                "payload_size_bytes",
+                "payload_sha256",
+                "parent_item_id",
+                "source_call_item_id",
+                "provider_sample_id",
+                "call_ordinal",
+                "created_at",
+                "committed_at",
+            ]),
+        ),
         (
             "Artifact".to_owned(),
             fields(&[
@@ -463,6 +512,9 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "task_id",
                 "stream_status",
                 "created_at",
+                "message_type",
+                "metadata",
+                "updated_at",
             ]),
         ),
         (
@@ -474,16 +526,16 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "status",
                 "routing_mode",
                 "requested_capability_id",
-                "root_node_id",
                 "summary",
                 "cancel_requested_at",
                 "created_at",
                 "updated_at",
+                "mcp_execution_mode",
+                "mcp_shadow_enabled",
+                "mcp_rollout_config_version",
+                "mcp_route_reason_code",
+                "mcp_rollout_mode",
             ]),
-        ),
-        (
-            "TaskEdge".to_owned(),
-            fields(&["from_node_id", "to_node_id", "edge_type", "condition"]),
         ),
         (
             "TaskNode".to_owned(),
@@ -493,15 +545,35 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "capability_id",
                 "assigned_instance_id",
                 "status",
-                "criticality",
-                "dependency_type",
-                "retry_policy",
-                "timeout_policy",
-                "resource_class",
                 "input_refs",
                 "output_refs",
                 "started_at",
                 "finished_at",
+            ]),
+        ),
+        (
+            "FileUploadMessageProjection".to_owned(),
+            fields(&[
+                "upload_id",
+                "conversation_id",
+                "content",
+                "metadata",
+                "created_at",
+            ]),
+        ),
+        (
+            "ConversationFileIndexRepairMarker".to_owned(),
+            fields(&[
+                "conversation_id",
+                "repair_kind",
+                "status",
+                "reason_code",
+                "affected_upload_ids",
+                "attempt_count",
+                "next_retry_at",
+                "created_at",
+                "updated_at",
+                "resolved_at",
             ]),
         ),
     ])

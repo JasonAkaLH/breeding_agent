@@ -1,15 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime
 
+from src.core.contracts import StoragePort
 from src.core.enums import AckPolicy, MailboxChannel, MailboxDeliveryStatus, NodeStatus, TaskStatus
 from src.core.models import Checkpoint, Interrupt, MailboxDelivery, MailboxMessage, Task, TaskNode
-from src.lifecycle.cancellation_service import CancellationService
+from src.lifecycle.cancellation_service import CancellationService, CancellationSidecarWriter
 from tests.lifecycle.support import LifecycleSQLiteTestCase
 
 
 class TaskCancellationTest(LifecycleSQLiteTestCase):
+    def test_cancellation_sidecar_writer_is_independent_from_storage(self) -> None:
+        protocol_methods = tuple(
+            name
+            for name, value in CancellationSidecarWriter.__dict__.items()
+            if callable(value) and not name.startswith("_")
+        )
+        self.assertEqual(protocol_methods, ("write_cancellation_token",))
+        self.assertEqual(
+            str(inspect.signature(CancellationSidecarWriter.write_cancellation_token)),
+            "(self, *, task_id: 'str', requested_at_ms: 'int', reason: 'str', "
+            "terminal_policy: 'str', idempotency_key: 'str') -> "
+            "'Mapping[str, Any] | Awaitable[Mapping[str, Any]]'",
+        )
+        self.assertNotIn("write_cancellation_token", dir(StoragePort))
+        self.assertEqual(
+            inspect.signature(CancellationService.__init__)
+            .parameters["runtime_sidecar_client"]
+            .annotation,
+            "CancellationSidecarWriter | None",
+        )
+
     def test_cancel_task_context_blocks_future_work_and_discards_late_results(self) -> None:
         service = CancellationService(self.storage)
 

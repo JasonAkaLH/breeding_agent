@@ -4,9 +4,17 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+from src.orchestration.agent_loop.models import AgentModelRequest, AgentSample
+
 from .llm_client import LLMClient, ReasoningEffort, load_config
 from .llm_stream_events import accepted_options, coerce_stream_event, coerce_text_result, iter_stream_like
-from .model_editions import config_with_model_edition, default_model_edition
+from .model_editions import (
+    ReasoningEffortConfig,
+    config_with_model_edition,
+    default_model_edition,
+    model_reasoning_effort_configs,
+)
+from .model_errors import raise_for_model_unavailable
 from .provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, render_prompt_envelope
 
@@ -39,6 +47,18 @@ class SharedLLMRuntime:
         self._config = dict(config) if config is not None else None
         self._config_source = config_source
         self.runtime_id = f"llm-runtime-{id(self):x}"
+
+    def config_snapshot(self) -> dict[str, Any]:
+        if self._config is not None:
+            return dict(self._config)
+        return load_config()
+
+    def default_model_edition(self) -> str | None:
+        config = self.config_snapshot()
+        return default_model_edition(config) or config.get("model_edition") or config.get("model")
+
+    def model_reasoning_configs(self) -> dict[str, ReasoningEffortConfig]:
+        return model_reasoning_effort_configs(self.config_snapshot())
 
     def static_metadata(
         self,
@@ -93,6 +113,23 @@ class SharedLLMRuntime:
         self._clients_by_model_edition[model_edition] = client
         return client
 
+    async def aclose(self) -> None:
+        clients: list[Any] = []
+        for client in (self._client, *self._clients_by_model_edition.values()):
+            if client is not None and all(client is not item for item in clients):
+                clients.append(client)
+        self._client = None
+        self._clients_by_model_edition.clear()
+        for client in clients:
+            close = getattr(client, "aclose", None)
+            if not callable(close):
+                close = getattr(client, "close", None)
+            if not callable(close):
+                continue
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
     def safe_metadata(
         self,
         *,
@@ -139,14 +176,42 @@ class SharedLLMRuntime:
         generate_text = getattr(client, "generate_text", None)
         if not callable(generate_text):
             raise TypeError("LLM runtime client must provide generate_text(prompt, ...).")
-        result = generate_text(
-            _runtime_prompt_for_client(prompt, client),
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
-        )
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            result = generate_text(
+                _runtime_prompt_for_client(prompt, client),
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
         return coerce_text_result(result)
+
+    async def sample_agent(self, request: AgentModelRequest) -> AgentSample:
+        client = self.client_for_model_edition(request.binding.model_edition)
+        sampler = getattr(client, "generate_agent_sample", None)
+        if not callable(sampler):
+            sampler = getattr(client, "sample_agent", None)
+        if not callable(sampler):
+            raise TypeError("LLM runtime client must provide generate_agent_sample(request).")
+        options = accepted_options(
+            sampler,
+            {"on_reasoning_delta": request.reasoning_delta_sink},
+        )
+        try:
+            result = sampler(request, **options) if options else sampler(request)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
+        if not isinstance(result, AgentSample):
+            raise TypeError("Agent model client returned a non-AgentSample result.")
+        if result.binding != request.binding:
+            raise ValueError("Agent model client changed the run-bound model binding")
+        return result
 
     async def stream_events(
         self,
@@ -172,11 +237,15 @@ class SharedLLMRuntime:
             return
 
         options = accepted_options(generator, {"thinking": thinking, "reasoning_effort": reasoning_effort})
-        produced = generator(_runtime_prompt_for_client(prompt, client), **options) if options else generator(_runtime_prompt_for_client(prompt, client))
-        async for event in iter_stream_like(produced):
-            coerced = coerce_stream_event(event)
-            if coerced:
-                yield coerced
+        try:
+            produced = generator(_runtime_prompt_for_client(prompt, client), **options) if options else generator(_runtime_prompt_for_client(prompt, client))
+            async for event in iter_stream_like(produced):
+                coerced = coerce_stream_event(event)
+                if coerced:
+                    yield coerced
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
 
 
 def _runtime_prompt_for_client(prompt: PromptInput, client: Any) -> PromptInput | str:

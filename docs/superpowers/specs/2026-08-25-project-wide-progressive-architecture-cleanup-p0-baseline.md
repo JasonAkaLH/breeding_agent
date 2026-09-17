@@ -1,0 +1,338 @@
+# 全仓业务代码渐进式架构清理 P0 Baseline
+
+## 1. 状态与边界
+
+- P0状态：`complete`；Checkpoint 0～H全部闭合
+- P0 start commit：`3cf44b14853c383e71bae07d0770f715b38a9d34`
+- P0 start tree：`6087fbbabbf80da25c1332b57f651bf83dba24cd`
+- 分支：`main`
+- 设计规范基线：`7b36cad70979aa4d5d6ded186dc00befa80d8054`
+- P0计划规范基线：`bafae8d6424e807a3286e17a5e6611b1e9c05167`
+- P0目标：只建立完整inventory、公开合同与高风险行为锁；业务实现零修改
+- 非目标：P1窄port、P2～P8结构迁移、行为修复、schema/data migration、`prod`与外部验证平台
+
+P0开始时工作树clean。相对业务设计基线`c8da6ccdf89eed5851cb5a79385cf583560a3c93`，只有`CHANGELOG.md`、`docs/AGENTS.md`、总设计和P0计划变化；`src/`、`frontend/`、`native/`、`scripts/`、`tests/`、CI与依赖零变化。
+
+`docker_cmd.md`只核验metadata：存在、权限`0600`、Git ignored、untracked；未读取正文。
+
+## 2. Inventory
+
+### 2.1 起点集合
+
+- P0 start tracked paths：1039
+- 排序path列表SHA-256：`39eebac293a9aa4d2af2c7318fd5a7fa4220879063397e1887dd1b9c51befc0d`
+- Source：`git -c core.quotePath=false ls-files`
+- Ignored/runtime/仓外文件不进入集合
+
+Checkpoint A增加baseline和inventory两个validation dependency，并把已存在的总设计/P0计划从普通documentation重分类为validation dependency，集合为1041行。Checkpoint B新增三份public contract tests，集合为1044行；Checkpoint C新增一份Agent repository contract test，当前集合为1045行。每个checkpoint均以cached+owned-untracked集合做双向精确比较，提交后以新HEAD重验。
+
+P0 final tracked set仍为1045行，排序path列表SHA-256为`9a4f46bf736cfd50c88c054b4795d0432a754d3e7e0654a524dafb40fda29a8a`；与inventory path列双向差集为空。
+
+### 2.2 分类结果
+
+| Classification | 数量 |
+|---|---:|
+| `business_source` | 320 |
+| `test` | 418 |
+| `contract_or_build_dependency` | 68 |
+| `explicit_out_of_scope` | 239 |
+| **合计** | **1045** |
+
+`unclassified=0`。业务源码owner分布：P1=8、P2=51、P3=112、P4=25、P5=61、P6=22、P7=41；合计320且每个path恰好一个source owner。P8只拥有finding处置与最终审计，不替代source owner。
+
+### 2.3 Source owner
+
+| Owner | Paths | P0审查边界 |
+|---|---|---|
+| P1 | `src/core/**` | persistence/shared contract与Cancellation边界；其他Core只能有证据地`reviewed_no_change` |
+| P2 | `src/orchestration/**`、`src/capabilities/**` | Agent Loop/Capabilities/continuation/Prompt |
+| P3 | `src/integrations/**`、`src/mysql_engine.py` | protocol/client/Gateway/Parser/Skills/LLM/database adapter |
+| P4 | `src/api/**` | composition、HTTP/SSE、DTO、bounded file-selection |
+| P5 | `src/auth/**`、`src/state/**`、`src/lifecycle/**`、`src/storage/**` | auth/state/lifecycle/storage与Python adapters |
+| P6 | Frontend业务源码、`frontend/scripts/prepare_mathjax_assets.mjs` | App、controllers/reducers/components与package lifecycle |
+| P7 | Native业务源码、根`scripts/**` operational business | 三Rust runtime workstreams与Operational Scripts |
+
+## 3. 当前公开合同
+
+| Contract | 当前证据 | 锁定状态 |
+|---|---|---|
+| 四条`StoragePort`路径 | 259个唯一async method；四条路径`is`同一对象 | Checkpoint B literal name/async/signature PASS |
+| `src.api.__all__` | `ApiRuntime, build_api_runtime, create_app` | Checkpoint B identity PASS |
+| `src.capabilities.main_agent.__all__` | 5个公开对象 | Checkpoint B identity/module PASS；两个Callable alias保持`collections.abc` |
+| `src.orchestration.agent_loop.__all__` | 65个公开对象 | Checkpoint B identity/module PASS |
+| `ApiRuntime.__init__` / `build_api_runtime` | 完整parameter order/kind/annotation/default/return | Checkpoint B literal shape PASS |
+| `src.api` fresh import | 只读取Core contract mode两个key，不读取其他应用key、不构造runtime | Checkpoint B isolated subprocess PASS |
+| Python Agent repositories | SQLite=16、PostgreSQL=16、RuntimeSidecar=13个public async methods；共同surface 13，Sidecar当前真实成功operation 11 | Checkpoint C literal import/module/constructor/MRO/surface/signature与backend trace PASS |
+| RuntimeSidecar Agent lease | 缺`acquire_task_lease|renew_task_lease|release_waiting_task_lease` | `BEHAVIOR-SIDECAR-AGENT-LEASE-001`，不得补能力 |
+| RuntimeSidecar recovery/cancel | `list_recoverable_runs`因未知`agent_run_list` policy抛`KeyError`；`cancel_agent_run`真实fixture因response validation抛`AgentStorageConflict`且Run/Task不变 | `BEHAVIOR-SIDECAR-AGENT-RECOVERY-LIST-001`、`BEHAVIOR-SIDECAR-AGENT-CANCEL-001`；不得在P0修复 |
+| FastAPI/DTO/SSE | 复用route、DTO、task-event tests | Checkpoint B/E映射，不新增完整OpenAPI snapshot |
+| Rust checked-in contracts | Core/Lifecycle/Runtime Sidecar/Skill Runtime/Safety/MCP Runtime六份 | Checkpoint G byte-level验证 |
+
+## 4. Dependency、authority与bounded seams
+
+| Seam | Exact current symbols/owner | 普通结构检查点约束 |
+|---|---|---|
+| StoragePort aliases | `src.core.contracts.StoragePort`、`src.core.StoragePort`、`src.storage.interfaces.StoragePort`、`src.storage.StoragePort` | identity/name/async/signature delta=0 |
+| Core rollout digest → P3 | `src.core.models.canonical_mcp_rollout_drill_observation_digest`函数内局部import `src.integrations.mcp.rollout_evidence.canonical_evidence_content_digest` | 当前唯一bounded reverse import；不扩张，未来消除须另立owner迁移 |
+| API import → Core contract mode | `src.api`首次import经Core enum读取`MAF_RUST_CORE_MODE`、`MAF_CORE_LIFECYCLE_PYO3_MODULE` | 只允许这两个key；其他应用env/config与runtime construction为0 |
+| Lifecycle → P2 recovery | `AgentContinuationLocator(Service)`、`AgentLeaseController/Handle`、Agent models/errors、`AgentAtomicWriter`、`AgentRunRepository`、`AgentTaskLeaseStore` | logical call-site IDs/kinds/counts/order exact；无第二状态机 |
+| P3 → P2 MCP Dispatch | `MCPDispatchOutcome`、selector/router、selector models/context/fingerprint | imports/object identity与functional calls exact；无复制/内联/缓存绕过 |
+| P5 Agent adapters → P2 contracts | Agent models/enums/errors/persistence payloads | contract-only；不得调用Agent Loop controller/service |
+| P4 → P5 composition | `SQLiteAgentRepository`、`PostgreSQLAgentRepository`、`RuntimeSidecarAgentRepository` | 三次直接assignment只在`build_api_runtime` composition root；P5 adapter mode/backend selector=0 |
+| P4 file-selection | `ConversationFileSelectionRuntimeMixin` + file-selection domain | candidate/LLM/attachment/TaskNode/Interrupt/event trace exact；不迁入Slot/P2 |
+| Frontend | App → controllers/components → domain/wire | App/Attachment/Task Runtime owner不复制；initial submit与answer owner不互换 |
+| Rust root/private | root public declarations；private kernel/adapter/service | root identity/attrs保留；private不得调用root assembly wrapper |
+
+### 4.1 Checkpoint D stable logical call-site IDs
+
+Location metadata绑定Checkpoint D生产源码位置；owner内一对一搬家只更新location，logical ID、kind、count与order不得变化。
+
+| Logical ID | `entry/scenario + phase + callee + ordinal` | 当前location | Exact trace/约束 |
+|---|---|---|---|
+| `D-RUN-WAIT-ENTRY-REL-01` | runner already-waiting + entry + `release_waiting` + 1 | `runner.py:137` | acquire后model/sample/capability/outcome均0，直接release |
+| `D-RUN-WAIT-WAVE-OUT-01` | runner new-waiting + outcome + `commit_agent_call_outcome` + 1 | `runner.py:253` | acquire → model → sample commit → capability → outcome commit |
+| `D-RUN-WAIT-WAVE-REL-02` | runner new-waiting + release + `release_waiting` + 2 | `runner.py:273` | outcome后唯一release；renew=0 |
+| `D-REC-PRELOAD-ACK-01` | continuation duplicate/terminal + preload + `ack` + 1 | `agent_run_recovery.py:270-286` | load Run/items → ack → return；acquire/resolve/commit/reload=0 |
+| `D-REC-ACTIVE-RESOLVE-01` | continuation active + resolve + `resolve_authority` + 1 | `agent_run_recovery.py:288-304` | acquire → reload → resolve |
+| `D-REC-POST-BARRIER-ACK-01` | concurrent committed/terminal + post-resolve + `ack` + 1 | `agent_run_recovery.py:305-316` | reload/fence → ack → return；commit/resume/ack后reload=0 |
+| `D-REC-ACTIVE-COMMIT-01` | continuation active + commit + `commit_agent_call_outcome` + 1 | `agent_run_recovery.py:317-335` | resolution validation后唯一commit，随后ack → reload |
+| `D-REC-REMAINING-REL-01` | continuation remaining-waiting + release + `release_waiting` + 1 | `agent_run_recovery.py:337-350` | remaining非空时resume/model/Tool=0 |
+| `D-REC-CLEARED-RUN-01` | continuation waiting-cleared + resume + `run_claimed` + 1 | `agent_run_recovery.py:351-358` | 复用原handle/binding；无统一release，final-candidate按loop state映射 |
+| `D-CRASH-EARLY-REC-01` | crash terminal/waiting + reconcile + `reconcile_agent_run_consistency` + 1 | `agent_run_recovery.py:189-196` | reconcile后立即return；acquire/abort/resume=0 |
+| `D-CRASH-ACTIVE-ABORT-01` | crash active reserved + abort + `commit_agent_call_outcome` + N | `agent_run_recovery.py:198-232` | reconcile → acquire → reload/items → 每个outstanding按ordinal abort |
+| `D-CRASH-ACTIVE-RUN-02` | crash active + resume + `run_claimed` + 2 | `agent_run_recovery.py:234-247` | abort全部完成后唯一resume；resolver/ack=0 |
+| `D-API-LOCATOR-DURABLE-01` | API locator cache miss + rebuild + `from_safe_dict` + 1 | `runtime.py:4332-4365` | interrupt carrier miss → Run → items；从waiting result durable locator重建 |
+
+### 4.2 Checkpoint E stable logical call-site IDs
+
+| Logical ID | `entry/scenario + phase + callee + ordinal` | 当前location | Exact trace/约束 |
+|---|---|---|---|
+| `E-MCP-SELECT-01` | dispatch automatic/explicit + select + `selector.select` + 1..2 | `dispatch_coordinator.py:758,766` | normal=1；repair最多2；rejection无Tool send |
+| `E-MCP-ROUTE-01` | dispatch route-another + route + `server_router.route` + 1..2 | `dispatch_coordinator.py:2995,3000` | 只用remaining owner-scoped profiles；repair最多2 |
+| `E-MCP-RESERVE-01` | dispatch call + reserve + `reserve_mcp_call` + 1 | `dispatch_coordinator.py:2109` | reserve在registration与唯一Tool send前 |
+| `E-MCP-REGISTER-02` | dispatch call + may-have-dispatched + `mark_mcp_call_may_have_dispatched` + 2 | `dispatch_coordinator.py:2191,2483` | 普通failure=1；approval-resume registration+heartbeat=2，均保持当前幂等写 |
+| `E-MCP-SEND-03` | dispatch call + send + `gateway.call_tool` + 3 | `dispatch_coordinator.py:2220` | 原始Tool/job-start第二次调用=0；17 fault boundary按各自network delta |
+| `E-MCP-TERMINAL-04` | dispatch call + terminal/no-replay + `finish_mcp_call` + 4 | `dispatch_coordinator.py:2437,2700` | terminal或unknown/no-replay唯一闭合；不同分支不统一链 |
+| `E-GW-BOOT-01` | gateway scope + bootstrap + endpoint/credential/client + 1..5 | `gateway.py:770-795` | endpoint revalidate → credential read → client → initialize → list tools |
+| `E-GW-GUARD-01..04` | gateway call + accepting + guard + 1..4 | `gateway.py:1030,1102,1334,1343` | public admission 1次；execute发送前、raw后、normalize后各1次 |
+| `E-GW-CALLBACK-01` | gateway call + registration + callback + 1 | `gateway.py:1051-1180` | created → registered → 唯一Tool send |
+| `E-API-START-01` | API startup + pre-ready + sentinel/aggregate/dispatch/Agent recovery + 1..4 | `runtime.py:8161-8202` | sentinel → admission → aggregate → dispatch → Agent recovery；post-ready work随后 |
+| `E-API-SHUTDOWN-01` | API shutdown + close + quiesce/tasks/CP7/services/engine + 1..N | `runtime.py:9649-9725` | 固定顺序；首错仍阻断后续cleanup |
+| `E-FILE-SELECT-01` | file selection + decide/persist + candidate/LLM/TaskNode/Interrupt/events + 1..N | `file_selection_runtime.py:29-734` | P4 mixin/domain唯一owner；audit-only事件与attachment/sheet binding顺序保持 |
+
+### 4.3 Checkpoint F Frontend existing behavior-lock map
+
+F未发现需要新增测试的缺口；不复制现有case，不锁入UI/文案/可访问性修复预期。
+
+| Evidence owner | 已直接覆盖的P0场景 | 结果 |
+|---|---|---|
+| `frontend/src/App.test.tsx` | upload failure保持upload-accepting Interrupt；stale conversation/history response；cancel等待SSE或missed-SSE reconcile；terminal后拒绝stale non-terminal；artifact/history加载；draft upload/rollback/delete failure；optimistic submit与attachment顺序 | 直接行为测试PASS |
+| `frontend/src/api/taskEvents.test.ts` | SSE terminal close、非terminal close error、全部registered event types、Interrupt answer/cancel/unknown/late-result transport | wire/parser/subscription PASS |
+| `frontend/src/domain/taskEvents.test.ts` | Agent/MCP terminal precedence、multi-waiting、replay dedupe、same-ID conflict、predecessor gap、unknown/late chain、loading_artifacts与ignored duplicate state identity | reducer/state identity PASS |
+
+### 4.4 Checkpoint G Rust crate-root public surface ledger
+
+以当前macOS/unix target的rustdoc JSON root module items建立semantic public-shape记录：每项包含canonical `crate::symbol`、kind、public visibility、outer attrs/deprecation、struct公开fields与generics/where、enum variants、function inputs/output/generics/header（`async|const|unsafe|ABI`）、const type/value及module/re-export role；去除rustdoc内部ID、impl列表和function body后canonical JSON排序并以单LF结尾取SHA-256。它不是新增export manifest；G commit与下表共同绑定当前完整签名。`cfg(not(unix))`的`serve_runtime_sidecar_unix_socket`另保留同返回类型、underscore参数名的source declaration；unix surface含2个`#[cfg(unix)]`函数。
+
+| Crate-root | Items / kinds | qualifiers / attrs | Semantic public-shape SHA-256 | symbol role |
+|---|---|---|---|---|
+| `maf_runtime_sidecar` | 69 = const3/enum2/struct54/fn8/module1/use1 | async6；cfg2；must_use1；const-fn/unsafe/extern/deprecated=0 | `3fdbccdbbd3eb608a38507f28071252f26176894cf5a7d5e3f5bbfce1fc2f6d2` | 67 root-defined + `pb` generated contract module + `RuntimeSidecarSqliteAdapter` canonical re-export |
+| `maf_skill_runtime` | 60 = const8/enum3/struct23/fn25/module1 | async3；must_use16；cfg/const-fn/unsafe/extern/deprecated=0 | `bfceb1f9284a48b26cde6d4fe8d518e82846405058de0f74f866fac777bc7a3f` | 59 root-defined + `pb` generated contract module |
+| `maf_mcp_runtime` | 87 = const39/enum7/struct27/fn14 | must_use11；async/cfg/const-fn/unsafe/extern/deprecated=0 | `1b47306f86d1bc8f512aac2c545c1c59d18fa4158c9c723ba07733586b15d829` | 87 root-defined；official SDK adapter仍为shadow-only contract |
+
+Exact root function names（签名、generics/where与attrs由上述semantic shape绑定）：
+
+- `maf_runtime_sidecar`：`runtime_sidecar_service_from_config, serve_runtime_sidecar, serve_runtime_sidecar_service, serve_runtime_sidecar_tcp, serve_runtime_sidecar_unix_socket, semantic_probe_runtime_sidecar_unix_socket, serve_runtime_sidecar_with_incoming, supported_features`。
+- `maf_skill_runtime`：`serve_skill_sandbox, serve_skill_sandbox_service, serve_skill_sandbox_with_shutdown, allowed_execution_modes, default_execution_modes, allowed_answer_modes, default_answer_mode_by_execution_mode, answer_mode_required_execution_modes, allowed_rust_adapters, forbidden_x_runtime_rust_keys, guard_public_root_path, validate_service_binding, validate_handler_allowlist, validate_rust_metadata, bundle_fingerprint, validate_policy, artifact_provenance_policy, benchmark_policy, promotion_policy, ops_policy, decommission_policy, error_code_table, skill_runtime_contract_artifact, skill_runtime_contract_json, skill_policy_validate_json`。
+- `maf_mcp_runtime`：`task_terminal_states, mcp_runtime_contract_artifact, mcp_runtime_contract_json, approved_mcp_protocol_versions, official_rust_sdk_compile_time_markers, official_rust_sdk_adapter_metadata, health, readiness, check_compatibility, map_official_rust_sdk_error, compare_official_rust_sdk_shadow, validate_json_rpc_request, sanitize_tool_output, can_retry_tool_call`。
+
+Non-function root symbols按rustdoc root order由每类digest锁定；P7如移动root-defined item，必须先用本表逐项比较canonical path/kind/signature/attrs/role，不得把private implementation变化误报为public delta。
+
+### 4.5 Checked-in Rust contracts 与 Operational Script sequence
+
+| Contract | Checked-in SHA-256 | canonical export evidence |
+|---|---|---|
+| Core `src/core/rust_contracts/core_contract.json` | `0c4d8dd2ba1b00abfa9c82ed3589aeace6c84b76c43a3450dcb6f6780d98a4ce` | Python artifact test + Rust canonical-export test PASS |
+| Lifecycle `src/lifecycle/rust_contracts/lifecycle_contract.json` | `eb974e2fcd6fee8849e3c7cf16480f33661e5ecd482d583b8930a9ad830d1f7a` | Python artifact test + Rust canonical-export test PASS |
+| Runtime Sidecar `src/storage/rust_contracts/runtime_sidecar_contract.json` | `f1bce6934894f90403116c7d7531a74a76b32453e41e6f2100174cf9c8c40ee6` | Python artifact test + Rust canonical-export test PASS |
+| Skill Runtime `src/integrations/agent_skills/rust_contracts/skill_runtime_contract.json` | `bafaa94a42bce8d17c37a590db21df04c258ccc5f5eff17dbbc93900c3fef17c` | Python artifact test + Rust canonical-export test PASS |
+| Safety `src/integrations/rust_contracts/safety_contract.json` | `aa03c9e5359b404bf131ae13376c2e5babe19f2188d12e0c4ded0e0f68f314e5` | Python artifact test + Rust canonical-export test PASS |
+| MCP Runtime `src/integrations/mcp/rust_contracts/mcp_runtime_contract.json` | `ab27de5f07098310e1349351fbbb3426a0519db1fbe37d71f7e0334e890d0233` | Python artifact test + Rust canonical-export test PASS |
+
+Migration apply固定为SQLite → PostgreSQL locked mutation → Sidecar SQLite → Sidecar semantic probe；receipt tail固定为`restore_verified → applying_sqlite → sqlite_applied → applying_postgres → postgres_applied → applying_sidecar → sidecar_applied → verified → completed`。restore-all固定为Sidecar data → PostgreSQL `pg_restore` → SQLite → Sidecar semantic probe → `restored`。新增的唯一Scripts断言直接锁上述source order与`RECEIPT_ORDER`，未执行真实migration。
+
+## 5. Finding register
+
+Ruff只作为审计入口：当前`src scripts`有162个C901、7个F401、3个F841，共172个信号。C901不自动等于需要拆分；只有结合owner、side effect和合同证据后才成为finding。P0不运行`--fix`。
+
+| Finding ID | 类型 | Owner | 证据与边界 | 退出条件 |
+|---|---|---|---|---|
+| `P0-P1-STORAGE-PORT-001` | `structural_candidate` | P1 | `src/core/contracts.py`约1613行，StoragePort 259 methods | 四路径identity不变；259方法恰好映射一次到窄域；不建catch-all |
+| `P0-P1P3-CORE-ROLLOUT-DIGEST-001` | `reviewed_no_change` | P1/P3 | Core rollout observation digest函数局部import P3 canonical evidence digest | P0锁唯一symbol/function scope；不得扩张Core→Integrations imports |
+| `P0-P1P4-IMPORT-CORE-CONTRACT-001` | `reviewed_no_change` | P1/P4 | fresh API import读取两个Core Rust contract mode key | 保持当前allowed set；P4不得新增应用env/config import-time读取 |
+| `P0-P2-AGENT-SEAMS-001` | `structural_candidate` | P2/P5 seam | runner/invoker/lease/continuation/task projection与Lifecycle recovery交接 | waiting/recovery逐分支trace exact；无第二authority |
+| `P0-P2-MEMORY-001` | `structural_candidate` | P2 | `conversation_memory.py`约1801行，多阶段memory/prompt职责 | 仅在P2按owner拆分；token/LLM/prompt结果不变 |
+| `P0-P3-SKILLS-001` | `structural_candidate` | P3 | execution/missing-input/slot/input-resolution多个大模块 | schema/value/resolution/execution边界清楚；隐私/fallback不变 |
+| `P0-P3-MCP-COORDINATOR-001` | `structural_candidate` | P3 | `dispatch_coordinator.py`约3510行；`dispatch`/`_call_tool`高复杂度 | phase清晰、Coordinator唯一owner、17 fault/no-replay exact |
+| `P0-P3-MCP-GATEWAY-001` | `structural_candidate` | P3 | `gateway.py`约2382行，scope/call/catalog/shared state交织 | single shared state与external I/O owner不变 |
+| `P0-P3-GATEWAY-GUARDS-001` | `reviewed_no_change` | P3 | Gateway当前共有4个accepting guards，而非计划初始假设的2个 | 锁定public 1 + execute 3；结构迁移不得合并或删除 |
+| `P0-P3-MCP-REGISTER-HEARTBEAT-001` | `reviewed_no_change` | P3/P5 | approval-resume对may-have-dispatched执行registration+heartbeat两次幂等写，普通failure为一次 | 分场景锁call count；不得统一去重 |
+| `P0-P3-RESULT-PARSER-001` | `structural_candidate` | P3 | service/worker supervision与cleanup阶段 | decoder独立；spawn/pickle/timeout/cleanup/projection exact |
+| `P0-P4-RUNTIME-001` | `structural_candidate` | P4 | `runtime.py`约13878行；factory复杂度135 | stable facade/factory/patch seam；startup/shutdown与selector exact |
+| `P0-P4-FILE-SELECTION-001` | `structural_candidate` | P4 | bounded business authority位于API mixin/domain | 原位整理；LLM/storage/attachment/Interrupt/event exact |
+| `P0-P5-SQLITE-001` | `structural_candidate` | P5 | SQLite repositories约16895行、models约2204行 | domain逐项迁移；同Session/transaction/lock/CAS不变 |
+| `P0-P5-POSTGRES-001` | `structural_candidate` | P5 | PostgreSQL repositories/session含专用override/role逻辑 | shared pure基础与PG override分离；真实PG门禁 |
+| `P0-P5-AGENT-ADAPTERS-001` | `reviewed_no_change` | P5 | 三Agent adapters相似但surface/backend/transaction不同；同一missing-run fixture语义相同而SQL Session trace与Sidecar RPC trace不同 | 只比较共同operation；不合并authority、不补lease、不SQL fallback |
+| `P0-P6-APP-001` | `structural_candidate` | P6 | `App.tsx`约3814行，message/attachment/task effects交织 | App/Attachment/Task Runtime owner唯一；DOM/行为不变 |
+| `P0-P6-TASK-EVENTS-001` | `structural_candidate` | P6 | domain taskEvents约1578行 | wire/reducer/controller边界；state identity与event semantics不变 |
+| `P0-P7-RUNTIME-SIDECAR-001` | `structural_candidate` | P7 | root lib约4008行、sqlite adapter约2014行 | root public定义保留；kernel/service/codec/backend合同不变 |
+| `P0-P7-SKILL-RUNTIME-001` | `structural_candidate` | P7 | Skill Runtime root lib约2209行 | policy/process/service/codec边界；PyO3/wire/error不变 |
+| `P0-P7-MCP-RUNTIME-001` | `structural_candidate` | P7 | MCP Runtime root lib约2135行 | contract/SDK/JSON-RPC/sanitizer/registry边界；不接预备registry |
+| `P0-P7-SCRIPTS-001` | `structural_candidate` | P7 | 11个operational/migration/SQL业务脚本 | 只合并完全等价pure helper/engine lifecycle；CLI/SQL/receipt顺序不变 |
+| `P0-P8-PY-UNUSED-IMPORT-001` | `structural_candidate` | P8 | Ruff F401=7，分布于API runtime、Skill resource、Parser content、Agent invocation | 逐项证明无patch/import/registration/type side effect后删除，否则`reviewed_no_change` |
+| `P0-P8-PY-UNUSED-VAR-001` | `structural_candidate` | P8 | Ruff F841=3，API runtime两个、Prompt envelope一个 | 证明删除不改变evaluation/exception/trace后才删 |
+| `BEHAVIOR-ORCH-PARALLEL-001` | `deferred_behavior` | P2 | sibling cancel/异常策略非对称 | 结构迁移锁当前结果；行为修复另立任务 |
+| `BEHAVIOR-ORCH-LEASE-001` | `deferred_behavior` | P2 | heartbeat token与Invocation旧token现状 | trace锁定；不顺手传播新token |
+| `BEHAVIOR-ORCH-TERMINAL-CONTINUATION-001` | `deferred_behavior` | P2/P5 | terminal/active/result/ack矩阵非对称 | 逐分支锁定；不统一快路径 |
+| `BEHAVIOR-ORCH-AUTHORITY-SNAPSHOT-001` | `deferred_behavior` | P2/P4/P5 | resume入口在lease前读取/claim authority | 入口trace exact；不改锁序 |
+| `BEHAVIOR-ORCH-TASKNODE-PREPROJECTION-001` | `deferred_behavior` | P2 | TaskNode可先可见且outcome后失败无补偿 | 锁当前两阶段结果；不新增补偿 |
+| `BEHAVIOR-PARSER-CLEANUP-CANCEL-001` | `deferred_behavior` | P3 | cleanup join/terminate/kill可取消 | barrier锁当前阶段；不加shield/finally |
+| `BEHAVIOR-API-LIFECYCLE-001` | `deferred_behavior` | P4 | startup部分失败、shutdown首错阻断cleanup | trace锁定；不修复错误策略 |
+| `BEHAVIOR-SIDECAR-AGENT-LEASE-001` | `deferred_behavior` | P2/P4/P5/P7 | enforce选择Sidecar Agent adapter但其缺3个lease methods | 保持supported/unsupported与当前失败；不补方法/SQL fallback |
+| `BEHAVIOR-SIDECAR-AGENT-RECOVERY-LIST-001` | `deferred_behavior` | P2/P5/P7 | Sidecar adapter公开`list_recoverable_runs`调用gRPC `agent_run_list`，但Rust contract无该operation policy，当前抛exact `KeyError` | 保持当前失败；P0不补policy、不改error映射 |
+| `BEHAVIOR-SIDECAR-AGENT-CANCEL-001` | `deferred_behavior` | P2/P5/P7 | 真实Sidecar `cancel_agent_run`返回的error envelope未通过response validation，当前转为`AgentStorageConflict(runtime_store_response_invalid)`且Run/Task保持running | 保持current state/error；P0不改Rust/Python contract或terminal transition |
+
+### 5.1 Exact duplicate审计
+
+一次性AST body scan在`src/`与根`scripts/`发现22组三语句以上的完全相同function body。它只是语法等价证据，不证明authority/contract等价。首批处置分类：
+
+| Finding ID | 类型 | Owner | 范围 | 结论/退出 |
+|---|---|---|---|---|
+| `P0-P3-DUP-SKILL-PARSING-001` | `exact_duplicate` | P3 | Agent Skills JSON object loader与`_string_tuple`各3份 | P3先锁schema/error/fallback，再选择单一private owner |
+| `P0-P3-DUP-MCP-HELPERS-001` | `exact_duplicate` | P3 | selector/coordinator attachment helpers、safety/minute helpers | P3按调用trace验证后合并；不跨security authority |
+| `P0-P3-DUP-RUNTIME-STATE-001` | `exact_duplicate` | P3 | Skill/MCP runtime state retain/release bodies | 只有revision语义完全一致才复用，否则`reviewed_no_change` |
+| `P0-P5-DUP-STORAGE-HELPERS-001` | `exact_duplicate` | P5 | artifact/conversation filename sanitizer、两处SQL splitter | P5分别证明安全/SQL方言错误一致后再决定 |
+| `P0-CROSS-OWNER-SIMILAR-001` | `reviewed_no_change` | P3/P4/P5 | invalidation buses、gRPC frame helpers、runtime response helpers、trivial cleaners | 跨owner抽象会制造反向依赖；本项目默认不合并 |
+
+剩余语法重复为短小constructor/trivial normalization或已被上述组覆盖，P0记录为`reviewed_no_change`；P8必须基于当时HEAD重新证明，不能凭AST hash直接删除或合并。
+
+## 6. Behavior-lock matrix
+
+| Domain | 当前覆盖入口 | P0动作 | 状态 |
+|---|---|---|---|
+| Python public/StoragePort | Core contracts、SQLite bootstrap | literal identity/signature/pickle/import tests | Checkpoint B PASS（13项新增，focused合计43项） |
+| Agent adapters/Cancellation | Agent storage、runtime-sidecar contract、runtime wiring | surface/MRO/common fixture/transaction/selector/off-shadow-enforce/AgentRun trace | Checkpoint C PASS（focused 102项） |
+| Agent waiting/recovery | Agent Loop、continuation、Lifecycle recovery | 逐分支stable logical ID、order/count、durable locator trace | Checkpoint D PASS（focused 29项） |
+| MCP/API authority | selector/router、Coordinator/Gateway、startup/file-selection | public identity、17 fault proofs、order/count、lifecycle与P4 owner trace | Checkpoint E PASS（focused 161项） |
+| Frontend | App/taskEvents tests | 复用既有覆盖；无真实缺口，不新增case | Checkpoint F PASS（3 files / 177项 + typecheck/build） |
+| Rust/Scripts | 六contract tests、migration tests、Rust quality | 216 root public items、六contract bytes、migration sequence | Checkpoint G PASS（Python focused 97项；Rust fmt/clippy/test） |
+| P0 final gates / P1 handoff | Backend canonical、Frontend full、Rust quality、final inventory/diff | 逐域全量复验、平台skip逐项登记、P1允许/禁止边界 | Checkpoint H PASS；生产业务路径相对P0 start零diff |
+
+## 7. PostgreSQL P5 profile
+
+P0不连接真实PostgreSQL。P5在迁移对应domain前必须使用隔离non-prod DSN，逐项覆盖auth CAS、AgentRun/Item/lease/atomic outcome、Task/Node CAS、mailbox/interrupt/event order、owner guard/claim takeover、rollout与legacy migration role separation、conversation delete并发、fresh bootstrap和drift rollback。
+
+Required profile必须：目标收集>0、failure=0、skip=0、临时DB/role清理成功；日志不得记录DSN/credential。没有真实profile时对应P5切片不得开始，SQLite/mock不能替代。
+
+## 8. Gate records
+
+| Scope | CWD / command | Platform | ran/fail/skip | 结论 |
+|---|---|---|---|---|
+| Compile | repo / `python -m compileall -q src scripts tests` via conda env | macOS/Python 3.13 | completed/0/0 | PASS |
+| Core smoke | repo / `unittest tests.core.test_contracts` | macOS/Python 3.13 | 8/0/0 | PASS |
+| SQLite smoke | repo / `unittest tests.storage.test_sqlite_bootstrap` | macOS/Python 3.13 | 21/0/0 | PASS |
+| Agent smoke | repo / Agent Loop + continuation modules | macOS/Python 3.13 | 4/0/0 | PASS |
+| Recovery smoke | repo / Lifecycle recovery module | macOS/Python 3.13 | 12/0/0 | PASS |
+| Frontend event smoke | `frontend/` / two taskEvents files | macOS/Node | 51/0/0 | PASS |
+| Rust fmt | repo / existing Rust quality gate `cargo_fmt` | macOS/Rust toolchain | completed/0/0 | PASS |
+| Ruff audit | repo / `ruff check src scripts --select C90,F401,F841` | macOS/Python env | 172 signals | audit observation，不是质量PASS/FAIL gate |
+| Checkpoint B public contracts | repo / Core+API+Orchestration public contract focused suite | macOS/Python 3.13 | 43/0/0 | PASS |
+| Checkpoint C repository/cancellation | repo / 8-module Storage/API/Lifecycle focused suite | macOS/Python 3.13 | 102/0/0 | PASS；另观察到1条unclosed SQLite connection ResourceWarning，不计测试失败，P0不改生产清理语义 |
+| Checkpoint C changed-test compile/Ruff | repo / 4份受影响test files | macOS/Python 3.13 | completed/0/0 | PASS |
+| Checkpoint D continuation/recovery | repo / 5-module Orchestration/Lifecycle/API focused suite | macOS/Python 3.13 | 29/0/0 | PASS |
+| Checkpoint E MCP/API authority | repo / 8-module Capability/Integration/API focused suite（含17 boundary proof调度） | macOS/Python 3.13 | 161/0/0 | PASS |
+| Checkpoint E changed-test compile/Ruff | repo / 6份受影响test files | macOS/Python 3.13 | completed/0/0 | PASS |
+| Checkpoint F Frontend behavior | `frontend/` / App + API/domain taskEvents | macOS/Node/Vitest | 3 files / 177/0/0 | PASS |
+| Checkpoint F Frontend typecheck | `frontend/` / `npm run typecheck` | macOS/Node/TypeScript | completed/0/0 | PASS |
+| Checkpoint F Frontend build | `frontend/` / `npm run build` | macOS/Node/Vite | completed/0/0 | PASS；保留>500 kB chunk warning，P0不做code-splitting |
+| Checkpoint G Python contracts/scripts | repo / 7-module Rust contract + migration suite | macOS/Python 3.13 | 97/0/0 | PASS |
+| Checkpoint G Rust fmt | repo / unified `cargo_fmt` gate | macOS/Rust 1.95 | completed/0/0 | PASS |
+| Checkpoint G Rust clippy | repo / workspace all-targets/all-features `-D warnings` | macOS/Rust 1.95 | completed/0/0 | PASS |
+| Checkpoint G Rust test | repo / workspace all-features | macOS/Rust 1.95 | 147/0/0 | PASS；0-test binaries/doc targets不计入ran |
+| H Core | repo / `unittest discover -s tests/core` | macOS/Python 3.13 | 45/0/0 | PASS |
+| H Storage | repo / `unittest discover -s tests/storage` | macOS/Python 3.13 | 410/0/7 | PASS；7项真实PostgreSQL profile未配置，逐项N/A见下文 |
+| H Lifecycle | repo / `unittest discover -s tests/lifecycle` | macOS/Python 3.13 | 41/0/0 | PASS |
+| H Integrations | repo / `unittest discover -s tests/integrations` | macOS/Python 3.13 | 707/0/2 | PASS；2项Linux Result Parser gate在macOS N/A，逐项见下文 |
+| H Agent Skills | repo / `unittest discover -s tests/integrations/agent_skills` | macOS/Python 3.13 | 209/0/0 | PASS；父discover不递归该无`__init__.py`目录，已独立运行 |
+| H Orchestration | repo / `unittest discover -s tests/orchestration` | macOS/Python 3.13 | 109/0/0 | PASS；保留既有`datetime.utcnow` deprecation warning |
+| H Main Agent | repo / `unittest discover -s tests/capabilities/main_agent` | macOS/Python 3.13 | 16/0/0 | PASS |
+| H MCP Dispatch | repo / `unittest discover -s tests/capabilities/mcp_dispatch` | macOS/Python 3.13 | 15/0/0 | PASS |
+| H MCP Tool | repo / `unittest discover -s tests/capabilities/mcp_tool` | macOS/Python 3.13 | 15/0/0 | PASS |
+| H Skill Tool | repo / `unittest discover -s tests/capabilities/skill_tool` | macOS/Python 3.13 | 3/0/0 | PASS |
+| H API | repo / `unittest discover -s tests/api` | macOS/Python 3.13 | 446/0/0 | PASS；保留既有unclosed SQLite connection ResourceWarning |
+| H E2E | repo / `unittest discover -s tests/e2e` | macOS/Python 3.13 | 7/0/0 | PASS |
+| H Observability | repo / `unittest discover -s tests/observability` | macOS/Python 3.13 | 39/0/0 | PASS |
+| H Scripts | repo / `unittest discover -s tests/scripts` | macOS/Python 3.13 | 63/0/0 | PASS；先登记P0新增公开合同测试后闭合legacy inventory exact count=56 |
+| H Deployment | repo / `unittest discover -s tests/deployment` | macOS/Python 3.13 | 3/0/0 | PASS |
+| H Frontend full | `frontend/` / `npm test -- --run` | macOS/Node/Vitest | 21 files / 307/0/0 | PASS |
+| H Frontend typecheck/build | `frontend/` / `npm run typecheck`; `npm run build` | macOS/Node/TypeScript/Vite | completed/0/0 | PASS；build保留既有>500 kB chunk warning |
+| H Rust fmt/clippy/test | repo / 三条existing Rust quality gate | macOS/Rust 1.95 | fmt completed；clippy completed；test 147/0/0 | PASS |
+
+所有记录绑定P0 start commit`3cf44b14853c383e71bae07d0770f715b38a9d34`。测试数量以后续checkpoint当次输出为准，旧PASS不能替代受影响门禁。
+
+Storage的7项N/A依次为Agent repository、legacy MCP migration、conversation delete、MVCC、CP7 candidate validation、rollout integration、rollout permissions真实PostgreSQL profile；对应skip reason分别为`maf_postgres_agent_test_dsn_not_configured`、`maf_postgres_legacy_migration_test_dsn_not_configured`、`maf_postgres_conversation_delete_test_dsn_not_configured`、`maf_postgres_mvcc_test_dsn_not_configured`、`CP7_POSTGRES_VALIDATION_DSN is not configured`、`postgres_rollout_integration_test_dsn_not_configured`、`postgres_rollout_permissions_test_dsn_not_configured`。Integrations的2项N/A为`Linux terminable regex gate`与`Linux RLIMIT gate`。P0未改这些平台生产路径或测试合同，因此均不是`platform_pending`，也不写作PASS。
+
+H首次并发调度时，Frontend test/build同时准备MathJax目录导致build `EEXIST`，Rust test与其他cargo门禁争用时fake HTTP fixture出现`WouldBlock`；在Frontend test结束后独占build、独占Rust test均通过。此处只记录门禁编排争用，不改变业务或测试期待。
+
+## 9. 外部与平台状态
+
+- 真实PostgreSQL：`N/A`，P0未触及PG业务实现；profile已为P5定义。
+- Linux Result Parser：`N/A`，P0未触及worker/resource/cleanup生产路径。
+- manylinux/PyO3：`N/A`，P0未触及bridge/packaging生产路径。
+- fuzz：`N/A`，P0未触及parser/validation/sanitizer/policy生产路径；`mcp_runtime_protocol.rs` target与manifest check已存在，但Ubuntu bounded fuzz-smoke workflow未执行该target，既定gap留给P7计划。
+- 真实外部MCP：`N/A`，P0未触及transport/adapter/runtime wiring。
+
+以上均不是PASS；若后续P0测试/contract变更实际触发目标平台要求，状态必须改为`platform_pending`并停止对应切片。
+
+Checkpoint G确认`native/Cargo.toml`、`native/Cargo.lock`及三目标crate manifests相对P0 start均零diff；Ubuntu、manylinux、PyO3 packaging和fuzz源码均未触及，因此不把macOS Rust PASS冒充这些平台证据。
+
+## 10. P1 handoff（已冻结；不构成P1实现）
+
+### 10.1 输入与必须产物
+
+- 四条公开路径`src.core.contracts.StoragePort`、`src.core.StoragePort`、`src.storage.interfaces.StoragePort`、`src.storage.StoragePort`当前以`is`指向同一对象。
+- 259个async method的逐项当前signature authority为`tests/core/test_public_contract_compatibility.py::EXPECTED_STORAGE_METHOD_SIGNATURES`；其sorted compact JSON + LF SHA-256为`4139144f0ca4ef372636368dac366082d403e6764139b0a8686bdbd634a1d12c`。P1不得用运行时重新生成值覆盖literal baseline。
+- P1必须交付完整`method → narrow domain → unique owner plan → known production consumers → legal aggregate compatibility seam → adoption checkpoint`表；259个method必须恰好出现一次，不能缺失、重复或落入`misc/common/catch-all`。
+- 每个窄port只包含真实同域操作；P2～P5在各自计划内迁移consumer。四条公开路径继续re-export同一canonical aggregate对象，名称、async属性与signature delta必须为0。
+
+### 10.2 Cancellation边界
+
+- Cancellation Sidecar writer保持独立non-aggregate port，不进入259-method union。
+- 当前trace必须逐场景保留：`off`只走SQL legacy path；`shadow`保持SQL authority并按当前次序执行Sidecar shadow；`enforce`按当前selector走Sidecar；client缺失保留exact error且下游写入为0；legacy Task与AgentRun各自经过独立admission，不合并writer。
+- P1只可定义窄Protocol/兼容facade与直接test double；不得顺手改变SQL/Sidecar调用次数、顺序、CAS/idempotency、错误映射或AgentRun终态。
+
+### 10.3 允许与禁止
+
+- 允许：Core/shared persistence contract、四条兼容re-export、Cancellation独立contract，以及直接证明这些合同的Core/Storage/Lifecycle测试；具体新模块名由P1计划基于届时HEAD决定。
+- 禁止：迁移或重写P2 Orchestration/Capabilities、P3 Integrations/Skills/MCP、P4 API、P5 Storage/State/Lifecycle adapter实现、P6 Frontend、P7 Rust/Scripts的private helper或consumer；禁止改变Agent/Sidecar authority、schema/data、`prod`或任何业务行为。
+- `BEHAVIOR-ORCH-PARALLEL-001`、`BEHAVIOR-ORCH-LEASE-001`、`BEHAVIOR-ORCH-TERMINAL-CONTINUATION-001`、`BEHAVIOR-ORCH-AUTHORITY-SNAPSHOT-001`、`BEHAVIOR-ORCH-TASKNODE-PREPROJECTION-001`、`BEHAVIOR-PARSER-CLEANUP-CANCEL-001`、`BEHAVIOR-API-LIFECYCLE-001`、`BEHAVIOR-SIDECAR-AGENT-LEASE-001`、`BEHAVIOR-SIDECAR-AGENT-RECOVERY-LIST-001`、`BEHAVIOR-SIDECAR-AGENT-CANCEL-001`全部是行为修复禁区；P1只能维持其characterization，不能借结构迁移修复。
+
+### 10.4 P1启动前定向门禁
+
+```bash
+conda run -n multi_agent python -m unittest tests.core.test_public_contract_compatibility
+conda run -n multi_agent python -m unittest tests.lifecycle.test_task_cancellation
+conda run -n multi_agent python -m unittest tests.storage.test_agent_repository_contract
+conda run -n multi_agent python -m unittest tests.storage.test_runtime_sidecar_agent_repository
+conda run -n multi_agent python -m unittest tests.api.test_runtime_public_contract
+```
+
+P1只能在P0 final commit clean、inventory=final tracked set、生产业务路径相对P0 start零diff且上述门禁全绿后另行生成实施计划；本节不是直接修改consumer或创建窄port的授权。
+
+## 11. P0～P8终态附录（2026-08-25）
+
+本节只闭合P0 inventory到P8 final HEAD的可追溯性，不回写或重分类冻结的P0 TSV。当前tracked set为1094：`P0 final 1045 + 25 business + 16 tests + 8 phase plans`，删除0、未分类0，排序路径清单SHA-256为`b0dd66c0d71371a198dc06e1a5ac273351634ce3b6518973ce6ed2c02540c6b7`。
+
+P0原320个business中68个在P1～P8被修改、252个完成复核未改；owner维度changed为P1=1、P2=7、P3=24、P4=8、P5=18、P6=5、P7=5。后续阶段新增25个business均已由对应阶段验证，因此当前345个business终态为`93 changed + 252 reviewed_no_change`。新增cross-owner layer pair为0；既有P3→P2、P5→P2/P3依赖已复核，不属于本项目引入。
+
+P8最终证明、逐项finding、完整门禁和平台N/A记录见`2026-08-25-project-wide-progressive-architecture-cleanup-p8-implementation-plan.md`。P0～P8完成不改变本文件冻结的公开合同、行为禁区和外部平台证据规则，也不授权后续行为修复或`prod`变更。

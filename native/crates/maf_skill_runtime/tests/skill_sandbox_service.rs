@@ -50,10 +50,10 @@ fn version_compatibility_and_readiness_are_owned_by_skill_sandbox_service() {
 
 #[test]
 fn compatibility_rejects_client_versions_outside_supported_range() {
-    let service = SkillSandboxService::new();
+    let mut service = SkillSandboxService::new();
     let version = service.version();
     let error = service
-        .check_compatibility(CompatibilityCheck {
+        .accept_compatibility_handshake(CompatibilityCheck {
             client_version: "0.2.0".to_owned(),
             expected_component: version.component,
             expected_protocol_version: version.protocol_version,
@@ -63,6 +63,8 @@ fn compatibility_rejects_client_versions_outside_supported_range() {
         })
         .expect_err("unsupported client version must fail compatibility");
     assert_eq!(error.code, SkillRuntimeErrorCode::ContractMismatch.as_str());
+    assert_eq!(service.readiness().state, ReadinessState::NotReady);
+    assert!(!service.readiness().compatibility_handshake_passed);
 }
 
 #[test]

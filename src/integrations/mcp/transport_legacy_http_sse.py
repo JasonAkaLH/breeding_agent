@@ -5,7 +5,7 @@ import contextlib
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -13,14 +13,35 @@ import httpx
 
 from .client import MCPAuthRequiredError, MCPClientError, MCPProtocolError
 from .config import MCPAuthConfig
-from .protocol import MCP_PROTOCOL_VERSION_2024_11_05, MCPStreamEvent, MCPTransportResponse, json_rpc_message_kind
-from .transport_http import _response_from_http, _validate_json_rpc_message
+from .protocol import (
+    MCP_PROTOCOL_VERSION_2024_11_05,
+    MCPStreamEvent,
+    MCPTransportResponse,
+    json_rpc_message_kind,
+    normalize_json_rpc_response_id,
+)
+from .streaming_response import IncrementalJSONRPCResultParser, _MCPResultTarget
+from .temporary_results import MCPResultSink
+from .transport_http import (
+    MCPPolicyBoundHTTPConnection,
+    _response_from_http,
+    _streaming_response_from_http,
+    _validate_json_rpc_message,
+)
 
 
 @dataclass(slots=True)
 class _PendingRequest:
     future: asyncio.Future[MCPTransportResponse]
     events: list[MCPStreamEvent] = field(default_factory=list)
+    result_sink: MCPResultSink | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _PendingMatch:
+    request_id: str | int
+    pending: _PendingRequest
+    message: Mapping[str, Any]
 
 
 class LegacyHTTPSSETransport:
@@ -36,16 +57,26 @@ class LegacyHTTPSSETransport:
     def __init__(
         self,
         *,
-        endpoint: str,
+        endpoint: str | None = None,
         auth: MCPAuthConfig | None = None,
         request_headers: Mapping[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
+        policy_bound_connection: MCPPolicyBoundHTTPConnection | None = None,
     ) -> None:
-        self._sse_endpoint = endpoint
+        if policy_bound_connection is not None:
+            if client is not None:
+                raise ValueError("client and policy_bound_connection are mutually exclusive.")
+            self._sse_endpoint = str(policy_bound_connection.endpoint_url)
+            self._client = policy_bound_connection.client
+            self._owns_client = True
+        else:
+            if not endpoint:
+                raise ValueError("endpoint or policy_bound_connection is required.")
+            self._sse_endpoint = endpoint
+            self._client = client or httpx.AsyncClient()
+            self._owns_client = client is None
         self._auth = auth or MCPAuthConfig()
         self._request_headers = {str(key): str(value) for key, value in dict(request_headers or {}).items()}
-        self._client = client or httpx.AsyncClient()
-        self._owns_client = client is None
         self._post_endpoint: str | None = None
         self._post_endpoint_fingerprint: str = ""
         self._reader_task: asyncio.Task[None] | None = None
@@ -134,6 +165,99 @@ class LegacyHTTPSSETransport:
                 await self._remove_pending(request_id)
             raise
 
+    async def send_streaming(
+        self,
+        message: Mapping[str, Any],
+        *,
+        protocol_version: str,
+        result_sink: MCPResultSink,
+        session_id: str | None = None,
+        timeout_seconds: float | None = None,
+        last_event_id: str | None = None,
+    ) -> MCPTransportResponse:
+        """Stream a direct legacy POST response into the common result sink."""
+
+        del session_id, last_event_id
+        if protocol_version != MCP_PROTOCOL_VERSION_2024_11_05:
+            raise MCPProtocolError("MCP legacy HTTP+SSE transport only supports protocol version 2024-11-05.")
+        _validate_json_rpc_message(message)
+        kind = json_rpc_message_kind(message)
+        request_id = message.get("id") if kind == "request" else None
+        pending: _PendingRequest | None = None
+        post_endpoint = await self._ensure_post_endpoint(timeout_seconds=timeout_seconds)
+        if kind == "request":
+            if request_id is None:
+                raise MCPProtocolError("MCP legacy HTTP+SSE request id must be a non-null string or integer.")
+            pending = await self._register_pending(request_id, result_sink=result_sink)
+        try:
+            try:
+                async with self._client.stream(
+                    "POST",
+                    post_endpoint,
+                    json=dict(message),
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Content-Type": "application/json",
+                        **self._request_headers,
+                        **self._auth.headers(),
+                    },
+                    timeout=timeout_seconds,
+                ) as response:
+                    post_response = await _streaming_response_from_http(
+                        response,
+                        session_id=None,
+                        result_sink=result_sink,
+                        abort_sink_on_empty=False,
+                    )
+            except MCPClientError as exc:
+                if exc.mcp_error_code == "mcp_http_error":
+                    raise MCPClientError(
+                        "MCP legacy HTTP+SSE POST returned an error.",
+                        code="legacy_post_failed",
+                        retriable=exc.retriable,
+                        metadata={"endpoint_fingerprint": self._post_endpoint_fingerprint, **exc.metadata},
+                    ) from exc
+                raise
+            if kind != "request":
+                if post_response.message is None:
+                    await result_sink.abort()
+                return post_response
+            if post_response.message is not None:
+                await self._remove_pending(request_id)
+                return post_response
+            assert pending is not None
+            try:
+                return await asyncio.wait_for(pending.future, timeout=timeout_seconds)
+            except TimeoutError as exc:
+                await self._remove_pending(request_id)
+                raise MCPClientError(
+                    "MCP legacy HTTP+SSE response timed out.",
+                    code="legacy_response_timeout",
+                    retriable=True,
+                    metadata={"endpoint_fingerprint": self._post_endpoint_fingerprint},
+                ) from exc
+        except httpx.TimeoutException as exc:
+            await result_sink.abort()
+            raise MCPClientError(
+                "MCP legacy HTTP+SSE POST timed out.",
+                code="legacy_post_failed",
+                retriable=True,
+                metadata={"endpoint_fingerprint": self._post_endpoint_fingerprint},
+            ) from exc
+        except httpx.HTTPError as exc:
+            await result_sink.abort()
+            raise MCPClientError(
+                "MCP legacy HTTP+SSE POST failed.",
+                code="legacy_post_failed",
+                retriable=True,
+                metadata={"endpoint_fingerprint": self._post_endpoint_fingerprint},
+            ) from exc
+        except BaseException:
+            await result_sink.abort()
+            if request_id is not None:
+                await self._remove_pending(request_id)
+            raise
+
     async def close(self) -> None:
         if self._closing:
             return
@@ -208,7 +332,9 @@ class LegacyHTTPSSETransport:
         self._reader_task = asyncio.create_task(self._reader_loop(), name="mcp-legacy-http-sse-reader")
 
     async def _reader_loop(self) -> None:
-        parser = _LegacySSEEventParser()
+        parser = _LegacyStreamingSSEEventParser(
+            sink_selector=self._result_target_for_response,
+        )
         try:
             stream_context = self._client.stream(
                 "GET",
@@ -217,12 +343,10 @@ class LegacyHTTPSSETransport:
             )
             async with stream_context as response:
                 self._validate_sse_response(response)
-                async for line in response.aiter_lines():
-                    event = parser.feed(line)
-                    if event is not None:
+                async for chunk in response.aiter_bytes():
+                    for event in await parser.feed(chunk):
                         await self._handle_sse_event(event)
-                event = parser.finish()
-                if event is not None:
+                for event in await parser.finish():
                     await self._handle_sse_event(event)
             if self._post_endpoint is None:
                 self._set_endpoint_exception(
@@ -263,6 +387,8 @@ class LegacyHTTPSSETransport:
             )
             self._set_endpoint_exception(wrapped)
             await self._fail_pending(wrapped)
+        finally:
+            await parser.abort()
 
     def _validate_sse_response(self, response: httpx.Response) -> None:
         if response.status_code in {401, 403}:
@@ -302,32 +428,44 @@ class LegacyHTTPSSETransport:
         except ValueError as exc:
             raise MCPProtocolError(str(exc)) from exc
         if kind == "response":
-            request_id = message.get("id")
-            pending = self._pending.get(request_id)
-            if pending is None:
+            match = self._match_pending_response(message)
+            if match is None:
                 self._unknown_response_count += 1
                 return
-            events = (*pending.events, event)
-            if not pending.future.done():
-                pending.future.set_result(
+            normalized_event = (
+                event
+                if match.message is message
+                else replace(event, message=match.message)
+            )
+            events = (*match.pending.events, normalized_event)
+            if not match.pending.future.done():
+                match.pending.future.set_result(
                     MCPTransportResponse(
-                        message=message,
+                        message=match.message,
                         headers={},
                         last_event_id=event.event_id,
                         sse_retry_ms=event.retry_ms,
                         sse_events=events,
                     )
                 )
-            await self._remove_pending(request_id)
+            await self._remove_pending(match.request_id)
             return
         for pending in self._pending.values():
             pending.events.append(event)
 
-    async def _register_pending(self, request_id: str | int) -> _PendingRequest:
+    async def _register_pending(
+        self,
+        request_id: str | int,
+        *,
+        result_sink: MCPResultSink | None = None,
+    ) -> _PendingRequest:
         async with self._pending_lock:
             if request_id in self._pending:
                 raise MCPProtocolError("MCP legacy HTTP+SSE duplicate pending request id.")
-            pending = _PendingRequest(future=asyncio.get_running_loop().create_future())
+            pending = _PendingRequest(
+                future=asyncio.get_running_loop().create_future(),
+                result_sink=result_sink,
+            )
             self._pending[request_id] = pending
             return pending
 
@@ -340,8 +478,43 @@ class LegacyHTTPSSETransport:
             pending_items = list(self._pending.values())
             self._pending.clear()
         for pending in pending_items:
+            if pending.result_sink is not None:
+                await pending.result_sink.abort()
             if not pending.future.done():
                 pending.future.set_exception(exc)
+
+    def _result_target_for_response(
+        self,
+        message: Mapping[str, Any],
+    ) -> _MCPResultTarget | None:
+        if "id" not in message:
+            return None
+        match = self._match_pending_response(message)
+        if match is None:
+            return None
+        return _MCPResultTarget(
+            response_id=match.message.get("id"),
+            sink=match.pending.result_sink,
+        )
+
+    def _match_pending_response(
+        self,
+        message: Mapping[str, Any],
+    ) -> _PendingMatch | None:
+        alias: _PendingMatch | None = None
+        for request_id, pending in self._pending.items():
+            normalized = normalize_json_rpc_response_id(
+                message,
+                expected_request_id=request_id,
+            )
+            if normalized is None:
+                continue
+            match = _PendingMatch(request_id, pending, normalized)
+            if normalized is message:
+                return match
+            if alias is None:
+                alias = match
+        return alias
 
     def _set_endpoint_exception(self, exc: MCPClientError) -> None:
         if self._endpoint_ready is not None and not self._endpoint_ready.done():
@@ -380,6 +553,181 @@ def _extract_endpoint_event_from_lines(lines: list[str]) -> tuple[str, str | Non
         if result is not None:
             return result
     return parser.finish()
+
+
+class _LegacyStreamingSSEEventParser:
+    """Byte-framed SSE parser that streams JSON message data to a result sink."""
+
+    def __init__(self, *, sink_selector, max_control_bytes: int = 16 * 1024) -> None:
+        self._sink_selector = sink_selector
+        self._max_control_bytes = max_control_bytes
+        self._field_name = bytearray()
+        self._field_value = bytearray()
+        self._field: str | None = None
+        self._skip_space = False
+        self._saw_cr = False
+        self._event_name: str | None = None
+        self._event_id: str | None = None
+        self._retry_ms: int | None = None
+        self._data = bytearray()
+        self._data_line_seen = False
+        self._json_parser: IncrementalJSONRPCResultParser | None = None
+        self._pending_data_newline = False
+
+    async def feed(self, chunk: bytes) -> list[MCPStreamEvent]:
+        events: list[MCPStreamEvent] = []
+        for byte in chunk:
+            if self._saw_cr:
+                self._saw_cr = False
+                event = await self._end_line()
+                if event is not None:
+                    events.append(event)
+                if byte == ord("\n"):
+                    continue
+            if byte == ord("\r"):
+                self._saw_cr = True
+            elif byte == ord("\n"):
+                event = await self._end_line()
+                if event is not None:
+                    events.append(event)
+            else:
+                await self._feed_byte(byte)
+        return events
+
+    async def finish(self) -> list[MCPStreamEvent]:
+        events: list[MCPStreamEvent] = []
+        if self._saw_cr or self._field is not None or self._field_name:
+            event = await self._end_line()
+            if event is not None:
+                events.append(event)
+        if self._json_parser is not None or self._data or self._event_name or self._event_id or self._retry_ms is not None:
+            event = await self._finish_event()
+            if event is not None:
+                events.append(event)
+        return events
+
+    async def abort(self) -> None:
+        if self._json_parser is not None:
+            await self._json_parser.abort()
+
+    async def _feed_byte(self, byte: int) -> None:
+        if self._field == "data":
+            if self._skip_space:
+                self._skip_space = False
+                if byte == ord(" "):
+                    return
+            if self._is_message_event():
+                if self._json_parser is None:
+                    self._json_parser = IncrementalJSONRPCResultParser(
+                        sink_selector=self._sink_selector,
+                        require_response=False,
+                    )
+                if self._pending_data_newline:
+                    await self._json_parser.feed(b"\n")
+                    self._pending_data_newline = False
+                await self._json_parser.feed(bytes((byte,)))
+            else:
+                self._data.append(byte)
+                if len(self._data) > self._max_control_bytes:
+                    raise MCPProtocolError("MCP legacy SSE control event exceeded metadata limit.")
+            return
+        if self._field is not None:
+            if self._skip_space:
+                self._skip_space = False
+                if byte == ord(" "):
+                    return
+            self._field_value.append(byte)
+            if len(self._field_value) > self._max_control_bytes:
+                raise MCPProtocolError("MCP legacy SSE control line exceeded metadata limit.")
+            return
+        if byte == ord(":"):
+            self._field = self._field_name.decode("ascii", errors="ignore")
+            self._field_name.clear()
+            self._skip_space = True
+            return
+        self._field_name.append(byte)
+        if len(self._field_name) > self._max_control_bytes:
+            raise MCPProtocolError("MCP legacy SSE field name exceeded metadata limit.")
+
+    async def _end_line(self) -> MCPStreamEvent | None:
+        if self._field is None and not self._field_name:
+            event = await self._finish_event()
+            self._reset_line()
+            return event
+        value = self._decode_value()
+        if self._field == "event":
+            self._event_name = value
+        elif self._field == "id":
+            self._event_id = value
+        elif self._field == "retry":
+            try:
+                self._retry_ms = int(value)
+            except ValueError:
+                self._retry_ms = None
+        elif self._field == "data" and self._json_parser is not None:
+            self._pending_data_newline = True
+        elif self._field == "data":
+            self._data_line_seen = True
+            self._data.extend(b"\n")
+        self._reset_line()
+        return None
+
+    async def _finish_event(self) -> MCPStreamEvent | None:
+        if self._json_parser is not None:
+            parsed = await self._json_parser.finish()
+            event = MCPStreamEvent(
+                event=self._event_name or "message",
+                event_id=self._event_id,
+                retry_ms=self._retry_ms,
+                data="",
+                message=parsed.message,
+                is_priming=False,
+            )
+        elif self._event_name is not None or self._event_id is not None or self._retry_ms is not None or self._data:
+            try:
+                data = self._data[:-1].decode("utf-8") if self._data_line_seen else self._data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise MCPProtocolError("MCP legacy SSE control event must be UTF-8.") from exc
+            message = None
+            if (self._event_name in {None, "message"}) and data:
+                try:
+                    message = json.loads(data)
+                except json.JSONDecodeError as exc:
+                    raise MCPProtocolError("MCP legacy HTTP+SSE message event data must be JSON-RPC JSON.") from exc
+                _validate_json_rpc_message(message)
+            event = MCPStreamEvent(
+                event=self._event_name,
+                event_id=self._event_id,
+                retry_ms=self._retry_ms,
+                data=data,
+                message=message,
+                is_priming=not bool(data),
+            )
+        else:
+            return None
+        self._event_name = None
+        self._event_id = None
+        self._retry_ms = None
+        self._data.clear()
+        self._data_line_seen = False
+        self._json_parser = None
+        self._pending_data_newline = False
+        return event
+
+    def _is_message_event(self) -> bool:
+        return self._event_name in {None, "message"}
+
+    def _decode_value(self) -> str:
+        try:
+            return self._field_value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MCPProtocolError("MCP legacy SSE control field must be UTF-8.") from exc
+
+    def _reset_line(self) -> None:
+        self._field_name.clear()
+        self._field_value.clear()
+        self._field = None
+        self._skip_space = False
 
 
 class _EndpointEventParser:

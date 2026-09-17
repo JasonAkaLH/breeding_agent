@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from src.core.contracts import AuditSink, EventSink, StoragePort
+from src.core.contracts import AuditSink, EventSink, MailboxStoragePort
 from src.core.models import MailboxDelivery, MailboxMessage
 
 from . import task_state_machine
@@ -11,7 +11,7 @@ from . import task_state_machine
 class MailboxService:
     def __init__(
         self,
-        storage: StoragePort,
+        storage: MailboxStoragePort,
         *,
         event_sink: EventSink | None = None,
         audit_sink: AuditSink | None = None,

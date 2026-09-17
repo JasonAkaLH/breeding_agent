@@ -1,17 +1,780 @@
 use maf_runtime_sidecar::pb::common::v1 as common_pb;
 use maf_runtime_sidecar::pb::runtime::v1 as runtime_pb;
 use maf_runtime_sidecar::{
-    COMPONENT_ID, RuntimeSidecarGrpcService, RuntimeSidecarServeConfig,
+    COMPONENT_ID, GRPC_MAX_MESSAGE_BYTES, RuntimeSidecarGrpcService, RuntimeSidecarServeConfig,
     RuntimeSidecarSqliteAdapter, runtime_sidecar_service_from_config,
     serve_runtime_sidecar_with_incoming,
 };
+#[cfg(unix)]
+use maf_runtime_sidecar::{
+    semantic_probe_runtime_sidecar_unix_socket, serve_runtime_sidecar_unix_socket,
+};
+use prost::Message as _;
 use runtime_pb::runtime_sidecar_server::RuntimeSidecar;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::Request;
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn sqlite_empty_finalization(finalized_at_ms: i64) -> (String, Vec<u8>, Vec<u8>) {
+    let inventory = |kind: &str| {
+        let pk = serde_json::to_vec(&Vec::<String>::new()).unwrap();
+        let records = serde_json::to_vec(&Vec::<serde_json::Value>::new()).unwrap();
+        let digest = |suffix: &str, bytes: &[u8]| {
+            let mut hasher = Sha256::new();
+            hasher.update(format!("maf.submission_authority.inventory.{suffix}.v1\0").as_bytes());
+            hasher.update(kind.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(bytes);
+            format!("{:x}", hasher.finalize())
+        };
+        serde_json::json!({
+            "canonical_sha256": digest("rows", &records),
+            "count": 0,
+            "finalize_empty": true,
+            "pk_sha256": digest("pk", &pk),
+        })
+    };
+    let features = serde_json::to_vec(&maf_runtime_sidecar::supported_features()).unwrap();
+    let subject = serde_json::to_vec(&serde_json::json!({
+        "active_task_inventory": inventory("active_tasks"),
+        "conversation_inventory": inventory("conversations"),
+        "message_identity_inventory": inventory("message_identities"),
+        "proto_hash": maf_runtime_store::PROTO_HASH,
+        "report_sha256": "1".repeat(64),
+        "schema": "maf.submission_authority.finalization_subject.v1",
+        "schema_hash": maf_runtime_store::SCHEMA_HASH,
+        "snapshot_boundary_sha256": "2".repeat(64),
+        "source_backend": "sqlite",
+        "source_identity_sha256": "3".repeat(64),
+        "supported_features_sha256": format!("{:x}", Sha256::digest(features)),
+        "writer_fence_sha256": "4".repeat(64),
+    }))
+    .unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"maf.submission_authority.finalization.v1\0");
+    hasher.update(&subject);
+    let digest = format!("{:x}", hasher.finalize());
+    let subject_value: serde_json::Value = serde_json::from_slice(&subject).unwrap();
+    let receipt = serde_json::to_vec(&serde_json::json!({
+        "destination_schema_sha256": "c".repeat(64),
+        "finalization_receipt_sha256": digest,
+        "finalized_at_ms": finalized_at_ms,
+        "inventories": {
+            "active_tasks": subject_value["active_task_inventory"],
+            "conversations": subject_value["conversation_inventory"],
+            "message_identities": subject_value["message_identity_inventory"],
+        },
+        "result": "finalized",
+        "schema": "maf.submission_authority.import_receipt.v1",
+        "snapshot_boundary_sha256": "2".repeat(64),
+        "source_identity_sha256": "3".repeat(64),
+        "writer_fence_sha256": "4".repeat(64),
+    }))
+    .expect("canonical finalization receipt");
+    (digest, subject, receipt)
+}
+
+fn large_pb_admit_request() -> runtime_pb::AdmitSubmissionRequest {
+    let target_content_bytes = 49 * 1024 * 1024;
+    let mut content = "\"\\中".to_owned();
+    content.push_str(&"a".repeat(target_content_bytes - content.len()));
+    pb_admit_request("large", &content)
+}
+
+fn pb_admit_request(prefix: &str, content: &str) -> runtime_pb::AdmitSubmissionRequest {
+    let conversation_id = format!("{prefix}-conversation");
+    pb_admit_request_in_conversation(prefix, &conversation_id, content)
+}
+
+fn pb_admit_request_in_conversation(
+    prefix: &str,
+    conversation_id: &str,
+    content: &str,
+) -> runtime_pb::AdmitSubmissionRequest {
+    let conversation_id = conversation_id.to_owned();
+    let task_id = format!("{prefix}-task");
+    let message_id = format!("{prefix}-message");
+    let canonical = |value: serde_json::Value| serde_json::to_vec(&value).expect("canonical JSON");
+    let conversation = canonical(serde_json::json!({
+        "conversation_id": conversation_id,
+        "create_if_missing": true,
+        "created_at": "2026-08-26T00:00:00Z",
+        "current_task_id": task_id,
+        "schema": "maf.submission.conversation_projection.v1",
+        "status": "active",
+        "updated_at": "2026-08-26T00:00:00Z",
+        "username": "owner"
+    }));
+    let message = canonical(serde_json::json!({
+        "content": &content,
+        "conversation_id": conversation_id,
+        "message_created_at": "2026-08-26T00:00:00Z",
+        "message_id": message_id,
+        "message_type": "text",
+        "metadata": {},
+        "role": "user",
+        "schema": "maf.submission.message_projection.v1",
+        "stream_status": "complete",
+        "task_id": task_id,
+        "updated_at": "2026-08-26T00:00:00Z"
+    }));
+    let continuation = canonical(serde_json::json!({
+        "available_mcp_servers": [],
+        "bundle_revisions": {"mcp_bundle_revision": null, "skill_bundle_revision": null},
+        "conversation_id": conversation_id,
+        "execution_metadata": {
+            "requested_capability_alias": null,
+            "canonical_capability_id": null,
+            "mcp_dispatch_server_id": null,
+            "mcp_binding_mode": null,
+            "mcp_command": null,
+            "mcp_execution_mode": null,
+            "mcp_rollout_config_version": null,
+            "mcp_route_reason_code": null,
+            "mcp_rollout_mode": null,
+            "defer_task_completed_until_pending_skill_context_processed": null,
+            "forced_by_mcp_command": null,
+            "mcp_shadow_enabled": null
+        },
+        "initial_no_server_eligible": false,
+        "mcp_assignment": null,
+        "mcp_binding": null,
+        "message_content_sha256": format!("{:x}", Sha256::digest(content.as_bytes())),
+        "message_id": message_id,
+        "model_options": {"model_edition": null, "reasoning_effort": "medium", "thinking_enabled": false},
+        "owner_scope": "owner",
+        "pending_context": null,
+        "request_fingerprint": "a".repeat(64),
+        "requested_capability_id": null,
+        "routing_mode": "auto",
+        "schema": "maf.submission.continuation.v1",
+        "sheet_selections": {},
+        "task_id": task_id,
+        "upload_refs": []
+    }));
+    let mut projection_hasher = Sha256::new();
+    projection_hasher.update(b"maf.submission.projection.v1\0");
+    projection_hasher.update(&conversation);
+    projection_hasher.update(b"\0");
+    projection_hasher.update(&message);
+    let mut continuation_hasher = Sha256::new();
+    continuation_hasher.update(b"maf.submission.continuation.v1\0");
+    continuation_hasher.update(&continuation);
+    runtime_pb::AdmitSubmissionRequest {
+        message_id: message_id.clone(),
+        task_id: task_id.clone(),
+        conversation_id: conversation_id.clone(),
+        username: "owner".to_owned(),
+        request_fingerprint: "a".repeat(64),
+        conversation_projection_json: conversation,
+        message_projection_json: message,
+        projection_sha256: format!("{:x}", projection_hasher.finalize()),
+        continuation_json: continuation,
+        continuation_sha256: format!("{:x}", continuation_hasher.finalize()),
+        message_created_at_ms: 1,
+        workflow_owner: format!("{prefix}-worker"),
+        now_ms: 1,
+        claim_ttl_ms: 1_000,
+        task: Some(runtime_pb::TaskRecord {
+            task_id,
+            conversation_id,
+            root_message_id: message_id.clone(),
+            status: "accepted".to_owned(),
+            routing_mode: "auto".to_owned(),
+            requested_capability_id: None,
+            summary: None,
+            cancel_requested_at: None,
+            created_at: Some("2026-08-26T00:00:00Z".to_owned()),
+            updated_at: None,
+            assignment: None,
+        }),
+        idempotency_key: format!("submission:{message_id}"),
+    }
+}
+
+fn change_pb_request_fingerprint(
+    request: &mut runtime_pb::AdmitSubmissionRequest,
+    fingerprint: &str,
+) {
+    request.request_fingerprint = fingerprint.to_owned();
+    let mut continuation: serde_json::Value =
+        serde_json::from_slice(&request.continuation_json).expect("continuation");
+    continuation["request_fingerprint"] = serde_json::Value::String(fingerprint.to_owned());
+    request.continuation_json = serde_json::to_vec(&continuation).expect("canonical continuation");
+    let mut hasher = Sha256::new();
+    hasher.update(b"maf.submission.continuation.v1\0");
+    hasher.update(&request.continuation_json);
+    request.continuation_sha256 = format!("{:x}", hasher.finalize());
+}
+
+fn pb_prepared_execution(prefix: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "available_mcp_servers": [],
+        "bundle_revisions": {"mcp_bundle_revision": null, "skill_bundle_revision": null},
+        "conversation_id": format!("{prefix}-conversation"),
+        "execution_metadata": {
+            "canonical_capability_id": null,
+            "defer_task_completed_until_pending_skill_context_processed": null,
+            "forced_by_mcp_command": null,
+            "mcp_binding_mode": null,
+            "mcp_command": null,
+            "mcp_dispatch_server_id": null,
+            "mcp_execution_mode": null,
+            "mcp_rollout_config_version": null,
+            "mcp_rollout_mode": null,
+            "mcp_route_reason_code": null,
+            "mcp_shadow_enabled": null,
+            "requested_capability_alias": null
+        },
+        "execution_text_sha256": "c".repeat(64),
+        "execution_text_source": "root_message",
+        "initial_required_tool_name": null,
+        "mcp_assignment": null,
+        "mcp_binding": null,
+        "message_id": format!("{prefix}-message"),
+        "model_options": {"model_edition": null, "reasoning_effort": "medium", "thinking_enabled": false},
+        "owner_scope": "owner",
+        "pending_context": null,
+        "planned_handoff_kind": "agent_run",
+        "preparation_receipt": {
+            "memory_context_sha256": "f".repeat(64),
+            "receipt_sha256": "d".repeat(64),
+            "route_decision_sha256": "e".repeat(64),
+            "selector_decision_sha256": "0".repeat(64),
+            "task_id": format!("{prefix}-task")
+        },
+        "prepared_kind": "agent_run",
+        "requested_capability_id": null,
+        "schema": "maf.submission.prepared_execution.v1",
+        "sheet_selections": {},
+        "task_id": format!("{prefix}-task"),
+        "upload_refs": [],
+    }))
+    .expect("canonical prepared execution")
+}
+
+#[tokio::test]
+async fn submission_identity_rpc_round_trips_in_memory_and_sqlite_cutover_is_explicit() {
+    assert!(std::hint::black_box(GRPC_MAX_MESSAGE_BYTES) >= 140 * 1024 * 1024);
+    let request = runtime_pb::ReserveMessageIdentityRequest {
+        identity: Some(runtime_pb::MessageIdentityRecord {
+            message_id: "grpc-file-message".to_owned(),
+            conversation_id: "grpc-file-conversation".to_owned(),
+            username: "owner".to_owned(),
+            identity_kind: runtime_pb::MessageIdentityKind::FileVisible as i32,
+            role: Some("assistant".to_owned()),
+            message_type: Some("file".to_owned()),
+            message_created_at_ms: Some(1),
+            task_id: None,
+            request_fingerprint: None,
+            reserved_at_ms: 2,
+        }),
+    };
+    let in_memory =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    let created = in_memory
+        .reserve_message_identity(Request::new(request.clone()))
+        .await
+        .expect("reserve in-memory identity")
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::MessageIdentityDisposition::Created as i32
+    );
+    let exact = in_memory
+        .reserve_message_identity(Request::new(request.clone()))
+        .await
+        .expect("exact in-memory identity")
+        .into_inner();
+    assert_eq!(
+        exact.disposition,
+        runtime_pb::MessageIdentityDisposition::ExactReplay as i32
+    );
+
+    let db_path = temp_db_path("grpc-submission-a1-blocked");
+    let sqlite = RuntimeSidecarGrpcService::with_sqlite_adapter(
+        RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter"),
+    );
+    let blocked = sqlite
+        .reserve_message_identity(Request::new(request))
+        .await
+        .expect("typed migration response")
+        .into_inner();
+    assert_eq!(
+        blocked.error.expect("migration error").code,
+        "runtime_store_migration_blocked"
+    );
+    let finalized_path = temp_db_path("grpc-submission-a2-finalized");
+    let finalized_adapter = RuntimeSidecarSqliteAdapter::open(&finalized_path).unwrap();
+    let (digest, subject, receipt) = sqlite_empty_finalization(1);
+    finalized_adapter
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 1)
+        .unwrap();
+    let finalized = RuntimeSidecarGrpcService::with_sqlite_adapter(finalized_adapter);
+    let created = finalized
+        .reserve_message_identity(Request::new(runtime_pb::ReserveMessageIdentityRequest {
+            identity: Some(runtime_pb::MessageIdentityRecord {
+                message_id: "sqlite-file-message".to_owned(),
+                conversation_id: "sqlite-file-conversation".to_owned(),
+                username: "owner".to_owned(),
+                identity_kind: runtime_pb::MessageIdentityKind::FileVisible as i32,
+                role: Some("assistant".to_owned()),
+                message_type: Some("file".to_owned()),
+                message_created_at_ms: Some(1),
+                task_id: None,
+                request_fingerprint: None,
+                reserved_at_ms: 2,
+            }),
+        }))
+        .await
+        .expect("SQLite reservation RPC")
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::MessageIdentityDisposition::Created as i32
+    );
+    assert!(created.error.is_none());
+    let _ = std::fs::remove_file(finalized_path);
+}
+
+#[tokio::test]
+async fn sqlite_submission_rpc_sequence_persists_all_admission_phases() {
+    let db_path = temp_db_path("grpc-submission-a2-sequence");
+    let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+    let (digest, subject, receipt) = sqlite_empty_finalization(2);
+    adapter
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 2)
+        .unwrap();
+    let service = RuntimeSidecarGrpcService::with_sqlite_adapter(adapter);
+    let created = service
+        .admit_submission(Request::new(pb_admit_request("sqlite-flow", "hello")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::Created as i32
+    );
+    let admission = created.admission.unwrap();
+    let initial_claim = created.claim.unwrap();
+    let renewed = service
+        .renew_submission_claim(Request::new(runtime_pb::RenewSubmissionClaimRequest {
+            message_id: admission.message_id.clone(),
+            workflow_owner: initial_claim.owner,
+            claim_token: initial_claim.token,
+            now_ms: 2,
+            claim_ttl_ms: 1_000,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .claim
+        .expect("renewed claim");
+    let projected = service
+        .acknowledge_submission_projection(Request::new(
+            runtime_pb::AcknowledgeSubmissionProjectionRequest {
+                message_id: admission.message_id.clone(),
+                workflow_owner: renewed.owner.clone(),
+                claim_token: renewed.token.clone(),
+                projection_sha256: admission.projection_sha256.clone(),
+                expected_state: runtime_pb::SubmissionProjectionState::Pending as i32,
+                now_ms: 3,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(projected.error.is_none());
+    let prepared = pb_prepared_execution("sqlite-flow");
+    let mut hasher = Sha256::new();
+    hasher.update(b"maf.submission.prepared_execution.v1\0");
+    hasher.update(&prepared);
+    let prepared_sha256 = format!("{:x}", hasher.finalize());
+    let prepared_response = service
+        .prepare_submission_handoff(Request::new(runtime_pb::PrepareSubmissionHandoffRequest {
+            message_id: admission.message_id.clone(),
+            workflow_owner: renewed.owner.clone(),
+            claim_token: renewed.token.clone(),
+            prepared_execution_json: prepared.clone(),
+            prepared_execution_sha256: prepared_sha256.clone(),
+            expected_state: runtime_pb::SubmissionPreparationState::Pending as i32,
+            now_ms: 4,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(prepared_response.error.is_none());
+    let stored = service
+        .get_submission_preparation(Request::new(runtime_pb::GetSubmissionPreparationRequest {
+            username: "owner".to_owned(),
+            conversation_id: "sqlite-flow-conversation".to_owned(),
+            task_id: "sqlite-flow-task".to_owned(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(stored.found);
+    assert_eq!(
+        stored.admission.unwrap().prepared_execution_json,
+        Some(prepared)
+    );
+    let handed_off = service
+        .acknowledge_submission_handoff(Request::new(
+            runtime_pb::AcknowledgeSubmissionHandoffRequest {
+                message_id: admission.message_id,
+                workflow_owner: renewed.owner,
+                claim_token: renewed.token,
+                prepared_execution_sha256: prepared_sha256,
+                handoff_kind: "agent_run".to_owned(),
+                handoff_identity: "run-sqlite-flow".to_owned(),
+                expected_state: runtime_pb::SubmissionHandoffState::Pending as i32,
+                now_ms: 5,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(handed_off.error.is_none());
+    let empty = service
+        .claim_pending_submission(Request::new(runtime_pb::ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 2_000,
+            claim_ttl_ms: 1_000,
+            after_created_at_ms: None,
+            after_message_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!empty.found);
+    assert_eq!(empty.pending_count, 0);
+    assert_eq!(empty.earliest_claim_expires_at_ms, None);
+    assert_eq!(empty.finalization_receipt_sha256, Some(digest));
+    let closed = service
+        .close_conversation_admission(Request::new(
+            runtime_pb::CloseConversationAdmissionRequest {
+                username: "owner".to_owned(),
+                conversation_id: "sqlite-flow-conversation".to_owned(),
+                operation_id: "delete:sqlite-flow-conversation".to_owned(),
+                now_ms: 6,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        closed.disposition,
+        runtime_pb::ConversationAdmissionCloseDisposition::Closed as i32
+    );
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn submission_admission_rpc_maps_all_closed_dispositions() {
+    let service =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    let request = pb_admit_request("grpc-dispositions", "hello");
+
+    let created = service
+        .admit_submission(Request::new(request.clone()))
+        .await
+        .expect("created RPC result")
+        .into_inner();
+    assert_eq!(
+        created.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::Created as i32
+    );
+    assert!(created.error.is_none());
+
+    let replay = service
+        .admit_submission(Request::new(request.clone()))
+        .await
+        .expect("replay RPC result")
+        .into_inner();
+    assert_eq!(
+        replay.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::IdempotentReplay as i32
+    );
+    assert!(replay.error.is_none());
+
+    let busy = service
+        .admit_submission(Request::new(pb_admit_request_in_conversation(
+            "grpc-dispositions-busy",
+            "grpc-dispositions-conversation",
+            "hello",
+        )))
+        .await
+        .expect("busy RPC result")
+        .into_inner();
+    assert_eq!(
+        busy.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::ConversationBusy as i32
+    );
+    assert!(busy.error.is_none());
+
+    let mut conflict_request = request;
+    change_pb_request_fingerprint(&mut conflict_request, &"d".repeat(64));
+    let conflict = service
+        .admit_submission(Request::new(conflict_request))
+        .await
+        .expect("Message conflict RPC result")
+        .into_inner();
+    assert_eq!(
+        conflict.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::MessageIdConflict as i32
+    );
+    assert!(conflict.error.is_none());
+}
+
+#[tokio::test]
+async fn claim_pending_submission_rpc_exposes_pending_count_and_head_expiry() {
+    let service =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    service
+        .admit_submission(Request::new(pb_admit_request("claim-observation", "hello")))
+        .await
+        .unwrap();
+    let blocked = service
+        .claim_pending_submission(Request::new(runtime_pb::ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 2,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!blocked.found);
+    assert_eq!(blocked.pending_count, 1);
+    assert_eq!(blocked.earliest_claim_expires_at_ms, Some(1_001));
+
+    let claimed = service
+        .claim_pending_submission(Request::new(runtime_pb::ClaimPendingSubmissionRequest {
+            workflow_owner: "recovery".to_owned(),
+            now_ms: 1_001,
+            claim_ttl_ms: 100,
+            after_created_at_ms: None,
+            after_message_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(claimed.found);
+    assert_eq!(claimed.pending_count, 1);
+    assert_eq!(claimed.earliest_claim_expires_at_ms, None);
+}
+
+fn pb_task(status: &str) -> runtime_pb::TaskRecord {
+    runtime_pb::TaskRecord {
+        task_id: "grpc-task".to_owned(),
+        conversation_id: "conv".to_owned(),
+        root_message_id: "message".to_owned(),
+        status: status.to_owned(),
+        routing_mode: "auto".to_owned(),
+        requested_capability_id: None,
+        summary: None,
+        cancel_requested_at: None,
+        created_at: Some("created".to_owned()),
+        updated_at: None,
+        assignment: Some(runtime_pb::TaskRouteAssignment {
+            route_mode: "shadow".to_owned(),
+            real_path: "legacy".to_owned(),
+            shadow_path: "user_scoped".to_owned(),
+            config_version: "v1".to_owned(),
+            reason_code: "sample".to_owned(),
+            cohort_id: None,
+            assignment_key_hash: None,
+            assigned_at: None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn tonic_service_submits_and_gets_authoritative_task_record() {
+    let service = RuntimeSidecarGrpcService::new();
+    let submitted = service
+        .submit_task(Request::new(runtime_pb::SubmitTaskRequest {
+            task_id: "grpc-task".to_owned(),
+            conversation_id: "conv".to_owned(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "grpc-task-key".to_owned(),
+                owner: "test".to_owned(),
+                deadline_ms: 1,
+            }),
+            task: Some(pb_task("accepted")),
+            expected_from_status: None,
+        }))
+        .await
+        .expect("submit")
+        .into_inner();
+    assert_eq!(submitted.task.expect("record").root_message_id, "message");
+    let found = service
+        .get_task(Request::new(runtime_pb::GetTaskRequest {
+            task_id: "grpc-task".to_owned(),
+        }))
+        .await
+        .expect("get")
+        .into_inner();
+    assert!(found.found);
+    assert_eq!(
+        found
+            .task
+            .expect("task")
+            .assignment
+            .expect("assignment")
+            .config_version,
+        "v1"
+    );
+    let missing = service
+        .get_task(Request::new(runtime_pb::GetTaskRequest {
+            task_id: "missing".to_owned(),
+        }))
+        .await
+        .expect("get missing")
+        .into_inner();
+    assert!(!missing.found);
+    assert!(missing.task.is_none());
+    let listed = service
+        .list_tasks_for_conversation(Request::new(runtime_pb::ListTasksForConversationRequest {
+            conversation_id: "conv".to_owned(),
+            statuses: vec!["accepted".to_owned()],
+        }))
+        .await
+        .expect("list tasks")
+        .into_inner();
+    assert_eq!(listed.tasks.len(), 1);
+    assert_eq!(listed.tasks[0].task_id, "grpc-task");
+    let active = service
+        .get_active_task_for_conversation(Request::new(
+            runtime_pb::GetActiveTaskForConversationRequest {
+                conversation_id: "conv".to_owned(),
+            },
+        ))
+        .await
+        .expect("get active task")
+        .into_inner();
+    assert!(active.found);
+    assert_eq!(active.task.expect("active task").task_id, "grpc-task");
+}
+
+#[tokio::test]
+async fn tonic_service_rejects_conflicting_top_level_task_identity() {
+    let service = RuntimeSidecarGrpcService::new();
+    let response = service
+        .submit_task(Request::new(runtime_pb::SubmitTaskRequest {
+            task_id: "different-task".to_owned(),
+            conversation_id: "conv".to_owned(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "conflicting-identity".to_owned(),
+                owner: "test".to_owned(),
+                deadline_ms: 1,
+            }),
+            task: Some(pb_task("accepted")),
+            expected_from_status: None,
+        }))
+        .await
+        .expect("typed write failure response")
+        .into_inner();
+
+    assert_eq!(
+        response.error.expect("identity conflict error").code,
+        "runtime_store_write_failed"
+    );
+    assert!(response.task.is_none());
+}
+
+#[tokio::test]
+async fn tonic_event_append_replays_exact_and_rejects_drift() {
+    let service = RuntimeSidecarGrpcService::new();
+    let request = |payload_json: &[u8]| runtime_pb::AppendEventRequest {
+        conversation_id: "conv".to_owned(),
+        task_id: "task".to_owned(),
+        event_type: "task.accepted".to_owned(),
+        payload_json: payload_json.to_vec(),
+        idempotency: Some(runtime_pb::Idempotency {
+            key: "event-exact".to_owned(),
+            owner: "python-runtime".to_owned(),
+            deadline_ms: 2_000,
+        }),
+    };
+
+    let first = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("first append")
+        .into_inner();
+    let replay = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("exact replay")
+        .into_inner();
+    assert_eq!(replay.cursor, first.cursor);
+    assert!(!first.duplicate);
+    assert!(replay.duplicate);
+    assert!(replay.error.is_none());
+
+    let conflict = service
+        .append_event(Request::new(request(b"{\"changed\":true}")))
+        .await
+        .expect("typed conflict response")
+        .into_inner();
+    assert!(conflict.cursor.is_none());
+    assert_eq!(
+        conflict.error.expect("idempotency conflict").code,
+        "runtime_store_idempotency_conflict"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_backed_tonic_event_append_replays_exact_and_rejects_drift() {
+    let db_path = temp_db_path("grpc-event-exact");
+    let service = RuntimeSidecarGrpcService::with_sqlite_adapter(
+        RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter"),
+    );
+    let request = |payload_json: &[u8]| runtime_pb::AppendEventRequest {
+        conversation_id: "conv".to_owned(),
+        task_id: "task".to_owned(),
+        event_type: "task.accepted".to_owned(),
+        payload_json: payload_json.to_vec(),
+        idempotency: Some(runtime_pb::Idempotency {
+            key: "event-exact".to_owned(),
+            owner: "python-runtime".to_owned(),
+            deadline_ms: 2_000,
+        }),
+    };
+
+    let first = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("first append")
+        .into_inner();
+    let replay = service
+        .append_event(Request::new(request(b"{}")))
+        .await
+        .expect("exact replay")
+        .into_inner();
+    assert_eq!(replay.cursor, first.cursor);
+    assert!(!first.duplicate);
+    assert!(replay.duplicate);
+    assert!(replay.error.is_none());
+
+    let conflict = service
+        .append_event(Request::new(request(b"{\"changed\":true}")))
+        .await
+        .expect("typed conflict response")
+        .into_inner();
+    assert!(conflict.cursor.is_none());
+    assert_eq!(
+        conflict.error.expect("idempotency conflict").code,
+        "runtime_store_idempotency_conflict"
+    );
+    let _ = std::fs::remove_file(db_path);
+}
 
 #[tokio::test]
 async fn tonic_service_maps_pb_requests_to_rust_adapter_envelopes() {
@@ -117,33 +880,14 @@ async fn sqlite_backed_tonic_service_rejects_writes_after_shutdown_drain() {
                 owner: "python-runtime".to_owned(),
                 deadline_ms: 3_000,
             }),
+            task: None,
+            expected_from_status: None,
         }))
         .await
         .expect("submit rejected in envelope")
         .into_inner();
     assert_runtime_unavailable(submit.error);
     assert!(submit.task_id.is_empty());
-
-    let edge = service
-        .save_task_edge(Request::new(runtime_pb::SaveTaskEdgeRequest {
-            edge: Some(runtime_pb::TaskEdgeRecord {
-                task_id: "task".to_owned(),
-                from_node_id: "node-a".to_owned(),
-                to_node_id: "node-b".to_owned(),
-                edge_type: "data".to_owned(),
-                condition: "".to_owned(),
-            }),
-            idempotency: Some(runtime_pb::Idempotency {
-                key: "edge-after-drain".to_owned(),
-                owner: "python-runtime".to_owned(),
-                deadline_ms: 2_000,
-            }),
-        }))
-        .await
-        .expect("edge rejected in envelope")
-        .into_inner();
-    assert_runtime_unavailable(edge.error);
-    assert!(edge.edge.is_none());
 
     let artifact = service
         .save_artifact(Request::new(runtime_pb::SaveArtifactRequest {
@@ -215,26 +959,6 @@ async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
             .into_inner();
         assert_eq!(append.cursor.expect("cursor").sequence, 1);
 
-        let edge = service
-            .save_task_edge(Request::new(runtime_pb::SaveTaskEdgeRequest {
-                edge: Some(runtime_pb::TaskEdgeRecord {
-                    task_id: "task".to_owned(),
-                    from_node_id: "node-a".to_owned(),
-                    to_node_id: "node-b".to_owned(),
-                    edge_type: "data".to_owned(),
-                    condition: "".to_owned(),
-                }),
-                idempotency: Some(runtime_pb::Idempotency {
-                    key: "edge-1".to_owned(),
-                    owner: "python-runtime".to_owned(),
-                    deadline_ms: 2_000,
-                }),
-            }))
-            .await
-            .expect("save edge")
-            .into_inner();
-        assert_eq!(edge.edge.expect("edge").from_node_id, "node-a");
-
         let artifact = service
             .save_artifact(Request::new(runtime_pb::SaveArtifactRequest {
                 artifact: Some(runtime_pb::ArtifactRecord {
@@ -275,15 +999,6 @@ async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
         .into_inner();
     assert_eq!(replay.cursors.len(), 1);
     assert_eq!(replay.cursors[0].sequence, 1);
-    let edges = reopened
-        .list_task_edges(Request::new(runtime_pb::ListTaskEdgesRequest {
-            task_id: "task".to_owned(),
-        }))
-        .await
-        .expect("list edges")
-        .into_inner();
-    assert_eq!(edges.edges.len(), 1);
-    assert_eq!(edges.edges[0].to_node_id, "node-b");
     let artifact = reopened
         .get_artifact(Request::new(runtime_pb::GetArtifactRequest {
             artifact_id: "artifact".to_owned(),
@@ -480,6 +1195,110 @@ async fn sidecar_listener_accepts_generated_grpc_client_on_loopback() {
     server.await.expect("server task");
 }
 
+#[tokio::test]
+async fn tonic_transport_round_trips_near_fifty_mib_escaped_multibyte_admission() {
+    let request = large_pb_admit_request();
+    assert!(request.encoded_len() > 49 * 1024 * 1024);
+    assert!(request.encoded_len() < GRPC_MAX_MESSAGE_BYTES);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let service =
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        serve_runtime_sidecar_with_incoming(service, incoming, async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .expect("serve large-message runtime sidecar")
+    });
+    let endpoint = format!("http://{addr}");
+    let channel = tonic::transport::Endpoint::from_shared(endpoint)
+        .expect("large-message endpoint")
+        .connect()
+        .await
+        .expect("connect large-message client");
+    let mut client = runtime_pb::runtime_sidecar_client::RuntimeSidecarClient::new(channel)
+        .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES)
+        .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES);
+    let response = client
+        .admit_submission(request)
+        .await
+        .expect("near-50MiB admission transport roundtrip")
+        .into_inner();
+    assert_eq!(
+        response.disposition,
+        runtime_pb::SubmissionAdmissionDisposition::Created as i32
+    );
+    assert!(response.error.is_none());
+    assert!(
+        response
+            .admission
+            .expect("large admission")
+            .message_projection_json
+            .len()
+            > 49 * 1024 * 1024
+    );
+    let _ = shutdown_tx.send(());
+    server.await.expect("large-message server task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn semantic_probe_replaces_stale_socket_and_verifies_readiness() {
+    let socket_path = temp_socket_path("probe");
+    let stale = std::os::unix::net::UnixListener::bind(&socket_path)
+        .expect("create stale runtime sidecar socket");
+    drop(stale);
+
+    let service = RuntimeSidecarGrpcService::new();
+    let served_path = socket_path.clone();
+    let server = tokio::spawn(async move {
+        serve_runtime_sidecar_unix_socket(&served_path, service)
+            .await
+            .expect("serve runtime sidecar over Unix socket")
+    });
+
+    let mut probe_error = None;
+    for _ in 0..50 {
+        match semantic_probe_runtime_sidecar_unix_socket(&socket_path).await {
+            Ok(()) => {
+                probe_error = None;
+                break;
+            }
+            Err(error) => {
+                probe_error = Some(error.to_string());
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    assert!(
+        probe_error.is_none(),
+        "semantic probe failed: {probe_error:?}"
+    );
+
+    server.abort();
+    let _ = server.await;
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_listener_rejects_non_socket_collision() {
+    let socket_path = temp_socket_path("collision");
+    std::fs::write(&socket_path, b"not a socket").expect("write collision file");
+
+    let error = serve_runtime_sidecar_unix_socket(&socket_path, RuntimeSidecarGrpcService::new())
+        .await
+        .expect_err("non-socket collision must fail closed");
+    assert!(error.to_string().contains("is not a socket"));
+
+    let _ = std::fs::remove_file(socket_path);
+}
+
 fn temp_db_path(test_name: &str) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -489,6 +1308,17 @@ fn temp_db_path(test_name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "maf-runtime-sidecar-{test_name}-{}-{timestamp}-{unique}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn temp_socket_path(test_name: &str) -> PathBuf {
+    let unique = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "maf-rs-{test_name}-{}-{unique}.sock",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);

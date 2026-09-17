@@ -1,14 +1,15 @@
 {
   "component": "maf_core_types",
   "contract_version": "core.v1",
-  "schema_hash": "maf_core_types_core_v1_schema_20260526_auth_generation_strong_conversation_delete",
+  "schema_hash": "maf_core_types_core_v1_schema_20260822_auth_generation_agent_state",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
   "supported_features": [
     "core_contract_artifact",
     "core_enum_snapshot",
     "core_model_snapshot",
     "core_typed_error_table",
-    "pyo3_core_facade"
+    "pyo3_core_facade",
+    "agent_state_contract"
   ],
   "enums": {
     "AckPolicy": [
@@ -19,6 +20,62 @@
       {
         "name": "LIGHT",
         "value": "light"
+      }
+    ],
+    "AgentItemKind": [
+      {
+        "name": "USER_MESSAGE",
+        "value": "user_message"
+      },
+      {
+        "name": "ASSISTANT_MESSAGE",
+        "value": "assistant_message"
+      },
+      {
+        "name": "TOOL_CALL",
+        "value": "tool_call"
+      },
+      {
+        "name": "TOOL_RESULT",
+        "value": "tool_result"
+      },
+      {
+        "name": "SKILL_ACTIVATION",
+        "value": "skill_activation"
+      },
+      {
+        "name": "CONTEXT_SUMMARY",
+        "value": "context_summary"
+      },
+      {
+        "name": "CONTINUATION",
+        "value": "continuation"
+      }
+    ],
+    "AgentRunStatus": [
+      {
+        "name": "RUNNING",
+        "value": "running"
+      },
+      {
+        "name": "WAITING_FOR_INPUT",
+        "value": "waiting_for_input"
+      },
+      {
+        "name": "WAITING_FOR_DEPENDENCY",
+        "value": "waiting_for_dependency"
+      },
+      {
+        "name": "COMPLETED",
+        "value": "completed"
+      },
+      {
+        "name": "FAILED",
+        "value": "failed"
+      },
+      {
+        "name": "CANCELLED",
+        "value": "cancelled"
       }
     ],
     "ArtifactType": [
@@ -63,30 +120,6 @@
       {
         "name": "DELETING_FAILED",
         "value": "deleting_failed"
-      }
-    ],
-    "DependencyType": [
-      {
-        "name": "HARD",
-        "value": "hard"
-      },
-      {
-        "name": "SOFT",
-        "value": "soft"
-      }
-    ],
-    "EdgeType": [
-      {
-        "name": "DATA",
-        "value": "data"
-      },
-      {
-        "name": "CONTROL",
-        "value": "control"
-      },
-      {
-        "name": "FALLBACK",
-        "value": "fallback"
       }
     ],
     "EventVisibility": [
@@ -173,20 +206,6 @@
       {
         "name": "SYSTEM",
         "value": "system"
-      }
-    ],
-    "NodeCriticality": [
-      {
-        "name": "REQUIRED",
-        "value": "required"
-      },
-      {
-        "name": "OPTIONAL",
-        "value": "optional"
-      },
-      {
-        "name": "FALLBACK",
-        "value": "fallback"
       }
     ],
     "NodeStatus": [
@@ -289,6 +308,46 @@
     ]
   },
   "models": {
+    "AgentItem": [
+      "item_id",
+      "run_id",
+      "task_id",
+      "sequence",
+      "kind",
+      "state",
+      "payload_json",
+      "payload_size_bytes",
+      "payload_sha256",
+      "parent_item_id",
+      "source_call_item_id",
+      "provider_sample_id",
+      "call_ordinal",
+      "created_at",
+      "committed_at"
+    ],
+    "AgentRun": [
+      "run_id",
+      "task_id",
+      "conversation_id",
+      "status",
+      "model_edition",
+      "reasoning_effort",
+      "thinking_enabled",
+      "binding_option_digests",
+      "next_item_sequence",
+      "compacted_through_sequence",
+      "active_sample_item_id",
+      "waiting_call_item_ids",
+      "next_batch_call_ordinal",
+      "claim_owner",
+      "claim_token",
+      "lease_expires_at",
+      "revision",
+      "terminal_reason_code",
+      "created_at",
+      "updated_at",
+      "terminal_at"
+    ],
     "Artifact": [
       "artifact_id",
       "task_id",
@@ -365,6 +424,18 @@
       "delete_error_summary",
       "delete_phase"
     ],
+    "ConversationFileIndexRepairMarker": [
+      "conversation_id",
+      "repair_kind",
+      "status",
+      "reason_code",
+      "affected_upload_ids",
+      "attempt_count",
+      "next_retry_at",
+      "created_at",
+      "updated_at",
+      "resolved_at"
+    ],
     "ConversationMemorySummary": [
       "summary_id",
       "conversation_id",
@@ -392,6 +463,13 @@
       "event_type",
       "payload",
       "visibility",
+      "created_at"
+    ],
+    "FileUploadMessageProjection": [
+      "upload_id",
+      "conversation_id",
+      "content",
+      "metadata",
       "created_at"
     ],
     "Interrupt": [
@@ -464,7 +542,10 @@
       "content",
       "task_id",
       "stream_status",
-      "created_at"
+      "created_at",
+      "message_type",
+      "metadata",
+      "updated_at"
     ],
     "Task": [
       "task_id",
@@ -473,17 +554,15 @@
       "status",
       "routing_mode",
       "requested_capability_id",
-      "root_node_id",
       "summary",
       "cancel_requested_at",
       "created_at",
-      "updated_at"
-    ],
-    "TaskEdge": [
-      "from_node_id",
-      "to_node_id",
-      "edge_type",
-      "condition"
+      "updated_at",
+      "mcp_execution_mode",
+      "mcp_shadow_enabled",
+      "mcp_rollout_config_version",
+      "mcp_route_reason_code",
+      "mcp_rollout_mode"
     ],
     "TaskNode": [
       "node_id",
@@ -491,11 +570,6 @@
       "capability_id",
       "assigned_instance_id",
       "status",
-      "criticality",
-      "dependency_type",
-      "retry_policy",
-      "timeout_policy",
-      "resource_class",
       "input_refs",
       "output_refs",
       "started_at",

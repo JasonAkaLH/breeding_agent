@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from ._parsing import string_tuple as _string_tuple
+
 
 class SkillContractParseError(ValueError):
     pass
@@ -78,6 +80,16 @@ class SkillSchemaSelectorContract:
 
 
 @dataclass(slots=True, frozen=True)
+class SkillFileSelection:
+    required: bool = False
+    allow_multiple: bool = False
+    expected_content: tuple[str, ...] = ()
+    supported_file_types: tuple[str, ...] = ()
+    helpful_columns: tuple[str, ...] = ()
+    disambiguation_hint: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class SkillOutputContract:
     output_id: str
     required: tuple[str, ...] = ()
@@ -113,6 +125,7 @@ class SkillContract:
     resources: Mapping[str, SkillResourceRef] = field(default_factory=dict)
     resource_policy: SkillResourcePolicy = SkillResourcePolicy()
     routing: SkillRoutingContract = SkillRoutingContract()
+    file_selection: SkillFileSelection = SkillFileSelection()
     source_path: Path = Path("skill.contract.yaml")
 
     @property
@@ -123,6 +136,24 @@ class SkillContract:
 _ALLOWED_RUNTIME_MODES = {"python_subprocess", "platform_service", "delegated_main_agent"}
 _ALLOWED_SCHEMA_SELECTOR_STRATEGIES = {"single_schema", "deterministic_then_llm"}
 _FORBIDDEN_V1_FIELDS = {"auto_run", "run_by_default", "parameters", "input_parameters", "scripts", "execution", "public_usage"}
+_FILE_SELECTION_FIELDS = {
+    "required",
+    "allow_multiple",
+    "expected_content",
+    "supported_file_types",
+    "helpful_columns",
+    "disambiguation_hint",
+}
+_LEGACY_FILE_REQUIREMENT_FIELDS = {
+    "file_intent",
+    "needs_file",
+    "intent",
+    "accepted_file_types",
+    "expected_inputs",
+    "requires_file",
+    "required_file",
+    "default_allow_multiple",
+}
 
 
 def parse_skill_contract_file(path: str | Path) -> SkillContract:
@@ -133,6 +164,7 @@ def parse_skill_contract_file(path: str | Path) -> SkillContract:
         raise SkillContractParseError(f"Invalid skill.contract.yaml: {source_path}: {exc}") from exc
     if not isinstance(raw, Mapping):
         raise SkillContractParseError(f"Skill contract must be a mapping: {source_path}")
+    _reject_legacy_file_requirement_keys(raw, context="skill contract", source_path=source_path)
     root = source_path.parent
     contract_version = _required_string(raw, "contract_version", source_path)
     capability = _parse_capability(_required_mapping(raw, "capability", source_path), source_path)
@@ -145,6 +177,7 @@ def parse_skill_contract_file(path: str | Path) -> SkillContract:
     resources = _parse_resources(raw.get("resources"), root, source_path)
     resource_policy = _parse_resource_policy(_mapping(raw.get("resource_policy")))
     routing = _parse_routing(_mapping(raw.get("routing")))
+    file_selection = _parse_file_selection(_mapping(raw.get("file_selection")), source_path)
     return SkillContract(
         contract_version=contract_version,
         capability=capability,
@@ -156,6 +189,7 @@ def parse_skill_contract_file(path: str | Path) -> SkillContract:
         resources=resources,
         resource_policy=resource_policy,
         routing=routing,
+        file_selection=file_selection,
         source_path=source_path,
     )
 
@@ -317,6 +351,53 @@ def _parse_schema_selector(value: Mapping[str, Any], source_path: Path) -> Skill
     )
 
 
+def _parse_file_selection(value: Mapping[str, Any], source_path: Path) -> SkillFileSelection:
+    if not value:
+        return SkillFileSelection()
+    _validate_file_selection_mapping(value, context="contract file_selection", source_path=source_path)
+    return SkillFileSelection(
+        required=_bool_selection_field(value, "required", source_path),
+        allow_multiple=_bool_selection_field(value, "allow_multiple", source_path),
+        expected_content=_string_tuple(value.get("expected_content")),
+        supported_file_types=_string_tuple(value.get("supported_file_types")),
+        helpful_columns=_string_tuple(value.get("helpful_columns")),
+        disambiguation_hint=str(value.get("disambiguation_hint") or "").strip(),
+    )
+
+
+def _reject_legacy_file_requirement_keys(value: Mapping[str, Any], *, context: str, source_path: Path) -> None:
+    present = sorted(str(key) for key in value if str(key) in _LEGACY_FILE_REQUIREMENT_FIELDS)
+    if present:
+        raise SkillContractParseError(
+            f"{context} uses legacy file requirement fields {', '.join(present)}; use final file_selection fields: {source_path}"
+        )
+
+
+def _validate_file_selection_mapping(value: Mapping[str, Any], *, context: str, source_path: Path) -> None:
+    keys = {str(key) for key in value}
+    legacy = sorted(keys & _LEGACY_FILE_REQUIREMENT_FIELDS)
+    if legacy:
+        raise SkillContractParseError(
+            f"{context} uses legacy file requirement fields {', '.join(legacy)}; use final file_selection fields: {source_path}"
+        )
+    unknown = sorted(keys - _FILE_SELECTION_FIELDS)
+    if unknown:
+        raise SkillContractParseError(f"{context} has unsupported fields {', '.join(unknown)}: {source_path}")
+    for key in ("required", "allow_multiple"):
+        item = value.get(key)
+        if item not in (None, "") and not isinstance(item, bool):
+            raise SkillContractParseError(f"{context}.{key} must be boolean: {source_path}")
+
+
+def _bool_selection_field(value: Mapping[str, Any], key: str, source_path: Path) -> bool:
+    item = value.get(key)
+    if item in (None, ""):
+        return False
+    if isinstance(item, bool):
+        return item
+    raise SkillContractParseError(f"file_selection.{key} must be boolean: {source_path}")
+
+
 def _parse_resources(value: Any, root: Path, source_path: Path) -> dict[str, SkillResourceRef]:
     refs = _as_named_mappings(value, id_key="resource_id")
     parsed: dict[str, SkillResourceRef] = {}
@@ -392,16 +473,6 @@ def _required_string(value: Mapping[str, Any], key: str, source_path: Path) -> s
     if not text:
         raise SkillContractParseError(f"Skill contract requires field `{key}`: {source_path}")
     return text
-
-
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value.strip(),) if value.strip() else ()
-    if isinstance(value, list | tuple | set):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return ()
 
 
 def _safe_relative(root: Path, relative_path: str, *, source_path: Path, must_exist: bool) -> Path:

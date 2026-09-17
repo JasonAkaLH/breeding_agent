@@ -3,19 +3,91 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.orchestration.agent_loop.models import (
+    AgentFinishMetadata,
+    AgentSample,
+    AgentUsage,
+)
 from tests.api.support import APITestCase
 
 
+def _final_agent_sample(request, text: str) -> AgentSample:
+    return AgentSample(
+        sample_id=f"sample-{request.binding.model_edition}",
+        binding=request.binding,
+        visible_text=text,
+        tool_calls=(),
+        usage=AgentUsage(status="usage_unavailable"),
+        finish=AgentFinishMetadata("stop", 1),
+    )
+
+
 class ModelEditionSelectionAPITest(APITestCase):
+    @staticmethod
+    def _deepseek_reasoning() -> dict[str, Any]:
+        return {
+            "options": [
+                {"value": "minimal", "label": "最低"},
+                {"value": "high", "label": "高"},
+                {"value": "max", "label": "最高"},
+            ],
+            "thinking": {
+                "enabled": {"default": "high", "supported": ["minimal", "high", "max"]},
+                "disabled": {"default": "minimal", "supported": ["minimal", "high", "max"]},
+            },
+        }
+
+    @staticmethod
+    def _doubao_reasoning() -> dict[str, Any]:
+        return {
+            "options": [
+                {"value": "minimal", "label": "最低"},
+                {"value": "low", "label": "低"},
+                {"value": "medium", "label": "中"},
+                {"value": "high", "label": "高"},
+            ],
+            "thinking": {
+                "enabled": {"default": "high", "supported": ["minimal", "low", "medium", "high"]},
+                "disabled": {"default": "minimal", "supported": ["minimal"]},
+            },
+        }
+
     def _model_config(self) -> dict[str, Any]:
+        agent_capabilities = {
+            "supports_messages": True,
+            "roles": ["system", "user", "assistant", "tool"],
+            "supports_native_tools": True,
+            "supports_required_tool_choice": True,
+            "supports_streamed_tool_calls": True,
+        }
         return {
             "api_key": "test",
             "base_url": "http://example.test",
+            "tokenization": {"enabled": False},
             "model_editions": {
                 "default": "deepseek-v4-flash-260425",
                 "options": [
-                    {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
-                    {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro", "trim_max_tokens": 1024000},
+                    {
+                        "value": "deepseek-v4-flash-260425",
+                        "label": "DeepSeek V4 Flash",
+                        "trim_max_tokens": 1024000,
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                        "agent_capabilities": agent_capabilities,
+                    },
+                    {
+                        "value": "deepseek-v4-pro-260425",
+                        "label": "DeepSeek V4 Pro",
+                        "trim_max_tokens": 1024000,
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                        "agent_capabilities": agent_capabilities,
+                    },
+                    {
+                        "value": "doubao-seed-2-1-pro-260628",
+                        "label": "豆包Seed 2.1 Pro",
+                        "trim_max_tokens": 256000,
+                        "reasoning_efforts": self._doubao_reasoning(),
+                        "agent_capabilities": agent_capabilities,
+                    },
                 ],
             },
         }
@@ -31,11 +103,59 @@ class ModelEditionSelectionAPITest(APITestCase):
             {
                 "default_model_edition": "deepseek-v4-flash-260425",
                 "options": [
-                    {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"},
-                    {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro"},
+                    {
+                        "value": "deepseek-v4-flash-260425",
+                        "label": "DeepSeek V4 Flash",
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                    },
+                    {
+                        "value": "deepseek-v4-pro-260425",
+                        "label": "DeepSeek V4 Pro",
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                    },
+                    {
+                        "value": "doubao-seed-2-1-pro-260628",
+                        "label": "豆包Seed 2.1 Pro",
+                        "reasoning_efforts": self._doubao_reasoning(),
+                    },
                 ],
             },
         )
+
+    async def test_submit_message_rejects_disabled_disallowed_reasoning_effort(self) -> None:
+        await self.reconfigure_runtime(main_agent_llm_config=self._model_config())
+
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-model-invalid-effort",
+                "content": "你好",
+                "routing_mode": "auto",
+                "capability_id": None,
+                "model_edition": "doubao-seed-2-1-pro-260628",
+                "metadata": {"deep_thinking": False, "main_agent_reasoning_effort": "high"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("does not support reasoning_effort=high when thinking=disabled", response.text)
+
+    async def test_submit_message_allows_disabled_supported_reasoning_effort(self) -> None:
+        await self.reconfigure_runtime(main_agent_llm_config=self._model_config())
+
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-model-disabled-supported-effort",
+                "content": "你好",
+                "routing_mode": "auto",
+                "capability_id": None,
+                "model_edition": "deepseek-v4-flash-260425",
+                "metadata": {"deep_thinking": False, "main_agent_reasoning_effort": "high"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
 
     async def test_submit_message_rejects_unknown_model_edition(self) -> None:
         await self.reconfigure_runtime(main_agent_llm_config=self._model_config())
@@ -54,7 +174,43 @@ class ModelEditionSelectionAPITest(APITestCase):
 
         self.assertEqual(response.status_code, 400, response.text)
 
-    async def test_selected_model_edition_reaches_planner_and_main_agent_runtime(self) -> None:
+    async def test_runtime_rejects_configured_model_without_reasoning_efforts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing reasoning_efforts"):
+            self.build_runtime(
+                main_agent_llm_config={
+                    "api_key": "test",
+                    "base_url": "http://example.test",
+                    "model": "legacy-model-without-reasoning-config",
+                },
+                enable_conversation_memory=False,
+            )
+
+    async def test_runtime_rejects_model_edition_option_without_reasoning_efforts(self) -> None:
+        config = self._model_config()
+        config["model_editions"]["options"][0].pop("reasoning_efforts")
+        with self.assertRaisesRegex(ValueError, "missing reasoning_efforts"):
+            self.build_runtime(main_agent_llm_config=config, enable_conversation_memory=False)
+
+    async def test_endpoint_filters_non_default_non_agent_ready_edition(self) -> None:
+        config = self._model_config()
+        config["model_editions"]["options"][1].pop("agent_capabilities")
+        await self.reconfigure_runtime(main_agent_llm_config=config)
+
+        response = await self.client.get("/api/v1/config/model-editions")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [option["value"] for option in response.json()["options"]],
+            ["deepseek-v4-flash-260425", "doubao-seed-2-1-pro-260628"],
+        )
+
+    async def test_runtime_fails_closed_when_default_is_not_agent_ready(self) -> None:
+        config = self._model_config()
+        config["model_editions"]["options"][0].pop("agent_capabilities")
+        with self.assertRaisesRegex(ValueError, "Default model edition is not Agent-ready"):
+            self.build_runtime(main_agent_llm_config=config, enable_conversation_memory=False)
+
+    async def test_selected_model_edition_reaches_unified_agent_runtime(self) -> None:
         class RecordingLLM:
             instances: list["RecordingLLM"] = []
 
@@ -71,8 +227,7 @@ class ModelEditionSelectionAPITest(APITestCase):
                 thinking: bool = False,
                 reasoning_effort: str = "minimal",
             ) -> str:
-                self.calls.append({"method": "generate_text", "model_edition": self.model_edition, "prompt": prompt})
-                return json.dumps({"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]}, ensure_ascii=False)
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
 
             async def generate_text_with_thinking(
                 self,
@@ -81,17 +236,18 @@ class ModelEditionSelectionAPITest(APITestCase):
                 thinking: bool = False,
                 reasoning_effort: str = "minimal",
             ):
-                self.calls.append({"method": "generate_text_with_thinking", "model_edition": self.model_edition, "prompt": prompt})
-                if "受边界约束的高层工作流规划器" in prompt:
-                    yield {
-                        "answer": json.dumps(
-                            {"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]},
-                            ensure_ascii=False,
-                        ),
-                        "reasoning": None,
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
+                yield
+
+            async def generate_agent_sample(self, request):
+                self.calls.append(
+                    {
+                        "method": "generate_agent_sample",
+                        "model_edition": self.model_edition,
+                        "prompt": request.request_id,
                     }
-                    return
-                yield {"answer": "已使用所选模型。", "reasoning": None}
+                )
+                return _final_agent_sample(request, "已使用所选模型。")
 
             def safe_metadata(self, *, config_source: str | None = None, reasoning_effort: str | None = None) -> dict[str, Any]:
                 return {
@@ -104,7 +260,6 @@ class ModelEditionSelectionAPITest(APITestCase):
         await self.reconfigure_runtime(
             main_agent_llm_config=self._model_config(),
             main_agent_llm_client_factory=RecordingLLM,
-            enable_llm_planner=True,
         )
         response = await self.client.post(
             "/api/v1/conversations/chat-messages",
@@ -123,14 +278,12 @@ class ModelEditionSelectionAPITest(APITestCase):
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual([client.model_edition for client in RecordingLLM.instances], ["deepseek-v4-flash-260425"])
-        self.assertGreaterEqual(len(RecordingLLM.instances[0].calls), 2)
+        self.assertEqual(len(RecordingLLM.instances[0].calls), 1)
         self.assertTrue(all(call["model_edition"] == "deepseek-v4-flash-260425" for call in RecordingLLM.instances[0].calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         accepted = next(event for event in events if event.event_type == "task.accepted")
         self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-flash-260425")
-        llm_call = next(event for event in events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(llm_call.payload["model_edition"], "deepseek-v4-flash-260425")
 
     async def test_interrupt_resume_preserves_frontend_model_and_reasoning_metadata(self) -> None:
         skill_root = self.workspace / "skill-model-resume"
@@ -224,14 +377,11 @@ inputs:
                 "conversation_id": "conv-model-interrupt-resume",
                 "content": "做对角线设计",
                 "routing_mode": "force_capability",
-                "capability_id": "main_agent.respond",
+                "capability_id": "skill.field_design",
                 "model_edition": "deepseek-v4-pro-260425",
                 "metadata": {
                     "deep_thinking": True,
                     "main_agent_reasoning_effort": "max",
-                    "forced_by_slash_command": True,
-                    "slash_command": "/field-design",
-                    "soft_skill_binding": {"capability_id": "skill.field_design", "command": "/field-design"},
                 },
             },
         )
@@ -269,10 +419,6 @@ inputs:
         accepted = next(event for event in events if event.event_type == "task.accepted")
         self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-pro-260425")
         self.assertTrue(accepted.payload["deep_thinking"])
-        llm_call = next(event for event in events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(llm_call.payload["model_edition"], "deepseek-v4-pro-260425")
-        self.assertTrue(llm_call.payload["thinking_enabled"])
-        self.assertEqual(llm_call.payload["reasoning_effort"], "max")
 
     async def test_selected_model_edition_controls_runtime_trim_budget(self) -> None:
         class RecordingLLM:
@@ -285,10 +431,14 @@ inputs:
                 RecordingLLM.instances.append(self)
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
-                return json.dumps({"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]}, ensure_ascii=False)
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
 
             async def generate_text_with_thinking(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal"):
-                yield {"answer": "已使用所选模型预算。", "reasoning": None}
+                raise AssertionError("unified Agent execution must use generate_agent_sample")
+                yield
+
+            async def generate_agent_sample(self, request):
+                return _final_agent_sample(request, "已使用所选模型预算。")
 
             def safe_metadata(self, *, config_source: str | None = None, reasoning_effort: str | None = None) -> dict[str, Any]:
                 return {"provider": "fake", "model": self.model_edition, "trim_max_tokens": self.trim_max_tokens}
@@ -299,7 +449,6 @@ inputs:
         await self.reconfigure_runtime(
             main_agent_llm_config=config,
             main_agent_llm_client_factory=RecordingLLM,
-            enable_llm_planner=True,
         )
         response = await self.client.post(
             "/api/v1/conversations/chat-messages",

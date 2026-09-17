@@ -22,6 +22,10 @@ def _load_run_ocr_module():
 
 
 class OCRSkillScriptTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if not Path("skill/ocr/scripts/run_ocr.py").exists():
+            self.skipTest("external OCR skill is not present")
+
     def test_artifact_to_file_decodes_base64_binary_upload(self) -> None:
         run_ocr = _load_run_ocr_module()
         png_content = b"\x89PNG\r\n\x1a\nocr-test"

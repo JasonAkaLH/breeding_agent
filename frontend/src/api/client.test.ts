@@ -67,12 +67,58 @@ describe('createApiClient', () => {
     expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.data_lookup', display_name: '数据查询', kind: 'skill' });
   });
 
+  it('prefixes JSON requests with the configured subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ capabilities: [] }), { status: 200 }));
+    const api = createApiClient({ fetcher, baseUrl: '/seedpilot' });
+
+    await api.listCapabilities();
+
+    expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/capabilities', expect.any(Object));
+  });
+
+  it('normalizes a trailing slash in the subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' }, access_token: 'maf_tok_login' }), { status: 200 }));
+    const api = createApiClient({ fetcher, baseUrl: '/seedpilot/' });
+
+    await api.me();
+
+    expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/auth/me', expect.any(Object));
+  });
+
   it('loads model edition choices from backend config', async () => {
     const response = {
       default_model_edition: 'deepseek-v4-flash-260425',
       options: [
-        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash' },
-        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro' },
+        {
+          value: 'deepseek-v4-flash-260425',
+          label: 'DeepSeek V4 Flash',
+          reasoning_efforts: {
+            options: [
+              { value: 'minimal', label: '最低' },
+              { value: 'high', label: '高' },
+              { value: 'max', label: '最高' },
+            ],
+            thinking: {
+              enabled: { default: 'high', supported: ['minimal', 'high', 'max'] },
+              disabled: { default: 'minimal', supported: ['minimal', 'high', 'max'] },
+            },
+          },
+        },
+        {
+          value: 'deepseek-v4-pro-260425',
+          label: 'DeepSeek V4 Pro',
+          reasoning_efforts: {
+            options: [
+              { value: 'minimal', label: '最低' },
+              { value: 'high', label: '高' },
+              { value: 'max', label: '最高' },
+            ],
+            thinking: {
+              enabled: { default: 'high', supported: ['minimal', 'high', 'max'] },
+              disabled: { default: 'minimal', supported: ['minimal', 'high', 'max'] },
+            },
+          },
+        },
       ],
     };
     const fetcher = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
@@ -86,11 +132,12 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat', routingMode: 'auto' });
 
     expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/chat-messages', expect.objectContaining({ method: 'POST' }));
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.conversation_id).toBe('conv-1');
+    expect(body.routing_mode).toBe('auto');
     expect(body.capability_id).toBeNull();
     expect(body).not.toHaveProperty('model_edition');
   });
@@ -103,6 +150,7 @@ describe('createApiClient', () => {
       conversationId: 'conv-1',
       content: '用 pro 模型回答',
       mode: 'chat',
+      routingMode: 'auto',
       modelEdition: 'deepseek-v4-pro-260425',
     });
 
@@ -112,7 +160,7 @@ describe('createApiClient', () => {
   });
 
 
-  it('submits slash soft binding through main agent while preserving metadata', async () => {
+  it('submits a slash-selected Skill as a soft hint without forced metadata', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
@@ -120,61 +168,103 @@ describe('createApiClient', () => {
       conversationId: 'conv-1',
       content: '查询龙粳33',
       mode: 'chat',
-      capabilityId: 'main_agent.respond',
+      routingMode: 'hint',
+      capabilityId: 'skill.data_lookup',
       metadata: {
         upload_ids: ['upl-1'],
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
       },
     });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body).toMatchObject({
-      routing_mode: 'force_capability',
-      capability_id: 'main_agent.respond',
+      routing_mode: 'hint',
+      capability_id: 'skill.data_lookup',
       metadata: {
         upload_ids: ['upl-1'],
-        forced_by_slash_command: true,
-        slash_command: '/data-lookup',
-        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
         deep_thinking: false,
-        main_agent_reasoning_effort: 'minimal',
       },
     });
+    expect(body.metadata).not.toHaveProperty('main_agent_reasoning_effort');
+    expect(JSON.stringify(body.metadata)).not.toContain('forced');
   });
 
-  it('submits deep thinking metadata with minimal reasoning by default', async () => {
+  it('preserves the explicit MCP force routing contract', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '深入分析', mode: 'chat', deepThinking: true });
+    await api.submitMessage({
+      conversationId: 'conv-1',
+      content: '查询材料',
+      mode: 'chat',
+      routingMode: 'force_capability',
+      capabilityId: 'mcp.dispatch',
+      metadata: { mcp_server_binding: { server_id: 'mcp-data' } },
+    });
+
+    const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
+    expect(body).toMatchObject({
+      routing_mode: 'force_capability',
+      capability_id: 'mcp.dispatch',
+      metadata: { mcp_server_binding: { server_id: 'mcp-data' } },
+    });
+  });
+
+  it('rejects invalid routing and capability combinations before HTTP', async () => {
+    const fetcher = vi.fn();
+    const api = createApiClient({ fetcher });
+    const invalidInputs = [
+      { routingMode: 'auto' as const, capabilityId: 'skill.data_lookup' },
+      { routingMode: 'hint' as const, capabilityId: null },
+      { routingMode: 'hint' as const, capabilityId: 'mcp.dispatch' },
+      { routingMode: 'force_capability' as const, capabilityId: null },
+      { routingMode: 'force_capability' as const, capabilityId: 'mcp.dispatch' },
+    ];
+
+    for (const invalid of invalidInputs) {
+      await expect(api.submitMessage({
+        conversationId: 'conv-1',
+        content: 'invalid',
+        mode: 'chat',
+        ...invalid,
+      })).rejects.toMatchObject({
+        status: 0,
+        userMessage: '提交路由参数组合无效，请刷新后重试。',
+      });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('omits reasoning effort when App does not provide one', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
+    const api = createApiClient({ fetcher });
+
+    await api.submitMessage({ conversationId: 'conv-1', content: '深入分析', mode: 'chat', routingMode: 'auto', deepThinking: true });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
       deep_thinking: true,
-      main_agent_reasoning_effort: 'minimal',
     });
+    expect(body.metadata).not.toHaveProperty('main_agent_reasoning_effort');
   });
 
-  it('clamps reasoning effort to minimal when thinking is disabled', async () => {
+  it('passes App-provided reasoning effort even when thinking is disabled', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', reasoningEffort: 'max' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', routingMode: 'auto', reasoningEffort: 'max' });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
       deep_thinking: false,
-      main_agent_reasoning_effort: 'minimal',
+      main_agent_reasoning_effort: 'max',
     });
   });
 
-  it('submits selected reasoning effort only when deep thinking is enabled', async () => {
+  it('passes App-provided reasoning effort when deep thinking is enabled', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', deepThinking: true, reasoningEffort: 'max' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', routingMode: 'auto', deepThinking: true, reasoningEffort: 'max' });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
@@ -188,9 +278,22 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ detail: 'Conversation is busy' }), { status: 409 }));
     const api = createApiClient({ fetcher });
 
-    await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' })).rejects.toMatchObject({
+    await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat', routingMode: 'auto' })).rejects.toMatchObject({
       userMessage: expect.stringContaining('当前会话已有任务'),
     });
+  });
+
+  it('maps MCP binding 409 and feature 503 to specific errors', async () => {
+    for (const [status, code, expected] of [
+      [409, 'mcp_bound_server_unavailable', '所选 MCP Server 已不可用'],
+      [503, 'mcp_feature_unavailable', 'MCP 功能暂不可用'],
+    ] as const) {
+      const fetcher = vi.fn(async () => new Response(JSON.stringify({ detail: { code } }), { status }));
+      const api = createApiClient({ fetcher });
+      await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat', routingMode: 'auto' })).rejects.toMatchObject({
+        userMessage: expect.stringContaining(expected),
+      });
+    }
   });
 
   it('lists task interrupts', async () => {
@@ -199,6 +302,73 @@ describe('createApiClient', () => {
 
     await api.listInterrupts('task-1');
     expect(fetcher.mock.calls[0][0]).toBe('/api/v1/tasks/task-1/interrupts');
+  });
+
+  it('manages user MCP servers without exposing credentials in response types', async () => {
+    const server = {
+      server_id: 'srv/1',
+      display_name: '育种数据',
+      routing_description: '查询育种业务数据',
+      endpoint_url: 'https://mcp.example.test',
+      transport: 'streamable_http',
+      protocol_preference: 'auto',
+      auth_type: 'bearer',
+      auth_metadata: {},
+      enabled: true,
+      health_status: 'testing',
+      credential_configured: true,
+      config_version: 1,
+      security_version: 1,
+      last_tested_at: null,
+      last_test_error_code: null,
+      created_at: '2026-08-12T00:00:00Z',
+      updated_at: '2026-08-12T00:00:00Z',
+    };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ servers: [server] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(server), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(server), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(server), { status: 202 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const api = createApiClient({ fetcher });
+
+    await api.listMCPServers();
+    await api.createMCPServer({
+      display_name: '育种数据',
+      endpoint_url: 'https://mcp.example.test',
+      auth_type: 'bearer',
+      credential: { secret_value: 'write-only-token' },
+    });
+    await api.patchMCPServer('srv/1', { enabled: false, credential_action: 'retain' });
+    await api.testMCPServer('srv/1');
+    await expect(api.deleteMCPServer('srv/1')).resolves.toBeUndefined();
+
+    expect(fetcher).toHaveBeenNthCalledWith(1, '/api/v1/mcp/servers', expect.any(Object));
+    expect(fetcher).toHaveBeenNthCalledWith(2, '/api/v1/mcp/servers', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, '/api/v1/mcp/servers/srv%2F1', expect.objectContaining({ method: 'PATCH' }));
+    expect(fetcher).toHaveBeenNthCalledWith(4, '/api/v1/mcp/servers/srv%2F1/test', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(5, '/api/v1/mcp/servers/srv%2F1', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('manages MCP grants and safe call controls through owner-scoped paths', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ grants: [] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task/1', call_ref: 'call/1', status: 'running', accepted: true }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task/1', call_ref: 'call/1', status: 'cancelling', accepted: true }), { status: 202 }));
+    const api = createApiClient({ fetcher });
+
+    await api.listMCPGrants();
+    await api.deleteMCPGrant('grant/1');
+    await api.clearMCPServerGrants('srv/1');
+    await api.continueMCPCall('task/1', 'call/1');
+    await api.cancelMCPCall('task/1', 'call/1');
+
+    expect(fetcher).toHaveBeenNthCalledWith(2, '/api/v1/mcp/grants/grant%2F1', expect.objectContaining({ method: 'DELETE' }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, '/api/v1/mcp/servers/srv%2F1/grants', expect.objectContaining({ method: 'DELETE' }));
+    expect(fetcher).toHaveBeenNthCalledWith(4, '/api/v1/tasks/task%2F1/mcp-calls/call%2F1/continue', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(5, '/api/v1/tasks/task%2F1/mcp-calls/call%2F1/cancel', expect.objectContaining({ method: 'POST' }));
   });
 
   it('lists conversations and conversation messages for history restore', async () => {
@@ -293,6 +463,29 @@ describe('createApiClient', () => {
     expect(init.headers).toBeUndefined();
   });
 
+  it('prefixes multipart uploads with the configured subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      upload_id: 'upl-1',
+      conversation_id: 'conv-1',
+      filename: 'materials.csv',
+      content_type: 'text/csv',
+      file_type: 'csv',
+      size_bytes: 24,
+      sha256: 'hash',
+      expires_at: '2026-05-07T10:00:00',
+      preview: { row_count: 1, columns: ['ped_id'], shape: 'table' },
+    }), { status: 201 }));
+    const api = createApiClient({ fetcher, baseUrl: '/seedpilot' });
+    const file = new File(['a,b\n'], 'materials.csv', { type: 'text/csv' });
+
+    await api.uploadConversationFile('conv-1', file);
+
+    expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/conversations/uploads', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }));
+  });
+
 
 
   it('lists and deletes uploaded conversation files', async () => {
@@ -369,6 +562,29 @@ describe('createApiClient', () => {
       expect(createObjectUrl).toHaveBeenCalledOnce();
       expect(click).toHaveBeenCalledOnce();
       expect(revokeObjectUrl).toHaveBeenCalledWith('blob:artifact-download');
+    } finally {
+      URL.createObjectURL = originalCreateObjectUrl;
+      URL.revokeObjectURL = originalRevokeObjectUrl;
+      click.mockRestore();
+    }
+  });
+
+  it('prefixes artifact downloads with the configured subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response('file-content', { status: 200 }));
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    URL.createObjectURL = vi.fn(() => 'blob:artifact-download') as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
+    try {
+      const api = createApiClient({ fetcher, baseUrl: '/seedpilot' });
+
+      await api.downloadArtifact('art-file-1', 'layout.html');
+
+      expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/artifacts/art-file-1/download', expect.objectContaining({
+        method: 'GET',
+        credentials: 'same-origin',
+      }));
     } finally {
       URL.createObjectURL = originalCreateObjectUrl;
       URL.revokeObjectURL = originalRevokeObjectUrl;

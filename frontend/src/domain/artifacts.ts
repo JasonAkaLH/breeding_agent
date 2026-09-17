@@ -1,4 +1,4 @@
-import type { ArtifactResponse } from '../api/types';
+import type { ArtifactResponse, MCPBusinessResultContentMetadata, MCPBusinessResultPrimary, MCPBusinessResultView } from '../api/types';
 
 export interface DataQueryTablePreview {
   columns: string[];
@@ -34,6 +34,12 @@ export interface OcrRawTextDisplayModel {
   jobId?: string;
 }
 
+export interface MCPBusinessResultDisplayModel {
+  artifactId: string;
+  title: string;
+  result: MCPBusinessResultView;
+}
+
 export type CapabilityArtifactDisplay =
   | {
       kind: 'data_query';
@@ -46,6 +52,10 @@ export type CapabilityArtifactDisplay =
   | {
       kind: 'ocr_raw_text';
       result: OcrRawTextDisplayModel;
+    }
+  | {
+      kind: 'mcp_business_result';
+      result: MCPBusinessResultDisplayModel;
     };
 
 export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): CapabilityArtifactDisplay[] {
@@ -56,6 +66,7 @@ export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): 
     displays.push({ kind: 'data_query', result: dataQueryResult });
   }
   displays.push(...parseOcrRawTextDisplays(artifacts).map((result) => ({ kind: 'ocr_raw_text' as const, result })));
+  displays.push(...parseMCPBusinessResultDisplays(artifacts).map((result) => ({ kind: 'mcp_business_result' as const, result })));
   displays.push(...parseFileArtifactDisplays(artifacts).map((result) => ({ kind: 'file' as const, result })));
   return displays;
 }
@@ -66,7 +77,18 @@ export function summarizeCapabilityArtifactDisplays(displays: CapabilityArtifact
   if (first.kind === 'data_query') return first.result.summary;
   if (first.kind === 'file') return first.result.summary;
   if (first.kind === 'ocr_raw_text') return first.result.title;
+  if (first.kind === 'mcp_business_result') return first.result.title;
   return '';
+}
+
+export function parseMCPBusinessResultDisplays(artifacts: ArtifactResponse[]): MCPBusinessResultDisplayModel[] {
+  return artifacts
+    .filter((artifact) => artifact.artifact_type === 'mcp_result')
+    .map((artifact) => ({
+      artifactId: artifact.artifact_id,
+      title: stringOrFallback(artifact.summary, 'MCP 工具结果'),
+      result: parseMCPBusinessResultView(artifact.mcp_business_result),
+    }));
 }
 
 export function parseOcrRawTextDisplays(artifacts: ArtifactResponse[]): OcrRawTextDisplayModel[] {
@@ -149,7 +171,7 @@ export function parseDataQueryArtifacts(artifacts: ArtifactResponse[]): DataQuer
 
 export function parseAssistantTextArtifact(artifacts: ArtifactResponse[]): string | null {
   const textArtifacts = artifacts.filter((artifact) => artifact.artifact_type === 'text');
-  const textArtifact = textArtifacts.find(isMainAgentTextArtifact) ?? textArtifacts[0];
+  const textArtifact = textArtifacts.find(isAgentFinalTextArtifact) ?? textArtifacts[0];
   if (!textArtifact) return null;
   return textArtifact.storage_ref || textArtifact.summary || null;
 }
@@ -177,7 +199,6 @@ function isDataQueryDisplayArtifact(artifact: ArtifactResponse): boolean {
     metadata.domain_kind === 'data_query'
     || metadata.artifact_family === 'data_query'
     || artifact.artifact_id.includes('data_query')
-    || artifact.producer_node_id.includes('data_query')
     || isPreviewArtifact(artifact)
   );
 }
@@ -202,10 +223,9 @@ function artifactMetadata(artifact: ArtifactResponse): Record<string, unknown> {
   }
 }
 
-function isMainAgentTextArtifact(artifact: ArtifactResponse): boolean {
-  return artifact.producer_node_id.includes('main_agent.respond')
-    || artifact.artifact_id.includes('main_agent_response')
-    || artifact.artifact_id.includes('main_agent_text');
+function isAgentFinalTextArtifact(artifact: ArtifactResponse): boolean {
+  return artifact.artifact_id.startsWith('agent-artifact:')
+    && artifact.artifact_id.endsWith(':final');
 }
 
 function stringOrFallback(value: string | null | undefined, fallback: string): string {
@@ -247,6 +267,135 @@ function arrayOfRecords(value: unknown): Record<string, unknown>[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+const MCP_VIEW_KEYS = new Set([
+  'schema', 'availability', 'outcome', 'primary', 'unavailable_reason',
+  'supplemental_texts', 'content_metadata', 'projection_truncated',
+]);
+const MCP_UNAVAILABLE_REASONS = new Set([
+  'safe_hide', 'projection_missing', 'historical_authority_invalid', 'projection_invalid',
+]);
+
+function parseMCPBusinessResultView(value: unknown): MCPBusinessResultView {
+  if (!isRecord(value) || !hasOnlyKeys(value, MCP_VIEW_KEYS)) {
+    return unavailableMCPResult('projection_invalid');
+  }
+  if (value.schema !== 'maf.mcp.business_result_view.v1' || value.outcome !== 'succeeded') {
+    return unavailableMCPResult('projection_invalid');
+  }
+  if (value.availability === 'unavailable') {
+    if (
+      typeof value.unavailable_reason !== 'string'
+      || !MCP_UNAVAILABLE_REASONS.has(value.unavailable_reason)
+      || !isNullish(value.primary)
+      || !isNullish(value.supplemental_texts)
+      || !isNullish(value.content_metadata)
+      || value.projection_truncated !== false
+    ) {
+      return unavailableMCPResult('projection_invalid');
+    }
+    return value as MCPBusinessResultView;
+  }
+  if (
+    value.availability !== 'ready'
+    || !isNullish(value.unavailable_reason)
+    || typeof value.projection_truncated !== 'boolean'
+    || !isMCPPrimary(value.primary)
+    || !isOptionalStringList(value.supplemental_texts)
+    || !isOptionalMetadataList(value.content_metadata)
+  ) {
+    return unavailableMCPResult('projection_invalid');
+  }
+  return value as MCPBusinessResultView;
+}
+
+function unavailableMCPResult(reason: 'safe_hide' | 'projection_invalid'): MCPBusinessResultView {
+  return {
+    schema: 'maf.mcp.business_result_view.v1',
+    availability: 'unavailable',
+    outcome: 'succeeded',
+    unavailable_reason: reason,
+    projection_truncated: false,
+  };
+}
+
+function isMCPPrimary(value: unknown): value is MCPBusinessResultPrimary {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false;
+  if (value.kind === 'structured') {
+    return hasOnlyKeys(value, new Set(['kind', 'value', 'truncated']))
+      && value.truncated === false
+      && isJSONValue(value.value);
+  }
+  if (value.kind === 'structured_preview') {
+    return hasOnlyKeys(value, new Set(['kind', 'preview', 'truncated']))
+      && typeof value.preview === 'string'
+      && value.truncated === true;
+  }
+  if (value.kind === 'text') {
+    return hasOnlyKeys(value, new Set(['kind', 'text', 'truncated']))
+      && typeof value.text === 'string'
+      && typeof value.truncated === 'boolean';
+  }
+  return value.kind === 'empty'
+    && hasOnlyKeys(value, new Set(['kind', 'message', 'truncated']))
+    && typeof value.message === 'string'
+    && value.truncated === false;
+}
+
+function isOptionalStringList(value: unknown): boolean {
+  return isNullish(value) || (Array.isArray(value) && value.every((item) => typeof item === 'string'));
+}
+
+function isOptionalMetadataList(value: unknown): value is MCPBusinessResultContentMetadata[] | null | undefined {
+  return isNullish(value) || (Array.isArray(value) && value.every(isMCPMetadata));
+}
+
+function isMCPMetadata(value: unknown): value is MCPBusinessResultContentMetadata {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false;
+  if (value.kind === 'image' || value.kind === 'audio' || value.kind === 'embedded_blob_resource') {
+    return hasOnlyKeys(value, new Set(['kind', 'mime_type', 'byte_size', 'sha256']))
+      && typeof value.mime_type === 'string'
+      && Number.isSafeInteger(value.byte_size)
+      && (value.byte_size as number) >= 0
+      && typeof value.sha256 === 'string'
+      && /^sha256:[0-9a-f]{64}$/.test(value.sha256);
+  }
+  if (value.kind === 'resource_link') {
+    return hasOnlyKeys(value, new Set(['kind', 'name', 'title', 'description', 'mime_type', 'uri_scheme']))
+      && typeof value.name === 'string'
+      && optionalNullableString(value.title)
+      && optionalNullableString(value.description)
+      && optionalNullableString(value.mime_type)
+      && validUriScheme(value.uri_scheme);
+  }
+  return value.kind === 'embedded_text_resource'
+    && hasOnlyKeys(value, new Set(['kind', 'mime_type', 'uri_scheme']))
+    && optionalNullableString(value.mime_type)
+    && validUriScheme(value.uri_scheme);
+}
+
+function isJSONValue(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJSONValue);
+  return isRecord(value) && Object.values(value).every(isJSONValue);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: Set<string>): boolean {
+  return Object.keys(value).every((key) => keys.has(key));
+}
+
+function isNullish(value: unknown): boolean {
+  return value === null || value === undefined;
+}
+
+function optionalNullableString(value: unknown): boolean {
+  return isNullish(value) || typeof value === 'string';
+}
+
+function validUriScheme(value: unknown): boolean {
+  return typeof value === 'string' && /^[a-z][a-z0-9+.-]{0,31}$/.test(value);
 }
 
 function pickColumns(row: Record<string, unknown>, columns: string[]): Record<string, unknown> {

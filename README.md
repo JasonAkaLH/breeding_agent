@@ -8,11 +8,10 @@
 |---|---|
 | `AGENTS.md` | 仓库级 AI Agent 协作、编码、测试与文档约束。 |
 | `CHANGELOG.md` | 仓库级变更日志；开始任何分析、设计、编码或文档修改前应先阅读最近条目。 |
-| `Skill构建指南.md` | 项目级 Skill 构建、manifest、脚本执行与产物约束。 |
 | `requirements.txt` | `multi_agent` Conda 环境依赖快照。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/` 其他文件 | Capability 接入指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
-| `skill/` | 历史内置 Skill 目录；当前生产镜像不再追踪/打包该目录，后端默认扫描容器内 `/app/skill/**/SKILL.md`，部署时应把独立 Skill 仓库的 `skills/` 挂载到 `/app/skill`。 |
+| `skill/` | 本仓库不再跟踪该目录；仅可作为本地、Git-ignored 的外部 Skill 兼容检出目录。后端 runtime 默认扫描容器内 `/app/skill/**/SKILL.md`，开发部署应把独立 Skill 仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录只读挂载到 `/app/skill`。`GET /api/v1/capabilities` 会在返回前执行受控 Skill refresh check。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |
@@ -21,7 +20,7 @@
 | `src/capabilities/main_agent/` | `main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。 |
 | `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Skill 兼容层、MCP Python facade、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
 | `native/` | Rust workspace；当前包含 Core/Lifecycle、Runtime Store/Event/Dispatcher、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter、Skill Runtime policy / SkillSandboxService + tonic gRPC binding + `maf-skill-sandbox` 二进制入口与受限进程执行基线（client version / handler allowlist、相对 argv、sandbox root、timeout、stdin 上限、stdout/stderr 并发有界 drain、`env_clear` 最小环境、process-group cleanup）、MCP Runtime sidecar contract/kernel + `maf-mcp-runtime-sidecar` 二进制入口、Artifact/Auth/DataAccess/Audit 等 Rust contract/kernel crates 与 sidecar proto。部分 Python facade 已消费 Rust contract resource limits；Core/Lifecycle、Skill Runtime policy 与 Artifact/Auth/DataAccess/Audit safety kernels 已具备预构建 PyO3 module 加载 facade、Rust JSON bridge、`maturin` wheel build/import smoke 路径；RuntimeSidecar Python h2c / mTLS gRPC client 与 SkillSandbox Python h2c gRPC client 已可连接外部 Rust sidecar binary 做 runtime store/event/dispatcher RPC 与 Skill policy/sandbox RPC；MCP Runtime 目前仍是 Phase 0/1 sidecar contract/facade + evidence gate，MCP tool 真实执行仍走 Python legacy client，Phase 2-5 canonical runtime operations 待完成；RuntimeSidecar、Skill Runtime 与 MCP Runtime 均具备 artifact provenance / benchmark / promotion / ops / decommission gate + Python fail-closed validator；真实 production shadow / benchmark / ops drill / allowlist promotion evidence 仍按 PRD phase 门禁推进。 |
-| `/data/peihai/vibe-breeding-main/skills` | 生产服务器 Skill 仓库挂载源；由 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 目录提供，容器内挂载到 `/app/skill`。 |
+| `/data/peihai/vibe-breeding-dev/skills/<skill-name>/` | 开发服务器 Skill bundle 来源路径；由独立 Skill 仓库提供，容器内对应 `/app/skill/<skill-name>/`。后端会扫描 `/app/skill/**/SKILL.md` 并构建 public `skill.*` capability。 |
 | `scripts/` | 显式手工 smoke / 维护脚本，包含主代理真实 LLM smoke 与全栈开发启动脚本。 |
 | `tests/` | 后端分层 unittest 回归，包括 core、storage、lifecycle、orchestration、integrations、capabilities、api、e2e、observability。 |
 | `frontend/` | React + TypeScript + Vite + Ant Design 前端业务对话台，含 API/SSE client、状态 reducer、通用 data-query / file artifact 渲染与 Vitest 测试。 |
@@ -39,8 +38,8 @@ conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
-# 项目级可移除 Skill 自测：在独立 Skill 仓库对应 bundle 目录下运行其 tests/ 目录
-(cd /data/peihai/vibe-breeding-main/skills/<skill-name> && conda run -n multi_agent python -m unittest discover -s tests -p 'test_*.py')
+# 项目级可移除 Skill 自测：在对应 Skill bundle 目录下运行其 tests/ 目录
+(cd /data/peihai/vibe-breeding-dev/skills/<skill-name> && conda run -n multi_agent python -m unittest discover -s tests -p 'test_*.py')
 conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
@@ -104,36 +103,38 @@ CI 中的 Ubuntu 22.04 x86_64 / Python 3.13 wheel job 还会用 `cargo metadata 
 - 全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime）：
 
 ```bash
+export MAF_MASTER_KEY_FILE=/absolute/path/to/maf-master.key
 python scripts/run_fullstack_dev.py
 ```
 
-真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随外部 Skill 仓库 bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
+直接运行 backend（包括 `--fake-backend`）也必须提供固定的 `MAF_MASTER_KEY_FILE`；该文件格式和权限与下文 Docker Compose 使用的根密钥相同。真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随独立 Skill 仓库 `/data/peihai/vibe-breeding-dev/skills/<skill-name>/` bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
 
-- Docker Compose 打包 / 启动（会把本地 git-ignored `config.yaml` 复制进 backend 镜像；该文件包含 provider / 数据库等敏感配置时只应在受控环境构建和分发镜像）：
+- 本地开发 Docker Compose 打包 / 启动（backend镜像不包含本地git-ignored `config.yaml`；该文件只在运行时只读挂载）：
+
+`prod` 分支的业务源码与本次迁入的 `main@3ff5aef` 保持一致。生产部署使用本地、Git-ignored 的 `docker_cmd/docker_cmd_prod.md` 及生产外部配置；下列 Compose 保留 main 的本地开发配置，不作为生产启动入口。生产镜像使用 `-prod:0.1.23`，前后端端口为 `51999/51888`，Skill 沿用服务器已发布的 `/data/peihai/vibe-breeding-main/skills`，数据库为 `biobin_db`。源码同步不代表已发布镜像、升级生产数据库或完成生产启动；main 现有的生产启动检查保持不变。
 
 ```bash
+git clone git@gitee.com:wellionx/vibe-breeding.git /data/peihai/vibe-breeding-dev
+umask 177
+openssl rand -base64 32 > /absolute/path/to/maf-master.key
+export MAF_MASTER_KEY_FILE_HOST=/absolute/path/to/maf-master.key
+export MAF_CONFIG_FILE_HOST=/absolute/path/to/config.yaml
 docker compose build
 docker compose up
 ```
 
-部署前先在服务器准备独立 Skill 仓库，并保持 bundle 位于仓库的 `skills/` 目录：
+Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sidecar:local`（Rust RuntimeSidecar，以 Unix socket 提供 Version/Compatibility/Readiness 和 SQLite 状态）、`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。`MAF_MASTER_KEY_FILE_HOST` 必须是宿主机固定在线根密钥文件的绝对路径，Compose 只读挂载到 backend 的 `/run/secrets/maf-master.key`，不复制进镜像，也不挂载给 frontend 或 Runtime Sidecar。`MAF_CONFIG_FILE_HOST`必须是宿主机现有`config.yaml`的绝对路径；Compose禁止自动创建缺失源，并只读挂载到backend `/app/config.yaml`。main服务器固定使用`/data/peihai/seedpilot_config_dev.yaml`，该文件应为非symlink普通文件、单link、非空且mode为`0600`。根密钥必须和 SQLite 数据分开备份；丢失后既有登录 token、MCP credential 与 recovery 私有数据无法恢复。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；backend runtime 数据和 Sidecar socket/SQLite 分别使用 named volume。Skill bundle 从独立仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录读取；Compose 默认使用 `/data/peihai/vibe-breeding-dev/skills:/app/skill:ro` 把开发环境 Skill 仓库的 `skills/` 子目录只读挂载到 backend 容器 `/app/skill`，backend 会扫描 `/app/skill/**/SKILL.md`；更新 Skill 时在宿主机执行 `cd /data/peihai/vibe-breeding-dev && git pull`，下一次 `GET /api/v1/capabilities` 会触发刷新。
 
-```bash
-git clone git@gitee.com:wellionx/vibe-breeding.git /data/peihai/vibe-breeding-main
-```
-
-Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/seedpilot/api/`、`/seedpilot/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999/seedpilot/`，经前端 nginx 访问 API 文档 `http://127.0.0.1:51999/seedpilot/api-doc`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`，Skill bundle 通过 `/data/peihai/vibe-breeding-main/skills:/app/skill:ro` 只读挂载进入 backend 容器。
-
-`.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
+`.dockerignore` 会把根`config.yaml`、`tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
 
 若通过远端域名对浏览器开放该 Compose 栈，应在反向代理 / LB 层提供 HTTPS；当前认证只通过 `Authorization: Bearer <access-token>` 传递，前端将登录返回的 token 保存在浏览器 localStorage 中并为 REST、multipart upload 与 SSE fetch-stream 注入 Authorization。
 
 运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、Skill runtime 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 仍可通过显式 `config` dict 注入覆盖，不应在业务节点执行阶段重复读取 `config.yaml`。
 MySQL 只读连接配置也放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
-认证相关部署配置不得写入 tracked 文件：跨站 REST API 只通过 `MAF_API_CORS_ALLOWED_ORIGINS` 配置逗号分隔的显式 origin allowlist，不允许 `*`；token hash pepper 使用 `MAF_AUTH_TOKEN_HASH_SECRET`，当 `MAF_API_ENV` / `MAF_ENV` / `APP_ENV` 为 `production` / `prod` 或显式设置 `MAF_AUTH_TOKEN_HASH_SECRET_REQUIRED=1` 时，缺失 secret 必须 fail closed；未配置 secret 的开发/测试进程只使用进程内随机 pepper，重启后既有 token 自动失效。不要把 token 放入 URL query 或业务请求体。
+认证相关部署配置不得写入 tracked 文件：跨站 REST API 只通过 `MAF_API_CORS_ALLOWED_ORIGINS` 配置逗号分隔的显式 origin allowlist，不允许 `*`；登录 token 的持久 HMAC key 由 `/run/secrets/maf-master.key` 的 Auth token 领域子密钥派生，不再接受独立文本 pepper，正常 token refresh 不改变根密钥，也不影响 MCP credential。不要把 token 放入 URL query 或业务请求体。
 敏感信息（数据库连接、账号密码、API key、token、provider `base_url`、secret 等）不得写入、提交或推送到 tracked 文件；开发 / 手工 smoke 统一放入本地 `config.yaml` 或部署环境变量，并由启动 bootstrap 写入 `MAF_CONFIG_*` / 专用环境变量供 runtime 消费。若发现待提交内容包含敏感信息，应先迁移到配置或环境变量并从本次提交中移除；历史提交清理只在明确要求时执行。
 同一个 API runtime 中的 `*_config_path` 必须指向同一个启动配置文件；默认生产路径使用一个主代理 LLM runtime；Skill 内部 LLM service 只能通过受控 allowlisted adapter 复用该 runtime。显式组件级 `config` dict、client factory 或 fake generator 仍作为测试/定制 seam 保留。
-RuntimeSidecar 连接配置当前通过部署环境变量 `MAF_RUNTIME_SIDECAR_ENDPOINT` 注入，支持 `http://127.0.0.1:<port>` loopback h2c、`https://host:<port>` mTLS gRPC 与 `unix:///absolute/path` Unix domain socket 内部连接；可选 `MAF_RUNTIME_SIDECAR_ALLOWED_HOSTS`、`MAF_RUNTIME_SIDECAR_MTLS_ENABLED`、`MAF_RUNTIME_SIDECAR_TLS_CA_PATH`、`MAF_RUNTIME_SIDECAR_TLS_CERT_PATH`、`MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` 与 `MAF_RUNTIME_SIDECAR_TLS_SERVER_NAME` 用于 endpoint allowlist / client-side mTLS 身份门禁。`MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH` 与 `MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH` 可提供部署流水线生成的 sidecar artifact manifest / allowlist；任何 RuntimeSidecar component 进入 `enforce` 且配置 endpoint 时缺少这两个文件会 fail closed。`maf-runtime-sidecar --serve <addr> --tls-cert <cert> --tls-key <key> --client-ca <ca>` 或 server-side `MAF_RUNTIME_SIDECAR_TLS_CERT_PATH` / `MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` / `MAF_RUNTIME_SIDECAR_TLS_CLIENT_CA_PATH` 可启用 mTLS；跨主机访问缺少 mTLS 仍 fail-closed，artifact provenance allowlist 仍按 Rust PRD 门禁推进。`MAF_RUST_RUNTIME_STORE_MODE=shadow` / `MAF_RUST_EVENT_LOG_MODE=shadow` / `MAF_RUST_TASK_DISPATCHER_MODE=shadow` 下，task submit、node transition、cancellation token write、event append 与 Skill/MCP bundle revision pin/release 仍以 Python legacy 写入作为用户可见结果，并旁路调用已配置 RuntimeSidecar client，将脱敏 fingerprint / error code / duration 写入 `runtime.sidecar_shadow_diff` 审计事件。
+RuntimeSidecar 连接配置当前通过部署环境变量 `MAF_RUNTIME_SIDECAR_ENDPOINT` 注入，支持 `http://127.0.0.1:<port>` loopback h2c、`https://host:<port>` mTLS gRPC 与 `unix:///absolute/path` Unix domain socket 内部连接；可选 `MAF_RUNTIME_SIDECAR_ALLOWED_HOSTS`、`MAF_RUNTIME_SIDECAR_MTLS_ENABLED`、`MAF_RUNTIME_SIDECAR_TLS_CA_PATH`、`MAF_RUNTIME_SIDECAR_TLS_CERT_PATH`、`MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` 与 `MAF_RUNTIME_SIDECAR_TLS_SERVER_NAME` 用于 endpoint allowlist / client-side mTLS 身份门禁。`MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH` 与 `MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH` 可提供部署流水线生成的 sidecar artifact manifest / allowlist；任何 RuntimeSidecar component 进入 `enforce` 且配置 endpoint 时缺少这两个文件会 fail closed。唯一例外是 CP7-A 开发 Compose：`MAF_API_ENV=dev`、精确 Unix socket、三项 RuntimeSidecar authority mode 均为 `off`、user MCP enforce 100% 且 legacy assembly off 时允许省略 manifest/allowlist，但仍由 Sidecar healthcheck 完成 Version/Compatibility/Readiness 握手；该例外不适用于 production、TCP 或 Rust authority shadow/enforce。`maf-runtime-sidecar --serve <addr> --tls-cert <cert> --tls-key <key> --client-ca <ca>` 或 server-side `MAF_RUNTIME_SIDECAR_TLS_CERT_PATH` / `MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` / `MAF_RUNTIME_SIDECAR_TLS_CLIENT_CA_PATH` 可启用 mTLS；跨主机访问缺少 mTLS 仍 fail-closed，artifact provenance allowlist 仍按 Rust PRD 门禁推进。`MAF_RUST_RUNTIME_STORE_MODE=shadow` / `MAF_RUST_EVENT_LOG_MODE=shadow` / `MAF_RUST_TASK_DISPATCHER_MODE=shadow` 下，task submit、node transition、cancellation token write、event append 与 Skill/MCP bundle revision pin/release 仍以 Python legacy 写入作为用户可见结果，并旁路调用已配置 RuntimeSidecar client，将脱敏 fingerprint / error code / duration 写入 `runtime.sidecar_shadow_diff` 审计事件。
 Core/Lifecycle PyO3 配置当前通过 `MAF_RUST_CORE_MODE` / `MAF_RUST_LIFECYCLE_MODE` 控制 `off|shadow|enforce`，预构建 module 名可用 `MAF_CORE_LIFECYCLE_PYO3_MODULE` 覆盖，默认 `maf_core_lifecycle_pyo3`。`enforce` 下缺少预构建 PyO3 module、contract/schema/error/transition hash 或 supported_features 不匹配会 fail closed；`shadow` 下仍以 Python facade / checked-in Rust contract artifact 结果为用户可见结果。runtime 启动和请求路径不得调用 `maturin` / Cargo。
 SkillSandbox 连接配置当前通过部署环境变量 `MAF_SKILL_SANDBOX_ENDPOINT` 与 `MAF_SKILL_SANDBOX_ROOT` 注入；`MAF_SKILL_SANDBOX_ARTIFACT_MANIFEST_PATH` 与 `MAF_SKILL_SANDBOX_ARTIFACT_ALLOWLIST_PATH` 可提供部署流水线生成的 sandbox sidecar artifact manifest / allowlist，`MAF_RUST_SKILL_RUNTIME_MODE=enforce` 且配置 endpoint 时缺少这两个文件会 fail closed。Python `SkillSandboxGrpcClient` 会校验 h2c gRPC payload 精确长度、拒绝缺失/短头/多余/截断消息，并按 Rust contract 校验 server 返回的 client version range 与可选 artifact provenance allowlist。Skill policy trust gate 会优先尝试加载 `MAF_SKILL_POLICY_PYO3_MODULE`（默认 `maf_skill_runtime_pyo3`）指向的预构建 PyO3 policy module，校验 contract 后再调用 Rust policy；未安装该 module 时继续使用已配置 SkillSandbox policy client。`native/crates/maf_skill_runtime_pyo3` 只提供 CI / 部署预构建用 wheel source 与本地 smoke 路径，runtime 启动和请求路径不得调用 `maturin` / Cargo。Skill Runtime 生产 promotion 证据现在可通过 Rust contract 驱动的 Python validator 校验 artifact provenance、benchmark、shadow/enforce threshold、ops readiness 与 legacy decommission readiness；`scripts/validate_prd04_skill_runtime_evidence.py` 只作为进入 `enforce` / 下线 legacy 的 fail-closed 门禁，不代表当前仓库已经具备真实 production provenance 或生产观测证据。`MAF_RUST_SKILL_RUNTIME_MODE=enforce` 时平台服务 trust gate 与脚本型 Skill 都必须配置 Rust policy / SkillSandbox client，否则 fail closed，不回退 Python trust gate / subprocess legacy。`shadow` 模式下平台服务仍以 Python legacy 结果为准，并记录不含用户输入正文、secret 或真实 payload 的 Rust policy diff 审计事件。
 

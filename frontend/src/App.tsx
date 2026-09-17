@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
-import { CopyOutlined, ExclamationCircleFilled, ReloadOutlined } from '@ant-design/icons';
-import { Alert, Button, Card, ConfigProvider, Drawer, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
+import { CopyOutlined, ExclamationCircleFilled, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, ConfigProvider, Drawer, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
+import { mergeUploadsById, uploadAnswerDisplayText, type DraftAttachment, type UploadedDraftAttachment } from './domain/attachments';
 import { pickComposerPlaceholder } from './domain/composerPlaceholders';
+import { withoutSetValue } from './domain/collections';
+import { deriveMCPServerCommands, isMCPServerInput, mcpServerMenuCandidates, mcpServerSubmitIntent, parseDirectMCPServerCommand, type MCPServerCommand } from './domain/mcpServerCommands';
+import { interruptAcceptsUpload, interruptAnswerPlaceholder, interruptSheetSelectionField, interruptSubmitMetadata, isInterruptKeepOpenResponse, isNaturalLanguageInterrupt, selectedSheetPayload, sheetSelectionDisplayText, type PendingInterrupt } from './domain/interrupts';
 import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
 import {
@@ -19,12 +23,22 @@ import {
   markTaskCompleted,
   markTaskFailed,
   markWaitingInputRequired,
+  foldMCPResultArtifactProjections,
+  parseCapabilityFallbackNotice,
+  prepareTaskEventResync,
   taskProgressDisplayText,
+  type CapabilityFallbackNotice,
+  type MCPApprovalDecision,
   type SkillStatusLine,
   type TaskEventState,
 } from './domain/taskEvents';
 import { DataQueryResultCard } from './components/DataQueryResultCard';
+import { ConversationFileCard, DraftAttachmentCard } from './components/AttachmentCards';
 import { MarkdownText } from './components/MarkdownText';
+import { MCPApprovalDialog } from './components/MCPApprovalDialog';
+import { InterruptComposerStatus, InterruptQuestionText } from './components/InterruptPresentation';
+import { MCPResultArtifactNotice, MCPRuntimeStatus } from './components/MCPRuntimeStatus';
+import { MCPSettingsPanel } from './components/MCPSettingsPanel';
 import SlashCommandMenu from './components/SlashCommandMenu';
 import './styles.css';
 
@@ -44,78 +58,39 @@ interface AppProps {
   waitingInputCheckDelayMs?: number;
 }
 
-type MessageRole = 'user' | 'assistant';
+type MessageRole = 'user' | 'assistant' | 'system';
 type ActivityNoticeStatus = 'pending' | 'failed' | 'cancelled';
 
 interface ConversationMessage {
   id: string;
+  kind: 'chat' | 'file_upload';
   role: MessageRole;
   content: string;
   mode: ChatMode;
+  taskId?: string;
+  metadata?: Record<string, unknown>;
+  mcpServerBadge?: MCPServerBadge;
   reasoningRequested?: boolean;
   reasoningComplete?: boolean;
   reasoningContent?: string;
   activityText?: string;
   activityStatus?: ActivityNoticeStatus;
+  fallbackNotice?: CapabilityFallbackNotice;
   skillStatuses?: SkillStatusLine[];
   artifactDisplays?: CapabilityArtifactDisplay[];
+  mcpResultArtifactProjections?: MCPResultArtifactProjection[];
   finalContentLoaded?: boolean;
   replyCompleted?: boolean;
   interruptPrompt?: PendingInterrupt;
 }
 
-type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
+type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'taskId' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'fallbackNotice' | 'skillStatuses' | 'artifactDisplays' | 'mcpResultArtifactProjections' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
 type FileArtifactResult = Extract<CapabilityArtifactDisplay, { kind: 'file' }>['result'];
-
-interface PendingInterrupt {
-  taskId: string;
-  interruptId: string;
-  question: string;
-  requiredFields: Record<string, unknown>;
-  mode: ChatMode;
-  naturalLanguage?: boolean;
-}
-
-interface SheetSelectionField {
-  required_upload_ids: string[];
-  options_by_upload_id: Record<string, string[]>;
-  labels_by_upload_id?: Record<string, string>;
-}
-
-interface SlotCollectionRefSlot {
-  name: string;
-  label: string;
-  type: string;
-  status: string;
-  requiredNow: boolean;
-}
-
-interface SlotCollectionRefField {
-  collectionId: string;
-  slots: SlotCollectionRefSlot[];
-}
 
 interface TransientNotice {
   id: number;
   message: string;
   type: 'success' | 'warning';
-}
-
-type DraftAttachmentStatus = 'draft' | 'uploading' | 'failed';
-
-interface DraftAttachment {
-  localId: string;
-  file: File;
-  filename: string;
-  contentType: string;
-  sizeBytes: number;
-  status: DraftAttachmentStatus;
-  errorMessage?: string;
-}
-
-interface UploadedDraftAttachment {
-  draft: DraftAttachment;
-  upload: UploadFileResponse;
 }
 
 const COMPOSER_READY_PHASES = new Set(['idle', 'completed', 'failed', 'cancelled']);
@@ -185,13 +160,68 @@ const CANCEL_RECONCILE_MAX_ATTEMPTS = 10;
 const TRANSIENT_NOTICE_DURATION_MS = 5_000;
 const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
-const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
+const TERMINAL_TASK_EVENT_TYPES = new Set([
+  'task.completed',
+  'task.failed',
+  'task.cancelled',
+  'agent.run.completed',
+  'agent.run.failed',
+  'agent.run.cancelled',
+]);
+const TERMINAL_PROJECTION_EVENT_TYPES = new Set([
+  'mcp.execution_status_unknown',
+  'mcp.execution_status_resolution',
+  'mcp.late_terminal_result_recovered',
+  'mcp.result_artifact_projection',
+]);
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
-const REASONING_EFFORT_OPTIONS: { label: string; value: ReasoningEffort }[] = [
-  { label: '最低', value: 'minimal' },
-  { label: '高', value: 'high' },
-  { label: '最高', value: 'max' },
-];
+function validReasoningConfig(option: ModelEditionOption | null | undefined): option is ModelEditionOption {
+  const config = option?.reasoning_efforts;
+  if (!config || !Array.isArray(config.options) || config.options.length === 0 || !config.thinking) return false;
+  const values = config.options.map((effort) => effort.value);
+  const catalog = new Set(values);
+  if (catalog.size !== values.length || values.some((value) => !value)) return false;
+  const policies = [config.thinking.enabled, config.thinking.disabled];
+  if (policies.some((policy) => !policy || !Array.isArray(policy.supported))) return false;
+  const [enabled, disabled] = policies;
+  if (enabled.supported.length === 0) return false;
+  for (const policy of policies) {
+    const supported = new Set(policy.supported);
+    if (supported.size !== policy.supported.length) return false;
+    if (policy.supported.some((value) => !catalog.has(value))) return false;
+    if (policy.supported.length > 0 && (!policy.default || !supported.has(policy.default))) return false;
+    if (policy.supported.length === 0 && policy.default !== null) return false;
+  }
+  const referenced = new Set([...enabled.supported, ...disabled.supported]);
+  return values.every((value) => referenced.has(value));
+}
+
+function reasoningPolicyFor(option: ModelEditionOption, thinkingEnabled: boolean) {
+  return thinkingEnabled ? option.reasoning_efforts.thinking.enabled : option.reasoning_efforts.thinking.disabled;
+}
+
+function supportedReasoningEfforts(
+  option: ModelEditionOption | null | undefined,
+  thinkingEnabled: boolean,
+) {
+  if (!validReasoningConfig(option)) return [];
+  const supported = new Set(reasoningPolicyFor(option, thinkingEnabled).supported);
+  return option.reasoning_efforts.options.filter((effort) => supported.has(effort.value));
+}
+
+function forceDeepThinking(option: ModelEditionOption | null | undefined): boolean {
+  return validReasoningConfig(option) && reasoningPolicyFor(option, false).supported.length === 0;
+}
+
+function resolveEffectiveReasoningEffort(
+  option: ModelEditionOption | null | undefined,
+  current: ReasoningEffort,
+  thinkingEnabled: boolean,
+): ReasoningEffort {
+  if (!validReasoningConfig(option)) return current;
+  const policy = reasoningPolicyFor(option, thinkingEnabled);
+  return policy.supported.includes(current) ? current : (policy.default ?? current);
+}
 const AGRICULTURE_THEME: ThemeConfig = {
   algorithm: theme.defaultAlgorithm,
   token: {
@@ -242,13 +272,31 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [defaultModelEdition, setDefaultModelEdition] = useState<ModelEdition | null>(null);
   const [modelEdition, setModelEdition] = useState<ModelEdition | null>(null);
   const [deepThinking, setDeepThinking] = useState(false);
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('minimal');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
+  const selectedModelEdition = useMemo(
+    () => modelEditionOptions.find((option) => option.value === modelEdition) ?? null,
+    [modelEdition, modelEditionOptions],
+  );
+  const selectedModelReasoningConfigValid = modelEdition === null || validReasoningConfig(selectedModelEdition);
+  const selectedModelForcesThinking = forceDeepThinking(selectedModelEdition);
+  const effectiveDeepThinking = selectedModelForcesThinking ? true : deepThinking;
+  const effectiveReasoningEffort = resolveEffectiveReasoningEffort(
+    selectedModelEdition,
+    reasoningEffort,
+    effectiveDeepThinking,
+  );
+  const reasoningEffortOptions = supportedReasoningEfforts(selectedModelEdition, effectiveDeepThinking)
+    .map((option) => ({ label: option.label, value: option.value }));
   const [input, setInput] = useState('');
   const composerPlaceholder = useMemo(() => pickComposerPlaceholder(), [conversationId]);
   const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
   const [selectedSkillCommand, setSelectedSkillCommand] = useState<SlashCommand | null>(null);
+  const [mcpServerCommands, setMCPServerCommands] = useState<MCPServerCommand[]>([]);
+  const [mcpServerMenuOpen, setMCPServerMenuOpen] = useState(false);
+  const [mcpServerMenuActiveIndex, setMCPServerMenuActiveIndex] = useState(0);
+  const [selectedMCPServerCommand, setSelectedMCPServerCommand] = useState<MCPServerCommand | null>(null);
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [pendingUploads, setPendingUploads] = useState<UploadFileResponse[]>([]);
   const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
@@ -257,12 +305,16 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [deletingUploadIds, setDeletingUploadIds] = useState<Set<string>>(() => new Set());
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [taskState, setTaskState] = useState<TaskEventState>(createInitialTaskEventState());
+  const taskStateRef = useRef(taskState);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null);
   const currentTaskIdRef = useRef<string | null>(null);
   const currentAssistantIdRef = useRef<string | null>(null);
   const taskPhaseRef = useRef(taskState.phase);
   const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
+  const [mcpSettingsOpen, setMCPSettingsOpen] = useState(false);
+  const [mcpApprovalSubmitting, setMCPApprovalSubmitting] = useState(false);
+  const [mcpBusyCallRef, setMCPBusyCallRef] = useState<string | null>(null);
   const [conversationHistory, setConversationHistory] = useState<ConversationSummaryResponse[]>([]);
   const [restoredWorkspaceConversationId, setRestoredWorkspaceConversationId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -348,7 +400,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   useEffect(() => {
     taskPhaseRef.current = taskState.phase;
-  }, [taskState.phase]);
+    taskStateRef.current = taskState;
+  }, [taskState]);
 
   useEffect(() => {
     let mounted = true;
@@ -389,6 +442,27 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     };
   }, [api, authUser]);
 
+  const refreshMCPServerCommands = useCallback(async () => {
+    if (!authUser) {
+      setMCPServerCommands([]);
+      setMCPServerMenuOpen(false);
+      setSelectedMCPServerCommand(null);
+      return;
+    }
+    try {
+      const result = await api.listMCPServers();
+      setMCPServerCommands(deriveMCPServerCommands(result.servers));
+    } catch (error) {
+      setMCPServerCommands([]);
+      setMCPServerMenuOpen(false);
+      showTransientNotice(`MCP Server 列表加载失败：${friendlyError(error)}`);
+    }
+  }, [api, authUser]);
+
+  useEffect(() => {
+    void refreshMCPServerCommands();
+  }, [refreshMCPServerCommands]);
+
   useEffect(() => {
     if (!authUser) {
       setModelEditionOptions([]);
@@ -420,6 +494,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mounted = false;
     };
   }, [api, authUser]);
+
+  useEffect(() => {
+    if (!selectedModelEdition || !validReasoningConfig(selectedModelEdition)) return;
+    if (selectedModelForcesThinking && !deepThinking) {
+      setDeepThinking(true);
+      return;
+    }
+    if (effectiveReasoningEffort !== reasoningEffort) {
+      setReasoningEffort(effectiveReasoningEffort);
+    }
+  }, [deepThinking, effectiveReasoningEffort, reasoningEffort, selectedModelEdition, selectedModelForcesThinking]);
 
   useEffect(() => {
     if (!transientNotice) return undefined;
@@ -643,7 +728,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       const loadedMessages = await loadConversationMessages(targetConversationId);
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-      setMessages(loadedMessages);
+      setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
       await restoreCurrentConversationTask(summary, generation);
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       setRestoredWorkspaceConversationId(targetConversationId);
@@ -681,6 +766,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   function shouldIgnoreNonTerminalTaskEvent(eventType: string): boolean {
     if (eventType === 'task.cancellation_requested') return false;
+    if (TERMINAL_PROJECTION_EVENT_TYPES.has(eventType)) return false;
     return !TERMINAL_TASK_EVENT_TYPES.has(eventType)
       && CANCELLATION_OR_TERMINAL_PHASES.has(taskPhaseRef.current);
   }
@@ -697,6 +783,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       currentCapabilityId: null,
       currentCapabilityLabel: null,
       currentActivityText: null,
+      mcp: { ...state.mcp, approval: null },
       errorMessage: null,
     };
   }
@@ -722,7 +809,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function reconcileTerminalTaskStatus(
-    task: Pick<TaskSummaryResponse, 'task_id' | 'status'>,
+    task: Pick<TaskSummaryResponse, 'task_id' | 'status' | 'mcp_terminal_projection' | 'mcp_result_artifact_projections'>,
     expectedTaskId: string,
     assistantId: string,
     generation: number,
@@ -730,7 +817,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   ): Promise<boolean> {
     if (task.task_id !== expectedTaskId) return false;
     if (!isCurrentRestoreGeneration(generation, targetConversationId)) return true;
+    mergeTaskResultArtifactProjections(task.mcp_result_artifact_projections);
     if (!isTerminalTaskStatus(task.status)) return false;
+    if (task.status === 'failed' && task.mcp_terminal_projection) {
+      taskPhaseRef.current = 'failed';
+      localTaskRuntimeActiveRef.current = false;
+      setTaskState((state) => ({
+        ...state,
+        mcp: { ...state.mcp, approval: null },
+      }));
+      updateCurrentTaskId(expectedTaskId);
+      return true;
+    }
     clearEventStreamReconnectTimer();
     setPendingInterrupt(null);
     if (task.status === 'completed') {
@@ -783,13 +881,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       return;
     }
     if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-    if (isTerminalTaskStatus(task.status)) {
+    const hasTerminalProjection = task.status === 'failed' && Boolean(task.mcp_terminal_projection);
+    if (isTerminalTaskStatus(task.status) && !hasTerminalProjection) {
       clearCurrentTaskRuntime({ closeSubscription: true });
       if (task.status === 'completed') {
         try {
           const loadedMessages = await loadConversationMessages(targetConversationId);
           if (isCurrentRestoreGeneration(generation, targetConversationId)) {
-            setMessages(loadedMessages);
+            setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
           }
         } catch {
           if (isCurrentRestoreGeneration(generation, targetConversationId)) {
@@ -801,15 +900,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       return;
     }
-    if (!isActiveTaskStatus(task.status)) {
+    if (!isActiveTaskStatus(task.status) && !hasTerminalProjection) {
       showTransientNotice('任务状态暂不支持恢复，请刷新历史消息。');
       clearCurrentTaskRuntime({ closeSubscription: true });
       return;
     }
-    const restoringState = createRestoringTaskState();
+    const restoringState = hasTerminalProjection
+      ? { ...createRestoringTaskState(), phase: 'failed' as const, statusText: '任务执行结果无法确认', currentActivityText: null }
+      : createRestoringTaskState();
+    const restoredProjections = foldMCPResultArtifactProjections(
+      task.mcp_result_artifact_projections ?? [],
+    ) ?? [];
+    restoringState.mcp = {
+      ...restoringState.mcp,
+      resultArtifactProjections: restoredProjections,
+    };
     const restoredAssistantId = `restored-assistant-${taskId}`;
     const restoredAssistantMessage: ConversationMessage = {
       id: restoredAssistantId,
+      kind: 'chat',
       role: 'assistant',
       content: '',
       mode,
@@ -826,8 +935,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     updateCurrentTaskId(taskId);
     updateCurrentAssistantId(restoredAssistantId);
     setPendingInterrupt(null);
+    taskPhaseRef.current = restoringState.phase;
+    taskStateRef.current = restoringState;
+    localTaskRuntimeActiveRef.current = !hasTerminalProjection;
     setTaskState(restoringState);
     subscribeToTask(taskId, restoredAssistantId, generation, targetConversationId);
+  }
+
+  function resyncTaskEvents(taskId: string) {
+    const assistantId = currentAssistantIdRef.current;
+    if (!assistantId || currentTaskIdRef.current !== taskId) return;
+    setTaskState((state) => prepareTaskEventResync(state));
+    subscribeToTask(taskId, assistantId, restoreGenerationRef.current, conversationIdRef.current);
   }
 
   async function handleLogin(result: AuthTokenResponse) {
@@ -842,14 +961,15 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setMessages([]);
     setDraftAttachments([]);
     setPendingUploads([]);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     clearCurrentTaskRuntime({ closeSubscription: true });
   }
 
   async function handleLogout() {
     await api.logout().catch(() => undefined);
     clearStoredAuth();
-    const targetConversationId = conversationId;
-    const generation = beginRestoreGeneration();
+    beginRestoreGeneration();
     subscriptionRef.current?.close();
     setAuthUser(null);
     initializedWorkspaceConversationIdRef.current = null;
@@ -859,6 +979,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setConversationHistory([]);
     setDraftAttachments([]);
     setPendingUploads([]);
+    setMCPServerCommands([]);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     updateCurrentTaskId(null);
     updateCurrentAssistantId(null);
     setPendingInterrupt(null);
@@ -868,7 +991,96 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   function handleAccountSettings() {
-    showTransientNotice('用户账户设置功能会在后续版本开放。');
+    setMCPSettingsOpen(true);
+  }
+
+  async function handleMCPApprovalDecision(decision: MCPApprovalDecision) {
+    const approval = taskState.mcp.approval;
+    const targetConversationId = conversationIdRef.current;
+    const taskId = currentTaskIdRef.current;
+    const assistantId = currentAssistantIdRef.current;
+    const generation = restoreGenerationRef.current;
+    if (!approval?.pending || !approval.interruptId || !targetConversationId || !taskId || !assistantId) return;
+    const approvalClientMessageId = `mcp-approval-answer-v1-${approval.interruptId}`;
+    setMCPApprovalSubmitting(true);
+    try {
+      subscribeToTask(taskId, assistantId, generation, targetConversationId);
+      const response = await api.submitMessage({
+        conversationId: targetConversationId,
+        content: decision === 'deny' ? '拒绝本次 MCP 工具调用' : decision === 'always_allow' ? '始终允许此 MCP 工具' : '仅允许本次 MCP 工具调用',
+        mode,
+        routingMode: 'auto',
+        capabilityId: null,
+        clientMessageId: approvalClientMessageId,
+        metadata: {
+          interrupt_id: approval.interruptId,
+          mcp_tool_approval: decision,
+        },
+      });
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      const resumedTaskId = response.task_id || taskId;
+      const currentApproval = taskStateRef.current.mcp.approval;
+      const sameApproval = currentApproval?.interruptId === approval.interruptId;
+      const samePendingApproval = sameApproval && currentApproval.pending;
+      if (
+        currentTaskIdRef.current !== taskId
+        || currentAssistantIdRef.current !== assistantId
+        || taskPhaseRef.current === 'loading_artifacts'
+        || CANCELLATION_OR_TERMINAL_PHASES.has(taskPhaseRef.current)
+        || (taskPhaseRef.current === 'waiting_for_input' && !samePendingApproval)
+      ) return;
+      if (resumedTaskId === taskId && !samePendingApproval) return;
+      if (resumedTaskId !== taskId && !sameApproval) return;
+      localTaskRuntimeActiveRef.current = true;
+      taskPresentationModesRef.current.set(resumedTaskId, mode);
+      updateCurrentTaskId(resumedTaskId);
+      setPendingInterrupt(null);
+      updateAssistantMessage(assistantId, {
+        taskId: resumedTaskId,
+        interruptPrompt: undefined,
+      });
+      setTaskState((state) => ({
+        ...state,
+        phase: 'running',
+        statusText: 'MCP 工具授权已提交',
+        mcp: {
+          ...state.mcp,
+          approval: state.mcp.approval
+            && state.mcp.approval.interruptId === approval.interruptId
+            ? { ...state.mcp.approval, decision, pending: false }
+            : state.mcp.approval,
+        },
+      }));
+      if (resumedTaskId !== taskId) {
+        subscribeToTask(resumedTaskId, assistantId, generation, targetConversationId);
+      }
+    } catch (error) {
+      showTransientNotice(friendlyError(error));
+    } finally {
+      setMCPApprovalSubmitting(false);
+    }
+  }
+
+  async function handleContinueMCPCall(taskId: string, callRef: string) {
+    setMCPBusyCallRef(callRef);
+    try {
+      await api.continueMCPCall(taskId, callRef);
+    } catch (error) {
+      showTransientNotice(friendlyError(error));
+    } finally {
+      setMCPBusyCallRef(null);
+    }
+  }
+
+  async function handleCancelMCPCall(taskId: string, callRef: string) {
+    setMCPBusyCallRef(callRef);
+    try {
+      await api.cancelMCPCall(taskId, callRef);
+    } catch (error) {
+      showTransientNotice(friendlyError(error));
+    } finally {
+      setMCPBusyCallRef(null);
+    }
   }
 
   function resetConversationWorkspace(nextConversationId: string) {
@@ -880,6 +1092,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setActiveConversationId(nextConversationId);
     setMessages([]);
     setInput('');
+    setSelectedSkillCommand(null);
+    setSlashMenuOpen(false);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     setModelEdition(defaultModelEdition);
     setDraftAttachments([]);
     setPendingUploads([]);
@@ -941,11 +1157,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
-      setDeletingConversationIds((current) => {
-        const next = new Set(current);
-        next.delete(targetConversationId);
-        return next;
-      });
+      setDeletingConversationIds((current) => withoutSetValue(current, targetConversationId));
     }
   }
 
@@ -970,11 +1182,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
-      setRenamingConversationIds((current) => {
-        const next = new Set(current);
-        next.delete(targetConversationId);
-        return next;
-      });
+      setRenamingConversationIds((current) => withoutSetValue(current, targetConversationId));
     }
   }
 
@@ -987,30 +1195,56 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     : Math.min(slashMenuActiveIndex, slashCandidates.length - 1);
   const directSlashParse = useMemo(() => parseDirectSlashCommand(input, skillCommands), [input, skillCommands]);
   const slashInputBlocked = !selectedSkillCommand && (directSlashParse.kind === 'not_found' || directSlashParse.kind === 'conflict');
+  const mcpServerCandidates = useMemo(
+    () => (mcpServerMenuOpen ? mcpServerMenuCandidates(input, mcpServerCommands) : []),
+    [input, mcpServerCommands, mcpServerMenuOpen],
+  );
+  const normalizedMCPServerMenuActiveIndex = mcpServerCandidates.length === 0
+    ? 0
+    : Math.min(mcpServerMenuActiveIndex, mcpServerCandidates.length - 1);
+  const directMCPServerParse = useMemo(
+    () => parseDirectMCPServerCommand(input, mcpServerCommands),
+    [input, mcpServerCommands],
+  );
+  const mcpServerInputBlocked = !selectedMCPServerCommand
+    && (directMCPServerParse.kind === 'not_found' || directMCPServerParse.kind === 'conflict');
+  const mcpServerReady = selectedMCPServerCommand !== null || directMCPServerParse.kind === 'matched';
+  const mcpServerHasTaskText = selectedMCPServerCommand !== null
+    ? Boolean(input.trim())
+    : directMCPServerParse.kind === 'matched' && Boolean(directMCPServerParse.content.trim());
   const pendingInterruptAcceptsUpload = pendingInterrupt !== null && interruptAcceptsUpload(pendingInterrupt);
   const savedFileCount = pendingUploads.length;
   const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && draftAttachments.length > 0;
   const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
-  const canSubmitComposer = !slashInputBlocked && (
-    Boolean(input.trim())
+  const canSubmitComposer = selectedModelReasoningConfigValid && !slashInputBlocked && !mcpServerInputBlocked && (
+    (Boolean(input.trim()) && !isMCPServerInput(input))
     || selectedSkillCommand !== null
     || directSlashParse.kind === 'matched'
+    || (mcpServerReady && (mcpServerHasTaskText || draftAttachments.length > 0))
     || canSubmitUploadOnlyInterruptAnswer
   );
   const slashMenuEmptyMessage = skillCommands.length === 0 ? '暂无可用 Skill' : '未找到 Skill';
 
   function handleComposerInputChange(value: string) {
     setInput(value);
-    if (isSlashInput(value)) {
+    if (isMCPServerInput(value)) {
+      setMCPServerMenuOpen(true);
+      setMCPServerMenuActiveIndex(0);
+      setSlashMenuOpen(false);
+    } else if (isSlashInput(value)) {
       setSlashMenuOpen(true);
       setSlashMenuActiveIndex(0);
+      setMCPServerMenuOpen(false);
     } else {
       setSlashMenuOpen(false);
+      setMCPServerMenuOpen(false);
     }
   }
 
   function selectSlashCommand(command: SlashCommand) {
     setSelectedSkillCommand(command);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     setInput((current) => {
       const parsed = parseDirectSlashCommand(current, [command]);
       if (parsed.kind === 'matched') return parsed.content;
@@ -1020,6 +1254,66 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setSlashMenuOpen(false);
     setSlashMenuActiveIndex(0);
     clearTransientNotice();
+  }
+
+  function selectMCPServerCommand(command: MCPServerCommand) {
+    setSelectedMCPServerCommand(command);
+    setSelectedSkillCommand(null);
+    setInput((current) => {
+      const parsed = parseDirectMCPServerCommand(current, [command]);
+      if (parsed.kind === 'matched') return parsed.content;
+      if (isMCPServerInput(current)) return '';
+      return current;
+    });
+    setMCPServerMenuOpen(false);
+    setMCPServerMenuActiveIndex(0);
+    setSlashMenuOpen(false);
+    clearTransientNotice();
+  }
+
+  function handleMCPServerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (!mcpServerMenuOpen && !isMCPServerInput(input)) return false;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMCPServerMenuOpen(false);
+      return true;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setMCPServerMenuOpen(true);
+      setMCPServerMenuActiveIndex((current) => (
+        mcpServerCandidates.length === 0 ? 0 : (current + 1) % mcpServerCandidates.length
+      ));
+      return true;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setMCPServerMenuOpen(true);
+      setMCPServerMenuActiveIndex((current) => (
+        mcpServerCandidates.length === 0
+          ? 0
+          : (current - 1 + mcpServerCandidates.length) % mcpServerCandidates.length
+      ));
+      return true;
+    }
+    if (event.key === 'Enter') {
+      const parsed = parseDirectMCPServerCommand(input, mcpServerCommands);
+      if (parsed.kind === 'matched' && parsed.content.trim()) return false;
+      if (mcpServerMenuOpen && mcpServerCandidates.length > 0) {
+        event.preventDefault();
+        selectMCPServerCommand(mcpServerCandidates[normalizedMCPServerMenuActiveIndex]);
+        return true;
+      }
+      if (parsed.kind === 'not_found' || parsed.kind === 'conflict') {
+        event.preventDefault();
+        setMCPServerMenuOpen(true);
+        showTransientNotice(parsed.kind === 'conflict'
+          ? `命令 ${parsed.command} 存在同名 Server，请从列表中点选。`
+          : `未找到 MCP Server：${parsed.command}`);
+        return true;
+      }
+    }
+    return false;
   }
 
   function handleSlashKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
@@ -1062,26 +1356,44 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleSubmit() {
-    const intent = slashSubmitIntent(input, skillCommands, selectedSkillCommand);
-    if (intent.kind === 'blocked') {
-      setSlashMenuOpen(true);
-      showTransientNotice(intent.reason === 'conflict' ? `命令 ${intent.command} 存在冲突，请从列表中选择具体 Skill。` : `未找到 Skill：${intent.command}`);
+    const mcpIntent = mcpServerSubmitIntent(input, mcpServerCommands, selectedMCPServerCommand);
+    if (mcpIntent.kind === 'blocked') {
+      setMCPServerMenuOpen(true);
+      showTransientNotice(mcpIntent.reason === 'conflict'
+        ? `命令 ${mcpIntent.command} 存在同名 Server，请从列表中点选。`
+        : `未找到 MCP Server：${mcpIntent.command}`);
       return;
     }
-    const content = intent.content;
-    const forcedCommand = intent.kind === 'ready' ? intent.command : null;
-    const forcedCapabilityId = intent.kind === 'ready' ? intent.capabilityId : null;
-    const forcedMetadata = intent.kind === 'ready' ? intent.metadata : {};
+    const slashIntent = mcpIntent.kind === 'auto'
+      ? slashSubmitIntent(input, skillCommands, selectedSkillCommand)
+      : { kind: 'auto' as const, content: input.trim() };
+    if (slashIntent.kind === 'blocked') {
+      setSlashMenuOpen(true);
+      showTransientNotice(slashIntent.reason === 'conflict' ? `命令 ${slashIntent.command} 存在冲突，请从列表中选择具体 Skill。` : `未找到 Skill：${slashIntent.command}`);
+      return;
+    }
+    const commandKind = mcpIntent.kind === 'ready' ? 'mcp' : slashIntent.kind === 'ready' ? 'skill' : null;
+    const activeIntent = mcpIntent.kind === 'ready' ? mcpIntent : slashIntent;
+    const content = activeIntent.content;
+    const selectedCommand = activeIntent.kind === 'ready' ? activeIntent.command : null;
+    const capabilityId = activeIntent.kind === 'ready' ? activeIntent.capabilityId : null;
+    const routingMode = activeIntent.kind === 'ready' ? activeIntent.routingMode : 'auto';
+    const commandMetadata = mcpIntent.kind === 'ready' ? mcpIntent.metadata : {};
     const targetConversationId = authUser ? (conversationId || loadOrCreateConversationId(authUser.username)) : '';
     if (!authUser || !targetConversationId || active) return;
     if (!conversationId) {
       setActiveConversationId(targetConversationId);
     }
-    if (!content && intent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
+    if (!content && commandKind === 'mcp' && draftAttachments.length === 0) {
+      showTransientNotice('请说明任务或添加附件。');
+      return;
+    }
+    if (!content && activeIntent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
     clearTransientNotice();
-    if (pendingInterrupt && intent.kind === 'ready') {
-      setSlashMenuOpen(true);
-      showTransientNotice('当前任务正在等待补充信息。请先回答补充问题或取消当前任务，再使用新的 Skill 命令。');
+    if (pendingInterrupt && activeIntent.kind === 'ready') {
+      if (commandKind === 'mcp') setMCPServerMenuOpen(true);
+      else setSlashMenuOpen(true);
+      showTransientNotice(`当前任务正在等待补充信息。请先回答补充问题或取消当前任务，再使用新的${commandKind === 'mcp' ? ' MCP Server' : ' Skill'}命令。`);
       return;
     }
     if (pendingInterrupt) {
@@ -1093,23 +1405,46 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       uploadedDrafts = await uploadDraftAttachments(targetConversationId, draftSnapshot);
     } catch {
+      if (commandKind === 'mcp') {
+        setSelectedMCPServerCommand(null);
+        setMCPServerMenuOpen(false);
+      }
       return;
     }
+    const refreshedMessages = uploadedDrafts.length > 0
+      ? await loadConversationMessages(targetConversationId).catch(() => null)
+      : null;
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     initializedWorkspaceConversationIdRef.current = targetConversationId;
     setRestoredWorkspaceConversationId(targetConversationId);
-    const displayContent = content || (intent.kind === 'ready' ? intent.command.command : content);
-    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode };
+    const displayContent = content || (commandKind === 'mcp' ? '处理附加文件' : selectedCommand?.command ?? content);
+    const optimisticMCPBadge: MCPServerBadge | undefined = commandKind === 'mcp' && selectedCommand && 'serverId' in selectedCommand
+      ? {
+          server_id: selectedCommand.serverId,
+          display_name: selectedCommand.displayName,
+          command: selectedCommand.command,
+          binding_mode: 'explicit_command',
+        }
+      : undefined;
+    const userMessage: ConversationMessage = {
+      id: makeClientId('user'),
+      kind: 'chat',
+      role: 'user',
+      content: displayContent,
+      mode,
+      mcpServerBadge: optimisticMCPBadge,
+    };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
+      kind: 'chat',
       role: 'assistant',
       content: '',
       mode,
-      reasoningRequested: deepThinking,
+      reasoningRequested: effectiveDeepThinking,
       activityText: taskProgressDisplayText(createSubmittingTaskState()),
     };
-    setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
+    setMessages((current) => [...(refreshedMessages ?? current), userMessage, applyPendingAssistantPatch(assistantMessage)]);
     updateCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState(createSubmittingTaskState());
@@ -1119,37 +1454,51 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         conversationId: targetConversationId,
         content,
         mode,
+        routingMode,
         modelEdition: modelEdition ?? undefined,
-        deepThinking,
-        reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
-        capabilityId: forcedCapabilityId,
+        deepThinking: effectiveDeepThinking,
+        reasoningEffort: effectiveReasoningEffort,
+        capabilityId,
         metadata: {
           ...(uploadedDrafts.length > 0 ? { upload_ids: uploadedDrafts.map((item) => item.upload.upload_id) } : {}),
-          ...forcedMetadata,
+          ...commandMetadata,
         },
       });
-      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-      taskPresentationModesRef.current.set(accepted.task_id, mode);
-      updateCurrentTaskId(accepted.task_id);
-      markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
+      if (commandKind === 'mcp') {
+        setSelectedMCPServerCommand(null);
+        setMCPServerMenuOpen(false);
+      }
       setSelectedSkillCommand(null);
       setSlashMenuOpen(false);
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      taskPresentationModesRef.current.set(accepted.task_id, mode);
+      updateAssistantMessage(assistantMessage.id, { taskId: accepted.task_id });
+      updateCurrentTaskId(accepted.task_id);
+      markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
       subscribeToTask(accepted.task_id, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
       localTaskRuntimeActiveRef.current = false;
       const message = friendlyError(error);
       const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
       resetDraftAttachmentStatus(draftSnapshot);
-      if (forcedCommand) {
-        setSelectedSkillCommand(null);
-        setSlashMenuOpen(false);
-        void api.listCapabilities()
-          .then((result) => setSkillCommands(deriveSlashCommands(result.capabilities)))
-          .catch(() => undefined);
+      if (selectedCommand) {
+        if (commandKind === 'mcp') {
+          setSelectedMCPServerCommand(null);
+          setMCPServerMenuOpen(false);
+          void refreshMCPServerCommands();
+        } else {
+          setSelectedSkillCommand(null);
+          setSlashMenuOpen(false);
+          void api.listCapabilities()
+            .then((result) => setSkillCommands(deriveSlashCommands(result.capabilities)))
+            .catch(() => undefined);
+        }
       }
       setTaskState((state) => markTaskFailed(state, message));
       const rollbackMessage = rollbackFailed ? ' 部分文件已保存到当前对话，可在文件面板删除。' : '';
-      showTransientNotice(forcedCommand ? `${message}${rollbackMessage} Skill 列表可能已更新，请重新选择。` : `${message}${rollbackMessage}`);
+      showTransientNotice(selectedCommand
+        ? `${message}${rollbackMessage} ${commandKind === 'mcp' ? 'MCP Server' : 'Skill'}列表可能已更新，请重新选择。`
+        : `${message}${rollbackMessage}`);
     }
   }
 
@@ -1263,14 +1612,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       await api.deleteConversationUpload(conversationId, upload.upload_id);
       setPendingUploads((current) => current.filter((item) => item.upload_id !== upload.upload_id));
+      const loadedMessages = await loadConversationMessages(conversationId).catch(() => null);
+      if (loadedMessages) setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
-      setDeletingUploadIds((current) => {
-        const next = new Set(current);
-        next.delete(upload.upload_id);
-        return next;
-      });
+      setDeletingUploadIds((current) => withoutSetValue(current, upload.upload_id));
     }
   }
 
@@ -1330,21 +1677,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch {
       return;
     }
+    const refreshedMessages = uploadedDrafts.length > 0
+      ? await loadConversationMessages(targetConversationId).catch(() => null)
+      : null;
     const uploads = uploadedDrafts.map((item) => item.upload);
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     const resumeProgressText = '补充信息已提交，正在继续任务';
     const displayContent = content || uploadAnswerDisplayText(uploads) || sheetSelectionDisplayText(sheetField, selectedSheets);
-    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode: interrupt.mode };
+    const userMessage: ConversationMessage = { id: makeClientId('user'), kind: 'chat', role: 'user', content: displayContent, mode: interrupt.mode };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
+      kind: 'chat',
       role: 'assistant',
       content: '',
       mode: interrupt.mode,
-      reasoningRequested: deepThinking,
+      reasoningRequested: effectiveDeepThinking,
       activityText: resumeProgressText,
     };
-    setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
+    setMessages((current) => [...(refreshedMessages ?? current), userMessage, applyPendingAssistantPatch(assistantMessage)]);
     updateCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState((state) => ({
@@ -1361,9 +1712,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         conversationId: targetConversationId,
         content,
         mode: interrupt.mode,
+        routingMode: 'auto',
+        capabilityId: null,
         modelEdition: modelEdition ?? undefined,
-        deepThinking,
-        reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
+        deepThinking: effectiveDeepThinking,
+        reasoningEffort: effectiveReasoningEffort,
         clientMessageId: userMessage.id,
         metadata: interruptSubmitMetadata(interrupt, uploads, selectedSheets),
       });
@@ -1384,6 +1737,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           }),
         );
         const keepOpenTaskId = response.task_id || interrupt.taskId;
+        updateAssistantMessage(assistantMessage.id, { taskId: keepOpenTaskId });
         let refreshedInterrupt = interrupt;
         try {
           const interrupts = await api.listInterrupts(keepOpenTaskId);
@@ -1404,15 +1758,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         setPendingInterrupt(refreshedInterrupt);
         updateCurrentTaskId(keepOpenTaskId);
         taskPresentationModesRef.current.set(keepOpenTaskId, interrupt.mode);
-        if (draftSnapshot.length > 0) {
-          const sentDraftIds = new Set(draftSnapshot.map((attachment) => attachment.localId));
-          setDraftAttachments((current) => current.filter((attachment) => !sentDraftIds.has(attachment.localId)));
-          setPendingUploads((current) => mergeUploadsById(current, uploadedDrafts.map((item) => item.upload)));
-        }
+        markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
         return;
       }
       const resumedTaskId = response.task_id || interrupt.taskId;
       taskPresentationModesRef.current.set(resumedTaskId, interrupt.mode);
+      updateAssistantMessage(assistantMessage.id, { taskId: resumedTaskId });
       markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
       setPendingInterrupt(null);
       updateCurrentTaskId(resumedTaskId);
@@ -1455,9 +1806,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     generation: number,
     targetConversationId: string,
   ) {
-    if (TERMINAL_TASK_EVENT_TYPES.has(event.event_type)) {
-      clearWaitingInputRetryTimers();
-    }
     if (event.event_type === 'task.cancellation_requested') {
       taskPhaseRef.current = 'cancelling';
       clearWaitingInputRetryTimers();
@@ -1467,66 +1815,95 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (shouldIgnoreNonTerminalTaskEvent(event.event_type)) {
       return;
     }
-    setTaskState((previous) => {
-      if (CANCELLATION_OR_TERMINAL_PHASES.has(previous.phase) && !TERMINAL_TASK_EVENT_TYPES.has(event.event_type)) {
-        return previous;
+    const previous = taskStateRef.current;
+    if (CANCELLATION_OR_TERMINAL_PHASES.has(previous.phase)
+      && !TERMINAL_TASK_EVENT_TYPES.has(event.event_type)
+      && !TERMINAL_PROJECTION_EVENT_TYPES.has(event.event_type)) {
+      return;
+    }
+    const next = applyTaskEvent(previous, event);
+    taskStateRef.current = next;
+    setTaskState(next);
+    const eventConsumed = !previous.seenEventIds.includes(event.event_id)
+      && next.seenEventIds.includes(event.event_id);
+    const failedJustConsumed = eventConsumed && previous.phase !== 'failed' && next.phase === 'failed';
+    const cancelledJustConsumed = eventConsumed && previous.phase !== 'cancelled' && next.phase === 'cancelled';
+    const completedJustConsumed = eventConsumed
+      && (event.event_type === 'task.completed' || event.event_type === 'agent.run.completed');
+    if (eventConsumed && event.event_type === 'mcp.tool_approval_decided') {
+      const interruptId = event.payload.interrupt_id;
+      // The event can arrive before the approval HTTP response returns.
+      setPendingInterrupt((current) => current?.taskId === taskId && current.interruptId === interruptId ? null : current);
+      setMessages((current) => current.map((message) => (
+        message.id === assistantId
+        && message.interruptPrompt?.taskId === taskId
+        && message.interruptPrompt.interruptId === interruptId
+          ? { ...message, interruptPrompt: undefined }
+          : message
+      )));
+    }
+    const previousProgressText = taskProgressDisplayText(previous);
+    const nextProgressText = taskProgressDisplayText(next);
+    if (next.skillStatuses !== previous.skillStatuses) {
+      updateAssistantMessage(assistantId, { skillStatuses: next.skillStatuses });
+    }
+    if (next.assistantText !== previous.assistantText) {
+      updateAssistantStreamingContent(assistantId, next.assistantText);
+      if (next.assistantText) {
+        updateAssistantMessage(assistantId, { activityText: undefined });
       }
-      const next = applyTaskEvent(previous, event);
-      const previousProgressText = taskProgressDisplayText(previous);
-      const nextProgressText = taskProgressDisplayText(next);
-      if (next.skillStatuses !== previous.skillStatuses) {
-        updateAssistantMessage(assistantId, { skillStatuses: next.skillStatuses });
-      }
-      if (next.assistantText !== previous.assistantText) {
-        updateAssistantStreamingContent(assistantId, next.assistantText);
-        if (next.assistantText) {
-          updateAssistantMessage(assistantId, { activityText: undefined });
-        }
-      }
-      if (next.reasoningText !== previous.reasoningText) {
-        updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
-      }
-      if (next.phase === 'failed') {
-        updateAssistantMessage(assistantId, {
-          activityText: next.errorMessage ?? next.statusText,
-          activityStatus: 'failed',
-        });
-      } else if (nextProgressText !== previousProgressText) {
-        updateAssistantMessage(assistantId, {
-          activityText: assistantActivityText(next, nextProgressText),
-          activityStatus: next.phase === 'cancelled' ? 'cancelled' : 'pending',
-        });
-      }
-      if (event.event_type === 'task.failed') {
-        taskPhaseRef.current = 'failed';
-        setPendingInterrupt(null);
-        updateAssistantMessage(assistantId, { interruptPrompt: undefined });
-        localTaskRuntimeActiveRef.current = false;
+    }
+    if (next.reasoningText !== previous.reasoningText) {
+      updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
+    }
+    if (next.fallbackNotice !== previous.fallbackNotice) {
+      updateAssistantMessage(assistantId, { fallbackNotice: next.fallbackNotice ?? undefined, taskId });
+    }
+    if (next.phase === 'failed') {
+      updateAssistantMessage(assistantId, {
+        activityText: next.errorMessage ?? next.statusText,
+        activityStatus: 'failed',
+      });
+    } else if (nextProgressText !== previousProgressText) {
+      updateAssistantMessage(assistantId, {
+        activityText: assistantActivityText(next, nextProgressText),
+        activityStatus: next.phase === 'cancelled' ? 'cancelled' : 'pending',
+      });
+    }
+    if (failedJustConsumed) {
+      taskPhaseRef.current = 'failed';
+      clearWaitingInputRetryTimers();
+      setPendingInterrupt(null);
+      updateAssistantMessage(assistantId, { interruptPrompt: undefined });
+      localTaskRuntimeActiveRef.current = false;
+      if (!next.mcp.executionUnknown && !next.mcp.availability) {
         subscriptionRef.current?.close();
         subscriptionRef.current = null;
         updateCurrentTaskId(null);
         restoredTaskIdsRef.current.delete(taskId);
         taskPresentationModesRef.current.delete(taskId);
       }
-      if (event.event_type === 'task.cancelled') {
-        taskPhaseRef.current = 'cancelled';
-        setPendingInterrupt(null);
-        updateAssistantMessage(assistantId, { interruptPrompt: undefined });
-        localTaskRuntimeActiveRef.current = false;
-        subscriptionRef.current?.close();
-        subscriptionRef.current = null;
-        updateCurrentTaskId(null);
-        restoredTaskIdsRef.current.delete(taskId);
-        taskPresentationModesRef.current.delete(taskId);
-      }
-      return next;
-    });
-    if (event.event_type === 'task.completed') {
+    }
+    if (cancelledJustConsumed) {
+      taskPhaseRef.current = 'cancelled';
+      clearWaitingInputRetryTimers();
+      setPendingInterrupt(null);
+      updateAssistantMessage(assistantId, { interruptPrompt: undefined });
+      localTaskRuntimeActiveRef.current = false;
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      updateCurrentTaskId(null);
+      restoredTaskIdsRef.current.delete(taskId);
+      taskPresentationModesRef.current.delete(taskId);
+    }
+    if (completedJustConsumed) {
       taskPhaseRef.current = 'loading_artifacts';
-      updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
+      clearWaitingInputRetryTimers();
+      setPendingInterrupt((current) => current?.taskId === taskId ? null : current);
+      updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true, interruptPrompt: undefined });
       void loadArtifacts(taskId, assistantId);
     }
-    if (event.event_type === 'node.waiting_for_input') {
+    if (event.event_type === 'node.waiting_for_input' || event.event_type === 'agent.run.waiting') {
       void loadPendingInterruptFromWaitingEvent(event, taskId, assistantId, generation, targetConversationId);
     }
   }
@@ -1568,6 +1945,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (!openInterrupt) {
         scheduleWaitingInputInterruptRetry(event, taskId, assistantId, generation, targetConversationId, attempt);
         return;
+      }
+      if (openInterrupt.reason_code === 'mcp_tool_approval_required') {
+        const approval = taskStateRef.current.mcp.approval;
+        if (
+          taskPhaseRef.current === 'loading_artifacts'
+          || isTaskCancellationOrTerminalPhase()
+          || (approval && (approval.interruptId !== openInterrupt.interrupt_id || !approval.pending))
+        ) {
+          clearWaitingInputRetryTimer(event.event_id);
+          return;
+        }
       }
       clearWaitingInputRetryTimer(event.event_id);
       const interruptionMode = taskPresentationModesRef.current.get(taskId) ?? mode;
@@ -1644,6 +2032,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     generation = restoreGenerationRef.current,
     targetConversationId = conversationIdRef.current,
   ) {
+    if (taskStateRef.current.pendingEvents.length > 0) {
+      const replayIncomplete = {
+        ...taskStateRef.current,
+        eventSyncError: '任务事件历史缺少前序记录，请重新同步任务历史。',
+      };
+      taskStateRef.current = replayIncomplete;
+      setTaskState(replayIncomplete);
+      clearEventStreamReconnectTimer();
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      return;
+    }
     showTransientNotice('事件流暂时中断，正在尝试查询任务状态。');
     try {
       const task = await api.getTask(taskId);
@@ -1676,21 +2076,56 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }, EVENT_STREAM_RECONNECT_DELAY_MS);
   }
 
+  function mergeTaskResultArtifactProjections(
+    projections: MCPResultArtifactProjection[] | undefined,
+  ) {
+    const fromSummary = foldMCPResultArtifactProjections(projections ?? []);
+    if (fromSummary === null) return;
+    const current = taskStateRef.current;
+    const merged = foldMCPResultArtifactProjections([
+      ...current.mcp.resultArtifactProjections,
+      ...fromSummary,
+    ]);
+    const next: TaskEventState = merged === null
+      ? {
+        ...current,
+        mcp: { ...current.mcp, resultArtifactProjections: [] },
+        eventSyncError: 'MCP 完整结果文件状态存在冲突，请重新同步任务历史。',
+      }
+      : {
+        ...current,
+        mcp: { ...current.mcp, resultArtifactProjections: merged },
+      };
+    taskStateRef.current = next;
+    setTaskState(next);
+  }
+
+  function copyTaskResultArtifactProjectionsToAssistant(assistantId: string) {
+    const projections = taskStateRef.current.mcp.resultArtifactProjections;
+    updateAssistantMessage(assistantId, {
+      mcpResultArtifactProjections: projections.length > 0 ? projections : undefined,
+    });
+  }
+
   async function loadArtifacts(taskId: string, assistantId: string) {
     try {
       const response = await api.getTaskArtifacts(taskId);
       const artifactDisplays = parseCapabilityArtifactDisplays(response.artifacts);
       const fallbackText = parseAssistantTextArtifact(response.artifacts);
-      const artifactSummary = summarizeCapabilityArtifactDisplays(artifactDisplays);
-      if (fallbackText || artifactDisplays.length > 0) {
+      const nonMCPArtifactSummary = summarizeCapabilityArtifactDisplays(
+        artifactDisplays.filter((display) => display.kind !== 'mcp_business_result'),
+      );
+      const fallbackContent = fallbackText || nonMCPArtifactSummary;
+      if (fallbackContent || artifactDisplays.length > 0) {
         updateAssistantMessage(assistantId, {
-          content: fallbackText ?? artifactSummary,
+          ...(fallbackContent ? { content: fallbackContent } : {}),
           artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
           finalContentLoaded: true,
           replyCompleted: true,
         });
       }
       updateAssistantMessage(assistantId, { activityText: undefined });
+      copyTaskResultArtifactProjectionsToAssistant(assistantId);
       taskPhaseRef.current = 'completed';
       setTaskState((state) => markTaskCompleted(state));
       updateCurrentTaskId(null);
@@ -1704,7 +2139,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         try {
           const loadedMessages = await loadConversationMessages(targetConversationId);
           if (conversationIdRef.current === targetConversationId) {
-            setMessages(loadedMessages);
+            setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
           }
         } catch {
           showTransientNotice('任务已完成，但历史消息刷新失败，请稍后重试。');
@@ -1712,9 +2147,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       void refreshConversationHistory();
     } catch {
+      copyTaskResultArtifactProjectionsToAssistant(assistantId);
       localTaskRuntimeActiveRef.current = false;
       taskPhaseRef.current = 'completed';
       setTaskState((state) => markTaskCompleted(state, '任务已完成，但结果加载失败'));
+      updateCurrentTaskId(null);
+      taskPresentationModesRef.current.delete(taskId);
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
       showTransientNotice('结果加载失败，可稍后重试。');
     }
   }
@@ -1908,33 +2348,42 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           style={{ width: 176 }}
         />
       </Space>
+      {!selectedModelReasoningConfigValid ? (
+        <Alert
+          type="error"
+          showIcon
+          message="模型 reasoning_efforts 配置缺失或非法，请刷新或联系管理员。"
+        />
+      ) : null}
       <Space size="small" align="center" className="composer-menu-row">
         <Typography.Text type="secondary">思考强度</Typography.Text>
         <Select
           aria-label="思考强度"
-          value={reasoningEffort}
-          options={REASONING_EFFORT_OPTIONS}
+          value={effectiveReasoningEffort}
+          options={reasoningEffortOptions}
           onChange={setReasoningEffort}
-          disabled={interactionLocked || !deepThinking}
+          disabled={interactionLocked || !selectedModelReasoningConfigValid || reasoningEffortOptions.length === 0}
           size="small"
           style={{ width: 104 }}
         />
       </Space>
       <Space size="small" align="center" className="composer-menu-row">
         <Typography.Text type="secondary">深度思考</Typography.Text>
-        <Switch
-          aria-label="深度思考"
-          checked={deepThinking}
-          onChange={(checked) => {
-            setDeepThinking(checked);
-            if (!checked) {
-              setReasoningEffort('minimal');
-            }
-          }}
-          checkedChildren="开"
-          unCheckedChildren="关"
-          disabled={interactionLocked}
-        />
+        {selectedModelForcesThinking ? (
+          <Typography.Text aria-label="深度思考：已开启">已开启</Typography.Text>
+        ) : (
+          <Switch
+            aria-label="深度思考"
+            checked={effectiveDeepThinking}
+            onChange={(checked) => {
+              setDeepThinking(checked);
+              setReasoningEffort(resolveEffectiveReasoningEffort(selectedModelEdition, reasoningEffort, checked));
+            }}
+            checkedChildren="开"
+            unCheckedChildren="关"
+            disabled={interactionLocked || !selectedModelReasoningConfigValid}
+          />
+        )}
       </Space>
       {active && currentTaskId ? (
         <Button
@@ -2018,8 +2467,21 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
               onScroll={handleConversationScroll}
             >
               {messages.length === 0 ? <EmptyWelcome key={conversationId} /> : messages.map((message) => (
-                <MessageBubble key={message.id} message={message} onDownloadArtifact={handleDownloadArtifact} />
+                message.kind === 'file_upload'
+                  ? <FileUploadHistoryCard key={message.id} message={message} />
+                  : <MessageBubble key={message.id} message={message} onDownloadArtifact={handleDownloadArtifact} />
               ))}
+              {currentTaskId ? (
+                <MCPRuntimeStatus
+                  taskId={currentTaskId}
+                  mcp={taskState.mcp}
+                  busyCallRef={mcpBusyCallRef}
+                  onContinue={handleContinueMCPCall}
+                  onCancel={handleCancelMCPCall}
+                  syncError={taskState.eventSyncError}
+                  onResync={resyncTaskEvents}
+                />
+              ) : null}
             </div>
             <div
               className={`chat-floating-stack${draggingUpload ? ' chat-floating-stack-dragging' : ''}`}
@@ -2041,7 +2503,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                 <Space direction="vertical" size="small" className="composer-space">
                   {selectedSkillCommand ? (
                     <div className="selected-skill-command" role="status" aria-label="已选择 Skill">
-                      <span>将使用 <strong>{selectedSkillCommand.command}</strong> {selectedSkillCommand.displayName}</span>
+                      <span>已选择 · 优先使用 <strong>{selectedSkillCommand.command}</strong> {selectedSkillCommand.displayName}</span>
                       <Button
                         type="link"
                         size="small"
@@ -2053,12 +2515,36 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       </Button>
                     </div>
                   ) : null}
+                  {selectedMCPServerCommand ? (
+                    <div className="selected-skill-command selected-mcp-server-command" role="status" aria-label="已选择 MCP Server">
+                      <span>已绑定 <strong>{selectedMCPServerCommand.command}</strong> {selectedMCPServerCommand.displayName}</span>
+                      <Button
+                        type="link"
+                        size="small"
+                        aria-label={`取消 MCP Server ${selectedMCPServerCommand.command}`}
+                        disabled={active}
+                        onClick={() => setSelectedMCPServerCommand(null)}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  ) : null}
                   {slashMenuOpen ? (
                     <SlashCommandMenu
                       candidates={slashCandidates}
                       activeIndex={normalizedSlashMenuActiveIndex}
                       emptyMessage={slashMenuEmptyMessage}
                       onSelect={selectSlashCommand}
+                    />
+                  ) : null}
+                  {mcpServerMenuOpen ? (
+                    <SlashCommandMenu
+                      candidates={mcpServerCandidates}
+                      activeIndex={normalizedMCPServerMenuActiveIndex}
+                      emptyMessage={mcpServerCommands.length === 0 ? '暂无可用 MCP Server' : '未找到 MCP Server'}
+                      variant="mcp"
+                      onRefresh={() => void refreshMCPServerCommands()}
+                      onSelect={selectMCPServerCommand}
                     />
                   ) : null}
                   {draftAttachments.length > 0 ? (
@@ -2089,6 +2575,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                         }}
                         onPressEnter={(event) => {
                           if (!event.shiftKey && !isComposerImeConfirming(event)) {
+                            if (handleMCPServerKeyDown(event)) return;
                             if (handleSlashKeyDown(event)) return;
                             event.preventDefault();
                             void handleSubmit();
@@ -2216,6 +2703,24 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             </Drawer>
           </section>
         </main>
+        <Drawer
+          title="MCP 服务与授权"
+          width={720}
+          open={mcpSettingsOpen}
+          onClose={() => setMCPSettingsOpen(false)}
+          destroyOnHidden
+        >
+          <MCPSettingsPanel
+            api={api}
+            onError={(error) => showTransientNotice(friendlyError(error))}
+            onServersChanged={() => void refreshMCPServerCommands()}
+          />
+        </Drawer>
+        <MCPApprovalDialog
+          approval={taskState.mcp.approval}
+          submitting={mcpApprovalSubmitting}
+          onDecision={handleMCPApprovalDecision}
+        />
       </Layout>
     </ConfigProvider>
   );
@@ -2430,381 +2935,28 @@ function EmptyWelcome() {
   );
 }
 
-function interruptSubmitMetadata(interrupt: PendingInterrupt, uploads: UploadFileResponse[] = [], selectedSheets: Record<string, string> = {}): Record<string, unknown> {
-  const metadata: Record<string, unknown> = {
-    interrupt_id: interrupt.interruptId,
-  };
-  const uploadIds = uploads.map((upload) => upload.upload_id);
-  if (uploadIds.length > 0) {
-    metadata.upload_ids = uploadIds;
-  }
-  if (Object.keys(selectedSheets).length > 0) {
-    metadata.upload_sheet_selections = selectedSheets;
-  }
-  return metadata;
-}
-
-function uploadAnswerDisplayText(uploads: UploadFileResponse[]): string {
-  if (uploads.length === 0) return '';
-  return `已上传文件：${uploads.map((upload) => upload.filename).join('、')}`;
-}
-
-function isTsvContentType(contentType: string | null | undefined): boolean {
-  const normalized = (contentType || '').split(';', 1)[0].trim().toLowerCase();
-  return normalized === 'text/tab-separated-values' || normalized === 'text/tsv';
-}
-
-function uploadFileTypeLabel(upload: UploadFileResponse): string {
-  if (upload.filename.toLowerCase().endsWith('.tsv') || isTsvContentType(upload.content_type)) return 'TSV';
-  switch (upload.file_type) {
-    case 'spreadsheet':
-      return 'Excel';
-    case 'text':
-      return 'TXT';
-    case 'vcf':
-      return 'VCF';
-    case 'image':
-      return '图片';
-    case 'pdf':
-      return 'PDF';
-    case 'json':
-      return 'JSON';
-    case 'csv':
-      return 'CSV';
-    default:
-      return upload.file_type || '文件';
-  }
-}
-
-function uploadFileSummaryParts(upload: UploadFileResponse): string[] {
-  const preview = upload.preview;
-  const columns = preview.columns ?? [];
-  const parts = [uploadFileTypeLabel(upload)];
-  if (preview.source_encoding) parts.push(preview.source_encoding);
-  if (typeof preview.row_count === 'number') parts.push(`${preview.row_count} 行`);
-  if (columns.length > 0) parts.push(columns.slice(0, 3).join('/'));
-  if (preview.requires_sheet_selection) parts.push('需选择 sheet');
-  if (preview.columns_truncated || preview.excel_sheets_truncated) parts.push('已裁剪摘要');
-  return parts;
-}
-
-function formatFileSize(sizeBytes: number): string {
-  if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return '未知大小';
-  if (sizeBytes < 1024) return `${sizeBytes} B`;
-  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
-  return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function mergeUploadsById(current: UploadFileResponse[], additions: UploadFileResponse[]): UploadFileResponse[] {
-  if (additions.length === 0) return current;
-  const seen = new Set(current.map((upload) => upload.upload_id));
-  const merged = current.slice();
-  for (const upload of additions) {
-    if (seen.has(upload.upload_id)) continue;
-    seen.add(upload.upload_id);
-    merged.push(upload);
-  }
-  return merged;
-}
-
-function draftAttachmentTypeLabel(attachment: DraftAttachment): string {
-  const filename = attachment.filename.toLowerCase();
-  if (filename.endsWith('.vcf') || filename.endsWith('.vcf.gz')) return 'VCF';
-  if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) return 'Excel';
-  if (filename.endsWith('.json')) return 'JSON';
-  if (filename.endsWith('.tsv') || isTsvContentType(attachment.contentType)) return 'TSV';
-  if (filename.endsWith('.csv')) return 'CSV';
-  if (filename.endsWith('.txt')) return 'TXT';
-  if (filename.endsWith('.pdf')) return 'PDF';
-  if (filename.endsWith('.png') || filename.endsWith('.jpg') || filename.endsWith('.jpeg')) return '图片';
-  return attachment.contentType || '文件';
-}
-
-function draftAttachmentStatusText(status: DraftAttachmentStatus): string {
-  switch (status) {
-    case 'uploading':
-      return '上传中';
-    case 'failed':
-      return '待重试';
-    default:
-      return '待发送';
-  }
-}
-
-function DraftAttachmentCard({
-  attachment,
-  disabled,
-  onDelete,
-}: {
-  attachment: DraftAttachment;
-  disabled: boolean;
-  onDelete: () => void;
-}) {
-  const summaryParts = [draftAttachmentTypeLabel(attachment), formatFileSize(attachment.sizeBytes)];
-  if (attachment.errorMessage) summaryParts.push(attachment.errorMessage);
-  const tagColor = attachment.status === 'failed' ? 'red' : attachment.status === 'uploading' ? 'blue' : 'orange';
-
-  return (
-    <div className="conversation-file-card">
-      <div className="conversation-file-card-header">
-        <div className="conversation-file-card-title">
-          <Typography.Text strong ellipsis={{ tooltip: attachment.filename }} className="conversation-file-name">
-            {attachment.filename}
-          </Typography.Text>
-          <Typography.Text type={attachment.status === 'failed' ? 'danger' : 'secondary'} className="conversation-file-meta">
-            {summaryParts.join(' · ')}
-          </Typography.Text>
-        </div>
-        <Tag color={tagColor} className="conversation-file-ready-tag">{draftAttachmentStatusText(attachment.status)}</Tag>
-      </div>
-      <div className="conversation-file-actions">
-        <Typography.Text type="secondary" className="conversation-file-size">
-          {formatFileSize(attachment.sizeBytes)}
-        </Typography.Text>
-        <Button
-          danger
-          type="text"
-          size="small"
-          disabled={disabled || attachment.status === 'uploading'}
-          aria-label={`删除文件 ${attachment.filename}`}
-          onClick={onDelete}
-        >
-          删除
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function ConversationFileCard({
-  upload,
-  deleting,
-  disabled,
-  onDelete,
-}: {
-  upload: UploadFileResponse;
-  deleting: boolean;
-  disabled: boolean;
-  onDelete: () => void;
-}) {
-  const summaryParts = uploadFileSummaryParts(upload);
-  const columns = upload.preview.columns ?? [];
-
-  return (
-    <div className="conversation-file-card">
-      <div className="conversation-file-card-header">
-        <div className="conversation-file-card-title">
-          <Typography.Text strong ellipsis={{ tooltip: upload.filename }} className="conversation-file-name">
-            {upload.filename}
-          </Typography.Text>
-          <Typography.Text type="secondary" className="conversation-file-meta">
-            {summaryParts.join(' · ')}
-          </Typography.Text>
-        </div>
-        <Tag color="green" className="conversation-file-ready-tag">Skill 可用</Tag>
-      </div>
-      {columns.length > 3 ? (
-        <Typography.Text type="secondary" className="conversation-file-extra">
-          另有 {columns.length - 3} 个字段可在 Skill 中读取
-        </Typography.Text>
-      ) : null}
-      <div className="conversation-file-actions">
-        <Typography.Text type="secondary" className="conversation-file-size">
-          {formatFileSize(upload.size_bytes)}
-        </Typography.Text>
-        <Button
-          danger
-          type="text"
-          size="small"
-          loading={deleting}
-          disabled={disabled || deleting}
-          aria-label={`删除文件 ${upload.filename}`}
-          onClick={onDelete}
-        >
-          删除
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function sheetSelectionDisplayText(field: SheetSelectionField | null, selections: Record<string, string>): string {
-  if (!field) return '';
-  const parts = field.required_upload_ids
-    .map((uploadId) => {
-      const label = field.labels_by_upload_id?.[uploadId] ?? uploadId;
-      const sheet = selections[uploadId];
-      return sheet ? `${label}=${sheet}` : '';
-    })
-    .filter(Boolean);
-  return parts.length > 0 ? `已选择 sheet：${parts.join('；')}` : '';
-}
-
-function isInterruptKeepOpenResponse(response: { action?: string | null; answer_payload?: Record<string, unknown> | null }): boolean {
-  const action = response.action || '';
-  if (action === 'interrupt_clarification_answer' || action === 'clarification_answer') return true;
-  if (action === 'interrupt_mixed_processed' || action === 'interrupt_schema_switched') {
-    const payload = response.answer_payload || {};
-    return payload.will_resume !== true || payload.requires_confirmation === true;
-  }
-  return false;
-}
-
-function InterruptQuestionText({ interrupt }: { interrupt: PendingInterrupt }) {
-  return <MarkdownText content={interrupt.question} />;
-}
-
-function isNaturalLanguageInterrupt(requiredFields: Record<string, unknown>): boolean {
-  const resolution = requiredFields._sql_query_resolution;
-  if (!resolution || typeof resolution !== 'object') return false;
-  return (resolution as { presentation?: unknown }).presentation === 'natural_language';
-}
-
-function InterruptComposerStatus({ onCancel, cancelling }: { onCancel: () => void; cancelling: boolean }) {
-  return (
-    <div className="interrupt-composer-status" role="status" aria-live="polite">
-      <span className="interrupt-composer-status-text">等待补充 · 下一条消息将继续当前任务</span>
-      <Button danger type="text" size="small" aria-label="结束任务" onClick={onCancel} loading={cancelling}>
-        结束任务
-      </Button>
-    </div>
-  );
-}
-
-function interruptAcceptsUpload(interrupt: PendingInterrupt): boolean {
-  const hasVisibleUploadField = interruptVisibleFieldValues(interrupt).some((field) => {
-    if (!field || typeof field !== 'object') return false;
-    const metadata = field as { accepts_upload?: unknown; type?: unknown };
-    return metadata.accepts_upload === true || ['artifact', 'file', 'data'].includes(String(metadata.type ?? ''));
-  });
-  if (hasVisibleUploadField) return true;
-  return interruptSlotCollectionRefSlots(interrupt).some((slot) => ['artifact', 'file', 'data'].includes(slot.type));
-}
-
-function interruptSheetSelectionField(interrupt: PendingInterrupt): SheetSelectionField | null {
-  const raw = interrupt.requiredFields?.upload_sheet_selections;
-  if (!raw || typeof raw !== 'object') return null;
-  const field = raw as {
-    required_upload_ids?: unknown;
-    options_by_upload_id?: unknown;
-    labels_by_upload_id?: unknown;
-  };
-  if (!Array.isArray(field.required_upload_ids) || !field.options_by_upload_id || typeof field.options_by_upload_id !== 'object') {
-    return null;
-  }
-  const requiredUploadIds = field.required_upload_ids.filter((item): item is string => typeof item === 'string' && item.length > 0);
-  const optionsByUploadId: Record<string, string[]> = {};
-  for (const [uploadId, options] of Object.entries(field.options_by_upload_id as Record<string, unknown>)) {
-    if (Array.isArray(options)) {
-      optionsByUploadId[uploadId] = options.filter((item): item is string => typeof item === 'string' && item.length > 0);
-    }
-  }
-  const labelsByUploadId: Record<string, string> = {};
-  if (field.labels_by_upload_id && typeof field.labels_by_upload_id === 'object') {
-    for (const [uploadId, label] of Object.entries(field.labels_by_upload_id as Record<string, unknown>)) {
-      if (typeof label === 'string' && label.length > 0) labelsByUploadId[uploadId] = label;
-    }
-  }
-  return {
-    required_upload_ids: requiredUploadIds,
-    options_by_upload_id: optionsByUploadId,
-    labels_by_upload_id: labelsByUploadId,
-  };
-}
-
-function selectedSheetPayload(field: SheetSelectionField, answerText: string): Record<string, string> {
-  const payload: Record<string, string> = {};
-  const answer = answerText.trim();
-  if (!answer) return {};
-  if (field.required_upload_ids.length === 1) {
-    const uploadId = field.required_upload_ids[0];
-    const options = field.options_by_upload_id[uploadId] ?? [];
-    const matched = options.find((option) => option === answer)
-      ?? options.find((option) => option.toLowerCase() === answer.toLowerCase());
-    return { [uploadId]: matched ?? answer };
-  }
-
-  const labelsByUploadId = field.labels_by_upload_id ?? {};
-  const parts = answer.split(/[;\n；]+/).map((part) => part.trim()).filter(Boolean);
-  for (const part of parts) {
-    const match = part.match(/^(.+?)[=:：]\s*(.+)$/);
-    if (!match) continue;
-    const rawLabel = match[1].trim();
-    const rawSheet = match[2].trim();
-    const uploadId = field.required_upload_ids.find((candidate) => (
-      candidate === rawLabel || labelsByUploadId[candidate] === rawLabel
-    ));
-    if (!uploadId || !rawSheet) continue;
-    const options = field.options_by_upload_id[uploadId] ?? [];
-    const matched = options.find((option) => option === rawSheet)
-      ?? options.find((option) => option.toLowerCase() === rawSheet.toLowerCase());
-    payload[uploadId] = matched ?? rawSheet;
-  }
-  return payload;
-}
-
-function interruptVisibleFieldNames(interrupt: PendingInterrupt): string[] {
-  return Object.keys(interrupt.requiredFields ?? {}).filter((field) => !isReservedInterruptField(field));
-}
-
-function interruptVisibleFieldValues(interrupt: PendingInterrupt): unknown[] {
-  return Object.entries(interrupt.requiredFields ?? {})
-    .filter(([field]) => !isReservedInterruptField(field))
-    .map(([, value]) => value);
-}
-
-function interruptSlotCollectionRef(interrupt: PendingInterrupt): SlotCollectionRefField | null {
-  const raw = interrupt.requiredFields?._slot_collection_ref;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const field = raw as { collection_id?: unknown; slots?: unknown };
-  const collectionId = typeof field.collection_id === 'string' ? field.collection_id : '';
-  if (!collectionId) return null;
-  const slots: SlotCollectionRefSlot[] = [];
-  if (Array.isArray(field.slots)) {
-    for (const rawSlot of field.slots) {
-      if (!rawSlot || typeof rawSlot !== 'object' || Array.isArray(rawSlot)) continue;
-      const slot = rawSlot as {
-        name?: unknown;
-        label?: unknown;
-        type?: unknown;
-        status?: unknown;
-        required_now?: unknown;
-      };
-      const name = typeof slot.name === 'string' && slot.name.length > 0 ? slot.name : '';
-      if (!name) continue;
-      const label = typeof slot.label === 'string' && slot.label.length > 0 ? slot.label : name;
-      slots.push({
-        name,
-        label,
-        type: typeof slot.type === 'string' ? slot.type : 'string',
-        status: typeof slot.status === 'string' ? slot.status : '',
-        requiredNow: slot.required_now === true,
-      });
-    }
-  }
-  return { collectionId, slots };
-}
-
-function interruptSlotCollectionRefSlots(interrupt: PendingInterrupt): SlotCollectionRefSlot[] {
-  const ref = interruptSlotCollectionRef(interrupt);
-  if (!ref) return [];
-  const activeSlots = ref.slots.filter((slot) => slot.requiredNow || ['missing', 'invalid'].includes(slot.status));
-  return activeSlots.length > 0 ? activeSlots : ref.slots;
-}
-
-function isReservedInterruptField(field: string): boolean {
-  return field.startsWith('_');
-}
-
-function interruptAnswerPlaceholder(interrupt: PendingInterrupt): string {
-  return interrupt.question.trim() || '请补充当前任务所需信息';
-}
-
 function assistantActivityText(state: TaskEventState, progressText: string): string | undefined {
   if (state.assistantText) return undefined;
   if (!state.skillStatuses.length) return progressText;
   if (state.currentCapabilityId?.startsWith('skill.')) return undefined;
   return progressText;
+}
+
+
+function CapabilityFallbackNoticeView({ notice }: { notice: CapabilityFallbackNotice }) {
+  const scopeLabel = notice.scope === 'partial' ? '部分能力缺口' : '能力缺口';
+  const description = notice.scope === 'partial' && notice.attemptedCapabilitySummary
+    ? `${notice.attemptedCapabilitySummary}；${notice.missingCapabilitySummary}。${notice.fallbackContentScope}`
+    : `${notice.missingCapabilitySummary}。${notice.fallbackContentScope}`;
+  return (
+    <Alert
+      className="capability-fallback-notice"
+      type="warning"
+      showIcon
+      message={scopeLabel}
+      description={`${description}。本次不会生成可下载文件。`}
+    />
+  );
 }
 
 function MessageBubble({
@@ -2820,14 +2972,22 @@ function MessageBubble({
   const shouldShowAssistantActions = message.role === 'assistant'
     && (Boolean(message.finalContentLoaded) || Boolean(message.replyCompleted))
     && Boolean(message.content.trim());
+  const hasResultArtifactNotice = message.mcpResultArtifactProjections?.some(
+    (item) => item.status !== 'ready',
+  ) ?? false;
   return (
     <div className={className}>
       <div className="message-meta">{message.role === 'user' ? '你' : 'SeedPilot'}</div>
+      {message.role === 'user' && message.mcpServerBadge ? (
+        <Tag className="message-mcp-server-badge" color="green">{message.mcpServerBadge.command}</Tag>
+      ) : null}
       {message.role === 'assistant' ? <SkillStatusLines statuses={message.skillStatuses} /> : null}
       <div className="message-body">
         {shouldShowReasoning ? (
           <ReasoningBox content={message.reasoningContent ?? ''} complete={message.reasoningComplete} />
         ) : null}
+        {message.fallbackNotice ? <CapabilityFallbackNoticeView notice={message.fallbackNotice} /> : null}
+        <MCPResultArtifactNotice projections={message.mcpResultArtifactProjections ?? []} />
         {message.interruptPrompt ? (
           <InterruptQuestionText interrupt={message.interruptPrompt} />
         ) : shouldShowContent || message.artifactDisplays?.length ? (
@@ -2841,7 +3001,7 @@ function MessageBubble({
               />
             ))}
           </>
-        ) : message.activityText ? (
+        ) : hasResultArtifactNotice ? null : message.activityText ? (
           <ActivityNotice text={message.activityText} status={message.activityStatus} />
         ) : (
           <ActivityNotice text="正在等待回答..." />
@@ -2866,6 +3026,27 @@ function MessageBubble({
       ) : null}
     </div>
   );
+}
+
+function FileUploadHistoryCard({ message }: { message: ConversationMessage }) {
+  const metadata = message.metadata ?? {};
+  const filename = metadataText(metadata.filename) || '未命名文件';
+
+  return (
+    <div className="message message-user message-file-upload">
+      <div className="message-meta">你</div>
+      <div className="file-upload-history-card" data-message-kind="file_upload" aria-label={`已上传文件 ${filename}`}>
+        <FileTextOutlined className="file-upload-history-icon" aria-hidden="true" />
+        <Typography.Text strong ellipsis={{ tooltip: filename }} className="file-upload-history-filename">
+          {filename}
+        </Typography.Text>
+      </div>
+    </div>
+  );
+}
+
+function metadataText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
 }
 
 function SkillStatusLines({ statuses }: { statuses?: SkillStatusLine[] }) {
@@ -2936,6 +3117,9 @@ function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): strin
     return `${display.kind}:${display.result.artifactId}`;
   }
   if (display.kind === 'ocr_raw_text') {
+    return `${display.kind}:${display.result.artifactId}`;
+  }
+  if (display.kind === 'mcp_business_result') {
     return `${display.kind}:${display.result.artifactId}`;
   }
   return 'capability-artifact';
@@ -3023,20 +3207,106 @@ function ReasoningBox({ content, complete }: { content: string; complete?: boole
 }
 
 function messageFromHistory(message: MessageResponse): ConversationMessage | null {
+  if (message.message_type === 'file_upload' && message.role === 'system') {
+    return {
+      id: message.message_id,
+      kind: 'file_upload',
+      role: 'system',
+      content: '',
+      mode: 'chat',
+      metadata: safeFileUploadHistoryMetadata(message.metadata),
+    };
+  }
   if (message.role !== 'user' && message.role !== 'assistant') return null;
   const assistantReplyCompleted = message.role === 'assistant' && message.stream_status === 'complete';
   const artifactDisplays = message.role === 'assistant'
     ? parseCapabilityArtifactDisplays(message.artifacts ?? [])
     : [];
+  const fallbackNotice = message.role === 'assistant'
+    ? parseCapabilityFallbackNotice(message.metadata)
+    : null;
+  const mcpServerBadge = message.role === 'user'
+    ? parseMCPServerBadge(message.metadata)
+    : null;
+  const mcpResultArtifactProjections = message.role === 'assistant'
+    ? foldMCPResultArtifactProjections(message.mcp_result_artifact_projections ?? []) ?? []
+    : [];
   return {
     id: message.message_id,
+    kind: 'chat',
     role: message.role,
     content: message.content,
     mode: 'chat',
+    taskId: message.task_id ?? undefined,
     finalContentLoaded: assistantReplyCompleted || undefined,
     replyCompleted: assistantReplyCompleted || undefined,
+    fallbackNotice: fallbackNotice ?? undefined,
+    mcpServerBadge: mcpServerBadge ?? undefined,
     artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
+    mcpResultArtifactProjections: mcpResultArtifactProjections.length > 0
+      ? mcpResultArtifactProjections
+      : undefined,
   };
+}
+
+function parseMCPServerBadge(metadata: Record<string, unknown> | undefined): MCPServerBadge | null {
+  const value = metadata?.mcp_server_badge;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const badge = value as Record<string, unknown>;
+  if (Object.keys(badge).sort().join(',') !== 'binding_mode,command,display_name,server_id') return null;
+  if (
+    typeof badge.server_id !== 'string'
+    || typeof badge.display_name !== 'string'
+    || typeof badge.command !== 'string'
+    || badge.binding_mode !== 'explicit_command'
+    || badge.command !== `$${badge.display_name}`
+  ) return null;
+  return {
+    server_id: badge.server_id,
+    display_name: badge.display_name,
+    command: badge.command,
+    binding_mode: 'explicit_command',
+  };
+}
+
+export function mergeHistoryWithLiveFallbackNotices(
+  loadedMessages: ConversationMessage[],
+  currentMessages: ConversationMessage[],
+): ConversationMessage[] {
+  const liveFallbacks = currentMessages
+    .filter((message) => message.role === 'assistant' && message.fallbackNotice && message.taskId)
+    .map((message) => ({ taskId: message.taskId as string, notice: message.fallbackNotice as CapabilityFallbackNotice }));
+  const noticeByTaskId = new Map(liveFallbacks.map((item) => [item.taskId, item.notice]));
+  const liveResultArtifactProjections = currentMessages
+    .filter((message) => message.role === 'assistant' && message.mcpResultArtifactProjections?.length && message.taskId)
+    .map((message) => ({
+      taskId: message.taskId as string,
+      projections: message.mcpResultArtifactProjections as MCPResultArtifactProjection[],
+    }));
+  if (liveFallbacks.length === 0 && liveResultArtifactProjections.length === 0) return loadedMessages;
+  const projectionsByTaskId = new Map(
+    liveResultArtifactProjections.map((item) => [item.taskId, item.projections]),
+  );
+  return loadedMessages.map((message) => {
+    if (message.role !== 'assistant' || !message.taskId) return message;
+    const mergedProjections = foldMCPResultArtifactProjections([
+      ...(projectionsByTaskId.get(message.taskId) ?? []),
+      ...(message.mcpResultArtifactProjections ?? []),
+    ]);
+    return {
+      ...message,
+      fallbackNotice: message.fallbackNotice ?? noticeByTaskId.get(message.taskId),
+      mcpResultArtifactProjections: mergedProjections?.length
+        ? mergedProjections
+        : undefined,
+    };
+  });
+}
+
+function safeFileUploadHistoryMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!metadata) return {};
+  const safeKeys = ['filename', 'upload_id', 'description_summary', 'description_status', 'file_status'];
+  return Object.fromEntries(safeKeys.map((key) => [key, metadata[key]]).filter(([, value]) => value !== undefined));
 }
 
 function conversationStorageKey(username: string): string {

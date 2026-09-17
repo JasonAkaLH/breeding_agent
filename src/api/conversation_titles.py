@@ -9,6 +9,8 @@ ConversationTitleGenerator: TypeAlias = Callable[..., str | Awaitable[str]]
 
 MAX_CONVERSATION_TITLE_LENGTH = 60
 AUTO_CONVERSATION_TITLE_LENGTH = 24
+_LEADING_GENERATED_CONTROL_TAG = re.compile(r"^<[A-Za-z_][A-Za-z0-9_.:-]*>")
+_KNOWN_MALFORMED_CONTROL_PREFIX = "ds_safety>"
 
 
 async def call_title_generator(
@@ -44,6 +46,10 @@ def validate_conversation_title(title: str) -> str:
 
 def normalize_generated_conversation_title(raw_title: str) -> str | None:
     title = _first_non_empty_line(raw_title)
+    if _LEADING_GENERATED_CONTROL_TAG.match(title) or title.startswith(
+        _KNOWN_MALFORMED_CONTROL_PREFIX
+    ):
+        return None
     title = _strip_label_prefix(title)
     title = title.strip(" \t\r\n`*_#\"'“”‘’《》<>:：。.!！?？,，、-—")
     title = _collapse_whitespace(title)

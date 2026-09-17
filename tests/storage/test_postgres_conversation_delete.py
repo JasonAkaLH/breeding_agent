@@ -10,9 +10,9 @@ from sqlalchemy import inspect as sqlalchemy_inspect, text
 
 from src.core.enums import MessageRole, TaskStatus
 from src.core.models import Conversation, Message, Task, TaskInputAttachment
-from src.state.postgres.worker import postgres_test_dsn_or_skip_reason
 from src.storage.postgres import bootstrap_postgres_database, create_postgres_engine, create_postgres_session_factory
 from src.storage.postgres.repositories import PostgreSQLStorage
+from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 
 
 class PostgresConversationDeleteTest(unittest.TestCase):
@@ -20,6 +20,9 @@ class PostgresConversationDeleteTest(unittest.TestCase):
         source = inspect.getsource(PostgreSQLStorage._delete_conversation_physical_sync)
         self.assertIn("DELETE FROM artifact", source)
         self.assertIn("DELETE FROM task_input_attachment", source)
+        self.assertIn("DELETE FROM mcp_dispatch_resume_outbox", source)
+        self.assertIn("DELETE FROM mcp_no_server_intent", source)
+        self.assertIn("DELETE FROM mcp_pending_tool_action", source)
         self.assertIn("DELETE FROM slot_event", source)
         self.assertIn("DELETE FROM slot_collection", source)
         self.assertIn("USING task", source)
@@ -38,7 +41,10 @@ class PostgresConversationDeleteTest(unittest.TestCase):
         self.assertIn("ConversationStatus.DELETING", source)
 
     def test_real_postgres_bootstrap_and_delete_task_input_attachment_when_dsn_configured(self) -> None:
-        dsn, skip_reason = postgres_test_dsn_or_skip_reason()
+        dsn, skip_reason = isolated_postgres_test_dsn_or_skip_reason(
+            "MAF_POSTGRES_CONVERSATION_DELETE_TEST_DSN",
+            fallback_env="MAF_POSTGRES_TEST_DSN",
+        )
         if skip_reason:
             self.skipTest(skip_reason)
         self.assertIsNotNone(dsn)

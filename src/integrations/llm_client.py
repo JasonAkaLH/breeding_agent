@@ -3,13 +3,23 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from openai import AsyncOpenAI
 
 from src.core.coercion import coerce_truthy
-from .model_editions import default_model_edition
+from src.core.errors import ModelUnavailableError
+from src.orchestration.agent_loop.models import (
+    AgentModelRequest,
+    AgentProtocolRetryPolicy,
+    AgentSample,
+    MODEL_MESSAGE_ROLES,
+)
+
+from .model_editions import default_model_edition, model_edition_options, validate_model_reasoning_effort_configs
+from .model_errors import raise_for_model_unavailable
+from .openai_agent_model_adapter import OpenAIAgentModelAdapter
 from .provider_cache import (
     provider_cache_capabilities_metadata,
     provider_cache_hint_status,
@@ -24,7 +34,7 @@ from src.orchestration.prompt_envelope import (
 )
 
 
-ReasoningEffort = Literal["minimal", "high", "max"]
+ReasoningEffort = str
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 CONFIG_ENV_PREFIX = "MAF_CONFIG_"
@@ -72,6 +82,8 @@ def bootstrap_config_env(
         config = yaml.safe_load(file)
     if not isinstance(config, dict):
         raise ValueError(f"LLM config must be a mapping: {path}")
+    validate_model_reasoning_effort_configs(config)
+    AgentProtocolRetryPolicy.from_config(config)
 
     if should_clear_existing:
         _clear_config_data_env()
@@ -117,8 +129,18 @@ class LLMClient:
             if config_path is not None:
                 bootstrap_config_env(config_path, override=True)
             loaded_config = load_config()
+        validate_model_reasoning_effort_configs(loaded_config)
+        self._agent_protocol_retry_policy = AgentProtocolRetryPolicy.from_config(loaded_config)
 
         self.model = model or _resolve_model_from_config(loaded_config)
+        self._agent_capabilities = next(
+            (
+                option.agent_capabilities
+                for option in model_edition_options(loaded_config)
+                if option.value == self.model
+            ),
+            None,
+        )
         self.temperature = temperature if temperature is not None else loaded_config.get("temperature", 0.0)
         api_key = api_key or loaded_config.get("api_key")
         base_url = base_url or loaded_config.get("base_url")
@@ -141,7 +163,7 @@ class LLMClient:
             if value in (None, "")
         ]
         if missing:
-            raise ValueError(f"Missing LLM config values: {', '.join(missing)}")
+            raise ModelUnavailableError()
 
         self.client = AsyncOpenAI(
             api_key=str(api_key),
@@ -149,6 +171,33 @@ class LLMClient:
             max_retries=int(max_retries),
             timeout=float(timeout),
         )
+
+    async def aclose(self) -> None:
+        await self.client.close()
+
+    async def generate_agent_sample(self, request: AgentModelRequest) -> AgentSample:
+        if request.binding.model_edition != self.model:
+            raise ValueError(
+                f"Agent binding edition {request.binding.model_edition!r} does not match client edition {self.model!r}"
+            )
+        if self._agent_capabilities is None or not self._agent_capabilities.agent_ready:
+            raise ValueError(f"Model edition {self.model!r} is not Agent-ready")
+        request_options, cache_hint_status = _provider_request_options(
+            thinking=request.binding.thinking_enabled,
+            reasoning_effort=request.binding.reasoning_effort,
+            feature_capabilities=self._feature_capabilities,
+            cache_capabilities=self._cache_capabilities,
+        )
+        self._last_provider_cache_hint_status = cache_hint_status
+        adapter = OpenAIAgentModelAdapter(
+            completions=self.client.chat.completions,
+            model=self.model,
+            temperature=self.temperature,
+            retry_policy=self._agent_protocol_retry_policy,
+            stream=self._agent_capabilities.supports_streamed_tool_calls,
+            request_options=request_options,
+        )
+        return await adapter.sample_agent(request)
 
     def safe_metadata(
         self,
@@ -191,13 +240,17 @@ class LLMClient:
             cache_capabilities=self._cache_capabilities,
         )
         self._last_provider_cache_hint_status = cache_hint_status
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=self._messages_payload(prompt),
-            stream=False,
-            temperature=self.temperature,
-            **request_options,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=self._messages_payload(prompt),
+                stream=False,
+                temperature=self.temperature,
+                **request_options,
+            )
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
         if not response.choices:
             return ""
         content = response.choices[0].message.content
@@ -232,26 +285,30 @@ class LLMClient:
             cache_capabilities=self._cache_capabilities,
         )
         self._last_provider_cache_hint_status = cache_hint_status
-        stream = await self.client.chat.completions.create(
-            model=self.model,
-            messages=self._messages_payload(prompt),
-            stream=True,
-            temperature=self.temperature,
-            **request_options,
-        )
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=self._messages_payload(prompt),
+                stream=True,
+                temperature=self.temperature,
+                **request_options,
+            )
 
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
 
-            delta = chunk.choices[0].delta
-            reasoning = getattr(delta, "reasoning_content", None)
-            answer = delta.content
+                delta = chunk.choices[0].delta
+                reasoning = getattr(delta, "reasoning_content", None)
+                answer = delta.content
 
-            if reasoning:
-                yield {"answer": None, "reasoning": reasoning}
-            if answer:
-                yield {"answer": answer, "reasoning": None}
+                if reasoning:
+                    yield {"answer": None, "reasoning": reasoning}
+                if answer:
+                    yield {"answer": answer, "reasoning": None}
+        except Exception as exc:
+            raise_for_model_unavailable(exc)
+            raise
 
     def _messages_payload(self, prompt: str | PromptEnvelope | Sequence[LLMMessage | Mapping[str, Any]]) -> list[dict[str, str]]:
         self._last_message_role_fallbacks = ()
@@ -416,7 +473,11 @@ def _coerce_message_roles(value: Any) -> frozenset[str]:
         candidates = value
     else:
         return frozenset()
-    return frozenset(str(role).strip().lower() for role in candidates if str(role).strip())
+    roles = frozenset(str(role).strip().lower() for role in candidates if str(role).strip())
+    unsupported_roles = sorted(roles - MODEL_MESSAGE_ROLES)
+    if unsupported_roles:
+        raise ValueError("Unsupported provider message roles: " + ", ".join(unsupported_roles))
+    return roles
 
 
 def _coerce_llm_messages(messages: Sequence[LLMMessage | Mapping[str, Any]]) -> tuple[LLMMessage, ...]:
@@ -446,23 +507,6 @@ def _fallback_messages_for_supported_roles(
         role = str(message.role or "user").strip().lower() or "user"
         if role in supported_roles:
             normalized.append(LLMMessage(role=role, content=message.content, name=message.name))
-            continue
-        if role == "developer" and "system" in supported_roles:
-            normalized.append(
-                LLMMessage(
-                    role="system",
-                    content=f"# message_{index} role_fallback:developer\n以下内容由 provider role fallback 折叠到 system；仍按 developer/system 约束处理。\n{message.content}",
-                    name=message.name,
-                )
-            )
-            fallbacks.append(
-                PromptRoleFallbackAudit(
-                    segment_name=f"message_{index}",
-                    source_role=role,
-                    target_role="system",
-                    reason="developer_to_system",
-                )
-            )
             continue
         normalized.append(
             LLMMessage(

@@ -204,7 +204,7 @@ class SlotStateMachineTest(unittest.TestCase):
                     "content_base64": "cGVkX2lk",
                 },
             ),
-            planner_hint={
+            turn_hint={
                 "target_slots": ["ncols"],
                 "reason": "用户明确提供了田块列数 api_key=sk-secret /Users/yinpeihai/private.csv",
             },
@@ -213,8 +213,8 @@ class SlotStateMachineTest(unittest.TestCase):
 
         self.assertEqual(payload["mode"], "normal_extraction")
         self.assertEqual(payload["slot_collection"]["schema_snapshot"]["inputs"]["design"]["const"], "diagonal")
-        self.assertEqual(payload["planner_hint"]["target_slots"], ["ncols"])
-        self.assertIn("田块列数", payload["planner_hint"]["reason"])
+        self.assertEqual(payload["turn_hint"]["target_slots"], ["ncols"])
+        self.assertIn("田块列数", payload["turn_hint"]["reason"])
         self.assertIn("对角线增广", payload["current_user_answer"])
         encoded = json.dumps(payload, ensure_ascii=False)
         self.assertNotIn("sk-secret", encoded)
@@ -309,7 +309,7 @@ class SlotStateMachineTest(unittest.TestCase):
             collection,
             schema,
             current_user_answer="10",
-            planner_reason="用户明确提供了田块列数10。",
+            turn_reason="用户明确提供了田块列数10。",
         )
         self.assertNotIn("ncols", without_hint.resolved)
 
@@ -317,14 +317,14 @@ class SlotStateMachineTest(unittest.TestCase):
             collection,
             schema,
             current_user_answer="10",
-            planner_target_slots=("ncols",),
-            planner_reason="用户明确提供了田块列数10。",
+            turn_target_slots=("ncols",),
+            turn_reason="用户明确提供了田块列数10。",
         )
 
         self.assertEqual(with_hint.resolved["ncols"].raw_value, "10")
         self.assertEqual(with_hint.resolved["ncols"].value, 10)
-        self.assertEqual(with_hint.resolved["ncols"].source, "planner_hint")
-        self.assertIn("backend_planner_hint_scalar_match", with_hint.diagnostics)
+        self.assertEqual(with_hint.resolved["ncols"].source, "turn_hint")
+        self.assertIn("backend_turn_hint_scalar_match", with_hint.diagnostics)
 
     def test_history_recall_resolves_prior_upload_from_backend_ledger_not_llm_artifact_claim(self) -> None:
         tmp, schema = _field_design_schema()

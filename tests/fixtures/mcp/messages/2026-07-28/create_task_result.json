@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "resultType": "task",
+    "taskId": "raw-remote-task-id",
+    "status": "working",
+    "createdAt": "2026-08-12T00:00:00Z",
+    "lastUpdatedAt": "2026-08-12T00:00:00Z",
+    "ttlMs": 3600000,
+    "pollIntervalMs": 1000
+  }
+}

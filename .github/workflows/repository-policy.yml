@@ -8,9 +8,9 @@ on:
 
 jobs:
   docker-cmd-local-only:
-    name: docker_cmd.md remains local-only
+    name: Deployment commands remain local-only
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Verify docker_cmd.md policy
+      - name: Verify deployment command policy
         run: bash scripts/check_docker_cmd_policy.sh

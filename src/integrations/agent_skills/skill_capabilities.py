@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from src.orchestration.models import CapabilityDescriptor
-from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 
 from .catalog import SkillCatalog
 from .manifest import SkillManifest
@@ -27,7 +26,6 @@ class SkillCapabilityRegistry:
     descriptors_by_id: Mapping[str, CapabilityDescriptor]
     skill_name_by_capability_id: Mapping[str, str]
     source_path_by_capability_id: Mapping[str, str] = field(default_factory=dict)
-    payload_policies: Mapping[str, CapabilityPayloadPolicy] = field(default_factory=dict)
     diagnostics: tuple[SkillCapabilityDiagnostic, ...] = ()
 
     @property
@@ -75,7 +73,6 @@ def build_skill_capability_registry(
     descriptors: dict[str, CapabilityDescriptor] = {}
     skill_names: dict[str, str] = {}
     source_paths: dict[str, str] = {}
-    payload_policies: dict[str, CapabilityPayloadPolicy] = {}
     for capability_id, skills in sorted(candidates.items()):
         if len(skills) > 1:
             for skill in skills:
@@ -98,13 +95,11 @@ def build_skill_capability_registry(
         descriptors[capability_id] = descriptor
         skill_names[capability_id] = skill.name
         source_paths[capability_id] = descriptor.source_path
-        payload_policies[capability_id] = CapabilityPayloadPolicy(planner_allowed_fields=("subtask_label", "parent_question"))
 
     return SkillCapabilityRegistry(
         descriptors_by_id=descriptors,
         skill_name_by_capability_id=skill_names,
         source_path_by_capability_id=source_paths,
-        payload_policies=payload_policies,
         diagnostics=tuple(diagnostics),
     )
 

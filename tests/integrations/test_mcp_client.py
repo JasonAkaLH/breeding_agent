@@ -5,7 +5,7 @@ import unittest
 import httpx
 
 from src.integrations.mcp.client import MCPClient, MCPProtocolError, MCPUnsupportedClientRequest
-from src.integrations.mcp.protocol import DEFAULT_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, MCPTransportResponse
+from src.integrations.mcp.protocol import DEFAULT_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, MCPStreamEvent, MCPTransportResponse
 from src.integrations.mcp.transport_http import StreamableHTTPTransport
 
 
@@ -37,6 +37,37 @@ class RecordingTransport:
 
 
 class MCPClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_accepts_numeric_string_ids_in_final_and_sse_response(self) -> None:
+        streamed = {"jsonrpc": "2.0", "id": "2", "result": {"tools": []}}
+        transport = RecordingTransport(
+            [
+                MCPTransportResponse(
+                    message={
+                        "jsonrpc": "2.0",
+                        "id": "1",
+                        "result": {
+                            "protocolVersion": MCP_PROTOCOL_VERSION,
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "fake"},
+                        },
+                    },
+                    headers={"MCP-Session-Id": "sess-string-id"},
+                ),
+                MCPTransportResponse(message=None, headers={}),
+                MCPTransportResponse(
+                    message=streamed,
+                    sse_events=(MCPStreamEvent(message=streamed),),
+                ),
+            ]
+        )
+        client = MCPClient(server_id="crm", transport=transport)
+
+        initialized = await client.initialize()
+        tools = await client.list_tools()
+
+        self.assertEqual(initialized["protocolVersion"], MCP_PROTOCOL_VERSION)
+        self.assertEqual(tools, [])
+
     async def test_initialize_sends_initialized_notification_and_minimal_capabilities(self) -> None:
         transport = RecordingTransport(
             [

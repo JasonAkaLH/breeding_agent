@@ -1,5 +1,7 @@
 # Skill 一等 Capability 能力池 PRD
 
+> **Phase 6 authority notice（2026-08-23）**：本文中的旧任务编排名词仅保留为历史设计或兼容语境，不再描述当前执行控制面。当前任务入口、Tool调用、补充输入、恢复、取消和最终输出以 `docs/prd/backend/unified-agent-loop/` 为唯一authority；不得据本文恢复旧控制面或读取旧Task。
+
 - **项目**：breeding_agent
 - **范围**：后端 capability registry、Planner / Replanner 能力发现、Skill runtime 接入边界
 - **文档状态**：已实现并更新（2026-05-13 起 数据查询 Skill 也作为 `skill.data_lookup` platform-service 进入能力池）

@@ -14,16 +14,204 @@ import httpx
 from src.api.app import create_app
 from src.api.runtime import ApiRuntime, build_api_runtime
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryResult
+from src.integrations.token_counter import TokenBoundedText
 
 
 GENERIC_DATA_SKILL_ID = "skill.generic_data_lookup"
 GENERIC_DATA_SKILL_NAME = "generic-data-lookup"
 
 
-def blocking_mysql_adapter() -> tuple[MySQLReadonlyAdapter, threading.Event]:
+async def _test_tool_result_token_budgeter(
+    text: str,
+    *,
+    max_tokens: int,
+    model_edition: str,
+    config=None,
+) -> TokenBoundedText:
+    del max_tokens, model_edition, config
+    return TokenBoundedText(
+        text=text,
+        total_tokens=int(bool(text)),
+        truncated=False,
+        cutoff=len(text),
+    )
+
+
+def test_llm_config() -> dict[str, object]:
+    return {
+        "agent_protocol_max_retries": 1,
+        "model_editions": {
+            "default": "api-test",
+            "options": [
+                {
+                    "value": "api-test",
+                    "label": "API Test",
+                    "trim_max_tokens": 1_024_000,
+                    "reasoning_efforts": {
+                        "options": [
+                            {
+                                "value": "minimal",
+                                "label": "Minimal",
+                            },
+                            {
+                                "value": "max",
+                                "label": "Max",
+                            },
+                        ],
+                        "thinking": {
+                            "enabled": {"default": "minimal", "supported": ["minimal", "max"]},
+                            "disabled": {"default": "minimal", "supported": ["minimal"]},
+                        },
+                    },
+                    "agent_capabilities": {
+                        "supports_messages": True,
+                        "roles": ["system", "user", "assistant", "tool"],
+                        "supports_native_tools": True,
+                        "supports_required_tool_choice": True,
+                        "supports_streamed_tool_calls": True,
+                    },
+                }
+            ],
+        },
+    }
+
+
+class InMemoryTaskRuntimeSidecar:
+    """Small Task/TaskNode authority used by canonical MCP rollout API tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.tasks: dict[str, dict[str, object]] = {}
+        self.nodes: dict[str, dict[str, object]] = {}
+
+    async def submit_task(self, **payload: object) -> dict[str, object]:
+        task_id = str(payload["task_id"])
+        task = dict(payload["task"])  # type: ignore[arg-type]
+        self.calls.append(("task_submit", dict(payload)))
+        self.tasks[task_id] = task
+        return {
+            "operation": "task_submit",
+            "task_id": task_id,
+            "duplicate": False,
+            "task": task,
+            "error": None,
+        }
+
+    async def get_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_get", {"task_id": task_id}))
+        task = self.tasks.get(task_id)
+        return {
+            "operation": "task_get",
+            "found": task is not None,
+            "task": task,
+            "error": None,
+        }
+
+    async def list_tasks_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+        statuses: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "task_list_for_conversation",
+                {"conversation_id": conversation_id, "statuses": statuses},
+            )
+        )
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task["conversation_id"] == conversation_id
+            and (not statuses or task["status"] in statuses)
+        ]
+        tasks.sort(
+            key=lambda task: (str(task.get("created_at") or ""), str(task["task_id"])),
+            reverse=True,
+        )
+        return {
+            "operation": "task_list_for_conversation",
+            "tasks": tasks,
+            "error": None,
+        }
+
+    async def get_active_task_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            ("task_get_active_for_conversation", {"conversation_id": conversation_id})
+        )
+        active_statuses = {"accepted", "planning", "running", "cancelling"}
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task["conversation_id"] == conversation_id
+            and task["status"] in active_statuses
+        ]
+        tasks.sort(
+            key=lambda task: (str(task.get("created_at") or ""), str(task["task_id"])),
+            reverse=True,
+        )
+        task = tasks[0] if tasks else None
+        return {
+            "operation": "task_get_active_for_conversation",
+            "found": task is not None,
+            "task": task,
+            "error": None,
+        }
+
+    async def transition_node(self, **payload: object) -> dict[str, object]:
+        node_id = str(payload["node_id"])
+        node = payload.get("node")
+        self.calls.append(("node_state_transition", dict(payload)))
+        if isinstance(node, dict):
+            self.nodes[node_id] = dict(node)
+        return {
+            "operation": "node_state_transition",
+            "node_id": node_id,
+            "status": str(payload["to_status"]),
+            "node": node,
+            "error": None,
+        }
+
+    async def get_task_node(self, *, node_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_get", {"node_id": node_id}))
+        node = self.nodes.get(node_id)
+        return {
+            "operation": "task_node_get",
+            "found": node is not None,
+            "node": node,
+            "error": None,
+        }
+
+    async def list_task_nodes_for_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_list", {"task_id": task_id}))
+        nodes = sorted(
+            (
+                node
+                for node in self.nodes.values()
+                if node["task_id"] == task_id
+            ),
+            key=lambda node: str(node["node_id"]),
+        )
+        return {
+            "operation": "task_node_list",
+            "nodes": nodes,
+            "error": None,
+        }
+
+
+def blocking_mysql_adapter(
+    *,
+    started: threading.Event | None = None,
+) -> tuple[MySQLReadonlyAdapter, threading.Event]:
     release = threading.Event()
 
     def _runner(sql: str) -> ReadonlyQueryResult:
+        if started is not None:
+            started.set()
         if not release.wait(timeout=10):
             raise TimeoutError(f"Timed out waiting to release blocking SQL runner for {sql!r}.")
         return ReadonlyQueryResult(
@@ -60,13 +248,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         platform_llm_config_path=None,
         platform_llm_client_factory=None,
         enable_platform_llm: bool | None = None,
-        planner_text_generator=None,
-        planner_llm_config=None,
-        planner_llm_config_path=None,
-        planner_llm_client_factory=None,
-        planner_reasoning_effort="minimal",
-        enable_llm_planner: bool | None = None,
-        planner_payload_policies=None,
         main_agent_stream_generator=None,
         main_agent_llm_config=None,
         main_agent_llm_config_path=None,
@@ -91,6 +272,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
         runtime_sidecar_client=None,
+        enable_user_mcp: bool | None = None,
+        enable_user_mcp_routing: bool | None = None,
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
             runner=lambda sql: ReadonlyQueryResult(
@@ -98,10 +281,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 rows=({"variety_name": "龙粳33"},),
                 row_count=1,
             )
-        )
-        planner_configured = any(
-            value is not None
-            for value in (planner_text_generator, planner_llm_config, planner_llm_config_path, planner_llm_client_factory)
         )
         platform_llm_configured = any(
             value is not None
@@ -147,6 +326,11 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                     _prompt,
                     **self._stream_generator_supported_options(delegated_main_agent_stream_generator, _kwargs),
                 )
+        if (
+            main_agent_llm_config is None
+            and main_agent_llm_config_path is None
+        ):
+            main_agent_llm_config = test_llm_config()
         effective_skill_roots = tuple(skill_roots) if skill_roots is not None else tuple(self.default_skill_roots())
         effective_public_skill_roots = (
             tuple(public_skill_roots)
@@ -156,22 +340,16 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
 
         with patch.dict("os.environ", {"MAF_STATE_STORE_BACKEND": "sqlite"}, clear=False):
-            return build_api_runtime(
+            runtime = build_api_runtime(
                 database_path=self.workspace / "phase6-api.sqlite3",
                 audit_log_path=self.workspace / "audit.jsonl",
+                master_key_bytes=b"t" * 32,
                 mysql_adapter=adapter,
                 platform_llm_text_generator=platform_llm_text_generator,
                 platform_llm_config=platform_llm_config,
                 platform_llm_config_path=platform_llm_config_path,
                 platform_llm_client_factory=platform_llm_client_factory,
                 enable_platform_llm=platform_llm_configured if enable_platform_llm is None else enable_platform_llm,
-                planner_text_generator=planner_text_generator,
-                planner_llm_config=planner_llm_config,
-                planner_llm_config_path=planner_llm_config_path,
-                planner_llm_client_factory=planner_llm_client_factory,
-                planner_reasoning_effort=planner_reasoning_effort,
-                enable_llm_planner=planner_configured if enable_llm_planner is None else enable_llm_planner,
-                planner_payload_policies=planner_payload_policies,
                 main_agent_stream_generator=main_agent_stream_generator,
                 main_agent_llm_config=main_agent_llm_config,
                 main_agent_llm_config_path=main_agent_llm_config_path,
@@ -196,7 +374,18 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 mcp_sidecar_client=mcp_sidecar_client,
                 mcp_runtime_state=mcp_runtime_state,
                 runtime_sidecar_client=runtime_sidecar_client,
+                enable_user_mcp=enable_user_mcp,
+                enable_user_mcp_routing=enable_user_mcp_routing,
                 )
+        runtime.agent_loop_orchestrator._runner._invoker._result_projector._token_budgeter = (
+            _test_tool_result_token_budgeter
+        )
+        user_mcp_gateway = runtime.user_mcp_gateway
+        if user_mcp_gateway is not None and user_mcp_gateway._result_service is not None:
+            user_mcp_gateway._result_service._token_budgeter = (
+                _test_tool_result_token_budgeter
+            )
+        return runtime
 
     async def _bind_client(self) -> None:
         self.app = create_app(runtime=self.runtime)
@@ -228,13 +417,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         platform_llm_config_path=None,
         platform_llm_client_factory=None,
         enable_platform_llm: bool | None = None,
-        planner_text_generator=None,
-        planner_llm_config=None,
-        planner_llm_config_path=None,
-        planner_llm_client_factory=None,
-        planner_reasoning_effort="minimal",
-        enable_llm_planner: bool | None = None,
-        planner_payload_policies=None,
         main_agent_stream_generator=None,
         main_agent_llm_config=None,
         main_agent_llm_config_path=None,
@@ -259,6 +441,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
         runtime_sidecar_client=None,
+        enable_user_mcp: bool | None = None,
+        enable_user_mcp_routing: bool | None = None,
     ) -> None:
         await self.client.aclose()
         await self.runtime.shutdown()
@@ -269,13 +453,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             platform_llm_config_path=platform_llm_config_path,
             platform_llm_client_factory=platform_llm_client_factory,
             enable_platform_llm=enable_platform_llm,
-            planner_text_generator=planner_text_generator,
-            planner_llm_config=planner_llm_config,
-            planner_llm_config_path=planner_llm_config_path,
-            planner_llm_client_factory=planner_llm_client_factory,
-            planner_reasoning_effort=planner_reasoning_effort,
-            enable_llm_planner=enable_llm_planner,
-            planner_payload_policies=planner_payload_policies,
             main_agent_stream_generator=main_agent_stream_generator,
             main_agent_llm_config=main_agent_llm_config,
             main_agent_llm_config_path=main_agent_llm_config_path,
@@ -300,6 +477,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
             runtime_sidecar_client=runtime_sidecar_client,
+            enable_user_mcp=enable_user_mcp,
+            enable_user_mcp_routing=enable_user_mcp_routing,
         )
         await self._bind_client()
 
@@ -309,29 +488,29 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         conversation_id: str = "conv-1",
         content: str = "查询某个品种的基因型信息",
         capability_id: str | None = GENERIC_DATA_SKILL_ID,
+        client_message_id: str | None = None,
         metadata: dict | None = None,
     ) -> httpx.Response:
         request_metadata = dict(metadata or {})
         request_capability_id = capability_id
         routing_mode = "auto"
-        if capability_id is not None and capability_id.startswith("skill."):
-            request_capability_id = "main_agent.respond"
+        if capability_id is not None:
             routing_mode = "force_capability"
+        if capability_id is not None and capability_id.startswith("skill."):
             request_metadata.setdefault("forced_by_slash_command", True)
             request_metadata.setdefault("slash_command", f"/{capability_id.removeprefix('skill.').replace('_', '-')}")
-            request_metadata["soft_skill_binding"] = {
-                "capability_id": capability_id,
-                "command": request_metadata["slash_command"],
-            }
+        body = {
+            "conversation_id": conversation_id,
+            "content": content,
+            "routing_mode": routing_mode,
+            "capability_id": request_capability_id,
+            "metadata": request_metadata,
+        }
+        if client_message_id is not None:
+            body["client_message_id"] = client_message_id
         return await self.client.post(
             "/api/v1/conversations/chat-messages",
-            json={
-                "conversation_id": conversation_id,
-                "content": content,
-                "routing_mode": routing_mode,
-                "capability_id": request_capability_id,
-                "metadata": request_metadata,
-            },
+            json=body,
         )
 
     async def answer_interrupt_with_chat(

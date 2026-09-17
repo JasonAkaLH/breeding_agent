@@ -42,6 +42,12 @@
 - 返回未声明或不支持的 MCP `protocolVersion`；
 - 把 2024 旧版协议伪装成 2025+ Streamable HTTP。
 
+### 1.2 用户主动绑定 Server 时的行为
+
+聊天用户可以通过 `$显示名称` 主动绑定自己的一个 `enabled + available` MCP Server。该操作固定Server，但不强制调用具体Tool：客户端会先完成 `initialize + tools/list`，随后受限Selector只会选择当前Server内的 `call_tool`、`finish`或`stop`，不会改路由到其他Server。`initialize`和`tools/list`不触发Tool授权；只有实际 `tools/call` 才进入允许一次、始终允许或拒绝流程。
+
+本项目当前不会把聊天附件正文、base64、本地路径、URL或内部upload ID自动转换成MCP Tool参数。Server可能只看到普通Tool参数，不会直接收到SeedPilot附件；如Tool必须读取文件内容，本轮会零调用结束并向用户说明缺少文件桥接。Tool名称、描述、annotations、Schema和输出均按不可信外部数据处理，不得依赖描述文本改变Host侧系统规则。
+
 ---
 
 ## 2. 你需要提供一个 HTTP endpoint

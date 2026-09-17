@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 
 from src.core.enums import AckPolicy, EventVisibility, MailboxChannel, MailboxDeliveryStatus
 from src.core.models import EventRecord, MailboxDelivery, MailboxMessage
@@ -35,6 +36,117 @@ class SQLiteMailboxRepositoryTest(SQLiteStorageTestCase):
         self.assertEqual(saved, event)
         self.assertEqual(loaded, event)
         self.assertEqual(listed, [event])
+
+    def test_event_record_replays_exact_and_rejects_field_drift(self) -> None:
+        event = EventRecord(
+            event_id="evt-exact",
+            conversation_id="conv-1",
+            task_id="task-1",
+            node_id="node-1",
+            agent_id="agent-1",
+            event_type="task.accepted",
+            payload={"status": "accepted"},
+            visibility=EventVisibility.FRONTEND,
+            created_at=datetime(2026, 4, 23, 12, 0, 0),
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteCollaborationRepository(session)
+            self.assertEqual(repo.save_event_record_exact(event), (event, False))
+            self.assertEqual(repo.save_event_record_exact(event), (event, True))
+            session.commit()
+
+        drifted_events = (
+            replace(event, conversation_id="conv-2"),
+            replace(event, task_id="task-2"),
+            replace(event, node_id="node-2"),
+            replace(event, agent_id="agent-2"),
+            replace(event, event_type="task.changed"),
+            replace(event, payload={"status": "changed"}),
+            replace(event, visibility=EventVisibility.INTERNAL),
+            replace(event, created_at=event.created_at + timedelta(seconds=1)),
+        )
+        for drifted in drifted_events:
+            with self.subTest(drifted=drifted), self.session_factory() as session:
+                repo = SQLiteCollaborationRepository(session)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_idempotency_conflict",
+                ):
+                    repo.save_event_record_exact(drifted)
+
+        with self.session_factory() as session:
+            saved = SQLiteCollaborationRepository(session).get_event_record(event.event_id)
+        self.assertEqual(saved, event)
+
+    def test_event_record_exact_replay_uses_persisted_json_payload_semantics(self) -> None:
+        event = EventRecord(
+            event_id="evt-json-array",
+            conversation_id="conv-1",
+            task_id="task-1",
+            event_type="skill.service_bound",
+            payload={
+                "services": ("mysql_readonly",),
+                "binding": {"mode": "readonly", "version": 1},
+            },
+            created_at=datetime(2026, 4, 23, 12, 0, 0),
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteCollaborationRepository(session)
+            saved, duplicate = repo.save_event_record_exact(event)
+            session.commit()
+        self.assertFalse(duplicate)
+        self.assertEqual(
+            saved.payload,
+            {
+                "binding": {"mode": "readonly", "version": 1},
+                "services": ["mysql_readonly"],
+            },
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteCollaborationRepository(session)
+            replayed, duplicate = repo.save_event_record_exact(
+                replace(
+                    event,
+                    payload={
+                        "binding": {"version": 1, "mode": "readonly"},
+                        "services": ["mysql_readonly"],
+                    },
+                )
+            )
+            session.commit()
+        self.assertTrue(duplicate)
+        self.assertEqual(replayed.payload, saved.payload)
+
+    def test_event_record_legacy_save_keeps_existing_merge_behavior(self) -> None:
+        first = EventRecord(
+            event_id="evt-legacy-merge",
+            conversation_id="conv-1",
+            task_id="task-1",
+            event_type="skill.execution_started",
+            payload={"attempt": 1},
+            created_at=datetime(2026, 4, 23, 12, 0, 0),
+        )
+        replay = replace(
+            first,
+            payload={"attempt": 2},
+            created_at=first.created_at + timedelta(seconds=1),
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteCollaborationRepository(session)
+            repo.save_event_record(first)
+            saved = repo.save_event_record(replay)
+            session.commit()
+
+        self.assertEqual(saved, replay)
+        with self.session_factory() as session:
+            stored = SQLiteCollaborationRepository(session).get_event_record(
+                first.event_id
+            )
+        self.assertEqual(stored, replay)
 
     def test_mailbox_message_and_delivery_round_trip(self) -> None:
         mailbox = MailboxMessage(

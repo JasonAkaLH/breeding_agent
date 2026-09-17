@@ -12,10 +12,18 @@ import type {
   LogoutResponse,
   TaskInterruptsResponse,
   TaskListResponse,
+  CreateMCPServerRequest,
+  MCPCallControlResponse,
+  MCPDeleteServerResponse,
+  MCPServerListResponse,
+  MCPServerResponse,
+  MCPToolGrantListResponse,
   MessageAcceptedResponse,
   ModelEdition,
   ModelEditionsResponse,
   ReasoningEffort,
+  RoutingMode,
+  PatchMCPServerRequest,
   SubmitMessageRequest,
   TaskArtifactsResponse,
   TaskGraphResponse,
@@ -34,6 +42,7 @@ export interface SubmitMessageInput {
   conversationId: string;
   content: string;
   mode: ChatMode;
+  routingMode: RoutingMode;
   modelEdition?: ModelEdition;
   deepThinking?: boolean;
   reasoningEffort?: ReasoningEffort;
@@ -65,6 +74,17 @@ export interface ApiClient {
   downloadArtifact(artifactId: string, filename: string): Promise<void>;
   getTaskGraph(taskId: string): Promise<TaskGraphResponse>;
   listInterrupts(taskId: string): Promise<TaskInterruptsResponse>;
+  listMCPServers(): Promise<MCPServerListResponse>;
+  createMCPServer(input: CreateMCPServerRequest): Promise<MCPServerResponse>;
+  getMCPServer(serverId: string): Promise<MCPServerResponse>;
+  patchMCPServer(serverId: string, input: PatchMCPServerRequest): Promise<MCPServerResponse>;
+  testMCPServer(serverId: string): Promise<MCPServerResponse>;
+  deleteMCPServer(serverId: string): Promise<MCPDeleteServerResponse | undefined>;
+  listMCPGrants(): Promise<MCPToolGrantListResponse>;
+  deleteMCPGrant(grantId: string): Promise<void>;
+  clearMCPServerGrants(serverId: string): Promise<void>;
+  continueMCPCall(taskId: string, callRef: string): Promise<MCPCallControlResponse>;
+  cancelMCPCall(taskId: string, callRef: string): Promise<MCPCallControlResponse>;
 }
 
 export class ApiError extends Error {
@@ -117,6 +137,9 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       }
       throw await toApiError(response);
     }
+    if (response.status === 204) {
+      return undefined as T;
+    }
     return (await response.json()) as T;
   }
 
@@ -157,27 +180,29 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       }
       return (await response.json()) as UploadFileResponse;
     },
-    submitMessage: (input) => {
+    submitMessage: async (input) => {
       const mode = UI_MODES.find((candidate) => candidate.key === input.mode);
       if (!mode) {
         throw new ApiError(0, null, '当前对话模式不可用，请刷新后重试。');
       }
-      const explicitCapabilityId = input.capabilityId ?? null;
-      const capabilityId = explicitCapabilityId || mode.capabilityId;
+      const capabilityId = input.capabilityId ?? null;
+      validateSubmitRouting(input.routingMode, capabilityId, input.metadata);
       const deepThinking = input.deepThinking ?? false;
-      const reasoningEffort = deepThinking ? (input.reasoningEffort ?? 'minimal') : 'minimal';
+      const metadata: Record<string, unknown> = {
+        ...(input.metadata ?? {}),
+        deep_thinking: deepThinking,
+      };
+      if (input.reasoningEffort) {
+        metadata.main_agent_reasoning_effort = input.reasoningEffort;
+      }
       const body: SubmitMessageRequest = {
         conversation_id: input.conversationId,
         content: input.content,
-        routing_mode: capabilityId ? 'force_capability' : 'auto',
+        routing_mode: input.routingMode,
         capability_id: capabilityId,
         client_message_id: input.clientMessageId ?? null,
         ...(input.modelEdition ? { model_edition: input.modelEdition } : {}),
-        metadata: {
-          ...(input.metadata ?? {}),
-          deep_thinking: deepThinking,
-          main_agent_reasoning_effort: reasoningEffort,
-        },
+        metadata,
       };
       return request<MessageAcceptedResponse>('/api/v1/conversations/chat-messages', {
         method: 'POST',
@@ -205,6 +230,38 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       body: JSON.stringify({ task_id: taskId }),
     }),
     listInterrupts: (taskId) => request<TaskInterruptsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/interrupts`),
+    listMCPServers: () => request<MCPServerListResponse>('/api/v1/mcp/servers'),
+    createMCPServer: (input) => request<MCPServerResponse>('/api/v1/mcp/servers', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    getMCPServer: (serverId) => request<MCPServerResponse>(`/api/v1/mcp/servers/${encodeURIComponent(serverId)}`),
+    patchMCPServer: (serverId, input) => request<MCPServerResponse>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}`,
+      { method: 'PATCH', body: JSON.stringify(input) },
+    ),
+    testMCPServer: (serverId) => request<MCPServerResponse>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}/test`,
+      { method: 'POST' },
+    ),
+    deleteMCPServer: (serverId) => request<MCPDeleteServerResponse | undefined>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}`,
+      { method: 'DELETE' },
+    ),
+    listMCPGrants: () => request<MCPToolGrantListResponse>('/api/v1/mcp/grants'),
+    deleteMCPGrant: (grantId) => request<void>(`/api/v1/mcp/grants/${encodeURIComponent(grantId)}`, { method: 'DELETE' }),
+    clearMCPServerGrants: (serverId) => request<void>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}/grants`,
+      { method: 'DELETE' },
+    ),
+    continueMCPCall: (taskId, callRef) => request<MCPCallControlResponse>(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/mcp-calls/${encodeURIComponent(callRef)}/continue`,
+      { method: 'POST' },
+    ),
+    cancelMCPCall: (taskId, callRef) => request<MCPCallControlResponse>(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/mcp-calls/${encodeURIComponent(callRef)}/cancel`,
+      { method: 'POST' },
+    ),
     getTaskArtifacts: (taskId) => request<TaskArtifactsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts`),
     downloadArtifact: async (artifactId, filename) => {
       const response = await fetcher(`${baseUrl}/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`, {
@@ -239,6 +296,33 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
   };
 }
 
+function validateSubmitRouting(
+  routingMode: RoutingMode,
+  capabilityId: string | null,
+  metadata: Record<string, unknown> | undefined,
+): void {
+  const mcpBinding = metadata?.mcp_server_binding;
+  const hasMCPBinding = mcpBinding !== undefined;
+  const validMCPBinding = isRecord(mcpBinding)
+    && Object.keys(mcpBinding).length === 1
+    && typeof mcpBinding.server_id === 'string'
+    && mcpBinding.server_id.trim().length > 0;
+  const valid = routingMode === 'auto'
+    ? capabilityId === null && !hasMCPBinding
+    : routingMode === 'hint'
+      ? Boolean(capabilityId?.startsWith('skill.')) && !hasMCPBinding
+      : routingMode === 'force_capability'
+        && capabilityId !== null
+        && (capabilityId === 'mcp.dispatch' ? validMCPBinding : !hasMCPBinding);
+  if (!valid) {
+    throw new ApiError(0, null, '提交路由参数组合无效，请刷新后重试。');
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 async function toApiError(response: Response): Promise<ApiError> {
   let detail: unknown = null;
   try {
@@ -246,10 +330,17 @@ async function toApiError(response: Response): Promise<ApiError> {
   } catch {
     detail = await response.text().catch(() => null);
   }
-  return new ApiError(response.status, detail, friendlyErrorMessage(response.status));
+  return new ApiError(response.status, detail, friendlyErrorMessage(response.status, detail));
 }
 
-function friendlyErrorMessage(status: number): string {
+function friendlyErrorMessage(status: number, detail: unknown): string {
+  const code = apiErrorCode(detail);
+  if (code === 'mcp_bound_server_unavailable') {
+    return '所选 MCP Server 已不可用，请刷新列表后重新选择。';
+  }
+  if (code === 'mcp_feature_unavailable') {
+    return 'MCP 功能暂不可用，请稍后重试。';
+  }
   if (status === 401) {
     return '登录已失效，请重新登录。';
   }
@@ -263,6 +354,14 @@ function friendlyErrorMessage(status: number): string {
     return '任务不存在或已过期，请重新提交问题。';
   }
   return '请求未完成，请稍后重试。';
+}
+
+function apiErrorCode(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const detail = (value as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return '';
+  const code = (detail as { code?: unknown }).code;
+  return typeof code === 'string' ? code : '';
 }
 
 export function normalizeBaseUrl(value: string): string {

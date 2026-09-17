@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from src.core.contracts import StoragePort
+from src.core.contracts import TaskStoragePort
 
 from .errors import ConversationBusyError
 
 
 class ConversationSerialGuard:
-    def __init__(self, storage: StoragePort) -> None:
+    def __init__(self, storage: TaskStoragePort) -> None:
         self._storage = storage
 
     async def ensure_conversation_available(self, conversation_id: str) -> None:

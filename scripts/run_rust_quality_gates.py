@@ -99,7 +99,14 @@ def build_gates() -> list[Gate]:
         ),
         Gate(
             name="fuzz_cargo_check",
-            command=["cargo", "check", "--manifest-path", "native/fuzz/Cargo.toml", "--bins"],
+            command=[
+                "cargo",
+                "check",
+                "--locked",
+                "--manifest-path",
+                "native/fuzz/Cargo.toml",
+                "--bins",
+            ],
             cwd=REPO_ROOT,
             required_tools=("cargo",),
             description="Compile all PRD01 fuzz harnesses without executing libFuzzer.",
@@ -110,6 +117,13 @@ def build_gates() -> list[Gate]:
             cwd=REPO_ROOT / "native" / "fuzz",
             required_tools=("cargo", "cargo-fuzz"),
             description="Bounded PRD01 fuzz smoke for the Skill Runtime policy boundary.",
+        ),
+        Gate(
+            name="mcp_runtime_protocol_fuzz_smoke",
+            command=["cargo", "+nightly", "fuzz", "run", "mcp_runtime_protocol", "--", "-max_total_time=30"],
+            cwd=REPO_ROOT / "native" / "fuzz",
+            required_tools=("cargo", "cargo-fuzz"),
+            description="Bounded PRD05 fuzz smoke for MCP JSON-RPC and sanitizer boundaries.",
         ),
         Gate(
             name="rust_artifact_provenance_self_check",

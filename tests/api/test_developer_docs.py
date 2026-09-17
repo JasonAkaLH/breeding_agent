@@ -35,7 +35,13 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("slot collection revision", response.text)
         self.assertIn("Thinking / reasoning_effort 组合规则", response.text)
         self.assertIn("metadata.deep_thinking=false", response.text)
-        self.assertIn("强制降为", response.text)
+        self.assertIn("reasoning_efforts", response.text)
+        self.assertIn("thinking.disabled.supported", response.text)
+        self.assertIn("ReasoningEffortThinkingPolicyResponse", response.text)
+        self.assertNotIn("allow_when_thinking_disabled", response.text)
+        self.assertNotIn("disabled_default", response.text)
+        self.assertIn("validation error", response.text)
+        self.assertNotIn("强制降为", response.text)
         self.assertIn("历史消息只持久化最终 answer content", response.text)
         self.assertIn("API 更新日志", response.text)
         self.assertIn("api-changelog-content", response.text)
@@ -43,12 +49,20 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn('aria-label="API 更新日志滚动阅读窗"', response.text)
         self.assertIn("overflow-y: auto", response.text)
         self.assertIn("max-height: min(620px, 52vh)", response.text)
-        self.assertIn("/api-doc/API更新日志.md", response.text)
+        self.assertIn("api-doc/API更新日志.md", response.text)
         self.assertIn("openapi-schema-status", response.text)
-        self.assertIn("data-openapi-source=\"/openapi.json\"", response.text)
+        self.assertIn("data-openapi-source=\"openapi.json\"", response.text)
         self.assertIn("fetch(source, { cache: 'no-store' })", response.text)
         self.assertIn("components.schemas", response.text)
         self.assertIn("字段结构在浏览器运行时读取", response.text)
+        self.assertNotIn('data-source="/api-doc/API更新日志.md"', response.text)
+        self.assertNotIn('data-openapi-source="/openapi.json"', response.text)
+        self.assertIn("http://127.0.0.1:51999/seedpilot/", response.text)
+        self.assertIn("/seedpilot/api/", response.text)
+        self.assertIn("/seedpilot/api-doc", response.text)
+        self.assertIn("/assets/</code> 不再由 SeedPilot 占用", response.text)
+        self.assertIn("51999/seedpilot", response.text)
+        self.assertIn("仅用于内部调试", response.text)
         self.assertIn("CSV / TSV / JSON 多编码", response.text)
         self.assertIn("file_type=csv", response.text)
         self.assertIn("sheet_selection_required", response.text)
@@ -68,8 +82,16 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("任务终态仍保持", response.text)
         self.assertIn("columns_truncated", response.text)
         self.assertIn("excel_sheets_truncated", response.text)
-        self.assertIn("metadata.soft_skill_binding", response.text)
-        self.assertIn("direct_skill_execution_disabled", response.text)
+        self.assertNotIn("metadata.soft_skill_binding", response.text)
+        self.assertNotIn("direct_skill_execution_disabled", response.text)
+        self.assertIn("capability_id=skill.*", response.text)
+        self.assertIn("routing_mode=hint", response.text)
+        self.assertIn("skill_hint_unavailable", response.text)
+        self.assertIn("prepared v2", response.text)
+        self.assertIn("skill_result.json", response.text)
+        self.assertIn("每Call 50,000 tokens预算", response.text)
+        self.assertIn("Frontend不执行字符、UTF-8 bytes或Token长度校验", response.text)
+        self.assertIn("131,072 bytes", response.text)
         self.assertIn("skill.contract.yaml", response.text)
         self.assertIn("schemas/*.input.yaml", response.text)
         self.assertIn("SkillResourceService", response.text)
@@ -84,8 +106,9 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("runtime/", response.text)
         self.assertIn("schemas/", response.text)
         self.assertIn("config.yaml", response.text)
-        self.assertIn("soft_skill_binding.decision", response.text)
-        self.assertIn("main_agent.output_delta", response.text)
+        self.assertIn("agent.reasoning_delta", response.text)
+        self.assertIn("agent.reasoning_reset", response.text)
+        self.assertIn("agent.run.completed", response.text)
         self.assertIn("文件产物判定规则", response.text)
         self.assertIn("sandbox:/mnt/data", response.text)
         self.assertIn("/api/v1/artifacts/{artifact_id}/download", response.text)
@@ -100,7 +123,7 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("以 SSE 为主账本", response.text)
         self.assertIn("只有当 SSE 中收到", response.text)
         self.assertIn("不能替代 SSE 触发 interrupt", response.text)
-        self.assertIn("graph 只能说明“现在看起来是什么状态”", response.text)
+        self.assertIn("graph 只提供当前活动快照", response.text)
         self.assertIn("所有 interrupt 回答统一通过 chat-messages 提交", response.text)
         self.assertIn("开放性追问", response.text)
         self.assertIn("metadata.upload_sheet_selections", response.text)
@@ -120,10 +143,6 @@ class DeveloperDocsAPITest(APITestCase):
             "auth.invalidated",
             "task.accepted",
             "task.graph_created",
-            "task.graph_updated",
-            "task.replan_started",
-            "task.replan_rejected",
-            "task.replan_available",
             "task.completed",
             "task.failed",
             "task.cancellation_requested",
@@ -136,16 +155,24 @@ class DeveloperDocsAPITest(APITestCase):
             "node.waiting_for_input",
             "node.cancelled",
             "node.blocked_by_cancellation",
-            "node.orphaned",
             "node.ready_to_resume",
             "node.resuming",
-            "main_agent.output_delta",
-            "main_agent.reasoning_delta",
-            "planner.reasoning_delta",
+            "agent.reasoning_delta",
+            "agent.reasoning_reset",
             "interrupt.reasoning_delta",
             "memory.reasoning_delta",
-            "soft_skill.reasoning_delta",
-            "main_agent.output_final",
+            "agent.run.waiting",
+            "agent.run.resumed",
+            "agent.run.completed",
+            "agent.run.failed",
+            "agent.run.cancelled",
+            "agent.run.started",
+            "agent.sample.started",
+            "agent.sample.completed",
+            "agent.tool_call.accepted",
+            "agent.tool_result.committed",
+            "agent.run.lease_lost",
+            "agent.context.compacted",
             "skill.progress",
             "mcp.long_task_started",
             "mcp.long_task_progress",
@@ -160,20 +187,10 @@ class DeveloperDocsAPITest(APITestCase):
             "assistant_history_sync.failed",
             "conversation.memory_built",
             "conversation.memory_fallback",
-            "main_agent.llm_call",
-            "main_agent.llm_stream_failed",
-            "main_agent.prompt_envelope_failed",
-            "main_agent.prompt_envelope_rendered",
-            "main_agent.prompt_profile_rendered",
-            "main_agent.stream_cancelled",
             "mcp.tool_call_blocked",
             "mcp.tool_call_started",
             "mcp.tool_call_failed",
             "mcp.tool_call_completed",
-            "pending_skill_context.superseded",
-            "pending_skill_context.consumed",
-            "pending_skill_context.created",
-            "skill.bundle_missing",
             "skill.entrypoint_started",
             "skill.entrypoint_failed",
             "skill.entrypoint_completed",
@@ -181,30 +198,19 @@ class DeveloperDocsAPITest(APITestCase):
             "skill.execution_failed",
             "skill.execution_completed",
             "skill.execution_interrupted",
-            "skill.forced_missing",
-            "skill.forced_selected",
             "skill.input_resolution_prompt_profile",
             "skill.input_resolution_diagnostic",
             "skill.input_resolved",
             "skill.input_missing",
-            "skill.match_fallback",
-            "skill.match_suppressed",
-            "skill.matched",
             "skill.output_error",
             "skill.output_file_rejected",
             "skill.output_file_collected",
             "skill.script_started",
             "skill.script_failed",
             "skill.script_completed",
-            "skill.service_denied",
-            "skill.service_bound",
             "skill.resource_read",
             "skill.output_contract_validated",
-            "soft_skill_binding.decision",
-            "soft_skill_binding.llm_failed",
             "task.late_result_discarded",
-            "task.replanned",
-            "workflow.plan_built",
         ):
             self.assertIn(event_type, response.text)
             self.assertRegex(
@@ -212,6 +218,17 @@ class DeveloperDocsAPITest(APITestCase):
                 rf'<code class="inline-code">{re.escape(event_type)}</code>（[^）]+）',
             )
         self.assertNotIn("task.updated", response.text)
+        for removed_event_type in (
+            "task.graph_updated",
+            "task.replanned",
+            "workflow.plan_built",
+            "planner.reasoning_delta",
+            "soft_skill.reasoning_delta",
+            "soft_skill_binding.decision",
+            "main_agent.output_delta",
+            "main_agent.output_final",
+        ):
+            self.assertNotIn(removed_event_type, event_enum_section)
         self.assertIn("ConversationSummaryResponse", response.text)
         self.assertIn("username", response.text)
         self.assertIn("51888", response.text)
@@ -253,43 +270,22 @@ class DeveloperDocsAPITest(APITestCase):
         changelog_response = await self.client.get("/api-doc/API更新日志.md")
         self.assertEqual(changelog_response.status_code, 200)
         self.assertIn("text/markdown", changelog_response.headers["content-type"])
-        self.assertIn("# API 更新日志", changelog_response.text)
-        self.assertIn("2026-06-09", changelog_response.text)
-        self.assertIn("_slot_collection_ref", changelog_response.text)
-        self.assertIn("client_request_id", changelog_response.text)
-        self.assertIn("clarification_answer", changelog_response.text)
-        self.assertIn("metadata.interrupt_id", changelog_response.text)
-        self.assertIn("MessageAcceptedResponse.action", changelog_response.text)
-        self.assertIn("interrupt_resumed", changelog_response.text)
-        self.assertIn("interrupt_mixed_processed", changelog_response.text)
-        self.assertIn("interrupt_schema_switched", changelog_response.text)
-        self.assertIn("collection_id + revision", changelog_response.text)
-        self.assertIn("will_resume=true", changelog_response.text)
-        self.assertIn("interrupt_clarification_answer", changelog_response.text)
-        self.assertIn("assistant_message", changelog_response.text)
-        self.assertIn("History Recall", changelog_response.text)
-        self.assertIn("model_edition", changelog_response.text)
-        self.assertIn("messages[].artifacts", changelog_response.text)
-        self.assertIn("file_type=vcf", changelog_response.text)
-        self.assertIn("file_type=text", changelog_response.text)
-        self.assertIn("char_count", changelog_response.text)
-        self.assertIn("line_count", changelog_response.text)
-        self.assertNotIn("/api/v1/tasks/interrupts/answer", changelog_response.text)
-        self.assertNotIn("AnswerInterrupt", changelog_response.text)
-        self.assertIn("2026-06-05", changelog_response.text)
-        self.assertIn("v2-only Skill Contract", changelog_response.text)
-        self.assertIn("skill.contract.yaml", changelog_response.text)
-        self.assertIn("_slot_collection.schema_version=2", changelog_response.text)
-        self.assertIn("SkillResourceService", changelog_response.text)
-        self.assertIn("skill.resource_read", changelog_response.text)
-        self.assertIn("2026-06-01", changelog_response.text)
-        self.assertIn("sheet_selection_required", changelog_response.text)
-        self.assertIn("upload_sheet_selections", changelog_response.text)
-        self.assertIn("不会创建 message / task", changelog_response.text)
-        self.assertIn("保持原 interrupt open", changelog_response.text)
-        self.assertIn("任务终态仍保持 `cancelled`", changelog_response.text)
-        self.assertIn("2026-05-28 至 2026-05-29", changelog_response.text)
-        self.assertIn("direct_skill_execution_disabled", changelog_response.text)
+        self.assertIn("# API 更新日志：`main` 与 `prod` 全量差异扫描", changelog_response.text)
+        self.assertIn("main@bd0fd2d", changelog_response.text)
+        self.assertIn("prod@e7ede32", changelog_response.text)
+        self.assertIn("新增路径：0", changelog_response.text)
+        self.assertIn("method 变化：0", changelog_response.text)
+        self.assertIn("ReasoningEffortConfigResponse", changelog_response.text)
+        self.assertIn("options[].reasoning_efforts", changelog_response.text)
+        self.assertIn("metadata.main_agent_reasoning_effort", changelog_response.text)
+        self.assertIn("message_type=file_upload", changelog_response.text)
+        self.assertIn("metadata.file_selection", changelog_response.text)
+        self.assertIn("MAF_CONVERSATION_FILE_SELECTOR_MODE", changelog_response.text)
+        self.assertIn("capability.missing_fallback", changelog_response.text)
+        self.assertIn("artifact_generation_allowed", changelog_response.text)
+        self.assertIn("/seedpilot/api/v1/*", changelog_response.text)
+        self.assertIn("sub_filter", changelog_response.text)
+        self.assertNotIn("## 2026-06-09", changelog_response.text)
         alias_response = await self.client.get("/api-doc/api-changelog.md")
         self.assertEqual(alias_response.status_code, 200)
         self.assertEqual(alias_response.text, changelog_response.text)

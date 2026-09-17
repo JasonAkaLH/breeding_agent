@@ -6,7 +6,7 @@ from tests.api.support import APITestCase
 
 
 class OutputContractV2APITest(APITestCase):
-    async def test_output_contract_missing_required_key_fails_closed(self) -> None:
+    async def test_output_contract_failure_is_committed_for_agent_recovery(self) -> None:
         root = self.workspace / "skill"
         skill = root / "bad-output"
         (skill / "scripts").mkdir(parents=True)
@@ -26,8 +26,11 @@ outputs:
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
         terminal = await self.wait_for_terminal_task(task_id)
-        self.assertEqual(terminal["status"], "failed")
+        self.assertEqual(terminal["status"], "completed")
         events = await self.runtime.storage.list_events_for_task(task_id)
         validation = next(event for event in events if event.event_type == "skill.output_contract_validated")
         self.assertFalse(validation.payload["schema_validated"])
         self.assertEqual(validation.payload["missing"], ["answer"])
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_node = next(node for node in nodes if node.capability_id == "skill.bad_output")
+        self.assertEqual(str(skill_node.status), "failed")

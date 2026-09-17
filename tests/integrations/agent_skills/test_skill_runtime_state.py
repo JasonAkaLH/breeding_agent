@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.integrations.agent_skills.skill_runtime_state import SkillRuntimeState
+from src.integrations.agent_skills.skill_runtime_state import (
+    SkillBundleRevisionError,
+    SkillRuntimeState,
+)
 
 
 class SkillRuntimeStateTest(unittest.TestCase):
@@ -63,6 +66,74 @@ entrypoints:
             self.assertIsNotNone(new_manifest)
             self.assertEqual(old_manifest.description, "version one")
             self.assertEqual(new_manifest.description, "version two")
+
+    def test_revision_v2_is_stable_across_independent_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            self._write_skill(root, "demo-skill", "stable")
+
+            first = SkillRuntimeState.from_roots(
+                skill_roots=(root,),
+                public_skill_roots=(root,),
+                reserved_capability_ids=("main_agent.respond",),
+            )
+            second = SkillRuntimeState.from_roots(
+                skill_roots=(root,),
+                public_skill_roots=(root,),
+                reserved_capability_ids=("main_agent.respond",),
+            )
+
+            self.assertEqual(first.active_revision, second.active_revision)
+            self.assertRegex(first.active_revision, r"^skillrev-v2-[0-9a-f]{64}$")
+
+    def test_execution_resolver_rejects_non_v2_revisions_before_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            self._write_skill(root, "demo-skill", "stable")
+            state = SkillRuntimeState.from_roots(
+                skill_roots=(root,),
+                public_skill_roots=(root,),
+                reserved_capability_ids=("main_agent.respond",),
+            )
+            legacy = "skillrev-000002-f84bc49b3ad8"
+            state._bundles[legacy] = state.active_bundle
+
+            cases = (
+                (None, "agent_skill_bundle_revision_retired"),
+                ("", "agent_skill_bundle_revision_retired"),
+                ("   ", "agent_skill_bundle_revision_retired"),
+                (legacy, "agent_skill_bundle_revision_retired"),
+                ("skillrev-1000000-f84bc49b3ad8", "agent_skill_bundle_revision_retired"),
+                ("skillrev-forged", "agent_skill_bundle_revision_invalid"),
+                (
+                    "skillrev-v2-" + ("a" * 64),
+                    "agent_skill_bundle_revision_unavailable",
+                ),
+            )
+            for revision, expected_code in cases:
+                with self.subTest(revision=revision):
+                    with self.assertRaises(SkillBundleRevisionError) as raised:
+                        state.bundle_for_revision(revision)
+                    self.assertEqual(raised.exception.safe_error_code, expected_code)
+
+            self.assertIs(state.bundle_for_revision(state.active_revision), state.active_bundle)
+
+    def test_retain_revision_requires_explicit_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            self._write_skill(root, "demo-skill", "stable")
+            state = SkillRuntimeState.from_roots(
+                skill_roots=(root,),
+                public_skill_roots=(root,),
+                reserved_capability_ids=("main_agent.respond",),
+            )
+
+            with self.assertRaises(SkillBundleRevisionError) as raised:
+                state.retain_revision(None)
+            self.assertEqual(
+                raised.exception.safe_error_code,
+                "agent_skill_bundle_revision_retired",
+            )
 
     def test_refresh_removes_deleted_public_skill_from_active_descriptors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

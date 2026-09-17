@@ -65,7 +65,6 @@ entrypoints:
         self.assertEqual(
             capability_ids,
             {
-                "main_agent.respond",
                 "skill.generic_data_lookup",
             },
         )

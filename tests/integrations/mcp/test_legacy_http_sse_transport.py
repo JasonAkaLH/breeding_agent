@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,11 +10,57 @@ import httpx
 from src.integrations.mcp.client import MCPClient, MCPClientError, MCPProtocolError
 from src.integrations.mcp.protocol import MCP_PROTOCOL_VERSION_2024_11_05
 from src.integrations.mcp.transport_legacy_http_sse import LegacyHTTPSSETransport
+from src.integrations.mcp.temporary_results import MCPTemporaryResultStore
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "mcp"
 
 
 class LegacyHTTPSSETransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_post_accepts_numeric_string_response_ids(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    text="event: endpoint\ndata: /messages\n\n",
+                )
+            payload = json.loads(request.content.decode("utf-8"))
+            if payload.get("method") == "notifications/initialized":
+                return httpx.Response(204)
+            result = (
+                {
+                    "protocolVersion": MCP_PROTOCOL_VERSION_2024_11_05,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "legacy"},
+                }
+                if payload.get("method") == "initialize"
+                else {"tools": []}
+            )
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": str(payload["id"]), "result": result},
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        transport = LegacyHTTPSSETransport(
+            endpoint="https://legacy.example.com/sse",
+            client=async_client,
+        )
+        client = MCPClient(
+            server_id="legacy",
+            transport=transport,
+            protocol_version=MCP_PROTOCOL_VERSION_2024_11_05,
+            transport_family="legacy_http_sse",
+        )
+
+        initialized = await client.initialize()
+        tools = await client.list_tools()
+
+        self.assertEqual(initialized["protocolVersion"], MCP_PROTOCOL_VERSION_2024_11_05)
+        self.assertEqual(tools, [])
+        await client.close()
+        await async_client.aclose()
+
     async def test_2024_legacy_transport_fixtures_are_present(self) -> None:
         for relative in (
             "messages/2024-11-05/initialize_request.json",
@@ -121,6 +168,35 @@ class LegacyHTTPSSETransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.message["result"], {"ok": True})
         self.assertEqual(response.sse_events[0].event, "message")
+
+    async def test_direct_post_response_can_stream_into_temporary_result_sink(self) -> None:
+        result_bytes = b'{"content":[{"type":"text","text":"legacy streamed"}]}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(200, headers={"content-type": "text/event-stream"}, text="event: endpoint\ndata: /messages\n\n")
+            payload = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b'{"jsonrpc":"2.0","id":' + str(payload["id"]).encode() + b',"result":' + result_bytes + b'}',
+            )
+
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        transport = LegacyHTTPSSETransport(endpoint="https://legacy.example.com/sse", client=async_client)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=4)
+            response = await transport.send_streaming(
+                {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {}},
+                protocol_version=MCP_PROTOCOL_VERSION_2024_11_05,
+                result_sink=store.create_sink("task-legacy"),
+            )
+            ref = response.message["result"]["_mcpResultRef"]["ref"]
+
+        await transport.close()
+        await async_client.aclose()
+
+        self.assertTrue(ref.startswith("mcp-result-"))
 
     async def test_client_session_records_legacy_post_endpoint_after_initialize(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

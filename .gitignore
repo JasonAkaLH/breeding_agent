@@ -1,6 +1,9 @@
 # Local tooling
 AGENTS.md
 !/AGENTS.md
+!/docs/AGENTS.md
+!/scripts/AGENTS.md
+!/docker/AGENTS.md
 .superpowers/
 .omx/
 .[c]odex/
@@ -12,9 +15,12 @@ AGENTS.md
 /config.yaml
 /mcp_server_config.json
 
-# Skill runtime artifacts
-/skill/**/outputs/
-/skill/ocr/config.yaml
+# Local deployment commands (may contain private DSNs/secrets)
+/docker_cmd.md
+/docker_cmd/
+
+# External Skill compatibility checkout; canonical bundles live in the independent repository.
+/skill
 
 # Local report drafts
 /本周工作周报.md
@@ -92,6 +98,7 @@ build.ninja
 /frontend/node_modules/
 /frontend/dist/
 /frontend/coverage/
+/frontend/public/vendor/
 
 # Local runtime data
 /runtime/
@@ -108,6 +115,3 @@ native/target/
 
 # Local test scratch files/scripts kept out of commits
 /mcp_test.json
-
-# Local deployment commands may contain environment-specific secrets.
-/docker_cmd.md

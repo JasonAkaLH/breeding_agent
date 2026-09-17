@@ -1,0 +1,25 @@
+agent_protocol_max_retries: 1
+model_editions:
+  default: clean-archive-test
+  options:
+    - value: clean-archive-test
+      label: Clean Archive Test
+      reasoning_efforts:
+        options:
+          - value: minimal
+            label: Minimal
+          - value: max
+            label: Max
+        thinking:
+          enabled:
+            default: minimal
+            supported: [minimal, max]
+          disabled:
+            default: minimal
+            supported: [minimal]
+      agent_capabilities:
+        supports_messages: true
+        roles: [system, user, assistant, tool]
+        supports_native_tools: true
+        supports_required_tool_choice: true
+        supports_streamed_tool_calls: true

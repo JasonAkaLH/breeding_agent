@@ -71,8 +71,6 @@ class CoreContractShapeTest(unittest.TestCase):
             "save_task_node",
             "get_task_node",
             "list_task_nodes_for_task",
-            "save_task_edge",
-            "list_task_edges",
             "save_artifact",
             "append_event",
             "list_events_for_task",

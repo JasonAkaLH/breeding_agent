@@ -9,6 +9,7 @@ MCP_PROTOCOL_VERSION_2024_11_05 = "2024-11-05"
 MCP_PROTOCOL_VERSION_2025_03_26 = "2025-03-26"
 MCP_PROTOCOL_VERSION_2025_06_18 = "2025-06-18"
 MCP_PROTOCOL_VERSION_2025_11_25 = "2025-11-25"
+MCP_PROTOCOL_VERSION_2026_07_28 = "2026-07-28"
 DEFAULT_MCP_PROTOCOL_VERSION = MCP_PROTOCOL_VERSION_2025_11_25
 MCP_PROTOCOL_VERSION = DEFAULT_MCP_PROTOCOL_VERSION
 SUPPORTED_MCP_PROTOCOL_VERSION_ORDER = (
@@ -16,6 +17,7 @@ SUPPORTED_MCP_PROTOCOL_VERSION_ORDER = (
     MCP_PROTOCOL_VERSION_2025_03_26,
     MCP_PROTOCOL_VERSION_2025_06_18,
     MCP_PROTOCOL_VERSION_2025_11_25,
+    MCP_PROTOCOL_VERSION_2026_07_28,
 )
 SUPPORTED_MCP_PROTOCOL_VERSIONS = frozenset(
     SUPPORTED_MCP_PROTOCOL_VERSION_ORDER
@@ -70,6 +72,26 @@ class MCPTransport(Protocol):
     async def close(self) -> None: ...
 
 
+@runtime_checkable
+class MCPRequestScopedTransport(Protocol):
+    """Transport seam for stateless 2026 requests.
+
+    Implementations must issue one POST per request and may return either a JSON
+    response in ``message`` or a request-scoped SSE response in ``sse_events``.
+    """
+
+    async def send(
+        self,
+        message: Mapping[str, Any],
+        *,
+        protocol_version: str,
+        request_headers: Mapping[str, str],
+        timeout_seconds: float | None = None,
+    ) -> MCPTransportResponse: ...
+
+    async def close(self) -> None: ...
+
+
 @dataclass(slots=True, frozen=True)
 class MCPNegotiatedSession:
     server_id: str
@@ -102,7 +124,7 @@ def is_mcp_transport_family_allowed(protocol_version: str, transport_family: str
     if family == MCP_TRANSPORT_LEGACY_HTTP_SSE:
         return version == MCP_PROTOCOL_VERSION_2024_11_05
     if family == MCP_TRANSPORT_STREAMABLE_HTTP:
-        return version != MCP_PROTOCOL_VERSION_2024_11_05
+        return True
     return False
 
 
@@ -120,11 +142,31 @@ def mcp_feature_status(protocol_version: str, feature: str) -> MCPCompatibilityS
         return MCPCompatibilityStatus.SUPPORTED
     if normalized in {"batch", "jsonrpc_batch", "json_rpc_batch"}:
         return MCPCompatibilityStatus.NOT_SUPPORTED
-    if normalized in {"ping", "notifications_initialized", "initialized_notification"}:
+    if normalized == "ping":
         return MCPCompatibilityStatus.SUPPORTED
+    if normalized in {"notifications_initialized", "initialized_notification"}:
+        return (
+            MCPCompatibilityStatus.NOT_APPLICABLE
+            if version == MCP_PROTOCOL_VERSION_2026_07_28
+            else MCPCompatibilityStatus.SUPPORTED
+        )
     if normalized in {"server_to_client_request", "server_request", "sampling/createmessage"}:
+        if version == MCP_PROTOCOL_VERSION_2026_07_28:
+            return MCPCompatibilityStatus.NOT_SUPPORTED
         return MCPCompatibilityStatus.COMPATIBLE_DEGRADED
     if normalized in {"roots", "sampling"}:
+        if version == MCP_PROTOCOL_VERSION_2026_07_28:
+            return MCPCompatibilityStatus.NOT_SUPPORTED
+        return MCPCompatibilityStatus.CONFIG_GATED
+    if normalized in {"server/discover", "server_discover", "list_cache_hint", "mrtr", "input_required"}:
+        return (
+            MCPCompatibilityStatus.SUPPORTED
+            if version == MCP_PROTOCOL_VERSION_2026_07_28
+            else MCPCompatibilityStatus.NOT_APPLICABLE
+        )
+    if normalized in {"tasks", "task_augmented_tools_call"} and version == MCP_PROTOCOL_VERSION_2026_07_28:
+        return MCPCompatibilityStatus.CONFIG_GATED
+    if normalized == "elicitation" and version == MCP_PROTOCOL_VERSION_2026_07_28:
         return MCPCompatibilityStatus.CONFIG_GATED
     if normalized in {"resources", "prompts", "tasks", "task_augmented_tools_call", "elicitation"}:
         return MCPCompatibilityStatus.FUTURE if version != MCP_PROTOCOL_VERSION_2024_11_05 else MCPCompatibilityStatus.NOT_APPLICABLE
@@ -163,3 +205,27 @@ def json_rpc_message_kind(message: Any) -> str:
     if has_id and (has_result or has_error):
         return "response"
     raise ValueError("JSON-RPC message must be a request, notification, response, or error.")
+
+
+def normalize_json_rpc_response_id(
+    message: Mapping[str, Any],
+    *,
+    expected_request_id: str | int,
+) -> Mapping[str, Any] | None:
+    """Return a matching response with a type-exact request id."""
+
+    try:
+        if json_rpc_message_kind(message) != "response":
+            return None
+    except ValueError:
+        return None
+    raw_response_id = message.get("id")
+    expected_type = type(expected_request_id)
+    raw_type = type(raw_response_id)
+    if expected_type in {int, str} and raw_type is expected_type and raw_response_id == expected_request_id:
+        return message
+    if expected_type is int and raw_type is str and raw_response_id == str(expected_request_id):
+        normalized = dict(message)
+        normalized["id"] = expected_request_id
+        return normalized
+    return None

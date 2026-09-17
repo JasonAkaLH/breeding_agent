@@ -16,7 +16,7 @@ class LongTaskRuntime:
             capability_id="mcp.crm.search_customer",
             server_id="crm",
             tool_name="search_customer",
-            planner_allowed_fields=("keyword",),
+            model_allowed_fields=("keyword",),
             input_schema={"type": "object", "properties": {"keyword": {"type": "string"}}},
             task_augmented_call=True,
         )
@@ -96,6 +96,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
             task_id="task-1",
             node_id="lookup",
             input_payload={"keyword": "龙粳"},
+            metadata={"mcp_execution_mode": "legacy"},
         )
 
         result = await executor.execute(request)
@@ -117,6 +118,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
             task_id="task-1",
             node_id="lookup",
             input_payload={"keyword": "龙粳"},
+            metadata={"mcp_execution_mode": "legacy"},
         )
 
         with self.assertRaises(asyncio.CancelledError):
@@ -141,7 +143,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
                                 "public_name": "Customer Search",
                                 "public_description": "查询客户。",
                                 "risk_level": "read_only",
-                                "planner_allowed_fields": ["keyword"],
+                                "model_allowed_fields": ["keyword"],
                             }
                         ],
                     }
@@ -157,6 +159,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
             task_id="task-1",
             node_id="lookup",
             input_payload={"keyword": "龙粳"},
+            metadata={"mcp_execution_mode": "legacy"},
         )
 
         execution = asyncio.create_task(executor.execute(request))

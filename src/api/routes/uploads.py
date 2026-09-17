@@ -11,16 +11,12 @@ from ..dto import (
     UploadPreviewResponse,
     is_reserved_identity_key,
 )
-from ..runtime import ApiRuntime
+from ..runtime_access import runtime_from_request as _runtime
 from ..upload_store import UploadValidationError
 
 router = APIRouter()
 UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 _UPLOAD_FORM_FIELDS = frozenset({"conversation_id", "file"})
-
-
-def _runtime(request: Request) -> ApiRuntime:
-    return request.app.state.runtime
 
 
 def _upload_response(record) -> UploadFileResponse:
@@ -143,4 +139,6 @@ async def delete_conversation_upload(body: DeleteUploadRequest, request: Request
         deleted = await runtime.delete_upload(conversation_id, user.username, upload_id)
     except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown upload: {upload_id}") from exc
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return DeleteUploadResponse(upload_id=upload_id, deleted=deleted)

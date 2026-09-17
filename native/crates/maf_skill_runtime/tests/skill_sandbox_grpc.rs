@@ -82,6 +82,30 @@ async fn tonic_service_maps_skill_sandbox_requests_to_rust_kernel_envelopes() {
     assert!(policy.allowed);
     assert_eq!(policy.bundle_fingerprint.len(), 64);
 
+    let fallback_policy = service
+        .validate_policy(Request::new(skill_pb::ValidatePolicyRequest {
+            skill_name: "example".to_owned(),
+            capability_id: "skill.example".to_owned(),
+            execution_mode: "platform_service".to_owned(),
+            trust_scope: "project".to_owned(),
+            handler: "skill.example.platform_handler".to_owned(),
+            manifest_services: vec!["mysql_readonly".to_owned()],
+            runtime_allowlist_services: Vec::new(),
+            requested_services: Vec::new(),
+            runtime_allowlist_handlers: vec!["skill.example.platform_handler".to_owned()],
+            x_runtime_rust: [("adapter".to_owned(), "pyo3".to_owned())]
+                .into_iter()
+                .collect(),
+        }))
+        .await
+        .expect("empty requested services fallback")
+        .into_inner();
+    assert!(!fallback_policy.allowed);
+    assert_eq!(
+        fallback_policy.error.expect("typed error").code,
+        "skill_runtime_service_not_allowlisted"
+    );
+
     let execution = service
         .execute_sandboxed(Request::new(skill_pb::ExecuteSandboxedRequest {
             skill_name: "example".to_owned(),

@@ -1,6 +1,7 @@
 from .generation_cache import AuthGenerationCache, AuthGenerationCheck, AuthGenerationSnapshot
 from .invalidation_bus import AuthGenerationChanged, InMemoryAuthInvalidationBus
 from .services import (
+    AuthTokenHasher,
     AuthTokenValidationError,
     AuthValidationError,
     UsernameTokenService,
@@ -14,6 +15,7 @@ __all__ = [
     "AuthGenerationCheck",
     "AuthGenerationSnapshot",
     "InMemoryAuthInvalidationBus",
+    "AuthTokenHasher",
     "AuthTokenValidationError",
     "AuthValidationError",
     "UsernameTokenService",

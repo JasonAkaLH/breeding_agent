@@ -2,11 +2,129 @@ from __future__ import annotations
 
 import unittest
 
+import httpx
+
+from src.core.errors import ModelUnavailableError
 from src.integrations.llm_runtime import SharedLLMRuntime
+from src.integrations.model_errors import raise_for_model_unavailable
+from src.orchestration.agent_loop.models import (
+    AgentFinishMetadata,
+    AgentMessage,
+    AgentModelBinding,
+    AgentModelRequest,
+    AgentSample,
+    AgentUsage,
+)
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, PromptSegment
 
 
+def _reasoning_efforts() -> dict:
+    return {
+        "options": [
+            {"value": "minimal", "label": "最低"},
+            {"value": "high", "label": "高"},
+            {"value": "max", "label": "最高"},
+        ],
+        "thinking": {
+            "enabled": {"default": "minimal", "supported": ["minimal", "high", "max"]},
+            "disabled": {"default": "minimal", "supported": ["minimal", "high", "max"]},
+        },
+    }
+
+
 class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_status_classification_uses_status_not_response_text(self) -> None:
+        request = httpx.Request("POST", "https://secret.example/v1/chat")
+        for status_code in (401, 403, 408, 429, 500, 503):
+            with self.subTest(status_code=status_code):
+                error = httpx.HTTPStatusError(
+                    "arbitrary private response",
+                    request=request,
+                    response=httpx.Response(status_code, request=request),
+                )
+                with self.assertRaises(ModelUnavailableError):
+                    raise_for_model_unavailable(error)
+
+        error = httpx.HTTPStatusError(
+            "model unavailable",
+            request=request,
+            response=httpx.Response(400, request=request),
+        )
+        self.assertIsNone(raise_for_model_unavailable(error))
+
+    async def test_explicit_provider_transport_failures_map_without_string_inspection(self) -> None:
+        class TextFailureClient:
+            async def generate_text(self, *_args, **_kwargs):
+                raise httpx.ConnectError("secret provider endpoint")
+
+        with self.assertRaises(ModelUnavailableError) as text_error:
+            await SharedLLMRuntime(client=TextFailureClient()).generate_text("prompt")
+        self.assertIsInstance(text_error.exception.__cause__, httpx.ConnectError)
+        self.assertEqual(str(text_error.exception), "")
+
+        class StreamFailureClient:
+            async def generate_text_with_thinking(self, *_args, **_kwargs):
+                yield {"answer": "partial", "reasoning": None}
+                raise TimeoutError("secret provider response")
+
+        runtime = SharedLLMRuntime(client=StreamFailureClient())
+        with self.assertRaises(ModelUnavailableError) as stream_error:
+            _ = [event async for event in runtime.stream_events("prompt")]
+        self.assertIsInstance(stream_error.exception.__cause__, TimeoutError)
+        self.assertEqual(str(stream_error.exception), "")
+
+    async def test_local_model_contract_failures_keep_their_original_type(self) -> None:
+        class LocalFailureClient:
+            async def generate_text(self, *_args, **_kwargs):
+                raise ValueError("local invariant")
+
+        with self.assertRaisesRegex(ValueError, "local invariant"):
+            await SharedLLMRuntime(client=LocalFailureClient()).generate_text(
+                "prompt"
+            )
+
+    async def test_agent_sample_uses_exact_binding_edition_and_rejects_binding_change(self) -> None:
+        binding = AgentModelBinding("edition-a", reasoning_effort="high", thinking_enabled=True)
+        request = AgentModelRequest("req", binding, (AgentMessage("user", "question"),))
+
+        class FakeClient:
+            instances: list["FakeClient"] = []
+
+            def __init__(self, **kwargs):
+                self.edition = kwargs["config"]["model_edition"]
+                FakeClient.instances.append(self)
+
+            async def generate_agent_sample(self, seen_request):
+                return AgentSample(
+                    sample_id="sample",
+                    binding=seen_request.binding,
+                    visible_text="answer",
+                    tool_calls=(),
+                    usage=AgentUsage(),
+                    finish=AgentFinishMetadata(finish_reason="stop", attempts=1),
+                )
+
+        runtime = SharedLLMRuntime(
+            client_factory=FakeClient,
+            config={"model_editions": {"default": "edition-a", "options": [{"value": "edition-a"}]}},
+        )
+        sample = await runtime.sample_agent(request)
+        self.assertIs(sample.binding, binding)
+        self.assertEqual(FakeClient.instances[0].edition, "edition-a")
+
+        class BadClient:
+            async def sample_agent(self, seen_request):
+                return AgentSample(
+                    sample_id="bad",
+                    binding=AgentModelBinding("edition-b"),
+                    visible_text="answer",
+                    tool_calls=(),
+                    usage=AgentUsage(),
+                    finish=AgentFinishMetadata(finish_reason="stop", attempts=1),
+                )
+
+        with self.assertRaisesRegex(ValueError, "changed the run-bound model binding"):
+            await SharedLLMRuntime(client=BadClient()).sample_agent(request)
     async def test_reuses_one_client_for_text_and_stream_calls(self) -> None:
         class FakeClient:
             instances: list["FakeClient"] = []
@@ -79,8 +197,18 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "model_editions": {
                     "default": "deepseek-v4-flash-260425",
                     "options": [
-                        {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
-                        {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro", "trim_max_tokens": 2048000},
+                        {
+                            "value": "deepseek-v4-flash-260425",
+                            "label": "DeepSeek V4 Flash",
+                            "trim_max_tokens": 1024000,
+                            "reasoning_efforts": _reasoning_efforts(),
+                        },
+                        {
+                            "value": "deepseek-v4-pro-260425",
+                            "label": "DeepSeek V4 Pro",
+                            "trim_max_tokens": 2048000,
+                            "reasoning_efforts": _reasoning_efforts(),
+                        },
                     ],
                 },
             },
@@ -117,7 +245,13 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "trim_max_tokens": 123,
                 "model_editions": {
                     "default": "deepseek-v4-flash-260425",
-                    "options": [{"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"}],
+                    "options": [
+                        {
+                            "value": "deepseek-v4-flash-260425",
+                            "label": "DeepSeek V4 Flash",
+                            "reasoning_efforts": _reasoning_efforts(),
+                        }
+                    ],
                 },
             },
             config_source="injected_config",
@@ -133,7 +267,7 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "model": "fake",
                 "messages": {
                     "supports_messages": True,
-                    "roles": ["system", "developer", "user"],
+                    "roles": ["system", "user", "assistant", "tool"],
                 },
             }
         )
@@ -142,7 +276,7 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             metadata["provider_role_capabilities"],
-            {"supports_messages": True, "roles": ["system", "developer", "user"]},
+            {"supports_messages": True, "roles": ["system", "user", "assistant", "tool"]},
         )
 
     async def test_static_metadata_includes_safe_provider_cache_capabilities(self) -> None:

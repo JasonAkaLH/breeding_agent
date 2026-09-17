@@ -141,7 +141,7 @@ class MCPToolConfig:
     public_name: str = ""
     public_description: str = ""
     risk_level: str = "read_only"
-    planner_allowed_fields: tuple[str, ...] = ()
+    model_allowed_fields: tuple[str, ...] = ()
     input_schema: Mapping[str, Any] | None = None
     output_schema: Mapping[str, Any] | None = None
     max_output_bytes: int | None = None
@@ -160,7 +160,7 @@ class MCPToolConfig:
             public_name=str(raw.get("public_name") or raw.get("name") or "").strip(),
             public_description=str(raw.get("public_description") or "").strip(),
             risk_level=str(raw.get("risk_level") or "read_only").strip().lower(),
-            planner_allowed_fields=tuple(str(field).strip() for field in raw.get("planner_allowed_fields") or () if str(field).strip()),
+            model_allowed_fields=tuple(str(field).strip() for field in raw.get("model_allowed_fields") or () if str(field).strip()),
             input_schema=raw.get("input_schema") if isinstance(raw.get("input_schema"), Mapping) else None,
             output_schema=raw.get("output_schema") if isinstance(raw.get("output_schema"), Mapping) else None,
             max_output_bytes=_positive_int_or_none(raw.get("max_output_bytes")),

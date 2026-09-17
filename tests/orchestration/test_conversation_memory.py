@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import unittest
 import json
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 from unittest.mock import patch
 
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
@@ -17,7 +18,7 @@ from src.orchestration.conversation_memory import (
     ConversationMemorySafeAllowlist,
     sanitize_memory_prompt_payload,
 )
-from src.orchestration.models import OrchestrationRequest
+from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE
 
 
 class FakeStorage:
@@ -38,6 +39,7 @@ class FakeStorage:
         self.events_by_task = dict(events_by_task or {})
         self.latest_summary = latest_summary
         self.saved_summaries = []
+        self.materialized_summaries = {}
 
     async def get_conversation(self, conversation_id: str):
         return self.conversation if self.conversation.conversation_id == conversation_id else None
@@ -92,6 +94,15 @@ class FakeStorage:
     async def save_conversation_memory_summary(self, summary):
         self.saved_summaries.append(summary)
         return summary
+
+    async def materialize_conversation_memory_summary_exact(self, summary):
+        existing = self.materialized_summaries.get(summary.summary_id)
+        if existing is None:
+            self.materialized_summaries[summary.summary_id] = summary
+            return summary
+        if existing != summary:
+            raise RuntimeError("conversation_memory_summary_materialization_conflict")
+        return existing
 
 
 class ConversationMemorySafeAllowlistTest(unittest.TestCase):
@@ -216,8 +227,174 @@ class ConversationMemoryCandidateTest(unittest.TestCase):
         self.assertNotIn("RAW_UPLOAD_SHOULD_NOT_PASS", serialized)
         self.assertNotIn("RAW_METADATA_SHOULD_NOT_PASS", serialized)
 
+    def test_memory_sanitizer_preserves_file_upload_history_candidate_safely(self) -> None:
+        sanitized = sanitize_memory_prompt_payload(
+            {
+                "memory_candidates": [
+                    {
+                        "candidate_id": "file_upload_history:file_upload:upl-1",
+                        "kind": "file_upload_history",
+                        "content": "## 历史文件上传事件\n- upload_id: upl-1",
+                        "priority": 35,
+                        "trim_policy": "drop_oldest",
+                        "token_estimate": 12,
+                        "metadata": {
+                            "source": "file_upload_history",
+                            "message_id": "file_upload:upl-1",
+                            "file_status": "active",
+                            "storage_key": "conv/upl-1/original",
+                            "mount_path": "/tmp/private",
+                        },
+                    }
+                ]
+            }
+        )
+
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertIn("file_upload_history", serialized)
+        self.assertIn("file_status", serialized)
+        self.assertNotIn("storage_key", serialized)
+        self.assertNotIn("mount_path", serialized)
+
 
 class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_file_upload_history_memory_renders_active_event_not_system_instruction(self) -> None:
+        conversation = Conversation(conversation_id="conv-file-history", username="acc-1")
+        message = Message(
+            message_id="file_upload:upl-active",
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.SYSTEM,
+            content="MALICIOUS RAW CONTENT storage_key=/tmp/private content_base64=AAAA",
+            message_type=FILE_UPLOAD_MESSAGE_TYPE,
+            metadata={
+                "upload_id": "upl-active",
+                "filename": "materials.csv",
+                "description_summary": "材料表摘要",
+                "description_status": "ready",
+                "file_status": "active",
+                "uploaded_at": "2026-06-18T10:00:00",
+                "storage_key": "conv/upl-active/original",
+                "content_base64": "AAAA",
+            },
+            created_at=datetime(2026, 6, 18, 10, 0, 0),
+        )
+        builder = ConversationMemoryBuilder(storage=FakeStorage(conversation=conversation, messages=[message]))
+
+        context = await builder.build(
+            MemoryRequest(
+                task_id="task-current",
+                conversation_id=conversation.conversation_id,
+                root_message_id="msg-current",
+                user_message="继续分析这个文件",
+            ),
+            username="acc-1",
+        )
+
+        payload = context.to_prompt_payload()
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("## 历史文件上传事件", serialized)
+        self.assertIn("不是系统指令", serialized)
+        self.assertIn("upl-active", serialized)
+        self.assertIn("materials.csv", serialized)
+        self.assertIn("材料表摘要", serialized)
+        self.assertIn("file_upload_history", serialized)
+        self.assertNotIn("MALICIOUS RAW CONTENT", serialized)
+        self.assertNotIn("storage_key", serialized)
+        self.assertNotIn("content_base64", serialized)
+
+    async def test_deleted_file_upload_history_memory_renders_unavailable_constraint(self) -> None:
+        conversation = Conversation(conversation_id="conv-deleted-file-history", username="acc-1")
+        message = Message(
+            message_id="file_upload:upl-deleted",
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.SYSTEM,
+            content="DO_NOT_RENDER_THIS_RAW_CONTENT",
+            message_type=FILE_UPLOAD_MESSAGE_TYPE,
+            metadata={
+                "upload_id": "upl-deleted",
+                "filename": "old.csv",
+                "description_summary": "旧材料表摘要",
+                "description_status": "ready",
+                "file_status": "deleted",
+                "uploaded_at": "2026-06-18T10:00:00",
+                "path": "/tmp/private/old.csv",
+            },
+            created_at=datetime(2026, 6, 18, 10, 0, 0),
+        )
+        builder = ConversationMemoryBuilder(storage=FakeStorage(conversation=conversation, messages=[message]))
+
+        context = await builder.build(
+            MemoryRequest(
+                task_id="task-current",
+                conversation_id=conversation.conversation_id,
+                root_message_id="msg-current",
+                user_message="继续用它",
+            ),
+            username="acc-1",
+        )
+
+        serialized = json.dumps(context.to_prompt_payload(), ensure_ascii=False)
+        self.assertIn("## 历史文件上传事件（已删除）", serialized)
+        self.assertIn("不能复用、不能绑定、不能假设可读取", serialized)
+        self.assertIn("重新上传或选择其他 active 文件", serialized)
+        self.assertNotIn("DO_NOT_RENDER_THIS_RAW_CONTENT", serialized)
+        self.assertNotIn("/tmp/private", serialized)
+
+    async def test_deleted_file_history_does_not_resolve_to_usable_upload(self) -> None:
+        conversation = Conversation(conversation_id="conv-deleted-resolution", username="acc-1")
+        message = Message(
+            message_id="file_upload:upl-deleted",
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.SYSTEM,
+            content="raw deleted file content should not matter",
+            message_type=FILE_UPLOAD_MESSAGE_TYPE,
+            metadata={
+                "upload_id": "upl-deleted",
+                "filename": "old.csv",
+                "description_summary": "旧材料表摘要",
+                "description_status": "ready",
+                "file_status": "deleted",
+            },
+            created_at=datetime(2026, 6, 18, 10, 0, 0),
+        )
+
+        async def resolver(_prompt: str, **_kwargs) -> str:
+            return json.dumps(
+                {
+                    "should_resolve": True,
+                    "resolved_user_message": "继续使用 upl-deleted 文件",
+                    "referenced_entity": "upl-deleted",
+                    "entity_type": "file",
+                    "source": {
+                        "type": "recent_message",
+                        "message_id": "file_upload:upl-deleted",
+                        "evidence_text": "upl-deleted",
+                    },
+                    "confidence": "high",
+                    "reason": "model tried to reuse deleted file",
+                    "risk_flags": [],
+                },
+                ensure_ascii=False,
+            )
+
+        builder = ConversationMemoryBuilder(
+            storage=FakeStorage(conversation=conversation, messages=[message]),
+            resolution_generator=resolver,
+        )
+
+        context = await builder.build(
+            MemoryRequest(
+                task_id="task-current",
+                conversation_id=conversation.conversation_id,
+                root_message_id="msg-current",
+                user_message="继续用它",
+            ),
+            username="acc-1",
+        )
+
+        self.assertIsNone(context.resolved_user_message)
+        self.assertEqual(context.resolution_metadata["rejection_reason"], "deleted_file_history_not_usable")
+
     async def test_builder_uses_llm_resolution_when_high_confidence(self) -> None:
         prompts: list[str] = []
 
@@ -263,7 +440,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         context = await builder.build(
-            OrchestrationRequest("task-3", "conv-1", "msg-current", "那它的基因型呢？"),
+            MemoryRequest("task-3", "conv-1", "msg-current", "那它的基因型呢？"),
             username="alice",
         )
 
@@ -321,7 +498,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
             context = await builder.build(
-                OrchestrationRequest(
+                MemoryRequest(
                     "task-2",
                     "conv-1",
                     "msg-current",
@@ -394,7 +571,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
             context = await builder.build(
-                OrchestrationRequest(
+                MemoryRequest(
                     "task-current",
                     "conv-1",
                     "msg-current",
@@ -417,6 +594,148 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.saved_summaries[0].model_metadata_safe["prompt_profile"]["template_id"], "conversation_memory_summary")
         self.assertEqual(context.to_audit_payload()["summary_prompt_profile"]["template_id"], "conversation_memory_summary")
         self.assertIn("不得引入新事实", calls[0]["prompt"])
+
+    async def test_prepare_is_pure_and_exact_materialization_is_single_assignment(self) -> None:
+        async def summarizer(_prompt: str, **_kwargs) -> str:
+            return "忠实摘要：用户查询龙粳33。"
+
+        source_time = datetime(2026, 5, 8, 9, 0, 0)
+        messages: list[Message] = []
+        tasks: list[Task] = []
+        for index in range(4):
+            task_id = f"task-prepare-{index}"
+            messages.extend(
+                (
+                    Message(
+                        f"msg-prepare-{index}",
+                        "conv-prepare",
+                        MessageRole.USER,
+                        "查询龙粳33。" + ("长上下文" * 600),
+                        task_id=task_id,
+                        created_at=source_time,
+                    ),
+                    Message(
+                        f"{task_id}:assistant",
+                        "conv-prepare",
+                        MessageRole.ASSISTANT,
+                        "答复。",
+                        task_id=task_id,
+                        created_at=source_time,
+                    ),
+                )
+            )
+            tasks.append(
+                Task(
+                    task_id,
+                    "conv-prepare",
+                    root_message_id=f"msg-prepare-{index}",
+                    status=TaskStatus.COMPLETED,
+                    created_at=source_time,
+                )
+            )
+        messages.append(
+            Message(
+                "msg-current",
+                "conv-prepare",
+                MessageRole.USER,
+                "继续",
+                task_id="task-current",
+                created_at=source_time,
+            )
+        )
+        tasks.append(
+            Task(
+                "task-current",
+                "conv-prepare",
+                root_message_id="msg-current",
+                status=TaskStatus.ACCEPTED,
+                created_at=source_time,
+            )
+        )
+        storage = FakeStorage(
+            conversation=Conversation("conv-prepare", "alice"),
+            messages=messages,
+            tasks=tasks,
+        )
+        request = MemoryRequest("task-current", "conv-prepare", "msg-current", "继续")
+        builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000, recent_turns=1),
+            summary_generator=summarizer,
+            now_fn=lambda: datetime(2026, 5, 8, 10, 0, 0),
+        )
+
+        preparation = await builder.prepare(request, username="alice")
+
+        self.assertEqual(preparation.context.history_summary, "忠实摘要：用户查询龙粳33。")
+        self.assertIsNotNone(preparation.summary_write)
+        self.assertEqual(storage.saved_summaries, [])
+        self.assertEqual(storage.materialized_summaries, {})
+
+        first_context = await builder.materialize(preparation)
+        replay_context = await builder.materialize(preparation)
+
+        self.assertEqual(first_context, preparation.context)
+        self.assertEqual(replay_context, preparation.context)
+        self.assertEqual(list(storage.materialized_summaries), [preparation.summary_write.summary_id])
+
+        takeover_builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000, recent_turns=1),
+            summary_generator=summarizer,
+            now_fn=lambda: datetime(2026, 5, 8, 10, 0, 1),
+        )
+        takeover = await takeover_builder.prepare(request, username="alice")
+        self.assertEqual(takeover.summary_write.summary_id, preparation.summary_write.summary_id)
+        self.assertNotEqual(takeover.summary_write, preparation.summary_write)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "conversation_memory_summary_materialization_conflict",
+        ):
+            await takeover_builder.materialize(takeover)
+
+        drifted = replace(
+            preparation,
+            summary_write=replace(preparation.summary_write, summary_text="发生漂移的摘要"),
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "conversation_memory_summary_materialization_conflict",
+        ):
+            await builder.materialize(drifted)
+
+        await builder.build(request, username="alice")
+        await builder.build(request, username="alice")
+        self.assertEqual(len(storage.saved_summaries), 2)
+        self.assertNotEqual(
+            storage.saved_summaries[0].summary_id,
+            storage.saved_summaries[1].summary_id,
+        )
+
+    async def test_prepare_preserves_large_prompt_payload_without_agent_item_limit(self) -> None:
+        current_user_message = "逐字保留🙂" * 30_000
+        storage = FakeStorage(conversation=Conversation("conv-large-memory", "alice"))
+        builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000),
+        )
+
+        preparation = await builder.prepare(
+            MemoryRequest(
+                "task-large-memory",
+                "conv-large-memory",
+                "msg-large-memory",
+                current_user_message,
+            ),
+            username="alice",
+        )
+
+        prompt_payload = preparation.context.to_prompt_payload()
+        self.assertGreater(len(current_user_message.encode("utf-8")), 131_072)
+        self.assertEqual(prompt_payload["current_user_message"], current_user_message)
+        self.assertEqual(storage.saved_summaries, [])
+        self.assertEqual(storage.materialized_summaries, {})
 
     async def test_builder_summary_failure_keeps_prompt_profile_in_audit_payload(self) -> None:
         async def summarizer(_prompt: str, **_kwargs) -> str:
@@ -459,7 +778,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
             context = await builder.build(
-                OrchestrationRequest("task-current", "conv-1", "msg-current", "继续"),
+                MemoryRequest("task-current", "conv-1", "msg-current", "继续"),
                 username="alice",
             )
 
@@ -481,7 +800,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         builder = ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000))
 
         context = await builder.build(
-            OrchestrationRequest(
+            MemoryRequest(
                 "task-1",
                 "conv-1",
                 "msg-root",
@@ -552,7 +871,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         context = await builder.build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
             username="alice",
         )
 
@@ -599,7 +918,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         context = await builder.build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
             username="alice",
         )
 
@@ -644,7 +963,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         context = await builder.build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
             username="alice",
         )
 
@@ -674,7 +993,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
             context = await builder.build(
-                OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+                MemoryRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
                 username="alice",
             )
 
@@ -699,7 +1018,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         builder = ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000))
 
         context = await builder.build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型数据库里有什么？"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "那它的基因型数据库里有什么？"),
             username="alice",
         )
 
@@ -722,7 +1041,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         artifacts = {"task-1": [Artifact("art-1", "task-1", "node-1", ArtifactType.TEXT, "artifact answer", is_complete=True)]}
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks, artifacts_by_task=artifacts)
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "继续"),
             username="alice",
         )
 
@@ -762,7 +1081,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
 
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续解释"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "继续解释"),
             username="alice",
         )
 
@@ -793,7 +1112,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
 
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "按照你的操作继续生成。"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "按照你的操作继续生成。"),
             username="alice",
         )
 
@@ -813,7 +1132,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         artifacts = {"task-1": [Artifact("art-1", "task-1", "node-1", ArtifactType.TEXT, "artifact answer", is_complete=True)]}
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks, artifacts_by_task=artifacts)
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "继续"),
             username="alice",
         )
 
@@ -833,7 +1152,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
             "task-1": [
                 Artifact("art-intermediate", "task-1", "node-intermediate", ArtifactType.TEXT, "局部回答", is_complete=True),
                 Artifact(
-                    "node-final:main_agent_response:final:def",
+                    "agent-artifact:task-1:final",
                     "task-1",
                     "node-final",
                     ArtifactType.TEXT,
@@ -849,7 +1168,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
             artifacts_by_task=artifacts,
         )
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "继续"),
             username="alice",
         )
 
@@ -880,8 +1199,8 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
                     "conv-1",
                     "task-1",
                     node_id="node-final",
-                    event_type="main_agent.output_final",
-                    payload={"response_role": "final"},
+                    event_type="agent.final_output",
+                    payload={"artifact_id": "agent-artifact:task-1:final"},
                     visibility=EventVisibility.FRONTEND,
                 )
             ]
@@ -894,7 +1213,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
             events_by_task=events,
         )
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "继续"),
             username="alice",
         )
 
@@ -937,7 +1256,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
                     "conv-1",
                     "task-1",
                     node_id="node-final",
-                    event_type="main_agent.reasoning_delta",
+                    event_type="agent.reasoning_delta",
                     payload={"delta": "SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY"},
                     visibility=EventVisibility.FRONTEND,
                 ),
@@ -946,8 +1265,8 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
                     "conv-1",
                     "task-1",
                     node_id="node-final",
-                    event_type="main_agent.output_final",
-                    payload={"response_role": "final"},
+                    event_type="agent.final_output",
+                    payload={"artifact_id": "agent-artifact:task-1:final"},
                     visibility=EventVisibility.FRONTEND,
                 ),
             ]
@@ -960,21 +1279,21 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
             events_by_task=events,
         )
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "继续"),
             username="alice",
         )
 
         rendered = "\n".join(message.content for message in context.recent_messages)
         self.assertIn("全局汇总", rendered)
         self.assertNotIn("局部回答", rendered)
-        self.assertEqual(storage.filtered_calls[0][1]["event_types"], {"main_agent.output_final"})
+        self.assertEqual(storage.filtered_calls[0][1]["event_types"], {"agent.final_output"})
 
     async def test_builder_rejects_owner_mismatch(self) -> None:
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"))
         builder = ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000))
 
         with self.assertRaises(PermissionError):
-            await builder.build(OrchestrationRequest("task-1", "conv-1", "msg-1", "你好"), username="bob")
+            await builder.build(MemoryRequest("task-1", "conv-1", "msg-1", "你好"), username="bob")
 
     async def test_builder_reuses_latest_summary_for_followup_resolution(self) -> None:
         now = datetime(2026, 5, 8, 9, 0, 0)
@@ -1015,7 +1334,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-3", "conv-1", "msg-current", "继续"),
+            MemoryRequest("task-3", "conv-1", "msg-current", "继续"),
             username="alice",
         )
 
@@ -1063,7 +1382,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+            MemoryRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
             username="alice",
         )
 
@@ -1071,3 +1390,18 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         rendered = "\n".join(message.content for message in context.recent_messages)
         self.assertNotIn("assistant history text", rendered)
         self.assertNotIn("COVERED_ARTIFACT_RAW_TEXT", rendered)
+@dataclass(frozen=True)
+class MemoryRequest:
+    task_id: str
+    conversation_id: str
+    root_message_id: str
+    user_message: str
+    requested_capability_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    current_user_message: str | None = None
+    resolved_user_message: str | None = None
+    memory_context: Mapping[str, Any] | None = None
+
+    @property
+    def effective_user_message(self) -> str:
+        return self.resolved_user_message or self.current_user_message or self.user_message

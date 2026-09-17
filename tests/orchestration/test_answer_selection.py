@@ -5,14 +5,13 @@ import unittest
 from src.core.enums import ArtifactType, EventVisibility
 from src.core.models import Artifact, EventRecord
 from src.orchestration.answer_selection import select_final_text_artifact
-from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 
 
 class AnswerSelectionTest(unittest.TestCase):
-    def test_selects_final_role_text_artifact_before_intermediate_text(self) -> None:
+    def test_selects_agent_final_artifact_before_capability_text(self) -> None:
         artifacts = [
             Artifact(
-                "node-intermediate:main_agent_response:intermediate:abc",
+                "artifact-capability",
                 "task-1",
                 "node-intermediate",
                 ArtifactType.TEXT,
@@ -20,7 +19,7 @@ class AnswerSelectionTest(unittest.TestCase):
                 is_complete=True,
             ),
             Artifact(
-                "node-final:main_agent_response:final:def",
+                "agent-artifact:task-1:final",
                 "task-1",
                 "node-final",
                 ArtifactType.TEXT,
@@ -34,7 +33,7 @@ class AnswerSelectionTest(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected.storage_ref, "全局汇总")
 
-    def test_can_fall_back_to_final_role_event_for_legacy_roleless_artifacts(self) -> None:
+    def test_can_select_final_node_from_agent_final_event(self) -> None:
         artifacts = [
             Artifact("art-intermediate", "task-1", "node-intermediate", ArtifactType.TEXT, "局部回答", is_complete=True),
             Artifact("art-final", "task-1", "node-final", ArtifactType.TEXT, "全局汇总", is_complete=True),
@@ -45,8 +44,8 @@ class AnswerSelectionTest(unittest.TestCase):
                 "conv-1",
                 "task-1",
                 node_id="node-final",
-                event_type="main_agent.output_final",
-                payload={"response_role": RESPONSE_ROLE_FINAL},
+                event_type="agent.final_output",
+                payload={"artifact_id": "art-final", "message_id": "message-final"},
                 visibility=EventVisibility.FRONTEND,
             )
         ]
