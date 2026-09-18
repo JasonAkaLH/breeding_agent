@@ -13799,6 +13799,8 @@ def _resolve_postgres_mcp_rollout_app_runtime(
     rollout_ledger_active: bool,
     env: Mapping[str, str],
 ) -> tuple[Engine, Any] | None:
+    if str(env.get("MAF_MCP_INITIALIZATION_ADMIN_DSN") or "").strip():
+        raise ValueError("API runtime must not receive MCP initialization administrator credentials")
     if not rollout_ledger_active:
         return None
 
@@ -14185,6 +14187,8 @@ def build_api_runtime(
     mcp_cp7_maintenance_authorization: object | None = None,
     mcp_cp7_maintenance_authorizer: Callable[[object], bool] | None = None,
 ) -> ApiRuntime:
+    if str(os.environ.get("MAF_MCP_INITIALIZATION_ADMIN_DSN") or "").strip():
+        raise ValueError("API runtime must not receive MCP initialization administrator credentials")
     master_key_deriver = _resolve_master_key_deriver(
         master_key_file=master_key_file,
         master_key_bytes=master_key_bytes,

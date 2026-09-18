@@ -22,6 +22,7 @@ from src.core.models import MCPRolloutMetricBucket as MCPRolloutMetricBucketReco
 from .rollout_evidence import (
     MCP_ROLLOUT_PROGRAM,
     MCPCallKind,
+    MCPEvidenceKind,
     MCPEvidenceProducer,
     MCPEvidenceSnapshot,
     MCPEvidenceSource,
@@ -42,6 +43,7 @@ from .rollout_evidence import (
     canonical_evidence_attestation_signature,
     canonical_evidence_content_digest,
     is_exact_mcp_metric_bucket_window,
+    parse_first_enablement_payload,
     validate_evidence_snapshot,
 )
 
@@ -576,6 +578,32 @@ def validate_mcp_evidence_snapshot_record(
 ) -> tuple[MCPGateBlocker, ...]:
     """Independently revalidate a snapshot after canonical-storage reload."""
 
+    if (
+        record.source == MCPEvidenceSource.DEPLOYMENT.value
+        or record.evidence_kind == MCPEvidenceKind.FIRST_ENABLEMENT.value
+    ):
+        try:
+            content = _record_evidence_content(record)
+            content.update(
+                stage=MCPRolloutStage(record.stage),
+                source=MCPEvidenceSource(record.source),
+                producer=MCPEvidenceProducer(record.producer),
+                payload=parse_first_enablement_payload(record.payload),
+            )
+            snapshot = MCPEvidenceSnapshot(
+                **content,
+                payload_digest=record.payload_digest,
+                attestation_key_id=record.attestation_key_id,
+                attestation_signature=record.attestation_signature,
+            )
+        except (KeyError, TypeError, ValueError):
+            return (MCPGateBlocker.PAYLOAD_INVALID,)
+        if (
+            record.rollout_program != MCP_ROLLOUT_PROGRAM
+            or record.evidence_kind != record.payload.get("kind")
+        ):
+            return (MCPGateBlocker.PROVENANCE_INVALID,)
+        return validate_evidence_snapshot(snapshot)
     blockers: list[MCPGateBlocker] = []
     if record.rollout_program != MCP_ROLLOUT_PROGRAM:
         blockers.append(MCPGateBlocker.PROVENANCE_INVALID)
@@ -751,6 +779,8 @@ def _json_value(value: Any) -> Any:
         return sorted(_json_value(item) for item in value)
     if isinstance(value, tuple):
         return [_json_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _json_value(item) for key, item in value.items()}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise TypeError(f"unsupported MCP evidence payload value: {type(value).__name__}")

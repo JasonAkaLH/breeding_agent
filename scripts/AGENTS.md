@@ -16,6 +16,8 @@
 - `validate_user_mcp_phase3_evidence.py`：离线验证 Phase 3 closed-schema evidence、digest/provenance、production HMAC attestation 和 stage gate。
 - `validate_unified_agent_loop_evidence.py`：统一Agent Loop Phase 0～7 handoff evidence validator；Phase 0双向校验active PRD、旧测试和九类执行/恢复入口，Phase 5/6/7按到期规则拒绝缺失或未closed的readiness、DAG删除和破坏性迁移证据。
 - `validate_project_skill_bundle.py`：对外部Project Skill root计算或校验确定性`sha256:<64-lower-hex>` bundle digest；拒绝symlink/特殊文件/容量/deadline边界，输出不含正文或绝对路径的safe JSON。
+- `initialize_mcp_first_production.py`：新用户 MCP 功能的一次性 PostgreSQL 管理员准入；`check` 只读，`apply` 绑定预检摘要并在锁内原子登记首次 evidence/approval/activation，不执行 DDL，不进入普通服务启动。
+- `postgres/user_mcp_first_enablement_constraints.sql`：显式升级五项 evidence CHECK；兼容原 CI/production 记录，不初始化 MCP。
 - `control_user_mcp_rollout.py`：向 canonical rollout ledger 追加 approval、activation、block/resolution 与严格降暴露回滚；PostgreSQL 的 `append-block` 只用 evaluator DSN，其他子命令只用 operator DSN，SQLite 仅限 local/CI。
 - `produce_user_mcp_shadow_evidence.py`：使用 snapshot producer 身份从 canonical PostgreSQL durable sample/metric/drill ledger 派生、签封并写入 production rollout evidence；不接受 caller-authored production payload。
 - `migrate_legacy_mcp_config.py`：legacy MCP inventory、HMAC consumer 引用/集合 digest、consumer × capability obligation 和 informational health dry-run；standalone safe apply 默认实时重验完整 catalog/capability/consumer 连续性，并根据 state runtime config 向 canonical PostgreSQL 或 local/CI SQLite 原子批量写入确定性新 ID、canonical config/加密凭据和 migration provenance；CLI 不接受 PostgreSQL DSN、不做 schema bootstrap，也不提供 Endpoint 域名/CIDR allowlist 参数，公网 HTTP/HTTPS 与私网拒绝规则和用户 API 一致。

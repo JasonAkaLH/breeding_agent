@@ -266,6 +266,12 @@ def plan_postgres_schema_reconciliation(
                         table_name, constraint_name, expected_definition
                     )
                 )
+        elif table_name == "mcp_rollout_evidence_snapshot":
+            if not _checks_match_exactly(
+                manifest.check_constraints.get(table_name, {}),
+                inspection.check_constraints.get(table_name, {}),
+            ):
+                operator_only_actions.append("mcp_first_enablement_constraints_required")
         elif table_name in _CP7_CHECK_TABLES:
             actions.extend(
                 _plan_cp7_check_reconciliation(
