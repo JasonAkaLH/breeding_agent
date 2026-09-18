@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 修复 Rust 依赖安全公告 RUSTSEC-2026-0285 和 RUSTSEC-2026-0190：主 workspace 将 rustls 升至 0.23.45、anyhow 升至 1.0.103，并联动更新 rustls-webpki、aws-lc-rs 与 aws-lc-sys；独立 fuzz 锁文件同步修复 rustls，保留其已修复的 anyhow 版本。main/prod 使用相同锁文件，业务代码与数据库结构不变。cargo fmt、Clippy、198 项 Rust 测试、主/fuzz 漏洞审计、cargo-deny、fuzz 编译和工件溯源自检通过；fuzz 仍有既有 chacha20 0.10.1 撤回版本提示，无漏洞公告命中。License Requirement：复用现有依赖，许可证检查通过，未扩大许可例外。
+
 - 用户确认 MCP 首次生产部署直接启用与 dev 一致的用户级功能：迁移计划固定 enforce/100%/legacy assembly off 目标，原逐级灰度观察窗不作为本次首次部署前置条件；保留生产身份、租户隔离、逐 Tool 授权、密钥与 Sidecar 信任、分角色权限和安全 blocker 检查。计划补充受控初始化、真实 activation、幂等重试及拒绝路径验收要求；技术适配尚未设计实施，本轮仅更新计划和索引，未操作生产。License Requirement：无新增依赖或许可变化。
 
 - 按用户确认修订 main→prod 迁移计划：生产 Skill 已在服务器发布，本次沿用现有内容并仅核验 revision、bundle digest、挂载及兼容性，取消重复发布步骤；三类镜像从候选验收到正式部署锁定同一 linux/amd64 工件 digest，重新构建须重新验收，Sidecar 信任材料同步匹配。同步更新文档索引；MCP 首次准入路线仍待确定，本轮未修改业务代码、部署命令或生产环境。License Requirement：无新增依赖或许可变化。
