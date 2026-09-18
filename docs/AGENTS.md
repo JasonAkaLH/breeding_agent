@@ -7,6 +7,7 @@
 - `api/`：静态 API 文档与 API 更新日志。
 - `prd/`：产品 / 架构 PRD，按 backend、frontend、rust、MCP 等主题组织。
 - `runbooks/`：运维与部署运行手册。
+- `runbooks/mcp-first-production-enablement.md`：新用户 MCP 功能的一次性管理员 check/apply、显式约束/角色前置条件、精确重试与常驻凭据边界。
 - `runbooks/user-mcp-gateway.md`：用户级 MCP Gateway 密钥、容量、基础发布和故障边界。
 - `runbooks/user-mcp-phase3-rollout.md`：Phase 3 canonical routing、cohort/实例准入、8 条权威安全红线、PostgreSQL 分角色 HMAC evidence/ledger、consumer × capability schema-contract 连续性与同事务 durable migration audit、CP-0 恢复、回滚和 legacy 删除门禁。
 - `checkpoint/`：checkpoint、time-travel、thread event 等设计与实施计划。
@@ -121,7 +122,7 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `approved`；设计已由用户确认 | 执行同名 implementation plan，验证首次记录、兼容约束、幂等及角色边界，再同步 main/prod、重建 Backend 并重做恢复库演练。生产尚未执行。 |
+| `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `image_published_pending_server_rehearsal`；首次初始化代码与新 Backend 已验收发布 | 在服务器拉取固定工件，重新完成恢复库结构与首次初始化演练；正式数据库尚未执行新迁移或准入。 |
 | `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md` | `source_synced_not_deployed`；prod 业务源码已同步 main，生产 Skill 已由用户确认发布 | 后续核验生产参数、现有 Skill 与数据库恢复演练；本次源码同步保留 main 现有 MCP 准入检查，未新增初始化逻辑、发布镜像或操作生产。 |
 | `superpowers/specs/2026-09-04-unified-tool-result-50k-token-budget-design.md`、同名Backend implementation plan与Frontend implementation plan | Backend与Frontend均为`image_published_not_deployed`；backend-dev `0.1.35`、frontend-dev `0.1.29`及各自远端digest验证已闭合 | 开发环境部署仍须另行授权；部署后验证大型既有v2 view、新的50k内/超限Result及`model_unavailable`。不修改历史Tool Result、projection revision、数据库schema、外部MCP/Skill或`prod`。 |
 | `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-implementation-plan.md` | `published_pending_deploy`；Checkpoint 0～E、相关全量门禁和backend-dev `0.1.34`发布已闭合 | 用新Task执行开发环境smoke；尚未部署或修改数据库，`prod`不在范围。 |

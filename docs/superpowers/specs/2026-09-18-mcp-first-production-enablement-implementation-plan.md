@@ -1,6 +1,6 @@
 # MCP 首次生产启用实施计划
 
-依据：[已批准设计](2026-09-18-mcp-first-production-enablement-design.md)。状态：`implementing`。
+依据：[已批准设计](2026-09-18-mcp-first-production-enablement-design.md)。状态：`image_published_pending_server_rehearsal`。
 
 ## 顺序与交付
 
@@ -32,3 +32,13 @@ License Requirement：复用现有依赖，无新增依赖或许可例外。
 - 已完成独立 first_enablement payload、原摘要兼容、管理员事务入口、显式 CHECK SQL、常驻管理员凭据拒绝及 Docker 固定文件交付。
 - PostgreSQL 17.10 独立测试实例：10 项新增集成测试及 20 项原 rollout 真实角色测试全部通过，无 skip；覆盖保留历史会话/Task、只读预检、重复执行、旧约束升级、错误角色/数据库、并发与写入故障回滚、app 租约和安全阻断。
 - evidence/脚本/ledger/schema/API 相关首轮 91 项回归通过；新增 CLI 与 closed payload 专项 8 项通过。最终复核与镜像检查继续进行，服务器恢复库和正式库尚未执行新入口。
+
+## 工件验收与发布
+
+- Backend 源码：`805c60a5357073d15f50bce2ac8c3703ba4d423b`；main 同内容提交 `5543e6e`。镜像内 290 个源码/交付文件逐项摘要一致，配置和本地部署命令未打包。
+- 已发布 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-prod:0.1.23`；index digest 为 `sha256:90033f7cc8c2f95a5587cae102c30051594862afe3617dd8119dcb08a914e331`，固定 Linux/amd64 manifest 为 `sha256:e2fa035732f63d08637288baa34a79181085e50e1d90222bece3e37485f101a0`。远端 tag 的目标 manifest 已核验。
+- schema v11 checksum：`e605d3c6d247a51887290a16fafb5afc7ccbbc83c0e662796154119e131b555c`。
+- 在 Docker 内部网络上的独立 PostgreSQL 实例，用该 Backend 完成生产旧结构模拟 24→23→66，23 张保留表摘要一致；镜像内 CLI check/apply/精确重试通过。使用普通 state 所有者和受限 rollout app 身份，真实 FastAPI 启动、健康文档端点及重启通过，无外部模型请求。
+- 与现有 Sidecar `sha256:2e45ef9d4d99180ac4ec43c33351fe933011dd914dc75a4567803962a0d3879a` 握手通过；原 manifest/allowlist 继续适配，篡改 manifest 被拒绝。
+- 最终变更面复核 48 项通过；Ruff 与 Git diff 空白检查通过。旧候选 `sha256:202a2ad471f07fde97055196079f250c704d859513bf78668773a0a204e2bb60` 及其验收记录保留，不替换为新验收结论。
+- 新恢复库脚本已准备并通过 Bash/嵌入 Python 语法检查，目标为独立 `biobin_restore_mcp_20260918_v11`。**服务器仍须实际拉取新工件、从备份重新恢复、完成结构及首次初始化演练；正式库未操作。** 后续操作参考 [runbook](../../runbooks/mcp-first-production-enablement.md)。
