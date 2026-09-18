@@ -84,6 +84,8 @@
 
 ## 4. MCP 首次生产准入：已确认直接启用新版功能
 
+用户于 2026-09-18 明确：生产此前没有用户自由配置 MCP 的功能，本次按新功能首次上线处理，不安排旧用户 MCP 配置或凭据迁移，也不复制开发库用户 MCP 数据。具体首次初始化方案见 [用户自定义 MCP 首次生产启用设计](2026-09-18-mcp-first-production-enablement-design.md)，当前待用户审阅，尚未实施。
+
 用户已确认：本次首次生产部署直接启用与 dev 一致的用户级 MCP 功能。目标配置为 Gateway 开启、`MCP_ROUTING_MODE=enforce`、`MCP_ENFORCE_PERCENT=100`、cohorts 为空、`MCP_LEGACY_GLOBAL_RUNTIME_ENABLED=false`、`MCP_ROLLOUT_STAGE=legacy_assembly_off`；环境继续使用 `MAF_API_ENV=prod` / `MAF_ENV=production`。
 
 本次首次启用不采用原有逐级灰度路线，不把其 24h、48h 及后续按周计算的观察窗作为首次部署前置条件。迁移演练、镜像验收、生产配置检查和上线后的运行观察仍需完成；普通用户的逐 Tool 授权规则保持不变。
@@ -172,7 +174,7 @@
 
 - MCP 首次直接启用的适配设计、实现及隔离验收；路线已由用户确认，现有固定 assembly-off 命令仍不能直接视为可执行。
 - 生产真实配置、master key、Sidecar trust、ledger 权限及 activation 的现场证据。
-- 旧登录 token 的重新登录安排、旧全局 MCP 的能力迁移范围、在途任务排空结果。
+- 旧登录 token 的重新登录安排、在途任务排空结果；用户自定义 MCP 按新功能首次上线处理。
 - 已发布生产 Skill 的服务器实际 revision、bundle digest、挂载权限及新旧后端兼容性验证记录；发布工作本身已由用户确认完成。
 - 旧 `/app/runtime` 挂载类型、完整生产备份的实际恢复演练和可接受维护窗口。
 
