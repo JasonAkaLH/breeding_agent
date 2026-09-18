@@ -13973,6 +13973,8 @@ class SQLiteStateRepository:
         evidence = self._session.get(MCPRolloutEvidenceSnapshotRow, approval.evidence_id)
         if evidence is None:
             raise ValueError("MCP rollout approval evidence does not exist")
+        if evidence.source == "deployment" or evidence.evidence_kind == "first_enablement":
+            raise ValueError("first enablement requires the PostgreSQL administrator initializer")
         if (
             evidence.environment_id != approval.environment_id
             or evidence.rollout_program != approval.rollout_program
@@ -14056,6 +14058,8 @@ class SQLiteStateRepository:
             or evidence.rollout_program != activation.rollout_program
         ):
             raise ValueError("MCP rollout activation evidence scope does not match")
+        if evidence.source == "deployment" or evidence.evidence_kind == "first_enablement":
+            raise ValueError("first enablement requires the PostgreSQL administrator initializer")
         if activation.previous_activation_id is not None:
             previous = self._session.get(
                 MCPRolloutDeploymentActivationRow,

@@ -11,7 +11,8 @@
 - `runbooks/user-mcp-phase3-rollout.md`：Phase 3 canonical routing、cohort/实例准入、8 条权威安全红线、PostgreSQL 分角色 HMAC evidence/ledger、consumer × capability schema-contract 连续性与同事务 durable migration audit、CP-0 恢复、回滚和 legacy 删除门禁。
 - `checkpoint/`：checkpoint、time-travel、thread event 等设计与实施计划。
 - `superpowers/specs/`：本地设计草案、spec 与阶段性方案。
-- `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md`：用户自定义 MCP 新功能首次生产启用设计；一次性管理员初始化复用发布记录，保留正常启动校验，不迁移旧用户配置；方案待审阅，实施后须用新 Backend 重新完成恢复库演练。
+- `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md`：用户自定义 MCP 新功能首次生产启用设计；一次性管理员初始化复用发布记录，保留正常启动校验，不迁移旧用户配置；设计已批准，按同名 implementation plan 实施；须用新 Backend 重新完成恢复库演练。
+- `superpowers/specs/2026-09-18-mcp-first-production-enablement-implementation-plan.md`：上述已批准设计的实施顺序，覆盖证据兼容、约束、管理员事务、CLI、真实 PostgreSQL 回归、候选发布及恢复库演练。
 - `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md`：main→prod 首次迁移计划，涵盖分叉合并、生产参数、PostgreSQL 结构升级、独立 Skill 版本、MCP 准入、恢复演练和停写回滚；执行前须闭合计划中的发布条件。
 - `superpowers/specs/2026-07-15-docker-cmd-local-only-protection-design.md`：`docker_cmd.md` 本地保留、Git 历史清理与防止重新跟踪的安全边界。
 - `superpowers/specs/2026-08-12-user-scoped-mcp-routing-execution-design.md`：用户级 MCP 两级路由、授权、执行账本、在线租约与前端闭环实施设计。
@@ -120,8 +121,8 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `draft_for_user_review`；首次直接启用方向已由用户确认 | 审阅一次性管理员初始化、真实首次记录、兼容约束、幂等及角色边界；确认后编写实施计划，再同步 main/prod、重建 Backend 并重做恢复库演练。尚未修改业务代码或生产。 |
-| `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md` | `draft_for_review`；生产 Skill 已发布，MCP 首次生产直接启用与 dev 一致功能的路线已确认 | 设计、实现并验证首次生产初始化及准入适配，核验现有 Skill，准备候选合并、生产参数和真实恢复演练；保持生产身份与安全检查，只部署验收过的镜像 digest，本轮未执行生产变更。 |
+| `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `approved`；设计已由用户确认 | 执行同名 implementation plan，验证首次记录、兼容约束、幂等及角色边界，再同步 main/prod、重建 Backend 并重做恢复库演练。生产尚未执行。 |
+| `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md` | `source_synced_not_deployed`；prod 业务源码已同步 main，生产 Skill 已由用户确认发布 | 后续核验生产参数、现有 Skill 与数据库恢复演练；本次源码同步保留 main 现有 MCP 准入检查，未新增初始化逻辑、发布镜像或操作生产。 |
 | `superpowers/specs/2026-09-04-unified-tool-result-50k-token-budget-design.md`、同名Backend implementation plan与Frontend implementation plan | Backend与Frontend均为`image_published_not_deployed`；backend-dev `0.1.35`、frontend-dev `0.1.29`及各自远端digest验证已闭合 | 开发环境部署仍须另行授权；部署后验证大型既有v2 view、新的50k内/超限Result及`model_unavailable`。不修改历史Tool Result、projection revision、数据库schema、外部MCP/Skill或`prod`。 |
 | `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-implementation-plan.md` | `published_pending_deploy`；Checkpoint 0～E、相关全量门禁和backend-dev `0.1.34`发布已闭合 | 用新Task执行开发环境smoke；尚未部署或修改数据库，`prod`不在范围。 |
 | `superpowers/specs/2026-09-04-mcp-selector-pre-approval-argument-validation-design.md` | `published_pending_deploy`；授权前schema校验、最终fingerprint门禁和repair边界已实施并发布 | 保持Gateway纵深校验；历史失败Task不重放或复活。 |

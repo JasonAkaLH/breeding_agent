@@ -563,23 +563,30 @@ class MCPRolloutEvidenceSnapshotRow(SQLiteBase):
             "'cohort_enforce', 'full_enforce', 'legacy_assembly_off')",
             name="mcp_rollout_evidence_stage",
         ),
-        CheckConstraint("source IN ('ci', 'production')", name="mcp_rollout_evidence_source"),
+        CheckConstraint("source IN ('ci', 'production', 'deployment')", name="mcp_rollout_evidence_source"),
         CheckConstraint(
-            "producer IN ('ci_pipeline', 'production_snapshot_producer')",
+            "producer IN ('ci_pipeline', 'production_snapshot_producer', 'deployment_initializer')",
             name="mcp_rollout_evidence_producer",
         ),
         CheckConstraint(
             "evidence_kind IN ('ci_conformance', 'internal_shadow', "
             "'internal_enforce', 'cohort_enforce', 'full_enforce', "
-            "'legacy_assembly_off', 'rollback_drill', 'resource_baseline', 'release_tag')",
+            "'legacy_assembly_off', 'rollback_drill', 'resource_baseline', 'release_tag', 'first_enablement')",
             name="mcp_rollout_evidence_kind",
         ),
         CheckConstraint("snapshot_id > 0", name="mcp_rollout_evidence_snapshot_id"),
         CheckConstraint(
-            "(source = 'ci' AND attestation_key_id IS NULL AND attestation_signature IS NULL) "
+            "(source IN ('ci', 'deployment') AND attestation_key_id IS NULL AND attestation_signature IS NULL) "
             "OR (source = 'production' AND attestation_key_id IS NOT NULL "
             "AND attestation_signature IS NOT NULL)",
             name="mcp_rollout_evidence_attestation",
+        ),
+        CheckConstraint(
+            "(source = 'deployment' AND producer = 'deployment_initializer' "
+            "AND evidence_kind = 'first_enablement' AND stage = 'off') OR "
+            "(source <> 'deployment' AND producer <> 'deployment_initializer' "
+            "AND evidence_kind <> 'first_enablement')",
+            name="mcp_rollout_first_enablement_source",
         ),
         Index(
             "idx_mcp_rollout_evidence_scope",

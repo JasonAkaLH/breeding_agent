@@ -44,6 +44,8 @@ def bootstrap_postgres_database(engine: Engine) -> None:
                 raise PostgresSchemaDriftError(
                     "agent_schema_migration_required"
                 )
+            if "mcp_first_enablement_constraints_required" in initial_plan.operator_only_actions:
+                raise PostgresSchemaDriftError("mcp_first_enablement_constraints_required")
             raise PostgresSchemaDriftError(
                 "mcp_dispatch_aggregate_migration_required"
             )

@@ -27,6 +27,7 @@ from src.integrations.mcp.rollout_evidence import (  # noqa: E402
     MCPEvidenceProducer,
     MCPEvidenceSnapshot,
     MCPEvidenceSource,
+    MCPFirstEnablementPayload,
     MCPLatencyBucket,
     MCPMetricAdapter,
     MCPMetricBucket,
@@ -47,6 +48,7 @@ from src.integrations.mcp.rollout_evidence import (  # noqa: E402
     MCPShadowScenarioObservation,
     MCPStageGateRequest,
     evaluate_mcp_stage_gate,
+    parse_first_enablement_payload,
 )
 
 
@@ -281,7 +283,12 @@ def run(
         return 2
 
 
-def _payload(raw: Mapping[str, Any]) -> MCPRolloutEvidencePayload:
+def _payload(raw: Mapping[str, Any]) -> MCPRolloutEvidencePayload | MCPFirstEnablementPayload:
+    if raw.get("kind") == MCPEvidenceKind.FIRST_ENABLEMENT.value:
+        try:
+            return parse_first_enablement_payload(raw)
+        except (TypeError, ValueError, KeyError) as error:
+            raise Phase3EvidenceError("first enablement payload is invalid") from error
     allowed = {
         "kind",
         "metric_buckets",

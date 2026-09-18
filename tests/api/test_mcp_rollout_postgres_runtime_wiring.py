@@ -49,6 +49,16 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
             )
         )
 
+    def test_first_enablement_admin_credentials_never_enter_runtime(self):
+        for active in (False, True):
+            with self.subTest(active=active), self.assertRaises(ValueError):
+                runtime_module._resolve_postgres_mcp_rollout_app_runtime(
+                    rollout_ledger_active=active,
+                    env={"MAF_MCP_INITIALIZATION_ADMIN_DSN": "postgresql://admin:secret@db/prod"},
+                )
+        with patch.dict(os.environ, {"MAF_MCP_INITIALIZATION_ADMIN_DSN": "secret"}), self.assertRaises(ValueError):
+            runtime_module.build_api_runtime(database_path="unused", audit_log_path="unused")
+
     def test_inactive_ledger_does_not_require_rollout_app_role(self) -> None:
         with patch.object(runtime_module, "create_postgres_engine") as create_engine:
             rollout_runtime = (

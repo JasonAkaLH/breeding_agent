@@ -33,11 +33,13 @@ class MCPRolloutStage(StrEnum):
 class MCPEvidenceSource(StrEnum):
     CI = "ci"
     PRODUCTION = "production"
+    DEPLOYMENT = "deployment"
 
 
 class MCPEvidenceProducer(StrEnum):
     CI_PIPELINE = "ci_pipeline"
     PRODUCTION_SNAPSHOT = "production_snapshot_producer"
+    DEPLOYMENT_INITIALIZER = "deployment_initializer"
 
 
 class MCPEvidenceKind(StrEnum):
@@ -50,6 +52,7 @@ class MCPEvidenceKind(StrEnum):
     ROLLBACK_DRILL = "rollback_drill"
     RESOURCE_BASELINE = "resource_baseline"
     RELEASE_TAG = "release_tag"
+    FIRST_ENABLEMENT = "first_enablement"
 
 
 class MCPMetricName(StrEnum):
@@ -328,6 +331,62 @@ class MCPRolloutEvidencePayload:
         return sum(item.terminal_sample_count for item in self.call_kinds)
 
 
+FIRST_ENABLEMENT_EMPTY_TABLES = (
+    "mcp_audit_event",
+    "mcp_branch_record",
+    "mcp_call_record",
+    "mcp_connection_lease",
+    "mcp_cp7_candidate_guard",
+    "mcp_cp7_ready_epoch_event",
+    "mcp_cp7_safety_ledger",
+    "mcp_dispatch_resume_outbox",
+    "mcp_durable_result_lifecycle",
+    "mcp_execution_terminal_projection",
+    "mcp_legacy_migration_record",
+    "mcp_legacy_retirement_evidence",
+    "mcp_legacy_retirement_receipt",
+    "mcp_no_server_convergence_receipt",
+    "mcp_no_server_intent",
+    "mcp_pending_tool_action",
+    "mcp_remote_task_binding",
+    "mcp_remote_task_outbox",
+    "mcp_rollout_block_resolution",
+    "mcp_rollout_deployment_activation",
+    "mcp_rollout_drill_observation",
+    "mcp_rollout_evidence_snapshot",
+    "mcp_rollout_instance_config",
+    "mcp_rollout_metric_bucket",
+    "mcp_rollout_promotion_block",
+    "mcp_rollout_stage_approval",
+    "mcp_sealed_state",
+    "mcp_shadow_audit_sample",
+    "mcp_terminal_candidate_lifecycle",
+    "mcp_terminal_result_receipt",
+    "user_mcp_health_attempt",
+    "user_mcp_owner_mutation_guard",
+    "user_mcp_scope_lease",
+    "user_mcp_server",
+    "user_mcp_tool_grant",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MCPFirstEnablementPayload:
+    kind: MCPEvidenceKind
+    schema_version: str
+    database_name: str
+    backend_image_digest: str
+    administrator: str
+    initial_table_counts: Mapping[str, int]
+    initial_state_digest: str
+
+
+def parse_first_enablement_payload(raw: Mapping[str, Any]) -> MCPFirstEnablementPayload:
+    if set(raw) != {field.name for field in fields(MCPFirstEnablementPayload)}:
+        raise ValueError("first enablement payload fields are not closed")
+    return MCPFirstEnablementPayload(**{**raw, "kind": MCPEvidenceKind(raw["kind"])})
+
+
 @dataclass(frozen=True, slots=True)
 class MCPEvidenceSnapshot:
     evidence_id: str
@@ -343,7 +402,7 @@ class MCPEvidenceSnapshot:
     source: MCPEvidenceSource
     snapshot_id: int
     nonce: str
-    payload: MCPRolloutEvidencePayload
+    payload: MCPRolloutEvidencePayload | MCPFirstEnablementPayload
     payload_digest: str
     attestation_key_id: str | None = None
     attestation_signature: str | None = None
@@ -365,7 +424,7 @@ class MCPEvidenceSnapshot:
         source: MCPEvidenceSource,
         snapshot_id: int,
         nonce: str,
-        payload: MCPRolloutEvidencePayload,
+        payload: MCPRolloutEvidencePayload | MCPFirstEnablementPayload,
         attestation_key_id: str | None = None,
         attestation_key: bytes | None = None,
     ) -> MCPEvidenceSnapshot:
@@ -508,6 +567,7 @@ _REQUIRED_PERFORMANCE_CALL_KINDS = frozenset(MCPCallKind)
 _EXPECTED_PRODUCER = {
     MCPEvidenceSource.CI: MCPEvidenceProducer.CI_PIPELINE,
     MCPEvidenceSource.PRODUCTION: MCPEvidenceProducer.PRODUCTION_SNAPSHOT,
+    MCPEvidenceSource.DEPLOYMENT: MCPEvidenceProducer.DEPLOYMENT_INITIALIZER,
 }
 _EXPECTED_KIND_BY_STAGE = {
     MCPRolloutStage.INTERNAL_SHADOW: MCPEvidenceKind.INTERNAL_SHADOW,
@@ -581,16 +641,31 @@ def validate_evidence_snapshot(
         blockers.append(MCPGateBlocker.PROVENANCE_INVALID)
     if not _is_positive_int(snapshot.snapshot_id):
         blockers.append(MCPGateBlocker.PROVENANCE_INVALID)
-    if not _valid_window(snapshot.window_started_at, snapshot.window_ended_at):
+    first_enablement = isinstance(snapshot.payload, MCPFirstEnablementPayload)
+    if first_enablement:
+        valid_window = (
+            _is_aware(snapshot.window_started_at)
+            and snapshot.window_started_at == snapshot.window_ended_at == snapshot.recorded_at
+        )
+    else:
+        valid_window = _valid_window(snapshot.window_started_at, snapshot.window_ended_at)
+    if not valid_window:
         blockers.append(MCPGateBlocker.WINDOW_INCOMPLETE)
     if not _is_aware(snapshot.recorded_at) or (
         _is_aware(snapshot.window_ended_at)
         and snapshot.recorded_at < snapshot.window_ended_at
     ):
         blockers.append(MCPGateBlocker.PROVENANCE_INVALID)
-    if not isinstance(snapshot.payload, MCPRolloutEvidencePayload):
+    if first_enablement:
+        blockers.extend(_validate_first_enablement(snapshot))
+    elif not isinstance(snapshot.payload, MCPRolloutEvidencePayload):
         blockers.append(MCPGateBlocker.PAYLOAD_INVALID)
     else:
+        if (
+            snapshot.source is MCPEvidenceSource.DEPLOYMENT
+            or snapshot.payload.kind is MCPEvidenceKind.FIRST_ENABLEMENT
+        ):
+            blockers.append(MCPGateBlocker.SOURCE_POLICY_VIOLATION)
         blockers.extend(_validate_payload(snapshot))
         if snapshot.source is MCPEvidenceSource.PRODUCTION:
             blockers.extend(_production_metric_blockers(snapshot))
@@ -697,6 +772,7 @@ def evaluate_mcp_stage_observation(
     )
     payload = snapshot.payload
     if not isinstance(payload, MCPRolloutEvidencePayload):
+        blockers.append(MCPGateBlocker.SOURCE_POLICY_VIOLATION)
         return _ordered_unique(blockers)
 
     blockers.extend(_common_observation_blockers(payload))
@@ -804,6 +880,34 @@ def active_mcp_promotion_blocks(
 ) -> tuple[MCPRolloutPromotionBlock, ...]:
     resolved_block_ids = {resolution.block_id for resolution in resolutions}
     return tuple(block for block in blocks if block.block_id not in resolved_block_ids)
+
+
+def _validate_first_enablement(snapshot: MCPEvidenceSnapshot) -> tuple[MCPGateBlocker, ...]:
+    payload = snapshot.payload
+    assert isinstance(payload, MCPFirstEnablementPayload)
+    if (
+        snapshot.source is not MCPEvidenceSource.DEPLOYMENT
+        or snapshot.producer is not MCPEvidenceProducer.DEPLOYMENT_INITIALIZER
+        or snapshot.stage is not MCPRolloutStage.OFF
+        or payload.kind is not MCPEvidenceKind.FIRST_ENABLEMENT
+    ):
+        return (MCPGateBlocker.SOURCE_POLICY_VIOLATION,)
+    counts = payload.initial_table_counts
+    if (
+        payload.schema_version != "maf.mcp.first_enablement.v1"
+        or not isinstance(payload.database_name, str)
+        or not _IDENTIFIER_RE.fullmatch(payload.database_name)
+        or not isinstance(payload.administrator, str)
+        or not _IDENTIFIER_RE.fullmatch(payload.administrator)
+        or not isinstance(payload.backend_image_digest, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", payload.backend_image_digest)
+        or not isinstance(counts, Mapping)
+        or set(counts) != set(FIRST_ENABLEMENT_EMPTY_TABLES)
+        or any(type(value) is not int or value != 0 for value in counts.values())
+        or payload.initial_state_digest != canonical_evidence_content_digest(counts)
+    ):
+        return (MCPGateBlocker.PAYLOAD_INVALID,)
+    return ()
 
 
 def _validate_payload(snapshot: MCPEvidenceSnapshot) -> tuple[MCPGateBlocker, ...]:
