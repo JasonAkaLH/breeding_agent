@@ -596,14 +596,41 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             result_receipt_id="receipt-1",
         )
         storage.list_mcp_call_records.return_value = [
-            SimpleNamespace(call_ref="call-1", may_have_dispatched=True)
+            SimpleNamespace(
+                call_ref="call-1",
+                node_id=intent.node_id,
+                may_have_dispatched=True,
+            ),
+            SimpleNamespace(
+                call_ref="sibling-call",
+                node_id="sibling-node",
+                may_have_dispatched=True,
+            ),
         ]
-        storage.get_mcp_terminal_result_receipt_for_call.return_value = (
-            SimpleNamespace(result_receipt_id="receipt-1")
+        storage.get_mcp_terminal_result_receipt_for_call.side_effect = (
+            lambda call_ref: SimpleNamespace(result_receipt_id="receipt-1")
+            if call_ref == "call-1"
+            else None
         )
         runtime = self._runtime(storage)
 
         await runtime._validate_terminal_cp7_mcp_authority([intent])
+        storage.get_mcp_terminal_result_receipt_for_call.assert_awaited_once_with(
+            "call-1"
+        )
+
+        storage.get_mcp_dispatch_resume_outbox.return_value.result_receipt_id = (
+            "sibling-receipt"
+        )
+        storage.get_mcp_terminal_result_receipt_for_call.side_effect = (
+            lambda call_ref: SimpleNamespace(
+                result_receipt_id=(
+                    "receipt-1" if call_ref == "call-1" else "sibling-receipt"
+                )
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "mcp_resolved_authority_incomplete"):
+            await runtime._validate_terminal_cp7_mcp_authority([intent])
 
     async def test_completed_no_call_is_valid_resolved_restart_authority(
         self,
@@ -636,10 +663,22 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             completion_mode="completed",
             result_receipt_id=None,
         )
-        storage.list_mcp_call_records.return_value = []
         runtime = self._runtime(storage)
 
-        await runtime._validate_terminal_cp7_mcp_authority([intent])
+        for sibling_calls in (
+            [],
+            [
+                SimpleNamespace(
+                    call_ref="sibling-call",
+                    node_id="sibling-node",
+                    may_have_dispatched=True,
+                )
+            ],
+        ):
+            with self.subTest(sibling_call_count=len(sibling_calls)):
+                storage.list_mcp_call_records.return_value = sibling_calls
+                await runtime._validate_terminal_cp7_mcp_authority([intent])
+        storage.get_mcp_terminal_result_receipt_for_call.assert_not_awaited()
 
 
 if __name__ == "__main__":

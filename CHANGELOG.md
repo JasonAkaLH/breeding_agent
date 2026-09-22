@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 修复 MCP 多节点任务在重启时被误判为 `mcp_resolved_authority_incomplete`：resolved intent 的调用和结果回执校验限定到当前 node，不再将同 Task 其他节点的工具调用计入 no-call 节点，也不允许其他节点回执满足当前节点的终态要求。回归覆盖兄弟节点已调用、本节点未调用、兄弟节点缺失回执及回执错配；相关 41 项测试通过，修复后的真实启动校验函数只读检查开发 PostgreSQL 的 64 条 resolved intent 全部通过，未修改历史任务或调用数据。License Requirement：复用现有依赖，无新增依赖或许可变化。
+
 - 实现新用户 MCP 功能的首次生产准入：提供一次性管理员 `check/apply`，只在 MCP 初始空状态下原子登记独立 `deployment/first_enablement` 证据、批准与最终 activation；保留普通角色、实例租约及安全阻断，常驻 Backend 拒绝初始化管理员凭据。支持精确重试、并发互斥和事务回滚，不执行旧 MCP 数据迁移或隐式 DDL。schema manifest 升至 v11，五项 CHECK 通过独立兼容 SQL 升级，public 表数仍为 66；旧证据摘要保持不变。独立 PostgreSQL 新增 10 项与既有 20 项真实角色测试通过，相关自动回归通过。新 Backend-prod `0.1.23` 已发布，固定 amd64 digest 为 `e2fa035732f63d08637288baa34a79181085e50e1d90222bece3e37485f101a0`，镜像内结构模拟迁移、首次初始化、FastAPI 启动/重启和现有 Sidecar 兼容检查通过；服务器恢复库新演练待执行，正式库未操作。License Requirement：复用现有依赖，无新增依赖或许可例外。
 
 - 用户自定义 MCP 首次生产启用设计已成文待审阅：按新功能上线处理，不迁移旧用户配置或复制开发用户数据；推荐一次性管理员初始化，复用现有发布记录并增加明确的首次证据类型，保留普通启动、租约、权限和安全 blocker 检查。表数保持 66，约束与 schema manifest 将变化，实施后须重建 Backend 并重做恢复库验收；本轮仅文档，尚未修改业务代码或生产。License Requirement：复用现有依赖，无新增依赖或许可例外。

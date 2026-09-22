@@ -12106,9 +12106,13 @@ class ApiRuntime(
                         ),
                     )
             elif status == "resolved":
-                calls = await self.storage.list_mcp_call_records(
-                    intent.owner_user_id, intent.task_id
-                )
+                calls = [
+                    call
+                    for call in await self.storage.list_mcp_call_records(
+                        intent.owner_user_id, intent.task_id
+                    )
+                    if call.node_id == intent.node_id
+                ]
                 receipts = [
                     await self.storage.get_mcp_terminal_result_receipt_for_call(call.call_ref)
                     for call in calls if call.may_have_dispatched
