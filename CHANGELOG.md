@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 修复 MCP 多节点任务在重启时被误判为 `mcp_resolved_authority_incomplete`：resolved intent 的调用和结果回执校验限定到当前 node，不再将同 Task 其他节点的工具调用计入 no-call 节点，也不允许其他节点回执满足当前节点的终态要求。回归覆盖兄弟节点已调用、本节点未调用、兄弟节点缺失回执及回执错配；相关 41 项测试通过，修复后的真实启动校验函数只读检查开发 PostgreSQL 的 64 条 resolved intent 全部通过，未修改历史任务或调用数据。License Requirement：复用现有依赖，无新增依赖或许可变化。
+
 - 2026-11-02：prod按顺序回移依赖安全修复`4afd92f → 7882116`、`c9d27cf → 0fb1f93`；仅解决CHANGELOG条目位置冲突并保留双方记录，native文件与mTLS回归同main，其他生产分支差异逐字节保留。候选Rust全量203项、相关Python集成/契约120项及质量门禁19项、Clippy/格式、Ruff、cargo-deny四类检查、provenance self-test与fuzz锁定编译通过；两个完整锁文件漏洞审计通过，原8条及补充quinn-proto告警清除，fuzz原有chacha20 0.10.1 yanked非阻断提示未隐藏。无业务代码、前端/API或部署配置变更，未构建镜像、部署或操作服务器数据，compat不变；本地部署命令文件内容、0600权限及ignored/untracked保护均保持。License Requirement：沿用main已审查的MIT/Apache-2.0随机数依赖及精确限定webpki-root-certs 1.0.10的CDLA-Permissive-2.0例外，无许可允许范围扩大。
 
 - 2026-11-02：补充将两个锁文件中的quinn-proto升级至最小修复版本0.11.18，清除完整锁文件审计发现的既有HTTP/3可选依赖漏洞；该功能仍未启用。主锁原0.11.15必须随上游切换至Rand 0.10依赖链，新增/替换的随机数依赖仅限该链，Rust最低版本要求1.85低于workspace固定的1.95；fuzz锁原0.11.17仅更新quinn-proto版本/校验和。两个完整锁文件cargo-audit（拒绝unsound告警）均为零漏洞/零unsound，cargo-deny四类检查、Rust全量203项、Clippy/格式及fuzz锁定编译再次通过。复审确认原8条与补充quinn告警均已清除，无安全公告豁免、功能开关或业务代码变更；fuzz既有chacha20 0.10.1 yanked非阻断提示仍保留。未部署或修改compat。License Requirement：quinn-proto及新增随机数传递依赖均为MIT/Apache-2.0，沿用既有许可允许集合。
