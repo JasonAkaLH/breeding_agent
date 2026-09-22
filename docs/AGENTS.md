@@ -12,6 +12,7 @@
 - `runbooks/user-mcp-phase3-rollout.md`：Phase 3 canonical routing、cohort/实例准入、8 条权威安全红线、PostgreSQL 分角色 HMAC evidence/ledger、consumer × capability schema-contract 连续性与同事务 durable migration audit、CP-0 恢复、回滚和 legacy 删除门禁。
 - `checkpoint/`：checkpoint、time-travel、thread event 等设计与实施计划。
 - `superpowers/specs/`：本地设计草案、spec 与阶段性方案。
+- `superpowers/specs/2026-09-22-agent-prompt-diagnostics-design.md`：dev单任务Prompt诊断边界、验证计划、临时开启/查看/关闭命令；只观察SDK参数元数据，不记录正文或凭据。
 - `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md`：用户自定义 MCP 新功能首次生产启用设计；一次性管理员初始化复用发布记录，保留正常启动校验，不迁移旧用户配置；设计已批准，按同名 implementation plan 实施；须用新 Backend 重新完成恢复库演练。
 - `superpowers/specs/2026-09-18-mcp-first-production-enablement-implementation-plan.md`：上述已批准设计的实施顺序，覆盖证据兼容、约束、管理员事务、CLI、真实 PostgreSQL 回归、候选发布及恢复库演练。
 - `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md`：main→prod 首次迁移计划，涵盖分叉合并、生产参数、PostgreSQL 结构升级、独立 Skill 版本、MCP 准入、恢复演练和停写回滚；执行前须闭合计划中的发布条件。

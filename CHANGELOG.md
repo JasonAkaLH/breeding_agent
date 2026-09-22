@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 新增默认关闭的开发单任务 Prompt 诊断：临时控制文件最长启用 600 秒，首次 AgentRun 请求原子锁定 Task，覆盖流式/非流式、工具后续轮次、审批恢复及协议重试；只记录完整事实规则在 system 消息中的命中与位置、消息角色、哈希和请求/响应 ID，不记录正文、工具参数或凭据。观测边界为 SDK 参数，考虑 extra_body.messages 覆盖，不宣称服务端接收内容；关闭、过期或诊断失败均不改变模型调用。新增测试与现有 adapter/client/context 共 65 项通过，包括真实 SDK MockTransport 序列化对照；Ruff 与 diff-check 通过。License Requirement：复用标准库及现有 SDK，无新增依赖或许可变化。
+
 - 修复 MCP 多节点任务在重启时被误判为 `mcp_resolved_authority_incomplete`：resolved intent 的调用和结果回执校验限定到当前 node，不再将同 Task 其他节点的工具调用计入 no-call 节点，也不允许其他节点回执满足当前节点的终态要求。回归覆盖兄弟节点已调用、本节点未调用、兄弟节点缺失回执及回执错配；相关 41 项测试通过，修复后的真实启动校验函数只读检查开发 PostgreSQL 的 64 条 resolved intent 全部通过，未修改历史任务或调用数据。License Requirement：复用现有依赖，无新增依赖或许可变化。
 
 - 实现新用户 MCP 功能的首次生产准入：提供一次性管理员 `check/apply`，只在 MCP 初始空状态下原子登记独立 `deployment/first_enablement` 证据、批准与最终 activation；保留普通角色、实例租约及安全阻断，常驻 Backend 拒绝初始化管理员凭据。支持精确重试、并发互斥和事务回滚，不执行旧 MCP 数据迁移或隐式 DDL。schema manifest 升至 v11，五项 CHECK 通过独立兼容 SQL 升级，public 表数仍为 66；旧证据摘要保持不变。独立 PostgreSQL 新增 10 项与既有 20 项真实角色测试通过，相关自动回归通过。新 Backend-prod `0.1.23` 已发布，固定 amd64 digest 为 `e2fa035732f63d08637288baa34a79181085e50e1d90222bece3e37485f101a0`，镜像内结构模拟迁移、首次初始化、FastAPI 启动/重启和现有 Sidecar 兼容检查通过；服务器恢复库新演练待执行，正式库未操作。License Requirement：复用现有依赖，无新增依赖或许可例外。

@@ -25,6 +25,7 @@ from src.orchestration.agent_loop.models import (
     validate_provider_safe_tool_name,
 )
 
+from .agent_prompt_diagnostics import capture_prompt_request, capture_prompt_response
 from .model_errors import raise_for_model_unavailable
 
 
@@ -101,7 +102,9 @@ class OpenAIAgentModelAdapter:
         attempt: int,
         reasoning_state: _ReasoningAttemptState,
     ) -> AgentSample:
-        stream = await self._completions.create(**self._request_payload(request, stream=True))
+        payload = self._request_payload(request, stream=True)
+        diagnostic = capture_prompt_request(request.request_id, payload, attempt=attempt)
+        stream = await self._completions.create(**payload)
         text_parts: list[str] = []
         buffers: dict[int, _CallBuffer] = {}
         usage: Any = None
@@ -144,6 +147,12 @@ class OpenAIAgentModelAdapter:
             raise
         if finish_reason is None:
             raise AgentProtocolViolation(AgentProtocolErrorCode.INCOMPLETE_STREAM, "stream ended without finish reason")
+        capture_prompt_response(
+            diagnostic,
+            response_id=response_id,
+            finish_reason=finish_reason,
+            tool_call_count=len(buffers),
+        )
         return self._close_sample(
             request,
             attempt=attempt,
@@ -161,7 +170,9 @@ class OpenAIAgentModelAdapter:
         attempt: int,
         reasoning_state: _ReasoningAttemptState,
     ) -> AgentSample:
-        response = await self._completions.create(**self._request_payload(request, stream=False))
+        payload = self._request_payload(request, stream=False)
+        diagnostic = capture_prompt_request(request.request_id, payload, attempt=attempt)
+        response = await self._completions.create(**payload)
         self._raise_if_cancelled(request)
         choices = _field(response, "choices") or []
         if not choices:
@@ -179,6 +190,12 @@ class OpenAIAgentModelAdapter:
                     arguments=str(_field(function, "arguments") or ""),
                 )
             )
+        capture_prompt_response(
+            diagnostic,
+            response_id=_field(response, "id"),
+            finish_reason=_field(choice, "finish_reason"),
+            tool_call_count=len(raw_calls),
+        )
         sample = self._close_sample(
             request,
             attempt=attempt,
