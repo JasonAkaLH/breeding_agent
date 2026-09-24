@@ -175,7 +175,7 @@
     .lifecycle-expanded li { margin: 6px 0; }
     .quick-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: end; }
     .quick-actions button, .formal-example-head button, .path-copy.copy-ok { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; background: #fff; color: var(--leaf-800); font-size: 12px; font-weight: 850; }
-    .quick-actions button:hover, .formal-example-head button:hover { background: var(--mint-100); }
+    .quick-actions button:hover, .formal-example-head button:hover { background: var(--mint-100); color: var(--leaf-800); }
     .endpoint-detail { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
     .endpoint-detail summary { cursor: pointer; color: var(--leaf-800); font-weight: 900; }
     .detail-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 12px; }
@@ -210,8 +210,8 @@
     .event-item b { display: block; color: var(--leaf-900); }
     .event-item span { color: var(--muted); font-size: 14px; }
     .schema-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
-    .schema-card { border: 1px solid var(--line); border-radius: 18px; background: var(--panel-strong); padding: 12px; }
-    .schema-card summary { cursor: pointer; font-weight: 900; color: var(--leaf-900); }
+    .schema-card { min-width: 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: var(--panel-strong); padding: 12px; }
+    .schema-card summary { overflow-wrap: anywhere; cursor: pointer; font-weight: 900; color: var(--leaf-900); }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
     th, td { padding: 10px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { color: var(--leaf-900); background: rgba(31, 91, 69, .05); }
@@ -245,6 +245,8 @@
     .tool-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
     .base-url { display: grid; gap: 8px; }
     .base-url input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 10px 11px; background: #fff; color: var(--ink); }
+    .base-url input[aria-invalid="true"] { border-color: var(--red-600); }
+    button:disabled { cursor: not-allowed; opacity: .5; }
     .tool-button { width: 100%; margin-top: 8px; border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: var(--leaf-700); color: white; font-weight: 900; }
     .flow-list { display: grid; gap: 9px; padding: 0; margin: 0; list-style: none; }
     .flow-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; align-items: start; font-size: 13px; color: #405248; }
@@ -263,6 +265,7 @@
       .shell { grid-template-columns: 1fr; padding: 14px; }
       .side-nav, .toolbox, .console-toolbar { position: static; max-height: none; }
       .side-nav { display: block; }
+      .toolbox { grid-column: auto; }
       .metric-strip, .quickstart-grid, .formal-flow, .formal-example-grid, .sse-layout, .schema-grid, .error-grid, .source-grid, .toolbox { grid-template-columns: 1fr; }
       .endpoint-summary { grid-template-columns: 1fr; }
       .quick-actions { justify-content: start; }
@@ -356,10 +359,10 @@
         <div class="source-grid">
           <div class="note-card"><b>本地开发前端</b><p><code class="inline-code">http://127.0.0.1:5173/</code>，由 Vite dev server 提供。</p></div>
           <div class="note-card"><b>本地开发后端</b><p><code class="inline-code">http://127.0.0.1:8000</code>，API 文档为 <code class="inline-code">http://127.0.0.1:8000/api-doc</code>。</p></div>
-          <div class="note-card"><b>Docker 前端</b><p><code class="inline-code">http://127.0.0.1:51999/</code>，nginx 服务 Vite build 产物并反代 <code class="inline-code">/api/</code> 与 <code class="inline-code">/api-doc</code>。</p></div>
-          <div class="note-card"><b>Docker 后端直连</b><p><code class="inline-code">http://127.0.0.1:51888</code>，后端容器内部仍监听 <code class="inline-code">8000</code>，宿主机映射为 <code class="inline-code">51888:8000</code>。</p></div>
-          <div class="note-card"><b>推荐接入</b><p>用户通过前端访问 <code class="inline-code">51999</code>；调试 API 或查看文档可访问 <code class="inline-code">51888/api-doc</code>。</p></div>
-          <div class="note-card"><b>数据持久化</b><p>Docker 运行时数据挂载到 <code class="inline-code">breeding-agent-runtime:/app/runtime</code>，升级镜像时不要删除该 volume。</p></div>
+          <div class="note-card"><b>compat 前端与代理</b><p><code class="inline-code">http://127.0.0.1:41999/seedpilot/</code>；文档入口为 <code class="inline-code">/seedpilot/api-doc</code>。通过前端接入时，<code class="inline-code">BASE_URL</code> 为 <code class="inline-code">http://127.0.0.1:41999/seedpilot</code>，nginx 将 <code class="inline-code">/seedpilot/api/</code> 代理到后端。</p></div>
+          <div class="note-card"><b>compat 后端直连</b><p><code class="inline-code">http://127.0.0.1:41888</code>，后端容器内部仍监听 <code class="inline-code">8000</code>，宿主机映射为 <code class="inline-code">41888:8000</code>。</p></div>
+          <div class="note-card"><b>地址选择</b><p>页面会按当前访问入口填写基础地址，并同步到全部 curl 示例。远程接入时请使用实际服务器地址或域名；示例中的 <code class="inline-code">127.0.0.1</code> 仅表示访问者本机。接口路径统一从 <code class="inline-code">/api/v1/</code> 开始，基础地址无需包含这一段。</p></div>
+          <div class="note-card"><b>数据持久化</b><p>Docker 运行时数据挂载到 <code class="inline-code">breeding-agent-runtime-compat:/app/runtime</code>，升级镜像时不要删除该 volume。</p></div>
         </div>
       </section>
 
@@ -402,7 +405,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>登录并返回当前 token</h3><p>只接收 username，返回当前 access_token；同一 username 新登录会让旧 token 立即失效。<br><b>典型时机：</b>首次进入应用、token 缺失或失效后重新建立登录态时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>LoginRequest；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>400：用户名不合法；422：请求体不符合 LoginRequest schema。该接口无需 Authorization。</p></div><div><b>下一步</b><p>调用受保护接口时把 access_token 放入 Authorization header。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>LoginRequest；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>400：用户名不合法；422：请求体不符合 LoginRequest schema。该接口无需 Authorization。</p></div><div><b>下一步</b><p>调用受保护接口时把 access_token 放入 Authorization header。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口是外部系统进入我们平台的身份起点。它不校验复杂账户资料，只用 <code class="inline-code">username</code> 建立或更新“当前用户 - 当前 token”的映射。</li><li>调用成功返回的 <code class="inline-code">access_token</code> 是后续所有受保护 REST、上传和 SSE 请求的唯一身份凭证；同一用户名再次登录会让旧 token 失效。</li><li>对接方应把 <code class="inline-code">username</code> 理解为本系统内的用户标识，不要在其他接口重复提交 username，也不要把它放进 metadata 试图切换资源归属。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">username</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>登录用户名；这是唯一允许客户端提交 username 的接口。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 AuthTokenResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -416,6 +419,7 @@
   &quot;access_token&quot;: &quot;maf_tok_xxx&quot;
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-auth-me" data-category="auth" data-method="GET" data-search="auth get /api/v1/auth/me 读取当前用户 通过 authorization token 定位当前用户，不接收 body、query 或 metadata 中的 username。">
           <div class="endpoint-topline">
@@ -427,7 +431,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>读取当前用户</h3><p>通过 Authorization token 定位当前用户，不接收 body、query 或 metadata 中的 username。<br><b>典型时机：</b>页面启动、刷新 token 后或恢复本地 token 时请求，用于确认登录态。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthUserResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>可用于前端启动时恢复登录态。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthUserResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>可用于前端启动时恢复登录态。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于检查当前 Authorization token 是否仍有效，并拿到服务端识别出的当前用户。它不读取任何业务任务或会话。</li><li>页面刷新、应用启动、前端本地已有 token 但不确定是否可用时优先调用它；返回 401 时应清空本地 token 并回到登录流程。</li><li>响应里的 <code class="inline-code">user.username</code> 是服务端从 token 解析出的结果，可用于展示当前用户或选择本地缓存命名空间。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>格式为 Authorization: Bearer &lt;access_token&gt;。</td><td>Bearer token</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 AuthUserResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -439,6 +443,7 @@
   &quot;user&quot;: { &quot;username&quot;: &quot;alice&quot; }
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-post-api-v1-auth-refresh-token" data-category="auth" data-method="POST" data-search="auth post /api/v1/auth/refresh-token 刷新 token 通过当前 token 定位用户，原子替换为新的当前 token；旧 token 立即失效。">
           <div class="endpoint-topline">
@@ -450,7 +455,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>刷新 token</h3><p>通过当前 token 定位用户，原子替换为新的当前 token；旧 token 立即失效。<br><b>典型时机：</b>页面仍在使用但需要续期、主动刷新会话或收到 token 当前性变化前请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>客户端必须立即保存新 access_token 并停止使用旧 token。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>客户端必须立即保存新 access_token 并停止使用旧 token。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于轮换当前 token。调用成功后，旧 token 立即不再是当前 token，所有后续请求都必须改用响应里的新 <code class="inline-code">access_token</code>。</li><li>如果页面上还有使用旧 token 的任务 SSE 连接，服务端会通过 <code class="inline-code">auth.invalidated</code> 或连接结束提示旧连接失效；客户端应关闭旧连接并用新 token 重连。</li><li>它适合在调用方主动续期或发现 token 需要轮换时使用，不用于创建会话、提交消息或恢复任务。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前有效 token；刷新成功后旧 token 立即失效。</td><td>Bearer token</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 AuthTokenResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -463,6 +468,7 @@
   &quot;access_token&quot;: &quot;maf_tok_new&quot;
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-post-api-v1-auth-logout" data-category="auth" data-method="POST" data-search="auth post /api/v1/auth/logout 登出 通过当前 token 定位用户并清空 token，保留 username 映射记录。">
           <div class="endpoint-topline">
@@ -474,7 +480,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>登出</h3><p>通过当前 token 定位用户并清空 token，保留 username 映射记录。<br><b>典型时机：</b>用户点击退出、切换账号前或需要让当前 token 立即失效时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">LogoutResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>登出后该 token 再访问受保护接口会返回 401。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">LogoutResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>登出后该 token 再访问受保护接口会返回 401。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于结束当前 token 的登录态。服务端会清空当前 token，但保留 username 映射记录。</li><li>调用后，使用该 token 的 REST 请求会返回 401，正在运行的 SSE 连接也会失效；客户端应清空本地 token 和当前任务订阅。</li><li>登出不会删除用户的会话、消息、任务或产物；这些业务数据仍归属于原 username。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前有效 token；登出会清空该 token。</td><td>Bearer token</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 LogoutResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -486,6 +492,7 @@
   &quot;logged_out&quot;: true
 }</code></pre></div>
           </div>
+          </details>
         </article>
         </section><section class="endpoint-group" id="group-capabilities" data-group="capabilities"><div class="group-title"><span>能力</span><small>2 个操作</small></div>
         <article class="endpoint-card" id="endpoint-get-api-v1-capabilities" data-category="capabilities" data-method="GET" data-search="capabilities get /api/v1/capabilities 列出公开能力 列出 public capability / skill，用于前端能力选择或 slash command 初始化。">
@@ -498,7 +505,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>列出公开能力</h3><p>列出 public capability / Skill，用于前端能力选择或 slash command 初始化。<br><b>典型时机：</b>应用启动、Skill / slash command 菜单初始化、能力列表刷新或强制 Skill 提交失败后请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">CapabilityListResponse</code></p></div><div><b>错误</b><p>公开接口，无需 Authorization；正常情况下不依赖请求参数。服务端异常按通用错误处理。</p></div><div><b>下一步</b><p><code class="inline-code">skill.*</code> capability 仅用于能力发现和系统内部编排；提交消息点名 Skill 时使用 <code class="inline-code">main_agent.respond</code> + <code class="inline-code">metadata.soft_skill_binding</code>，不要直接请求 <code class="inline-code">skill.*</code>。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">CapabilityListResponse</code></p></div><div><b>错误</b><p>公开接口，无需 Authorization；正常情况下不依赖请求参数。服务端异常按通用错误处理。</p></div><div><b>下一步</b><p><code class="inline-code">skill.*</code> capability 仅用于能力发现和系统内部编排；提交消息点名 Skill 时使用 <code class="inline-code">main_agent.respond</code> + <code class="inline-code">metadata.soft_skill_binding</code>，不要直接请求 <code class="inline-code">skill.*</code>。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口告诉外部系统当前有哪些公开能力和 Skill 可以被发现。公开 <code class="inline-code">skill.*</code> 只来自 v2 <code class="inline-code">skill.contract.yaml</code>；无 contract 或 contract invalid 的 Skill 不注册、不进入列表。</li><li>返回的 <code class="inline-code">capability_id</code> 只代表可发现能力；对外提交消息时不要直接用 <code class="inline-code">skill.*</code> 作为执行入口，点名 Skill 应走 <code class="inline-code">main_agent.respond + metadata.soft_skill_binding</code>。</li><li>如果调用消息提交时遇到能力缺失或 direct skill 被拒绝，应该重新拉取本接口刷新能力列表。</li></ul></section><section class="response-section"><h4>Skill Contract v2 能力来源</h4><p>公开 Skill capability 的名称、说明、版本和路由摘要全部来自 <code class="inline-code">skill.contract.yaml</code> 的 <code class="inline-code">capability</code> / <code class="inline-code">routing</code> 字段；<code class="inline-code">SKILL.md</code> 只作为轻量说明文件，不再承载平台注册或执行契约。</p><p>Public profile 只暴露 trigger、routing examples、<code class="inline-code">schemas/*.input.yaml</code> 的摘要、输出摘要和 prompt-facing <code class="inline-code">resource_index</code>。脚本路径、handler、runtime、service allowlist、内部配置和 secret 不进入 capability response 或主代理 profile。</p></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">无</code></td><td>—</td><td>—</td><td>否</td><td>公开接口，无请求参数。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 CapabilityListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -521,6 +528,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-config-model-editions" data-category="capabilities" data-method="GET" data-search="capabilities get /api/v1/config/model-editions 读取模型版本配置 读取 config.yaml 中声明的可选模型版本和新对话默认模型。">
           <div class="endpoint-topline">
@@ -532,7 +540,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>读取模型版本配置</h3><p>返回运行时 <code class="inline-code">config.yaml</code> 中声明的可选模型版本与新对话默认模型，供前端每次提交消息时选择。<br><b>典型时机：</b>应用启动、新建会话或初始化模型选择器时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ModelEditionsResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>提交消息时可把用户选择的模型放入 <code class="inline-code">model_edition</code> 顶层字段；每个模型的 <code class="inline-code">trim_max_tokens</code> 只由服务端 <code class="inline-code">config.yaml</code> 的 <code class="inline-code">model_editions.options[]</code> 维护；不再使用顶层 <code class="inline-code">trim_max_tokens</code>，前端不传该字段。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ModelEditionsResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>提交消息时可把用户选择的模型放入 <code class="inline-code">model_edition</code> 顶层字段；每个模型的 <code class="inline-code">trim_max_tokens</code> 只由服务端 <code class="inline-code">config.yaml</code> 的 <code class="inline-code">model_editions.options[]</code> 维护；不再使用顶层 <code class="inline-code">trim_max_tokens</code>，前端不传该字段。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于读取服务端允许前端展示和提交的模型版本。外部系统不要自行猜测模型枚举。</li><li>提交消息时的 <code class="inline-code">model_edition</code> 应来自本接口返回的 <code class="inline-code">options[].value</code>；为空时由服务端默认模型决定。</li><li>它只影响后续新提交消息的模型选择，不会改变已经创建的任务。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">无</code></td><td>—</td><td>—</td><td>否</td><td>使用 Authorization 定位当前登录态。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">default_model_edition</code></td><td><code class="inline-code">string|null</code></td><td>是</td><td>新对话默认模型版本。</td><td>来自 config.yaml</td></tr><tr><td><code class="inline-code">options</code></td><td><code class="inline-code">array</code></td><td>是</td><td>可选模型版本列表，每项含 value 与 label。</td><td>来自 config.yaml</td></tr></tbody></table></section>
@@ -547,6 +555,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         </section><section class="endpoint-group" id="group-conversations" data-group="conversations"><div class="group-title"><span>会话</span><small>5 个操作</small></div>
         <article class="endpoint-card" id="endpoint-get-api-v1-conversations" data-category="conversations" data-method="GET" data-search="conversations get /api/v1/conversations 列出会话 列出当前 token 所属 username 的会话。">
@@ -559,7 +568,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>列出会话</h3><p>列出当前 token 所属 username 的会话。<br><b>典型时机：</b>登录后初始化会话侧边栏、会话创建 / 重命名 / 删除 / 任务完成后刷新列表时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationListResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>进入会话后读取 messages、tasks、uploads。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationListResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>进入会话后读取 messages、tasks、uploads。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于恢复当前用户的会话列表，典型用途是渲染历史会话侧边栏或让外部系统选择一个已有 <code class="inline-code">conversation_id</code>。</li><li>列表只返回当前 token 所属 username 的会话，调用方无需也不能传 username。</li><li>每个会话摘要中的 <code class="inline-code">current_task_id</code> 可帮助客户端判断是否有未完成任务需要恢复订阅。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 ConversationListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -581,6 +590,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-patch-api-v1-conversations" data-category="conversations" data-method="PATCH" data-search="conversations patch /api/v1/conversations 重命名会话 按 body.conversation_id 重命名当前用户会话；非 get 业务 id 放 body。">
           <div class="endpoint-topline">
@@ -592,7 +602,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>重命名会话</h3><p>按 body.conversation_id 重命名当前用户会话；非 GET 业务 ID 放 body。<br><b>典型时机：</b>用户在会话列表或标题栏提交新标题时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>RenameConversationRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationSummaryResponse</code></p></div><div><b>错误</b><p>400：标题等请求语义不合法；401：token 缺失、过期或已失效；404：会话不存在、不属于当前用户或不可用；422：请求体不符合 schema。</p></div><div><b>下一步</b><p>成功后刷新会话列表或当前会话标题。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>RenameConversationRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationSummaryResponse</code></p></div><div><b>错误</b><p>400：标题等请求语义不合法；401：token 缺失、过期或已失效；404：会话不存在、不属于当前用户或不可用；422：请求体不符合 schema。</p></div><div><b>下一步</b><p>成功后刷新会话列表或当前会话标题。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于修改会话标题，通常发生在用户手动重命名历史会话，或外部系统想把一个业务单据标题同步为会话标题时。</li><li><code class="inline-code">conversation_id</code> 放在 body 中，服务端会先校验该会话是否属于当前 token 用户。</li><li>响应返回更新后的会话摘要；它不会修改消息内容、任务状态或任何产物。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要重命名的会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">title</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>新标题。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 ConversationSummaryResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -612,6 +622,7 @@
   &quot;updated_at&quot;: &quot;2026-05-27T10:06:00&quot;
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-delete-api-v1-conversations" data-category="conversations" data-method="DELETE" data-search="conversations delete /api/v1/conversations 删除会话 按 body.conversation_id 删除当前用户会话，并清理消息、任务、事件与关联文件记录。">
           <div class="endpoint-topline">
@@ -623,7 +634,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>删除会话</h3><p>强物理删除当前用户会话：确认后会话先进入 <code class="inline-code">deleting</code>，普通用户列表、消息、上传、任务、SSE 和 artifact 路由立即不可见；后端 deletion runner 会继续清理消息、任务、事件与关联文件记录。<br><b>典型时机：</b>用户确认删除会话时请求；成功后刷新会话列表并关闭相关 SSE。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteConversationRequest；必须携带 Authorization: Bearer access_token。删除没有前端/用户侧自动超时承诺，客户端断开后后端仍继续执行物理删除。</p></div><div><b>响应</b><p><code class="inline-code">DeleteConversationResponse</code>；成功响应不早于物理删除完成。</p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在、不属于当前用户、或处于 <code class="inline-code">deleting_failed</code> 运维状态；422：参数或 payload 不符合 schema。失败会话不向普通用户复活，按 runbook 运维诊断/重试。</p></div><div><b>下一步</b><p>前端应在目标历史条目显示 spinner；成功后从会话列表移除本会话。运维参考 <code class="inline-code">docs/runbooks/postgresql-state-platform.md</code> 的 failed deletion recovery。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteConversationRequest；必须携带 Authorization: Bearer access_token。删除没有前端/用户侧自动超时承诺，客户端断开后后端仍继续执行物理删除。</p></div><div><b>响应</b><p><code class="inline-code">DeleteConversationResponse</code>；成功响应不早于物理删除完成。</p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在、不属于当前用户、或处于 <code class="inline-code">deleting_failed</code> 运维状态；422：参数或 payload 不符合 schema。失败会话不向普通用户复活，按 runbook 运维诊断/重试。</p></div><div><b>下一步</b><p>前端应在目标历史条目显示 spinner；成功后从会话列表移除本会话。运维参考 <code class="inline-code">docs/runbooks/postgresql-state-platform.md</code> 的 failed deletion recovery。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于删除当前用户的整个会话及其关联资源，属于会话级清理入口。</li><li>如果会话存在未完成任务，服务端会先请求取消相关任务，再清理消息、任务、事件、上传和产物记录；响应中的 <code class="inline-code">delete_status</code> 表示本次删除流程状态。</li><li>客户端断开不代表后端删除一定停止；外部系统应以响应字段和后续列表查询确认最终效果。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要删除的会话 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">conversation_id</code></td><td><code class="inline-code">string</code></td><td>是</td><td>被删除的会话 ID。</td><td>业务 ID</td></tr><tr><td><code class="inline-code">deleted</code></td><td><code class="inline-code">boolean</code></td><td>是</td><td>物理删除是否完成。</td><td>成功时为 true</td></tr><tr><td><code class="inline-code">cancelled_task_ids</code></td><td><code class="inline-code">array</code></td><td>是</td><td>删除前被自动停止的运行中 task。</td><td>可能为空</td></tr><tr><td><code class="inline-code">deleted_counts</code></td><td><code class="inline-code">object</code></td><td>是</td><td>各业务表物理删除行数。</td><td>用于诊断</td></tr><tr><td><code class="inline-code">delete_status</code></td><td><code class="inline-code">string</code></td><td>是</td><td>删除 runner 结果。</td><td><code class="inline-code">completed</code> / <code class="inline-code">failed</code></td></tr><tr><td><code class="inline-code">runner_id</code></td><td><code class="inline-code">string|null</code></td><td>否</td><td>脱敏删除执行关联 ID。</td><td>日志关联</td></tr><tr><td><code class="inline-code">started_at</code></td><td><code class="inline-code">string|null</code></td><td>否</td><td>runner 开始时间。</td><td>ISO datetime</td></tr><tr><td><code class="inline-code">finished_at</code></td><td><code class="inline-code">string|null</code></td><td>否</td><td>runner 完成时间。</td><td>ISO datetime</td></tr><tr><td><code class="inline-code">error_code</code></td><td><code class="inline-code">string|null</code></td><td>否</td><td>仅失败时返回稳定错误码。</td><td>普通用户不返回原始堆栈</td></tr></tbody></table></section>
@@ -651,6 +662,7 @@
   &quot;error_code&quot;: null
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-messages" data-category="conversations" data-method="GET" data-search="conversations get /api/v1/conversations/{conversation_id}/messages 读取消息历史 读取 path 中 conversation_id 对应的当前用户消息历史。">
           <div class="endpoint-topline">
@@ -662,7 +674,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>读取消息历史</h3><p>读取 path 中 conversation_id 对应的当前用户消息历史。<br><b>典型时机：</b>打开或切换会话、刷新恢复、SSE 完成后补齐最终消息时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationMessagesResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于刷新恢复或 SSE 完成后补齐最终消息。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationMessagesResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于刷新恢复或 SSE 完成后补齐最终消息。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于读取会话历史消息，适合页面刷新、切换历史会话或任务终态后同步最终回答。</li><li>它返回的是持久化消息，不是实时 token 流；主代理实时输出中的 delta 不应依赖本接口逐字恢复。</li><li>服务端在读取前会尝试同步已完成任务的最终 assistant 消息，因此完成任务后调用它可以拿到更稳定的最终文本。assistant 历史消息可能带 <code class="inline-code">artifacts</code> 数组，用于恢复数据查询表格卡片、OCR 原文卡片和仍 active 的文件下载卡片。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取消息的会话 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 ConversationMessagesResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -696,6 +708,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-post-api-v1-conversations-chat-messages" data-category="conversations" data-method="POST" data-search="conversations post /api/v1/conversations/chat-messages 提交消息 提交用户消息并创建任务。资源归属只能由 authorization token 解析出的 username 决定，body 和 metadata 不允许伪造用户或 token。">
           <div class="endpoint-topline">
@@ -707,7 +720,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>提交消息</h3><p>提交用户消息：没有 open interrupt 时创建新任务；当前 conversation 有 open interrupt 时，服务端优先把下一条消息作为该 interrupt 的回答或追问，并复用原任务。资源归属只能由 Authorization token 解析出的 username 决定，body 和 metadata 不允许伪造用户或 token。<br><b>典型时机：</b>用户发送新消息、触发 slash Skill 命令、携带上传内容提交问题，或在 interrupt 状态下继续补充信息 / 提出开放性追问时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>SubmitMessageRequest；必须携带 Authorization: Bearer access_token。interrupt turn 与普通消息复用同一个 schema，通过 <code class="inline-code">metadata.interrupt_id</code>、<code class="inline-code">metadata.upload_ids</code> 和 <code class="inline-code">metadata.upload_sheet_selections</code> 表达补充上下文。</p></div><div><b>响应</b><p><code class="inline-code">MessageAcceptedResponse</code></p></div><div><b>错误</b><p>400：routing_mode、capability_id、model_edition、metadata.upload_ids、metadata.upload_sheet_selections、metadata.interrupt_id 或 metadata.soft_skill_binding 等请求语义不合法；metadata.upload_ids 中任一 upload_id 缺失、过期或不属于当前会话时 fail closed，返回 400，且不会创建 message / task；存在多个 open interrupt 但未指定 interrupt_id 时返回 400；v2 answered / 非 open stale interrupt 用新 client_message_id 重新提交会返回 400，只有原幂等键可 replay；外部 direct <code class="inline-code">skill.*</code> 请求返回 <code class="inline-code">direct_skill_execution_disabled</code>；401：token 缺失、过期或已失效；404：会话不属于当前用户或不可用；409：会话已有运行中任务且没有可路由的 open interrupt；422：请求体不符合 schema 或 metadata 携带保留身份字段。</p></div><div><b>下一步</b><p><code class="inline-code">action=task_accepted</code> 或 <code class="inline-code">interrupt_resumed</code> 时使用返回的 task_id 订阅 SSE 或查询任务摘要；<code class="inline-code">action=interrupt_clarification_answer</code>、<code class="inline-code">interrupt_mixed_processed</code> 或 <code class="inline-code">interrupt_schema_switched</code> 且 <code class="inline-code">answer_payload.will_resume=false</code> / <code class="inline-code">requires_confirmation=true</code> 时展示 assistant_message 并继续等待用户输入。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>SubmitMessageRequest；必须携带 Authorization: Bearer access_token。interrupt turn 与普通消息复用同一个 schema，通过 <code class="inline-code">metadata.interrupt_id</code>、<code class="inline-code">metadata.upload_ids</code> 和 <code class="inline-code">metadata.upload_sheet_selections</code> 表达补充上下文。</p></div><div><b>响应</b><p><code class="inline-code">MessageAcceptedResponse</code></p></div><div><b>错误</b><p>400：routing_mode、capability_id、model_edition、metadata.upload_ids、metadata.upload_sheet_selections、metadata.interrupt_id 或 metadata.soft_skill_binding 等请求语义不合法；metadata.upload_ids 中任一 upload_id 缺失、过期或不属于当前会话时 fail closed，返回 400，且不会创建 message / task；存在多个 open interrupt 但未指定 interrupt_id 时返回 400；v2 answered / 非 open stale interrupt 用新 client_message_id 重新提交会返回 400，只有原幂等键可 replay；外部 direct <code class="inline-code">skill.*</code> 请求返回 <code class="inline-code">direct_skill_execution_disabled</code>；401：token 缺失、过期或已失效；404：会话不属于当前用户或不可用；409：会话已有运行中任务且没有可路由的 open interrupt；422：请求体不符合 schema 或 metadata 携带保留身份字段。</p></div><div><b>下一步</b><p><code class="inline-code">action=task_accepted</code> 或 <code class="inline-code">interrupt_resumed</code> 时使用返回的 task_id 订阅 SSE 或查询任务摘要；<code class="inline-code">action=interrupt_clarification_answer</code>、<code class="inline-code">interrupt_mixed_processed</code> 或 <code class="inline-code">interrupt_schema_switched</code> 且 <code class="inline-code">answer_payload.will_resume=false</code> / <code class="inline-code">requires_confirmation=true</code> 时展示 assistant_message 并继续等待用户输入。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口处理聊天输入。没有 open interrupt 时，服务端会写入用户消息、创建任务，并返回后续跟踪用的 <code class="inline-code">task_id</code>；当前会话有 open interrupt 时，同一个接口会把用户输入作为该 interrupt 的回答或追问，不创建新 task。</li><li>响应 <code class="inline-code">status=accepted</code> 只表示服务端已接收；运行进度、等待输入和结果仍从任务 SSE 读取。客户端用 <code class="inline-code">action</code> 判断本次是 <code class="inline-code">task_accepted</code>、<code class="inline-code">interrupt_resumed</code>、<code class="inline-code">interrupt_clarification_answer</code>、<code class="inline-code">interrupt_mixed_processed</code> 还是 <code class="inline-code">interrupt_schema_switched</code>。</li><li>如果本次消息需要引用附件，仍先通过上传接口获得 <code class="inline-code">upload_id</code>，再把 <code class="inline-code">upload_ids</code> 放到 <code class="inline-code">metadata</code>；这个上传动作可以发生在用户选择文件后，也可以延迟到点击发送时。interrupt 中的 sheet 选择把 <code class="inline-code">{upload_id: sheet_name}</code> 放入 <code class="inline-code">metadata.upload_sheet_selections</code>；如果要点名 Skill，用 <code class="inline-code">metadata.soft_skill_binding</code>，不要直接外部执行 <code class="inline-code">skill.*</code>。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>目标会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">content</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>用户消息正文。</td><td>—</td></tr><tr><td><code class="inline-code">routing_mode</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>否</td><td>路由模式。</td><td>默认 auto</td></tr><tr><td><code class="inline-code">capability_id</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>指定非 Skill capability；外部请求不得直接指定 <code class="inline-code">skill.*</code>。点名 Skill 时固定使用 <code class="inline-code">main_agent.respond</code> 并在 metadata 中放 soft binding。</td><td>—</td></tr><tr><td><code class="inline-code">client_message_id</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>客户端幂等或追踪 ID。</td><td>—</td></tr><tr><td><code class="inline-code">model_edition</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>本次消息使用的模型版本；取值来自 <code class="inline-code">/api/v1/config/model-editions</code>。后端会按该模型在 <code class="inline-code">config.yaml</code> 的 <code class="inline-code">model_editions.options[]</code> 中声明的 <code class="inline-code">trim_max_tokens</code> 裁剪上下文；不读取顶层 trim 配置。</td><td>默认由服务端配置决定；客户端不得提交 trim_max_tokens</td></tr><tr><td><code class="inline-code">metadata.deep_thinking</code></td><td>Body.metadata</td><td><code class="inline-code">boolean</code></td><td>否</td><td>是否开启深度思考 / thinking；关闭时服务端按 minimal 执行，并不会持久化 reasoning 内容。</td><td>默认 false</td></tr><tr><td><code class="inline-code">metadata.main_agent_reasoning_effort</code></td><td>Body.metadata</td><td><code class="inline-code">string</code></td><td>否</td><td>本次主代理 / planner 思考强度；未开启 deep thinking 时服务端固定按 minimal 执行。</td><td><code class="inline-code">minimal</code> / <code class="inline-code">high</code> / <code class="inline-code">max</code>；前端默认 minimal，high/max 仅在 thinking 开启后可选</td></tr><tr><td><code class="inline-code">metadata.soft_skill_binding.capability_id</code></td><td>Body.metadata</td><td><code class="inline-code">string</code></td><td>否</td><td>slash / API 点名 Skill 的软绑定目标，必须是当前 active public <code class="inline-code">skill.*</code>。存在该字段时执行入口规范为 <code class="inline-code">main_agent.respond</code>，由主代理判断 answer 或 execute。</td><td>例如 skill.field_design</td></tr><tr><td><code class="inline-code">metadata.soft_skill_binding.command</code></td><td>Body.metadata</td><td><code class="inline-code">string</code></td><td>否</td><td>触发该绑定的 slash command，仅用于审计和 UI 语境。</td><td>例如 /field-design</td></tr><tr><td><code class="inline-code">metadata.interrupt_id</code></td><td>Body.metadata</td><td><code class="inline-code">string</code></td><td>否</td><td>当会话处于 open interrupt 时，指定本条 chat message 要回答或追问的 interrupt。单 open interrupt 可省略；多个 open interrupt 必须指定。</td><td>例如 interrupt-001</td></tr><tr><td><code class="inline-code">metadata.upload_ids</code></td><td>Body.metadata</td><td><code class="inline-code">array&lt;string&gt;</code></td><td>否</td><td>本条消息或 interrupt turn 引用的会话上传文件 ID；服务端校验归属、TTL 和用途。</td><td>例如 ["upl-001"]</td></tr><tr><td><code class="inline-code">metadata.upload_sheet_selections</code></td><td>Body.metadata</td><td><code class="inline-code">object</code></td><td>否</td><td>回答多 sheet Excel interrupt 时提交的 sheet 选择，结构为 <code class="inline-code">{upload_id: sheet_name}</code>。</td><td>例如 {"upl-book":"Sheet1"}</td></tr><tr><td><code class="inline-code">metadata</code></td><td>Body</td><td><code class="inline-code">object</code></td><td>否</td><td>业务 metadata；不得携带用户或 token 字段。</td><td>默认 {}</td></tr></tbody></table></section>
           <section class="response-section"><h4>Skill 软绑定提交规则</h4><p>外部客户端不得直接提交 <code class="inline-code">capability_id=skill.*</code>。用户通过 slash 或 API 点名 Skill 时，应提交 <code class="inline-code">capability_id=main_agent.respond</code>，并在 <code class="inline-code">metadata.soft_skill_binding.capability_id</code> 中放目标 Skill；服务端先让主代理基于公开 profile 判断是回答用法、追问缺参还是内部执行绑定 Skill。</p><p>答疑路径会先产生 <code class="inline-code">soft_skill_binding.decision</code>，随后通过 <code class="inline-code">main_agent.output_delta</code> 流式输出，并在完成时持久化最终 assistant 消息；后续追问按普通对话历史带入上一轮请求与答复。执行路径不会把 <code class="inline-code">skill.*</code> 暴露给外部请求方，而是由内部 deterministic replanner 展开到目标 Skill。</p><pre><code>{
@@ -751,6 +764,7 @@
   &quot;answer_payload&quot;: {&quot;client_request_id&quot;: &quot;user-frontend-001&quot;}
 }</code></pre></div>
           </div>
+          </details>
         </article>
         </section><section class="endpoint-group" id="group-uploads" data-group="uploads"><div class="group-title"><span>上传</span><small>3 个操作</small></div>
         <article class="endpoint-card" id="endpoint-post-api-v1-conversations-uploads" data-category="uploads" data-method="POST" data-search="uploads post /api/v1/conversations/uploads 上传会话文件 multipart/form-data 上传；conversation_id 与 file 放 form field，authorization 放 header。">
@@ -763,7 +777,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>上传会话文件</h3><p>multipart/form-data 上传；conversation_id 与 file 放 form field，Authorization 放 header。支持 JSON、CSV、TSV、Excel、TXT、图片、PDF、VCF 与 VCF.GZ；CSV / TSV / JSON 多编码会在上传层规范化，TSV 归入 CSV-family 并以 file_type=csv 返回，Excel .xlsx / .xls 会转为 spreadsheet metadata，VCF / VCF.GZ 按二进制遗传变异文件保存安全摘要。<br><b>典型时机：</b>用户发送前添加文件，或 OCR / 表格 / Skill 需要附件上下文时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>multipart/form-data；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadFileResponse</code></p></div><div><b>错误</b><p>400：文件类型、大小、编码、文件名或内容预览校验失败；401：token 缺失、过期或已失效；404：已存在的会话不属于当前用户或不可用；422：multipart 字段不符合 schema，或 form 中含多余 / 保留身份字段。若 conversation_id 尚不存在，上传会创建该会话。</p></div><div><b>下一步</b><p>提交消息时可在 metadata.upload_ids 中引用上传文件。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>multipart/form-data；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadFileResponse</code></p></div><div><b>错误</b><p>400：文件类型、大小、编码、文件名或内容预览校验失败；401：token 缺失、过期或已失效；404：已存在的会话不属于当前用户或不可用；422：multipart 字段不符合 schema，或 form 中含多余 / 保留身份字段。若 conversation_id 尚不存在，上传会创建该会话。</p></div><div><b>下一步</b><p>提交消息时可在 metadata.upload_ids 中引用上传文件。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于把文件临时挂到某个会话，供后续消息或 interrupt turn 引用。上传成功不代表任务已经开始执行。</li><li>响应只返回文件元数据、预览、编码/表头/Excel sheet/TXT 行数与字符数信息和 <code class="inline-code">upload_id</code>；不会把完整文件内容回传给调用方。TXT 返回 <code class="inline-code">file_type=text</code>，预览包含 <code class="inline-code">char_count</code>、<code class="inline-code">line_count</code> 与 <code class="inline-code">size_bytes</code>；VCF / VCF.GZ 返回 <code class="inline-code">file_type=vcf</code>，预览不包含表格行列内容。</li><li>对接方应保存 <code class="inline-code">upload_id</code>，在提交消息 / interrupt turn 的 <code class="inline-code">metadata.upload_ids</code> 中引用它。多 sheet Excel 可能需要后续通过 interrupt 选择 sheet。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Form</td><td><code class="inline-code">string</code></td><td>是</td><td>上传所属会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">file</code></td><td>Form</td><td><code class="inline-code">file</code></td><td>是</td><td>上传文件。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>表格上传规范化</h4><p>CSV / TSV / JSON 支持 <code class="inline-code">utf-8-sig</code>、<code class="inline-code">utf-8</code>、<code class="inline-code">gb18030</code>、<code class="inline-code">big5</code>、<code class="inline-code">shift_jis</code>、<code class="inline-code">cp932</code> 等确定性候选编码，表头会清理 BOM、零宽字符、全角空格、外层成对引号等技术噪声，但不会做业务列名映射。TSV <code class="inline-code">.tsv</code> / <code class="inline-code">text/tab-separated-values</code> / <code class="inline-code">text/tsv</code> 按 CSV-family 表格处理，响应仍使用 <code class="inline-code">file_type=csv</code>，执行兼容通道会提供归一化 CSV 文本；新 Skill 可通过资源 manifest 读取原始 TSV 文件副本。<code class="inline-code">application/vnd.ms-excel</code> 若没有 Excel 后缀或 magic bytes，会继续按 CSV 兼容处理。</p><p>TXT <code class="inline-code">.txt</code> / <code class="inline-code">text/plain</code> 上传返回 <code class="inline-code">file_type=text</code> 与 <code class="inline-code">shape=text</code>；preview 包含 <code class="inline-code">char_count</code>、<code class="inline-code">line_count</code>、<code class="inline-code">size_bytes</code>、<code class="inline-code">source_encoding</code> 和 <code class="inline-code">normalized_content_type=text/plain</code>。</p><p>Excel <code class="inline-code">.xlsx</code> / <code class="inline-code">.xls</code> 上传返回 <code class="inline-code">file_type=spreadsheet</code>。单有效 sheet 自动生成执行用 UTF-8 CSV；多 sheet 返回 <code class="inline-code">requires_sheet_selection=true</code> 与 <code class="inline-code">excel_sheets</code>，任务引用时会先进入 <code class="inline-code">sheet_selection_required</code> interrupt。客户端通过 <code class="inline-code">chat-messages</code> 回答时提交 <code class="inline-code">metadata.upload_sheet_selections</code>，结构为 <code class="inline-code">{upload_id: sheet_name}</code>。</p><p>Sheet 选择回答会在写入 answer 前校验 upload 归属、TTL / 过期状态、sheet allowlist 与表头清洗结果；缺失、过期、非法 sheet 或清洗冲突均返回 400，且不会消费原 open interrupt、不会推进 node 状态、不会保存无效 answer。</p><p>VCF <code class="inline-code">.vcf</code> / <code class="inline-code">.vcf.gz</code> 上传返回 <code class="inline-code">file_type=vcf</code>。VCF 按二进制文件处理，不做 CSV / JSON / Excel 表格预览解码；prompt-safe 通道只暴露文件名、大小、哈希、类型等安全元数据。</p><p>Prompt-safe preview 有硬上限：<code class="inline-code">columns</code> / <code class="inline-code">column_normalizations</code> 默认最多 50 项，<code class="inline-code">excel_sheets</code> 默认最多 20 个；超限摘要会带 <code class="inline-code">columns_truncated</code>、<code class="inline-code">column_normalizations_truncated</code>、<code class="inline-code">excel_sheets_truncated</code> 与真实 count 字段。普通 response / uploaded_artifacts 不返回完整 <code class="inline-code">content</code>、<code class="inline-code">content_base64</code> 或原始行数据；规范化全文只进入 Skill 执行专用通道。</p></section>
@@ -812,6 +826,7 @@
   }
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-uploads" data-category="uploads" data-method="GET" data-search="uploads get /api/v1/conversations/{conversation_id}/uploads 列出上传 列出当前用户会话的 active 上传文件资源。">
           <div class="endpoint-topline">
@@ -823,7 +838,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>列出上传</h3><p>列出当前用户会话的 active 上传文件资源。<br><b>典型时机：</b>打开会话、刷新右侧文件面板或提交前校准可用附件时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadListResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话已存在但不属于当前用户或不可用。若 conversation_id 不存在，返回空 uploads 列表。</p></div><div><b>下一步</b><p>用于展示可引用文件或刷新上传状态。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadListResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话已存在但不属于当前用户或不可用。若 conversation_id 不存在，返回空 uploads 列表。</p></div><div><b>下一步</b><p>用于展示可引用文件或刷新上传状态。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于列出某会话当前仍可引用的上传文件资源，常见于页面刷新后恢复右侧文件面板。</li><li>返回的是上传元数据和 prompt-safe 预览，不包含完整文件内容；默认只返回 active 文件；如果文件已删除或不属于该会话，不会作为可用上传返回。</li><li>如果外部系统准备提交消息，应优先确认要引用的 upload 仍在本接口列表中，避免消息提交时因 upload 缺失 fail closed。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要列出上传的会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">limit</code></td><td>Query</td><td><code class="inline-code">integer</code></td><td>否</td><td>分页返回数量上限。</td><td>1-500</td></tr><tr><td><code class="inline-code">cursor</code></td><td>Query</td><td><code class="inline-code">string</code></td><td>否</td><td>从上一页 next_cursor 后继续读取。</td><td>—</td></tr><tr><td><code class="inline-code">include_deleted</code></td><td>Query</td><td><code class="inline-code">boolean</code></td><td>否</td><td>是否包含已删除文件资源；普通客户端保持默认。</td><td>false</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 UploadListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -857,6 +872,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-delete-api-v1-conversations-uploads" data-category="uploads" data-method="DELETE" data-search="uploads delete /api/v1/conversations/uploads 删除上传 按 body.conversation_id 与 body.upload_id 删除上传记录。">
           <div class="endpoint-topline">
@@ -868,7 +884,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>删除上传</h3><p>按 body.conversation_id 与 body.upload_id 删除上传记录。<br><b>典型时机：</b>用户移除待使用附件、清理误传文件或取消本次附件上下文时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteUploadRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">DeleteUploadResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话或上传记录属于其他用户 / 会话，或已存在会话不可用；422：请求体不符合 schema。upload_id 不存在时返回 200 且 deleted=false。</p></div><div><b>下一步</b><p>删除后该 upload_id 不应继续用于提交消息。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteUploadRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">DeleteUploadResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话或上传记录属于其他用户 / 会话，或已存在会话不可用；422：请求体不符合 schema。upload_id 不存在时返回 200 且 deleted=false。</p></div><div><b>下一步</b><p>删除后该 upload_id 不应继续用于提交消息。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于从会话暂存区删除一个尚未使用或不再需要的上传文件。</li><li>删除操作按当前 token 用户和 <code class="inline-code">conversation_id</code> 校验归属；未知 upload 会返回 <code class="inline-code">deleted=false</code>，便于客户端幂等清理。</li><li>删除后，不要再在新消息或 interrupt answer 中引用该 <code class="inline-code">upload_id</code>；否则服务端会按缺失上传处理。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>上传所属会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">upload_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要删除的上传 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 DeleteUploadResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -883,6 +899,7 @@
   &quot;deleted&quot;: true
 }</code></pre></div>
           </div>
+          </details>
         </article>
         </section><section class="endpoint-group" id="group-tasks" data-group="tasks"><div class="group-title"><span>任务</span><small>7 个操作</small></div>
         <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-tasks" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/conversations/{conversation_id}/tasks 列出会话任务 列出当前用户指定会话任务；scope 为 query，支持 unfinished 或 all。">
@@ -895,7 +912,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>列出会话任务</h3><p>列出当前用户指定会话任务；scope 为 query，支持 unfinished 或 all。<br><b>典型时机：</b>恢复会话运行态、页面刷新查找未完成任务或批量取消当前会话任务时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskListResponse</code></p></div><div><b>错误</b><p>400：scope 不是 unfinished 或 all；401：token 缺失、过期或已失效；404：会话已存在但不属于当前用户或不可用。若 conversation_id 不存在，返回空 tasks 列表。</p></div><div><b>下一步</b><p>用于刷新恢复当前任务或查看历史任务。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskListResponse</code></p></div><div><b>错误</b><p>400：scope 不是 unfinished 或 all；401：token 缺失、过期或已失效；404：会话已存在但不属于当前用户或不可用。若 conversation_id 不存在，返回空 tasks 列表。</p></div><div><b>下一步</b><p>用于刷新恢复当前任务或查看历史任务。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于查看某会话下的任务列表，尤其适合应用启动或切换会话时寻找可恢复任务。</li><li>默认 <code class="inline-code">scope=unfinished</code> 只返回 accepted/planning/running/cancelling 等未结束任务；<code class="inline-code">scope=all</code> 可用于历史调试或完整任务记录。</li><li>如果会话不存在但属于“恢复查询”场景，返回空列表可被视为没有可恢复任务，而不是必须弹错误。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要查询任务的会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">scope</code></td><td>Query</td><td><code class="inline-code">string</code></td><td>否</td><td>任务列表范围。</td><td>unfinished / all；默认 unfinished</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -923,6 +940,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id} 读取任务摘要 读取当前用户任务摘要。">
           <div class="endpoint-topline">
@@ -934,7 +952,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>读取任务摘要</h3><p>读取当前用户任务摘要。<br><b>典型时机：</b>恢复任务、SSE 断线校准、取消 / 失败 / 完成后确认终态时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskSummaryResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于断线后回查任务状态。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskSummaryResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于断线后回查任务状态。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口读取任务摘要，适合恢复、兜底轮询、终态确认或展示任务计数。它不是实时进度主通道。</li><li><code class="inline-code">active_node_count</code>、<code class="inline-code">completed_node_count</code> 和 <code class="inline-code">failed_node_count</code> 是当前任务图节点聚合，用于概览，不应替代 SSE 节点事件账本。</li><li>任务完成时，服务端会尝试同步最终 assistant 消息，因此终态后再读取消息历史和产物更可靠。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取摘要的任务 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskSummaryResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -957,6 +975,7 @@
   &quot;updated_at&quot;: &quot;2026-05-27T10:00:05&quot;
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-events" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/events 订阅任务事件 返回 text/event-stream。token 必须放 authorization header，不能放 url；建连校验 token 和 task owner，流内按 auth_generation 本地失效。">
           <div class="endpoint-topline">
@@ -968,7 +987,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>订阅任务事件</h3><p>返回 text/event-stream。token 必须放 Authorization header，不能放 URL；服务端在建连时校验 token 和 task owner，连接中使用本地 auth_generation 失效检查，不对每条事件查询 token 数据库。<br><b>典型时机：</b>提交消息返回 task_id 后、恢复未完成任务后、回答 interrupt 后或取消后等待终态时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">text/event-stream</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。连接建立后如 auth_generation 失效，会发送 auth.invalidated 并结束。</p></div><div><b>下一步</b><p>事件结束后读取 messages 和 artifacts。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">text/event-stream</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。连接建立后如 auth_generation 失效，会发送 auth.invalidated 并结束。</p></div><div><b>下一步</b><p>事件结束后读取 messages 和 artifacts。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口是任务运行时的主事件通道。外部系统拿到 <code class="inline-code">task_id</code> 后应优先订阅它，而不是靠轮询 graph 判断任务进度。</li><li>SSE 中的 <code class="inline-code">event_type</code> 是前端行为的触发来源：节点状态、等待输入、恢复执行、取消、失败、完成和实时回答都从这里驱动。</li><li>特别注意 interrupt：只有收到 <code class="inline-code">node.waiting_for_input</code> 后才调用 <code class="inline-code">/interrupts</code>。<code class="inline-code">/graph</code> 可以辅助查看节点快照，但不能作为打开补充输入卡片的触发器。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token；禁止放入 URL。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要订阅事件的任务 ID。</td><td>—</td></tr><tr><td><code class="inline-code">Accept</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>建议</td><td>建议设置为 text/event-stream。</td><td>text/event-stream</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">event/id/data</code></td><td><code class="inline-code">SSE</code></td><td>是</td><td>每条事件含 id、event 与 JSON data。</td><td>data 解码为 TaskEventEnvelope；SSE <code class="inline-code">event</code> 与 data 内 <code class="inline-code">event_type</code> 同值。</td></tr><tr><td><code class="inline-code">auth.invalidated</code></td><td><code class="inline-code">SSE event</code></td><td>条件</td><td>refresh token、logout、generation 失配或生产 PostgreSQL auth invalidation listener 不可用时，旧 SSE 连接会优先收到该非持久化控制事件并结束。</td><td>payload 只含 reason、connection_id、generation 元信息和 occurred_at；reason 包括 auth_generation_mismatch、auth_generation_unknown、auth_generation_unavailable；不含 token/hash/header；若网络已断开可能直接结束。</td></tr></tbody></table></section>
@@ -982,6 +1001,7 @@
 	event: task.accepted
 	data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&quot;{conversation_id}&quot;,&quot;task_id&quot;:&quot;{task_id}&quot;,&quot;node_id&quot;:null,&quot;event_type&quot;:&quot;task.accepted&quot;,&quot;payload&quot;:{&quot;status&quot;:&quot;accepted&quot;},&quot;created_at&quot;:&quot;2026-06-01T10:00:00&quot;}</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-post-api-v1-tasks-cancel" data-category="tasks" data-method="POST" data-search="tasks post /api/v1/tasks/cancel 取消任务 按 body.task_id 请求取消当前用户任务；非 get 业务 id 放 body。">
           <div class="endpoint-topline">
@@ -993,7 +1013,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>取消任务</h3><p>按 body.task_id 请求取消当前用户任务；非 GET 业务 ID 放 body。<br><b>典型时机：</b>用户点击停止、切换会话前需终止当前任务或关闭会话前清理运行中任务时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>CancelTaskRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">CancelTaskResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用；422：请求体不符合 CancelTaskRequest schema。</p></div><div><b>下一步</b><p>前端可继续监听 SSE 或回查任务摘要确认终态。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>CancelTaskRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">CancelTaskResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用；422：请求体不符合 CancelTaskRequest schema。</p></div><div><b>下一步</b><p>前端可继续监听 SSE 或回查任务摘要确认终态。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于请求取消一个仍在运行或等待中的任务。取消是异步控制动作，响应 <code class="inline-code">accepted=true</code> 表示取消请求已被接收。</li><li>调用后客户端应继续监听该任务 SSE，直到收到 <code class="inline-code">task.cancelled</code>、<code class="inline-code">task.failed</code> 或其他终态事件。</li><li>如果节点晚返回，后端会避免用晚到结果覆盖已取消终态；客户端不需要根据 graph 自行修正终态。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要请求取消的任务 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>取消终态语义</h4><p>取消请求接受后，若后端执行节点晚返回或晚抛错，任务终态仍保持 <code class="inline-code">cancelled</code>；晚到结果会被丢弃，不再把已取消任务覆盖为 <code class="inline-code">failed</code> 或 <code class="inline-code">completed</code>。</p></section><section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 CancelTaskResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -1009,6 +1029,7 @@
   &quot;accepted&quot;: true
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-interrupts" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/interrupts 列出中断 列出当前用户任务待回答的 interrupt。">
           <div class="endpoint-topline">
@@ -1020,7 +1041,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>列出中断</h3><p>列出当前用户任务待回答的 interrupt。<br><b>典型时机：</b>任务等待输入、SSE 断线后恢复补充问题或刷新页面恢复待答 interrupt 时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskInterruptsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>收到 interrupt 事件后可调用本接口补齐状态。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskInterruptsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>收到 interrupt 事件后可调用本接口补齐状态。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口返回任务当前待回答的 open interrupt，例如缺少参数、需要选择 Excel sheet 或需要补充文件；当前前端直接展示 <code class="inline-code">question</code> 文本。</li><li>v2 Skill 缺参时，<code class="inline-code">required_fields</code> 只返回 <code class="inline-code">_slot_collection_ref</code> 摘要。客户端不要修改它，也不要把它当成完整状态表；真实补参状态由后端 SlotCollection / SlotEvent 持久化。</li><li>正常实时链路中，它应由 SSE <code class="inline-code">node.waiting_for_input</code> 触发：先看到等待输入事件，再调用本接口取 <code class="inline-code">question</code>、<code class="inline-code">required_fields</code> 和 open interrupt。</li><li>不要因为 <code class="inline-code">/graph</code> 某节点是 <code class="inline-code">waiting_for_input</code> 就提前调用本接口；这样才能保证任务事件账本和 UI 触发顺序一致。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要查询中断的任务 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskInterruptsResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -1057,6 +1078,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
                 <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-graph" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/graph 读取任务图 读取当前用户任务 dag 节点与边。">
           <div class="endpoint-topline">
@@ -1068,7 +1090,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>读取任务图</h3><p>读取当前用户任务 DAG 节点与边。<br><b>典型时机：</b>打开任务详情 / 调试面板、SSE 断线后恢复节点状态或展示 DAG 进度时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskGraphResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于调试或前端节点状态展示。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskGraphResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于调试或前端节点状态展示。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口返回任务 DAG 的当前快照，适合调试、可视化任务图或页面恢复时展示节点概览。</li><li>节点 <code class="inline-code">status</code> 是快照字段，不是 UI 触发事件；外部系统不能用它替代 <code class="inline-code">/events</code> 中的 <code class="inline-code">event_type</code>。</li><li>尤其是等待输入场景，应等 SSE 发出 <code class="inline-code">node.waiting_for_input</code> 后再拉 interrupts；graph 只能说明“现在看起来是什么状态”。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取 DAG 的任务 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskGraphResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
@@ -1100,6 +1122,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-artifacts" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/artifacts 列出产物 列出当前用户任务产物。">
           <div class="endpoint-topline">
@@ -1111,7 +1134,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>列出产物</h3><p>列出当前用户任务产物。<br><b>典型时机：</b>任务完成后加载结果卡片、刷新历史任务结果或下载前获取 artifact 列表时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskArtifactsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>文件产物可使用 download_url 或下载接口获取。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskArtifactsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>文件产物可使用 download_url 或下载接口获取。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口列出任务产生的可展示产物，通常在收到 <code class="inline-code">task.completed</code> 后调用。</li><li>返回的 artifact descriptor 描述产物类型、生产节点、摘要和下载信息；客户端应根据 <code class="inline-code">artifact_type</code> 和 <code class="inline-code">download_url</code> 决定是展示结果卡片还是下载按钮。</li><li>不要从模型文本中解析本地路径当下载链接；平台认可的文件下载入口只来自 artifact descriptor。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要列出产物的任务 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>文件产物判定规则</h4><p><code class="inline-code">download_url</code> 只由平台 artifact 接口生成，合法形态为 <code class="inline-code">/api/v1/artifacts/{artifact_id}/download</code>。客户端不得从 assistant 文本中提取 <code class="inline-code">sandbox:/mnt/data</code>、<code class="inline-code">sandbox:</code>、<code class="inline-code">file://</code>、<code class="inline-code">/mnt/data</code>、本地绝对路径或 <code class="inline-code">outputs/...</code> 作为下载入口；若任务没有 file artifact 或 artifact 缺少合法 <code class="inline-code">download_url</code>，应展示“未生成可下载文件 / 需补充信息”的普通文本或中断卡片。</p></section>
@@ -1143,6 +1166,7 @@
   ]
 }</code></pre></div>
           </div>
+          </details>
         </article>
         </section><section class="endpoint-group" id="group-artifacts" data-group="artifacts"><div class="group-title"><span>产物</span><small>1 个操作</small></div>
         <article class="endpoint-card" id="endpoint-get-api-v1-artifacts-artifact-id-download" data-category="artifacts" data-method="GET" data-search="artifacts get /api/v1/artifacts/{artifact_id}/download 下载文件产物 下载当前用户任务所属文件产物；不存在、非文件或不属于当前用户均返回 404。">
@@ -1155,7 +1179,7 @@
           </div>
           <div class="endpoint-summary"><div><h3>下载文件产物</h3><p>下载当前用户任务所属文件产物；不存在、非文件或不属于当前用户均返回 404。<br><b>典型时机：</b>用户点击文件产物下载、预览或导出已生成文件时请求。</p></div></div>
           <details class="endpoint-detail" open>
-            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">文件流</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：artifact 不存在、不是文件产物、文件已过期 / 缺失、所属任务不可访问或不属于当前用户。</p></div><div><b>下一步</b><p>成功时按附件形式返回文件内容。</p></div></div></details>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">文件流</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：artifact 不存在、不是文件产物、文件已过期 / 缺失、所属任务不可访问或不属于当前用户。</p></div><div><b>下一步</b><p>成功时按附件形式返回文件内容。</p></div></div>
           <section class="external-explanation"><h4>外部调用方说明</h4><ul><li>这个接口用于下载 <code class="inline-code">artifact_type=file</code> 的平台文件产物。它只接收 artifact ID，不接收任意文件路径。</li><li>服务端会校验 artifact 是否存在、是否属于当前用户任务、是否仍是 active skill output file；不满足时统一按 404 处理，避免泄漏文件路径或归属信息。</li><li>外部系统应从 <code class="inline-code">/tasks/{task_id}/artifacts</code> 返回的 <code class="inline-code">download_url</code> 进入下载，而不是拼接模型文本中的 sandbox、file 或本地路径。</li></ul></section>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">artifact_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要下载的文件产物 ID。</td><td>—</td></tr></tbody></table></section>
           <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">文件内容</code></td><td><code class="inline-code">binary</code></td><td>是</td><td>附件下载响应。</td><td>响应头含 Content-Disposition</td></tr></tbody></table></section>
@@ -1165,6 +1189,7 @@
   -o &quot;{filename}&quot;</code></pre></div>
             <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-artifacts-artifact-id-download">复制</button></div><pre><code id="response-endpoint-get-api-v1-artifacts-artifact-id-download">文件流响应。成功时响应头包含 Content-Disposition，文件类型由 artifact 元数据决定。</code></pre></div>
           </div>
+          </details>
         </article>
         </section>
       </section>
@@ -1181,7 +1206,7 @@
       <section class="panel" id="source"><div class="panel-head"><div><h2>来源与维护</h2><p class="panel-intro">本文档是静态单页外壳；字段结构在浏览器运行时读取 <code class="inline-code">/openapi.json</code>，行为说明与更新日志仍由 Markdown / HTML 维护。</p></div></div><div class="source-grid"><div class="note-card"><b>后端路由</b><p><code class="inline-code">src/api/routes/*.py</code>、<code class="inline-code">src/api/app.py</code></p></div><div class="note-card"><b>后端 <code class="inline-code">DTO</code></b><p><code class="inline-code">src/api/dto.py</code></p></div><div class="note-card"><b>前端客户端</b><p><code class="inline-code">frontend/src/api/client.ts</code>、<code class="inline-code">frontend/src/api/types.ts</code></p></div><div class="note-card"><b>部署文档</b><p><code class="inline-code">README.md</code>、<code class="inline-code">docker_cmd.md</code>、<code class="inline-code">docker-compose.yml</code></p></div></div></section>
     </main>
 
-    <aside class="toolbox" aria-label="开发工具箱"><section class="tool-section"><h2>基础地址</h2><div class="base-url"><input id="base-url" value="http://127.0.0.1:51888" aria-label="基础地址" /><button class="tool-button" type="button" data-copy-from="base-url">复制基础地址</button></div><p class="panel-intro">Docker 后端直连默认端口为 <code class="inline-code">51888</code>；本地开发后端为 <code class="inline-code">8000</code>。</p></section><section class="tool-section"><h2>认证方式</h2><p class="panel-intro">所有受保护接口统一使用 <code class="inline-code">Authorization: Bearer</code>。登录只传 <code class="inline-code">username</code>，其他接口不传 username。</p></section><section class="tool-section"><h2>部署端口</h2><ol class="flow-list"><li><span>1</span><div>前端：<code class="inline-code">51999</code></div></li><li><span>2</span><div>后端：<code class="inline-code">51888</code></div></li><li><span>3</span><div>本地开发：<code class="inline-code">5173</code> / <code class="inline-code">8000</code></div></li></ol></section><section class="tool-section"><h2>接入流程</h2><ol class="flow-list"><li><span>1</span><div>登录获取 token</div></li><li><span>2</span><div>当前用户 → 能力列表 → 会话列表</div></li><li><span>3</span><div>可选上传 / 发送时上传 → 提交消息</div></li><li><span>4</span><div><code class="inline-code">SSE</code> → 消息历史 / 任务产物</div></li></ol></section></aside>
+    <aside class="toolbox" aria-label="开发工具箱"><section class="tool-section"><h2>基础地址</h2><div class="base-url"><input id="base-url" type="url" value="http://127.0.0.1:41888" aria-label="基础地址" aria-describedby="base-url-status" spellcheck="false" /><button class="tool-button" type="button" data-copy-from="base-url">复制基础地址</button></div><p id="base-url-status" class="panel-intro" role="status">基础地址会自动适配当前文档入口；修改后同步更新全部 curl 示例。</p><p class="panel-intro">compat 前端代理使用 <code class="inline-code">41999/seedpilot</code>；后端直连使用 <code class="inline-code">41888</code>。</p></section><section class="tool-section"><h2>认证方式</h2><p class="panel-intro">所有受保护接口统一使用 <code class="inline-code">Authorization: Bearer</code>。登录只传 <code class="inline-code">username</code>，其他接口不传 username。</p></section><section class="tool-section"><h2>部署端口</h2><ol class="flow-list"><li><span>1</span><div>前端：<code class="inline-code">41999</code></div></li><li><span>2</span><div>后端：<code class="inline-code">41888</code></div></li><li><span>3</span><div>本地开发：<code class="inline-code">5173</code> / <code class="inline-code">8000</code></div></li></ol></section><section class="tool-section"><h2>接入流程</h2><ol class="flow-list"><li><span>1</span><div>登录获取 token</div></li><li><span>2</span><div>当前用户 → 能力列表 → 会话列表</div></li><li><span>3</span><div>可选上传 / 发送时上传 → 提交消息</div></li><li><span>4</span><div><code class="inline-code">SSE</code> → 消息历史 / 任务产物</div></li></ol></section></aside>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite">已复制</div>
   <script>
@@ -1189,6 +1214,11 @@
       const searchInput = document.querySelector('#endpoint-search');
       const filterButtons = [...document.querySelectorAll('[data-filter]')];
       const cards = [...document.querySelectorAll('.endpoint-card')];
+      const searchText = new Map(cards.map((card) => [card, `${card.dataset.search || ''} ${card.textContent}`.toLowerCase()]));
+      const baseUrlInput = document.querySelector('#base-url');
+      const baseUrlStatus = document.querySelector('#base-url-status');
+      const curlTemplates = new Map([...document.querySelectorAll('code[id^="curl-"]')].map((code) => [code, code.textContent]));
+      let currentBaseUrl = '';
       const groups = [...document.querySelectorAll('.endpoint-group')];
       const endpointNav = document.querySelector('#endpoint-nav');
       const emptyState = document.querySelector('#endpoint-empty');
@@ -1447,8 +1477,40 @@
         toastTimer = window.setTimeout(() => toast.classList.remove('show'), 1400);
       }
 
+      function updateBaseUrlExamples() {
+        try {
+          const url = new URL(baseUrlInput.value.trim());
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+            throw new Error('Invalid base URL');
+          }
+          currentBaseUrl = url.origin + url.pathname.replace(/\/+$/, '');
+        } catch {
+          currentBaseUrl = '';
+        }
+        const valid = Boolean(currentBaseUrl);
+        baseUrlInput.setAttribute('aria-invalid', String(!valid));
+        baseUrlStatus.textContent = valid
+          ? '全部 curl 示例已更新。调用前请替换 ACCESS_TOKEN 和花括号中的业务 ID。'
+          : '请输入完整的 HTTP(S) 基础地址，不含账号密码、查询参数或 # 片段。';
+        // The URL appears inside double quotes in every curl template.
+        const shellBaseUrl = currentBaseUrl.replace(/[\\"$`]/g, '\\$&');
+        curlTemplates.forEach((template, code) => {
+          code.textContent = valid ? template.replaceAll('${BASE_URL}', () => shellBaseUrl) : template;
+          document.querySelector(`[data-copy-from="${code.id}"]`).disabled = !valid;
+        });
+        document.querySelector('[data-copy-from="base-url"]').disabled = !valid;
+      }
+
+      if (['http:', 'https:'].includes(window.location.protocol)) {
+        const prefix = window.location.pathname.match(/^(.*)\/api-doc\/?$/)?.[1] || '';
+        baseUrlInput.value = window.location.origin + prefix;
+      }
+      baseUrlInput.addEventListener('input', updateBaseUrlExamples);
+      updateBaseUrlExamples();
+
       function textForCopy(trigger) {
         const sourceId = trigger.getAttribute('data-copy-from');
+        if (sourceId === 'base-url') return currentBaseUrl;
         if (sourceId) {
           const source = document.getElementById(sourceId);
           if (!source) return '';
@@ -1471,9 +1533,12 @@
             area.style.position = 'fixed';
             area.style.opacity = '0';
             document.body.appendChild(area);
-            area.select();
-            document.execCommand('copy');
-            area.remove();
+            try {
+              area.select();
+              if (!document.execCommand('copy')) throw new Error('Copy failed');
+            } finally {
+              area.remove();
+            }
           }
           showToast('已复制');
         } catch (error) {
@@ -1483,16 +1548,16 @@
 
       document.addEventListener('click', (event) => {
         const trigger = event.target.closest('[data-copy-from], [data-copy-value]');
-        if (!trigger) return;
+        if (!trigger || trigger.disabled) return;
         copyText(textForCopy(trigger));
       });
 
       function applyFilters() {
-        const term = (searchInput?.value || '').trim().toLowerCase();
+        const terms = (searchInput?.value || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
         let visibleCount = 0;
         cards.forEach((card) => {
           const matchesFilter = activeFilter === 'all' || (card.dataset.category || '').split(/\s+/).includes(activeFilter);
-          const matchesSearch = !term || (card.dataset.search || '').includes(term);
+          const matchesSearch = terms.every((term) => searchText.get(card).includes(term));
           const visible = matchesFilter && matchesSearch;
           card.hidden = !visible;
           if (visible) visibleCount += 1;
@@ -1544,6 +1609,8 @@
           event.preventDefault();
           if (searchInput) searchInput.value = '';
           setActiveFilter(link.dataset.groupNav || 'all');
+          const detail = target.querySelector('.endpoint-detail');
+          if (detail) detail.open = true;
           window.requestAnimationFrame(() => scrollToTarget(target, targetId));
         });
       });

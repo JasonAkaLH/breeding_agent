@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 2026-09-24
+
+- compat API 文档接入与交互优化：部署说明对齐 41999/41888、`/seedpilot/` 和独立 runtime volume；基础地址按当前文档入口自动识别并联动 curl 示例及复制内容；搜索覆盖完整接口说明、参数与示例；全部展开/收起控制完整接口详情，目录定位会展开目标接口；修复窄屏布局与数据结构表格溢出。新增页面交互回归；不改变后端接口协议，无新增运行依赖。
+
 ### 2026-07-02
 
 - Docker 正式环境镜像版本提升到 `0.1.23`：按当前 `prod` 工作树构建并推送 backend / frontend 到 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.23`，用于发布前端发送框 10000 字符输入上限；远端 manifest 已验证：backend `sha256:12c3cf0949c8c621199d7056406d1ade3e74d68a898a79fa9f82d79a2ec2c793`，frontend `sha256:c7b47aca3ca2c0c8ca9b40ccfd3f0094df5537ed4261bab905a237fb755133b2`；本地忽略文件 `docker_cmd.md` 已同步为仅生产环境部署命令并使用环境变量承载敏感值。License Requirement：镜像发布/运维文档变更，无依赖/许可变更，未触发 cargo-deny 风险。

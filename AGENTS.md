@@ -17,7 +17,7 @@
 - `skill/`：历史内置 Skill bundles 目录；生产部署不再追踪/打包该目录，改为把独立 Skill 仓库（默认 `/data/peihai/vibe-skill/skills`）挂载到容器 `/app/skill`。
 - `frontend/`：React + TypeScript + Vite 前端，对话台、API/SSE client、组件与前端测试。
 - `native/`：Rust workspace、runtime/kernel/sidecar/安全 facade 与相关 proto。
-- `tests/`：后端分层回归测试，目录大体对应 `src/` 的模块边界。
+- `tests/`：后端分层回归测试，目录大体对应 `src/` 的模块边界。 API 文档交互回归位于 `tests/api/api_doc_ui.test.cjs`，安装 frontend 依赖后可用 `NODE_PATH="$PWD/frontend/node_modules" node --test tests/api/api_doc_ui.test.cjs` 运行。
 - `docs/`：PRD、API 文档、runbook、设计记录与 checkpoint 文档。
 - `scripts/`、`docker/`：本地验证、维护脚本、Docker 与部署辅助入口。
 - `runtime/`：本地运行产物、日志、artifact 与调试 prompt；通常不作为业务源码入口。
