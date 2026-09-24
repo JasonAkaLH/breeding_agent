@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 旧前端 API 兼容层实现计划已成文：以 `1e48266` 旧前端和 `main@88726f7` 新后端源码为审计基线，独立服务对外端口固定 51998；分阶段覆盖请求/Skill/模型映射、结果与历史、SSE、补参和 MCP 运行中交互、固定旧客户端与新前端对照验收、独立打包及回退。新版前后端保持原入口，MCP 设置使用新前端；明确 reasoning、DAG、复杂表单与已移除能力的边界。当前仅计划，未实现服务、运行兼容层测试、构建镜像或部署。License Requirement：本次仅文档，无新增依赖或许可变化。
+
 - 新增默认关闭的开发单任务 Prompt 诊断：临时控制文件最长启用 600 秒，首次 AgentRun 请求原子锁定 Task，覆盖流式/非流式、工具后续轮次、审批恢复及协议重试；只记录完整事实规则在 system 消息中的命中与位置、消息角色、哈希和请求/响应 ID，不记录正文、工具参数或凭据。观测边界为 SDK 参数，考虑 extra_body.messages 覆盖，不宣称服务端接收内容；关闭、过期或诊断失败均不改变模型调用。新增测试与现有 adapter/client/context 共 65 项通过，包括真实 SDK MockTransport 序列化对照；Ruff 与 diff-check 通过。License Requirement：复用标准库及现有 SDK，无新增依赖或许可变化。
 
 - 修复 MCP 多节点任务在重启时被误判为 `mcp_resolved_authority_incomplete`：resolved intent 的调用和结果回执校验限定到当前 node，不再将同 Task 其他节点的工具调用计入 no-call 节点，也不允许其他节点回执满足当前节点的终态要求。回归覆盖兄弟节点已调用、本节点未调用、兄弟节点缺失回执及回执错配；相关 41 项测试通过，修复后的真实启动校验函数只读检查开发 PostgreSQL 的 64 条 resolved intent 全部通过，未修改历史任务或调用数据。License Requirement：复用现有依赖，无新增依赖或许可变化。
