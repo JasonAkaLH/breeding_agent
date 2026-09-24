@@ -340,6 +340,8 @@
 
 ## [Unreleased]
 
+- 重写 main API 文档为前端接入手册：按快速开始、认证/错误、聊天任务、SSE 恢复、补参审批、文件/MCP、接口参考组织；覆盖当前 27 个路径/33 个 HTTP 操作，嵌入 60 个数据结构及可下载 TypeScript 示例。增加合同快照同步脚本、DTO 示例校验和页面/流解析回归，修正实际鉴权、202/204、MCP 控制状态与流式返回说明；无新增依赖，不改变后端业务接口。
+
 - 统一同模型Agent Loop P1-C已完成additive Sidecar contract检查点但尚未标绿：runtime proto新增AgentRun/AgentItem与commit/get/list RPC，Rust core/store/Sidecar contract artifact加入closed Agent模型、`agent_state` feature和20260822 schema/proto hash；in-memory kernel与SQLite adapter覆盖CAS、sequence、exact idempotency、canonical payload/SHA/131072-byte和跨重启，Python无grpcio客户端/facade完成wire与response gate，共享Python/Rust canonical vectors通过。P1-C canonical Python 56项和统一Rust fmt/clippy/workspace test gate通过；直接all-targets运行曾因macOS缺`libpython3.13.dylib`失败，不替代统一门禁。当前缺口是TaskNode/Artifact/Message/Event/receipt尚未和Agent state进入同一Sidecar事务，且Python Sidecar repository尚未实现完整`AgentAtomicWriter`，因此Phase 1继续`in_progress`且不进入Phase 2。License Requirement：复用现有prost/tonic/rusqlite/serde/sha2 workspace依赖，无新增第三方包或许可类型。
 
 - 统一同模型Agent Loop P1-B已green：PostgreSQL fresh runtime schema additive升级v9并纳入三张Agent表，PostgreSQL复用相同原子repository合同；新增单一Task lease store/controller，覆盖正TTL、storage权威clock、TTL/3 heartbeat、token/revision旋转、stale commit fencing、expiry takeover、waiting先提交后release、resume reacquire、失租取消与SQLite/真实PG并发单赢家。初次DSN缺失的0 tests/1 skip未计通过；随后使用本机已有PostgreSQL 17镜像启动精确临时隔离库，真实验证fresh表、transaction fault all-or-zero、最小role权限与敏感authority拒读、clock/fencing/concurrency，P1-B canonical 32项零skip、额外PG schema 3项及P1-A 60项通过。临时容器和一次性数据已删除，未接触现有数据库。首次全库bootstrap暴露既有MCP CHECK重复添加并已事务回滚，保留为邻接缺陷。Phase 1继续`in_progress`，下一步P1-C。License Requirement：复用既有SQLAlchemy/PostgreSQL schema、asyncio与本地已有PostgreSQL镜像，无新增代码依赖或许可变更。

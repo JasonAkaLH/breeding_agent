@@ -4,7 +4,7 @@
 
 ## 目录速览
 
-- `api/`：静态 API 文档与 API 更新日志。
+- `api/`：前端接入手册 `api-doc.html`、可复制/下载的 `frontend-example.ts` 和 API 更新日志；HTML 内嵌当前 OpenAPI 快照，由 `scripts/update_api_doc_contract.py` 同步，接口语义以路由/DTO/runtime 为准。
 - `prd/`：产品 / 架构 PRD，按 backend、frontend、rust、MCP 等主题组织。
 - `runbooks/`：运维与部署运行手册。
 - `runbooks/mcp-first-production-enablement.md`：新用户 MCP 功能的一次性管理员 check/apply、显式约束/角色前置条件、精确重试与常驻凭据边界。

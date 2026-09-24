@@ -4,6 +4,7 @@
 
 ## 目录速览
 
+- `update_api_doc_contract.py`：离线同步前端 API 接入文档内嵌 OpenAPI 合同与 TypeScript 示例；`--check` 检查漂移，不启动 runtime、数据库或网络。
 - `check_docker_cmd_policy.sh`：校验本地 `docker_cmd/` 目录及旧根路径 `docker_cmd.md` 的 Git 忽略和未跟踪保护。
 - `run_fullstack_dev.py`：本地拉起前后端用于人工验证。
 - `smoke_main_agent_llm.py`、`smoke_model_reasoning_matrix.py`、`smoke_mcp_server_config.py`、`smoke_user_mcp_soft_binding.py`：真实 provider / MCP smoke脚本；reasoning matrix默认只输出脱敏plan，必须显式`--live`才探测全部model × thinking state × effort且不记录回答/凭据/request ID；user-scoped discovery smoke创建并清理隔离owner-bound Task，不绕过Gateway Task ownership。
