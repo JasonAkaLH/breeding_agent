@@ -12,7 +12,7 @@
 - `runbooks/user-mcp-phase3-rollout.md`：Phase 3 canonical routing、cohort/实例准入、8 条权威安全红线、PostgreSQL 分角色 HMAC evidence/ledger、consumer × capability schema-contract 连续性与同事务 durable migration audit、CP-0 恢复、回滚和 legacy 删除门禁。
 - `checkpoint/`：checkpoint、time-travel、thread event 等设计与实施计划。
 - `superpowers/specs/`：本地设计草案、spec 与阶段性方案。
-- `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md`：旧 `1e48266` 前端适配新版后端的独立兼容服务计划；保留 51999 给新前端，兼容 API 对外端口 51998，覆盖请求/结果/SSE/补参、固定旧客户端验收与独立部署回退；仅计划，尚未实施。
+- `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md`：旧 `1e48266` API 供第三方程序调用新版后端的独立兼容服务计划；通过 51999 的 `/seedpilot/compat/` 分流，兼容容器无额外宿主机端口，覆盖请求/结果/SSE/补参与新版 Web 原路径对照；仅计划，尚未实施。
 - `superpowers/specs/2026-09-22-agent-prompt-diagnostics-design.md`：dev单任务Prompt诊断边界、验证计划、临时开启/查看/关闭命令；只观察SDK参数元数据，不记录正文或凭据。
 - `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md`：用户自定义 MCP 新功能首次生产启用设计；一次性管理员初始化复用发布记录，保留正常启动校验，不迁移旧用户配置；设计已批准，按同名 implementation plan 实施；须用新 Backend 重新完成恢复库演练。
 - `superpowers/specs/2026-09-18-mcp-first-production-enablement-implementation-plan.md`：上述已批准设计的实施顺序，覆盖证据兼容、约束、管理员事务、CLI、真实 PostgreSQL 回归、候选发布及恢复库演练。
@@ -124,7 +124,7 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md` | `planned_not_implemented`；51999 保留新前端，独立兼容 API 入口 51998，旧功能兼容、新 MCP 设置使用新前端 | 后续按 P0～P7 完成合同固定、独立代理、请求/结果/SSE/补参转换、双前端验收与部署；当前仅文档，不修改新版业务代码、镜像、数据库或生产。 |
+| `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md` | `planned_not_implemented`；第三方旧 API 走 `51999/seedpilot/compat/`，新版 Web 走原路径 | 后续按 P0～P7 完成旧 API 合同固定、独立兼容服务、入口分流、请求/结果/SSE/补参转换、第三方联调与新版 Web 对照；当前仅文档，不修改新版业务代码、镜像、数据库或生产。 |
 | `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `image_published_pending_server_rehearsal`；首次初始化代码与新 Backend 已验收发布 | 在服务器拉取固定工件，重新完成恢复库结构与首次初始化演练；正式数据库尚未执行新迁移或准入。 |
 | `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md` | `source_synced_not_deployed`；prod 业务源码已同步 main，生产 Skill 已由用户确认发布 | 后续核验生产参数、现有 Skill 与数据库恢复演练；本次源码同步保留 main 现有 MCP 准入检查，未新增初始化逻辑、发布镜像或操作生产。 |
 | `superpowers/specs/2026-09-04-unified-tool-result-50k-token-budget-design.md`、同名Backend implementation plan与Frontend implementation plan | Backend与Frontend均为`image_published_not_deployed`；backend-dev `0.1.35`、frontend-dev `0.1.29`及各自远端digest验证已闭合 | 开发环境部署仍须另行授权；部署后验证大型既有v2 view、新的50k内/超限Result及`model_unavailable`。不修改历史Tool Result、projection revision、数据库schema、外部MCP/Skill或`prod`。 |
