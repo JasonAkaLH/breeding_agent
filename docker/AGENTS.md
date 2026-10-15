@@ -12,3 +12,4 @@
 - `docker-compose.yml`：本地 compose 编排。
 - `.dockerignore`：Docker build context 排除规则。
 - `docker_cmd/docker_cmd_dev.md`、`docker_cmd/docker_cmd_prod.md`：Git-ignored 的本地开发 / 生产部署命令记录，整个目录不进入 Docker build context。
+- `docker_cmd/docker_cmd_prod_db_check.md`：首次生产数据库迁移后的独立只读检查；在新版容器启动前执行，保持本地、Git-ignored。

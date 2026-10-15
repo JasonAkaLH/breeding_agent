@@ -4,6 +4,8 @@
 
 ## 目录速览
 
+- `CentOS容器部署适配评估报告.md`：CentOS 版本待定、使用容器的部署适配评估；区分 Stream 9/10 + Docker 的 3–5 人日基线、Podman/旧系统等条件性增量、验收要求与未实测边界，仅文档。
+- `CentOS容器部署适配评估报告.pdf`：上述报告的 PDF 导出版，含页码、跨页表头、网页链接与仓库文件引用附录；正文以 Markdown 源文为准。
 - `api/`：前端接入手册 `api-doc.html`、可复制/下载的 `frontend-example.ts` 和 API 更新日志；HTML 内嵌当前 OpenAPI 快照，由 `scripts/update_api_doc_contract.py` 同步，接口语义以路由/DTO/runtime 为准。
 - `prd/`：产品 / 架构 PRD，按 backend、frontend、rust、MCP 等主题组织。
 - `prd/backend/24-文献知识库原生CapabilityPRD.md`：已确认需求的完整知识库专题 PRD；覆盖独立原生能力、Markdown 入库审核、SHA-256 判重、只读共享与团队授权接口、会话选库、正文清理及答案独立，尚未实施。
@@ -126,6 +128,7 @@
 | PRD | 状态 | 后续动作 |
 |---|---|---|
 | `prd/backend/24-文献知识库原生CapabilityPRD.md` | `requirements_confirmed_prd_pending_review`；需求已确认，PRD 已成文，尚未实施 | 书面审阅后按完整范围制定实施计划；不得改为 Skill/MCP 包装、自动审核入库、历史正文保留或答案关联维护，不执行部署。 |
+| `CentOS容器部署适配评估报告.md` | `assessment_only_pending_target`；CentOS 版本待定，允许容器部署 | 确认系统/CPU/容器运行时及网络条件后复核工作量；后续如实施，再完成挂载、生产配置与实机验收，本次不修改代码或部署。 |
 | `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md` | `planned_not_implemented`；第三方旧 API 走 `51999/seedpilot/compat/`，新版 Web 走原路径 | 后续按 P0～P7 完成旧 API 合同固定、独立兼容服务、入口分流、请求/结果/SSE/补参转换、第三方联调与新版 Web 对照；当前仅文档，不修改新版业务代码、镜像、数据库或生产。 |
 | `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `image_published_pending_server_rehearsal`；首次初始化代码与新 Backend 已验收发布 | 在服务器拉取固定工件，重新完成恢复库结构与首次初始化演练；正式数据库尚未执行新迁移或准入。 |
 | `superpowers/specs/2026-09-17-main-to-prod-migration-plan.md` | `source_synced_not_deployed`；prod 业务源码已同步 main，生产 Skill 已由用户确认发布 | 后续核验生产参数、现有 Skill 与数据库恢复演练；本次源码同步保留 main 现有 MCP 准入检查，未新增初始化逻辑、发布镜像或操作生产。 |

@@ -4,6 +4,14 @@
 
 - 2026-10-15：新增 `docs/prd/backend/24-文献知识库原生CapabilityPRD.md`，固化已确认的独立 `knowledge` Capability、全文提取与人工批量审核、原始字节 SHA-256 判重、只读即时共享、团队授权接口预留、会话选库和本轮范围固定、单一当前正文与旧全文清理、静态答案及引用规则，并提供完整验收矩阵。同步后端、前端和文档入口；当前仅 PRD，尚未实施，不修改业务代码、数据库或部署。License Requirement：无新增项目依赖、第三方代码或许可变化。
 
+- 导出 CentOS 容器部署适配评估报告 PDF，按用户要求保存至 `docs/CentOS容器部署适配评估报告.pdf` 并删除临时输出目录。采用 A4 排版并嵌入中文字体，保留正文与网页链接，增加仓库文件引用附录；已检查 7 页预览、表格分页和正文完整性，移动前后文件哈希一致。Markdown 源文、业务代码与部署配置未改。License Requirement：无新增项目依赖或许可变化。
+
+- 将部署评估定稿改名为 `docs/CentOS容器部署适配评估报告.md`，同步文档索引，删除润色草稿及本次编辑的临时快照。报告正文保持不变，未修改代码或部署配置。License Requirement：无新增依赖或许可变化。
+
+- 润色 CentOS 容器部署评估报告：简化生硬措辞和长句，减少加粗与模板化表述，保留版本待定、使用容器的前提、技术事实、3 至 5 人日估算、全部引用和实测缺口。仅调整文档表述，未修改代码或部署配置。License Requirement：无新增依赖或许可变化。
+
+- 新增 CentOS 容器部署适配评估报告：按“CentOS 版本待定、允许容器部署”收敛前提，记录复用现有 amd64 镜像时 Stream 9/10 + Docker 的 3–5 人日估算、SELinux/挂载/生产配置/网络/恢复验收要求，以及 Podman、旧系统、ARM 和离线环境的条件性增量。同步文档索引与待确认状态；仅文档，未修改业务代码、镜像构建/编排配置、部署命令或生产环境，未进行 CentOS 实机验收。License Requirement：无新增依赖或许可变化。
+
 - 按用户澄清重订旧 API 兼容层计划：不部署旧版网页，新版 Web 继续走原 `51999/seedpilot/*`；第三方程序调用旧版 API 走同一端口的 `/seedpilot/compat/api/v1/*`。51999 入口代理分流到内部兼容 FastAPI（仅容器端口 8000）或原新前端镜像；旧版 22 个 HTTP 操作、响应/SSE 合同、旧 metadata 与真实第三方联调成为验收主体。修订计划与文档索引，移除旧网页/Vite/浏览器验收及对外 51998 映射；仅文档，未修改镜像、容器或线上路由。License Requirement：无新增依赖或许可变化。
 
 - 兼容层部署计划确认端口归属：依现有 Compose 的 `51999:80`，51999 保留给新前端页面；51998 给独立兼容 API，旧前端页面在同宿主机使用其他独立端口并核对其同源 API 转发。同步计划和文档索引；仅文档，未改容器、镜像或线上端口。License Requirement：无新增依赖或许可变化。
@@ -12,15 +20,25 @@
 
 - 旧前端 API 兼容层实现计划已成文：以 `1e48266` 旧前端和 `main@88726f7` 新后端源码为审计基线，独立服务对外端口固定 51998；分阶段覆盖请求/Skill/模型映射、结果与历史、SSE、补参和 MCP 运行中交互、固定旧客户端与新前端对照验收、独立打包及回退。新版前后端保持原入口，MCP 设置使用新前端；明确 reasoning、DAG、复杂表单与已移除能力的边界。当前仅计划，未实现服务、运行兼容层测试、构建镜像或部署。License Requirement：本次仅文档，无新增依赖或许可变化。
 
+- Prompt 诊断开发镜像 `backend-dev:0.1.38` 已基于 `main@88726f7` 发布到既有阿里云仓库；OCI index digest 为 `sha256:340990d27316e223e55a8b47b914f54b99c9a3802451cc8b14ed20e6d16973be`，`linux/amd64` manifest 为 `sha256:26111cb04b774c1961eac4a8cbc8b3b56ee215ec60b10a7cee4e2ec4bdfd7410`，远端复验一致并包含 attestation。镜像 290 个交付文件哈希匹配源码，诊断控制文件默认不存在；隔离 SQLite 容器 healthy、`/api-doc` 返回 200。开发部署文件先建立 0600 备份后仅更新 5 处后端标签，命令语法与忽略/未跟踪保护通过；生产文件、前端和 Sidecar 未改。服务器待部署；诊断需要显式开启后重新测试，不追溯旧请求。License Requirement：无新增依赖或许可变化。
+
 - 新增默认关闭的开发单任务 Prompt 诊断：临时控制文件最长启用 600 秒，首次 AgentRun 请求原子锁定 Task，覆盖流式/非流式、工具后续轮次、审批恢复及协议重试；只记录完整事实规则在 system 消息中的命中与位置、消息角色、哈希和请求/响应 ID，不记录正文、工具参数或凭据。观测边界为 SDK 参数，考虑 extra_body.messages 覆盖，不宣称服务端接收内容；关闭、过期或诊断失败均不改变模型调用。新增测试与现有 adapter/client/context 共 65 项通过，包括真实 SDK MockTransport 序列化对照；Ruff 与 diff-check 通过。License Requirement：复用标准库及现有 SDK，无新增依赖或许可变化。
 
+- 开发后端启动修复镜像 `backend-dev:0.1.37` 已基于 `main@96efc25` 发布到既有阿里云仓库；OCI index digest 为 `sha256:ff5575d645b0ac1862e42368bd1e8dfca8570bdb576c5a294dd0eae3e8bddcad`，`linux/amd64` manifest 为 `sha256:3970d36e299b1b25aa8dd5417bf1b6bfd845279bcebaab2a7ab54f5cdccc8057`，远端核验一致。镜像内 289 个交付文件哈希匹配源码，保留事实与解释边界 Prompt；开发部署命令的 5 处后端标签已更新，生产文件不变。此前开发库显式兼容升级仅更新 4 个 CHECK 并新增 1 个 CHECK，事务前后证据表均为空，schema 只读复验通过；本次启动误判修复不修改历史任务或调用数据。服务器需拉取新镜像重建后端后再确认 healthy，尚未宣称服务器恢复。License Requirement：无新增依赖或许可变化。
+
 - 修复 MCP 多节点任务在重启时被误判为 `mcp_resolved_authority_incomplete`：resolved intent 的调用和结果回执校验限定到当前 node，不再将同 Task 其他节点的工具调用计入 no-call 节点，也不允许其他节点回执满足当前节点的终态要求。回归覆盖兄弟节点已调用、本节点未调用、兄弟节点缺失回执及回执错配；相关 41 项测试通过，修复后的真实启动校验函数只读检查开发 PostgreSQL 的 64 条 resolved intent 全部通过，未修改历史任务或调用数据。License Requirement：复用现有依赖，无新增依赖或许可变化。
+
+- 主 Agent 新增通用“事实与解释边界”系统提示词，约束无依据的含义补写并区分事实与推断。基于 `main@0e5b82a` 构建并发布开发后端 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.36`；OCI index digest 为 `sha256:56bb622dd9c070bacaf5ae316e3928f02d6de1ac62bee30d1d82bf9d1d77872e`，`linux/amd64` manifest 为 `sha256:02059aa1c026eb99860621a4a771a0b5f87216d01574048fd671e405a78b6c52`，远端复验一致并包含 BuildKit attestation。镜像内 289 个交付文件与源码哈希一致，24 项相关测试通过；隔离 SQLite 启动 healthy，`/api-doc` 返回 200，未连接远端数据库。开发部署文件已先在仓库外建立 `0600` 备份，再仅更新 5 处后端镜像引用，命令语法和 local-only 保护检查通过；生产部署文件保持原样。镜像已发布、尚未部署，前端、Sidecar 和 `prod` 未改；未进行真实模型效果验证。License Requirement：复用现有依赖与构建链，无新增依赖或许可变化。
 
 - 实现新用户 MCP 功能的首次生产准入：提供一次性管理员 `check/apply`，只在 MCP 初始空状态下原子登记独立 `deployment/first_enablement` 证据、批准与最终 activation；保留普通角色、实例租约及安全阻断，常驻 Backend 拒绝初始化管理员凭据。支持精确重试、并发互斥和事务回滚，不执行旧 MCP 数据迁移或隐式 DDL。schema manifest 升至 v11，五项 CHECK 通过独立兼容 SQL 升级，public 表数仍为 66；旧证据摘要保持不变。独立 PostgreSQL 新增 10 项与既有 20 项真实角色测试通过，相关自动回归通过。新 Backend-prod `0.1.23` 已发布，固定 amd64 digest 为 `e2fa035732f63d08637288baa34a79181085e50e1d90222bece3e37485f101a0`，镜像内结构模拟迁移、首次初始化、FastAPI 启动/重启和现有 Sidecar 兼容检查通过；服务器恢复库新演练待执行，正式库未操作。License Requirement：复用现有依赖，无新增依赖或许可例外。
 
 - 用户自定义 MCP 首次生产启用设计已成文待审阅：按新功能上线处理，不迁移旧用户配置或复制开发用户数据；推荐一次性管理员初始化，复用现有发布记录并增加明确的首次证据类型，保留普通启动、租约、权限和安全 blocker 检查。表数保持 66，约束与 schema manifest 将变化，实施后须重建 Backend 并重做恢复库验收；本轮仅文档，尚未修改业务代码或生产。License Requirement：复用现有依赖，无新增依赖或许可例外。
 
 - 修复 Rust 依赖安全公告 RUSTSEC-2026-0285 和 RUSTSEC-2026-0190：主 workspace 将 rustls 升至 0.23.45、anyhow 升至 1.0.103，并联动更新 rustls-webpki、aws-lc-rs 与 aws-lc-sys；独立 fuzz 锁文件同步修复 rustls，保留其已修复的 anyhow 版本。main/prod 使用相同锁文件，业务代码与数据库结构不变。cargo fmt、Clippy、198 项 Rust 测试、主/fuzz 漏洞审计、cargo-deny、fuzz 编译和工件溯源自检通过；fuzz 仍有既有 chacha20 0.10.1 撤回版本提示，无漏洞公告命中。License Requirement：复用现有依赖，许可证检查通过，未扩大许可例外。
+
+- 按用户逐项确认的第 3 项调整，本地 prod 命令取消尚未准备的 `seedpilot_prod.env` 依赖，改为命令块顶部填写 7 个必填生产参数，并通过显式 `docker run -e` 同时传给保留的 MCP/Sidecar 预检与 Backend；独立数据库检查同步采用 `-e`。空值在 Docker 操作前退出，原 Python 预检逻辑保持不变；dev 未修改，未执行部署或数据库操作。目录索引与保护范围继续适用。License Requirement：无新增依赖或许可变化。
+
+- 按用户逐项确认的第 1 项调整，本地 prod 日常启动块中的数据库身份/结构只读预检原样提取到 `docker_cmd/docker_cmd_prod_db_check.md`，并在 prod 前置条件中要求首次迁移后、新版容器启动前独立执行。仅移除一条预检命令并替换一处前置说明，dev 文件及其他 prod 命令保持原样；两份 Bash 块语法通过，独立命令与原文一致，三份本地文件保持 `0600`、Git-ignored/untracked。同步目录索引和保护对象；未运行检查命令、Docker 或数据库操作。License Requirement：无新增依赖或许可变化。
 
 - 用户确认 MCP 首次生产部署直接启用与 dev 一致的用户级功能：迁移计划固定 enforce/100%/legacy assembly off 目标，原逐级灰度观察窗不作为本次首次部署前置条件；保留生产身份、租户隔离、逐 Tool 授权、密钥与 Sidecar 信任、分角色权限和安全 blocker 检查。计划补充受控初始化、真实 activation、幂等重试及拒绝路径验收要求；技术适配尚未设计实施，本轮仅更新计划和索引，未操作生产。License Requirement：无新增依赖或许可变化。
 
