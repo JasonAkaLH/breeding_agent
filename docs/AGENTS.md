@@ -8,14 +8,16 @@
 - `CentOS容器部署适配评估报告.pdf`：上述报告的 PDF 导出版，含页码、跨页表头、网页链接与仓库文件引用附录；正文以 Markdown 源文为准。
 - `api/`：前端接入手册 `api-doc.html`、可复制/下载的 `frontend-example.ts` 和 API 更新日志；HTML 内嵌当前 OpenAPI 快照，由 `scripts/update_api_doc_contract.py` 同步，接口语义以路由/DTO/runtime 为准。
 - `prd/`：产品 / 架构 PRD，按 backend、frontend、rust、MCP 等主题组织。
-- `prd/backend/24-文献知识库原生CapabilityPRD.md`：已确认需求的完整知识库专题 PRD；覆盖独立原生能力、Markdown 入库审核、SHA-256 判重、只读共享与团队授权接口、会话选库、正文清理及答案独立；已补充新读取校验与压缩正文载入约束，尚未实施。
+- `prd/backend/24-文献知识库原生CapabilityPRD.md`：已确认需求的完整知识库专题 PRD；独立原生能力、人工审核、SHA-256、只读共享、固定范围、正文清理和压缩已接入，真实 PostgreSQL 与文献模型评测待补；未部署。
 - `runbooks/`：运维与部署运行手册。
 - `runbooks/mcp-first-production-enablement.md`：新用户 MCP 功能的一次性管理员 check/apply、显式约束/角色前置条件、精确重试与常驻凭据边界。
 - `runbooks/user-mcp-gateway.md`：用户级 MCP Gateway 密钥、容量、基础发布和故障边界。
 - `runbooks/user-mcp-phase3-rollout.md`：Phase 3 canonical routing、cohort/实例准入、8 条权威安全红线、PostgreSQL 分角色 HMAC evidence/ledger、consumer × capability schema-contract 连续性与同事务 durable migration audit、CP-0 恢复、回滚和 legacy 删除门禁。
 - `checkpoint/`：checkpoint、time-travel、thread event 等设计与实施计划。
 - `superpowers/specs/`：本地设计草案、spec 与阶段性方案。
-- `superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md`：基于 PRD 24 的完整文献知识库实施计划；按 0/A～G 八个检查点覆盖存储授权、全文入库与清理、管理 API、固定本轮范围、原生工具与压缩、前端及 29 项验收；当前仅计划，尚未实施。
+- `superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md`：基于 PRD 24 的完整实施计划；已落实仓库接入与自动验收，保留真实环境检查要求，不把 skip 当通过。
+- `superpowers/specs/2026-10-16-literature-knowledge-implementation-evidence.md`：29 项验收证据、实际回归结果、既有失败及真实 PostgreSQL/真实文献模型评测缺口；尚未整体关闭 AC-27/NFR-05。
+- `runbooks/literature-knowledge.md`：知识库持久根、共享 SQL schema、异步恢复、最小验证、真实评测和发布回退边界。
 - `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md`：旧 `1e48266` API 供第三方程序调用新版后端的独立兼容服务计划；通过 51999 的 `/seedpilot/compat/` 分流，兼容容器无额外宿主机端口，覆盖请求/结果/SSE/补参与新版 Web 原路径对照；仅计划，尚未实施。
 - `superpowers/specs/2026-09-22-agent-prompt-diagnostics-design.md`：dev单任务Prompt诊断边界、验证计划、临时开启/查看/关闭命令；只观察SDK参数元数据，不记录正文或凭据。
 - `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md`：用户自定义 MCP 新功能首次生产启用设计；一次性管理员初始化复用发布记录，保留正常启动校验，不迁移旧用户配置；设计已批准，按同名 implementation plan 实施；须用新 Backend 重新完成恢复库演练。
@@ -128,8 +130,8 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `prd/backend/24-文献知识库原生CapabilityPRD.md` | `requirements_confirmed_plan_written`；需求已确认，完整实施计划已成文，尚未实施 | 实施入口见 `superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md`；完整覆盖已确认范围，不得改为 Skill/MCP 包装、自动审核入库、历史正文保留或答案关联维护，不执行部署。 |
-| `superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md` | `planned_not_implemented`；八个检查点及 FR/NFR/AC 映射已成文 | 获得实施指令后从检查点 0 开始，完成 18 项 FR、5 项 NFR 和 29 项 AC；保留 Sidecar、真实 PostgreSQL 与真实文献评测要求，不把计划当作实现或发布结果。 |
+| `prd/backend/24-文献知识库原生CapabilityPRD.md` | `implemented_pending_external_acceptance`；仓库代码与自动回归已接入 | 保持全部已确认需求；补齐隔离 PostgreSQL 并发和真实育种文献问题集评测。参见同日 implementation-evidence；未部署，不把替身测试当真实质量结果。 |
+| `superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md` | `implemented_pending_external_acceptance`；0 至 F 已接入，G 的外部验收未闭合 | 真实 Sidecar 三模式范围恢复已验证；真实 PostgreSQL/文献模型配置仍缺，AC-27/NFR-05 不得标记整体完成。 |
 | `CentOS容器部署适配评估报告.md` | `assessment_only_pending_target`；CentOS 版本待定，允许容器部署 | 确认系统/CPU/容器运行时及网络条件后复核工作量；后续如实施，再完成挂载、生产配置与实机验收，本次不修改代码或部署。 |
 | `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md` | `planned_not_implemented`；第三方旧 API 走 `51999/seedpilot/compat/`，新版 Web 走原路径 | 后续按 P0～P7 完成旧 API 合同固定、独立兼容服务、入口分流、请求/结果/SSE/补参转换、第三方联调与新版 Web 对照；当前仅文档，不修改新版业务代码、镜像、数据库或生产。 |
 | `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `image_published_pending_server_rehearsal`；首次初始化代码与新 Backend 已验收发布 | 在服务器拉取固定工件，重新完成恢复库结构与首次初始化演练；正式数据库尚未执行新迁移或准入。 |
