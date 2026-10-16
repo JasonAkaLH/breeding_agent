@@ -40,6 +40,11 @@ _CP7_CHECK_TABLES = frozenset(
     }
 )
 
+_KNOWLEDGE_CHECK_TABLES = frozenset({
+    "knowledge_library", "knowledge_document", "knowledge_import",
+    "knowledge_library_grant", "conversation_knowledge_selection", "knowledge_query_scope",
+})
+
 _MCP_AGGREGATE_CONTROLLED_CUTOVER_TABLES = frozenset(
     {"mcp_call_record", "mcp_dispatch_resume_outbox"}
 )
@@ -272,7 +277,7 @@ def plan_postgres_schema_reconciliation(
                 inspection.check_constraints.get(table_name, {}),
             ):
                 operator_only_actions.append("mcp_first_enablement_constraints_required")
-        elif table_name in _CP7_CHECK_TABLES:
+        elif table_name in _CP7_CHECK_TABLES | _KNOWLEDGE_CHECK_TABLES:
             actions.extend(
                 _plan_cp7_check_reconciliation(
                     table_name,

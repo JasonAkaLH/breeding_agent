@@ -2317,3 +2317,138 @@ class CheckpointRow(SQLiteBase):
     source_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     invalidated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class KnowledgeLibraryRow(SQLiteBase):
+    __tablename__ = "knowledge_library"
+    __table_args__ = (
+        Index("idx_knowledge_library_owner_status", "owner_user_id", "status"),
+        CheckConstraint("status IN ('active', 'deleted')", name="knowledge_library_status"),
+        CheckConstraint("revision > 0 AND index_revision >= 0", name="knowledge_library_revision"),
+    )
+
+    library_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    index_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    published_index_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cleanup_refs: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    cleanup_pending: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class KnowledgeDocumentRow(SQLiteBase):
+    __tablename__ = "knowledge_document"
+    __table_args__ = (
+        Index("idx_knowledge_document_library_status", "library_id", "status"),
+        Index("idx_knowledge_document_library_sha", "library_id", "sha256"),
+        Index("uq_knowledge_document_live_sha", "library_id", "sha256", unique=True, sqlite_where=text("status = 'active'"), postgresql_where=text("status = 'active'")),
+        CheckConstraint("status IN ('active', 'deleted')", name="knowledge_document_status"),
+        CheckConstraint("revision > 0", name="knowledge_document_revision"),
+    )
+
+    document_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    library_id: Mapped[str] = mapped_column(Text, nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    authors: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    doi: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keywords: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    body_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    publication_state: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cleanup_refs: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    cleanup_pending: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class KnowledgeImportRow(SQLiteBase):
+    __tablename__ = "knowledge_import"
+    __table_args__ = (
+        Index("idx_knowledge_import_library_sha", "library_id", "sha256"),
+        Index("uq_knowledge_import_live_sha", "library_id", "sha256", unique=True, sqlite_where=text("status IN ('uploading', 'pending', 'processing', 'awaiting_review', 'failed', 'publishing')"), postgresql_where=text("status IN ('uploading', 'pending', 'processing', 'awaiting_review', 'failed', 'publishing')")),
+        Index("idx_knowledge_import_pending", "status", "claim_expires_at"),
+        CheckConstraint(
+            "status IN ('uploading', 'pending', 'processing', 'awaiting_review', 'failed', 'publishing', 'published', 'discarded')",
+            name="knowledge_import_status",
+        ),
+        CheckConstraint("revision > 0", name="knowledge_import_revision"),
+    )
+
+    import_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    library_id: Mapped[str] = mapped_column(Text, nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    body_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    replacement_document_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    document_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    authors: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    doi: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keywords: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    publication_state: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_expires_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    model_edition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cleanup_refs: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    cleanup_pending: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class LibraryGrantRow(SQLiteBase):
+    __tablename__ = "knowledge_library_grant"
+    __table_args__ = (
+        CheckConstraint("subject_type = 'user' AND role = 'reader'", name="knowledge_grant_subject_role"),
+        Index("idx_knowledge_grant_subject", "subject_type", "subject_id"),
+    )
+
+    library_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    subject_type: Mapped[str] = mapped_column(Text, primary_key=True)
+    subject_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ConversationKnowledgeSelectionRow(SQLiteBase):
+    __tablename__ = "conversation_knowledge_selection"
+    __table_args__ = (
+        CheckConstraint("mode IN ('auto', 'selected')", name="knowledge_selection_mode"),
+        CheckConstraint("revision > 0", name="knowledge_selection_revision"),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    library_ids: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class KnowledgeQueryScopeRow(SQLiteBase):
+    __tablename__ = "knowledge_query_scope"
+    __table_args__ = (
+        Index("idx_knowledge_scope_conversation", "conversation_id"),
+        CheckConstraint("mode IN ('auto', 'selected')", name="knowledge_scope_mode"),
+    )
+
+    root_message_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    selected_library_ids: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    candidate_library_ids: Mapped[list] = mapped_column(JSONText(), nullable=False)
