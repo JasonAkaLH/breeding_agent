@@ -6,7 +6,7 @@
 
 | 文档 | 范围 | 状态 |
 |---|---|---|
-| `docs/prd/backend/24-文献知识库原生CapabilityPRD.md` | 文献知识库跨端专题：用户账户设置中的管理页面、人工批量确认、只读共享和会话选库 | 需求已确认；PRD 待书面审阅，尚未实施 |
+| `docs/prd/backend/24-文献知识库原生CapabilityPRD.md` | 文献知识库跨端专题：用户账户设置中的管理页面、人工批量确认、只读共享和会话选库 | 需求已确认；已完成限定硬伤审阅与修订，尚未实施 |
 | `00-前端业务对话台PRD.md` | 基于当前后端能力的 v1 业务用户对话台：主代理 streaming、数据查询 Skill 表格预览、任务状态、取消与 artifacts 展示 | 草案 |
 | `deferred-message-upload/01-deferred-message-upload-prd.md` | 对话台文件先作为浏览器草稿附件，发送消息时再调用现有上传 API 并绑定 `metadata.upload_ids` | 已实施，待最终合并 |
 

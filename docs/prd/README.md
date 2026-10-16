@@ -7,7 +7,7 @@
 | 目录 | 范围 | 状态 |
 |---|---|---|
 | `docs/prd/backend/` | 后端统一Agent Loop、Skill runtime、LLM runtime、对话记忆、执行与API契约 | 当前正式基线；任务编排authority见`unified-agent-loop/` |
-| `docs/prd/backend/24-文献知识库原生CapabilityPRD.md` | 文献知识库原生 Capability、Markdown 入库审核、库级只读共享、会话选库及配套页面的完整产品合同 | 需求已确认；PRD 待书面审阅，尚未实施 |
+| `docs/prd/backend/24-文献知识库原生CapabilityPRD.md` | 文献知识库原生 Capability、Markdown 入库审核、库级只读共享、会话选库及配套页面的完整产品合同 | 需求已确认；已完成限定硬伤审阅与修订，尚未实施 |
 | `docs/prd/backend/postgresql-state-platform/` | PostgreSQL State Platform 防死锁、写队列、runtime integration 与 SQLite migration/cutover Phase PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/prompt-envelope/` | 大语言模型提示词信封、动态上下文预算、KV Cache 友好组装与多大语言模型调用档案分步 PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/unified-agent-loop/` | 统一同模型Agent Loop总纲与Phase 0～7实施依赖PRD：Model Contract、Agent Storage/Lease、Invocation/Skill/MCP、核心Loop、Continuation、API/Frontend、Clean Cutover和破坏性Schema删除 | `complete`；当前任务编排authority；r3/r4回滚备份保留到用户结束窗口 |
@@ -49,6 +49,7 @@
 - Skill 运行闭环 Workbench 分步 PRD：`docs/prd/backend/skill-workbench/README.md`。
 - 能力缺失 LLM fallback 披露兼容入口：`docs/prd/backend/23-能力缺失LLMFallback披露PRD.md`。
 - 文献知识库原生 Capability PRD：`docs/prd/backend/24-文献知识库原生CapabilityPRD.md`；同时定义账户设置中的管理入口和会话选库要求，前端索引引用同一专题。
+- 文献知识库完整实施计划：[2026-10-16-literature-knowledge-implementation-plan.md](../superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md)；覆盖 PRD 24 全部需求，当前仅计划，尚未实施。
 - 能力缺失 LLM fallback 披露分步 PRD：`docs/prd/backend/capability-missing-fallback/README.md`。
 - PostgreSQL State Platform 防死锁与写队列 Phase PRD：`docs/prd/backend/postgresql-state-platform/README.md`。
 - 大语言模型提示词信封分步 PRD：`docs/prd/backend/prompt-envelope/README.md`。
