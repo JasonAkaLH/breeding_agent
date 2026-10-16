@@ -43,7 +43,7 @@ _OUTCOMES = frozenset(
         "waiting",
     }
 )
-_CAPABILITY_KINDS = frozenset({"internal", "mcp", "skill", "unknown"})
+_CAPABILITY_KINDS = frozenset({"internal", "knowledge", "mcp", "skill", "unknown"})
 _REASON_KINDS = frozenset(
     {
         "cancel",
@@ -65,6 +65,7 @@ _RESULT_PROJECTION_MODES = frozenset(
         "artifact_persist_failed",
         "inline",
         "invalid",
+        "knowledge_reference",
         "projection_too_large",
         "reused",
         "transient_staged",
@@ -76,6 +77,7 @@ _RESULT_PROJECTION_ERRORS = {
     "artifact_persist_failed": "agent_result_artifact_persist_failed",
     "inline": None,
     "invalid": "agent_result_invalid",
+    "knowledge_reference": None,
     "projection_too_large": "agent_result_projection_too_large",
     "reused": None,
     "transient_staged": None,

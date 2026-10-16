@@ -173,6 +173,7 @@ class KnowledgeService:
         replacement_document_id: str | None = None,
     ) -> list[dict[str, Any]]:
         await self._run(self.access.require_permission, actor, library_id, "write")
+        started = time.perf_counter()
         results = []
         for filename, raw in uploads:
             try:
@@ -181,6 +182,7 @@ class KnowledgeService:
             except KnowledgeError as exc:
                 results.append({"filename": filename, "status": "failed", "error": exc.code})
         self._wake.set()
+        logger.info("knowledge_upload_batch_completed", extra={"library_id": library_id, "count": len(results), "status": "processed", "duration_ms": round((time.perf_counter() - started) * 1000)})
         return results
 
     def _upload(
@@ -252,9 +254,11 @@ class KnowledgeService:
                       for key, field in LiteratureMetadata.model_fields.items()}
             merged.update(metadata)
             fields = validate_metadata(merged)
-            return _public(self.repository.update_import(
+            result = _public(self.repository.update_import(
                 import_id, expected_revision, **fields, status="awaiting_review", error=None,
             ))
+            logger.info("knowledge_review_saved", extra={"import_id": import_id, "status": result["status"]})
+            return result
         return await self._run(edit)
 
     async def retry_import(
@@ -294,6 +298,7 @@ class KnowledgeService:
             return _public(self.repository.get_import(import_id))
         result = await self._run(confirm)
         self._wake.set()
+        logger.info("knowledge_confirmation_processed", extra={"import_id": import_id, "status": result["status"]})
         return result
 
     async def batch_confirm(
@@ -408,7 +413,9 @@ class KnowledgeService:
         def grant() -> dict[str, Any]:
             self.access.require_permission(actor, library_id, "write")
             return _public(self.repository.grant(library_id, subject_id, subject_type, role))
-        return await self._run(grant)
+        result = await self._run(grant)
+        logger.info("knowledge_grant_saved", extra={"library_id": library_id, "status": "reader", "count": 1})
+        return result
 
     async def revoke_grant(self, actor: str, library_id: str, grant_id: str) -> dict[str, Any]:
         def revoke() -> dict[str, Any]:
@@ -470,6 +477,7 @@ class KnowledgeService:
         for ref in item.get("cleanup_refs", []):
             self.files.delete_body(ref)
         self.repository.finish_import_cleanup(item["import_id"], item["revision"])
+        logger.info("knowledge_import_cleanup_completed", extra={"import_id": item["import_id"], "status": "complete", "count": len(item.get("cleanup_refs", []))})
 
     async def delete_document(
         self, actor: str, library_id: str, document_id: str, *, expected_revision: int | None = None,
@@ -492,6 +500,7 @@ class KnowledgeService:
         for ref in item.get("cleanup_refs", []):
             self.files.delete_body(ref)
         self.repository.finish_document_cleanup(item["document_id"], item["revision"])
+        logger.info("knowledge_document_cleanup_completed", extra={"document_id": item["document_id"], "status": "complete", "count": len(item.get("cleanup_refs", []))})
 
     async def delete_library(
         self, actor: str, library_id: str, *, expected_revision: int | None = None,
@@ -513,6 +522,7 @@ class KnowledgeService:
         self.files.delete_library_files(library_id)
         current = self.repository.get_library(library_id)
         self.repository.finish_library_cleanup(library_id, current["revision"])
+        logger.info("knowledge_library_cleanup_completed", extra={"library_id": library_id, "status": "complete"})
 
     async def process_pending(self) -> None:
         await self._run(self._recover_pending)
@@ -521,6 +531,7 @@ class KnowledgeService:
             if item is None:
                 return
             heartbeat = asyncio.create_task(self._renew_claim(item))
+            started = time.perf_counter()
             try:
                 if self.extractor is None:
                     raise KnowledgeError("knowledge_extractor_unavailable")
@@ -532,7 +543,9 @@ class KnowledgeService:
                 metadata = dict(result)
                 model = metadata.pop("extraction_model", None)
                 fields = validate_metadata(metadata)
-                await self._run(self._finish_extraction, item, fields, model)
+                completed = await self._run(self._finish_extraction, item, fields, model)
+                if completed:
+                    logger.info("knowledge_extraction_completed", extra={"import_id": item["import_id"], "status": "awaiting_review", "duration_ms": round((time.perf_counter() - started) * 1000)})
             except asyncio.CancelledError:
                 await self._run(self._fail_extraction, item, "pending", None)
                 raise
@@ -554,16 +567,17 @@ class KnowledgeService:
             if not renewed:
                 return
 
-    def _finish_extraction(self, item: Mapping[str, Any], fields: Mapping[str, Any], model: str | None) -> None:
+    def _finish_extraction(self, item: Mapping[str, Any], fields: Mapping[str, Any], model: str | None) -> bool:
         library = self.repository.get_library(item["library_id"])
         current = self.repository.get_import(item["import_id"])
         if (not library or library["status"] != "active" or not current or current["status"] != "processing"
                 or current.get("claim_token") != item.get("claim_token") or current["sha256"] != item["sha256"]):
-            return
+            return False
         self.repository.update_import(
             item["import_id"], item["revision"], **fields, status="awaiting_review", model_edition=model,
             claim_token=item.get("claim_token"), error=None,
         )
+        return True
 
     def _fail_extraction(self, item: Mapping[str, Any], status: str, error: str | None) -> None:
         current = self.repository.get_import(item["import_id"])

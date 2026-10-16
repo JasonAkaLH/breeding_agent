@@ -83,6 +83,32 @@ class KnowledgeServiceTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(KnowledgeError):
             await self.service.add_grant("alice", self.library_id, "team1", subject_type="team")
 
+    async def test_success_logs_expose_states_counts_and_duration_without_reference_text(self):
+        raw = b"# PRIVATE_BODY_MARKER\nconfidential experimental details"
+        with self.assertLogs("src.capabilities.knowledge.service", level="INFO") as captured:
+            draft = await self.draft(raw)
+            reviewed = await self.service.edit_import(
+                "alice", self.library_id, draft["import_id"],
+                {"title": "PRIVATE_TITLE_MARKER", "summary": "PRIVATE_SUMMARY_MARKER"},
+                expected_revision=draft["revision"],
+            )
+            published = await self.service.confirm_import(
+                "alice", self.library_id, draft["import_id"], expected_revision=reviewed["revision"],
+            )
+            await self.service.add_grant("alice", self.library_id, "bob")
+            await self.service.delete_document("alice", self.library_id, published["document_id"])
+        records = {record.msg: record for record in captured.records}
+        self.assertEqual(records["knowledge_upload_batch_completed"].count, 1)
+        self.assertGreaterEqual(records["knowledge_extraction_completed"].duration_ms, 0)
+        self.assertEqual(records["knowledge_extraction_completed"].status, "awaiting_review")
+        self.assertEqual(records["knowledge_review_saved"].status, "awaiting_review")
+        self.assertEqual(records["knowledge_confirmation_processed"].status, "published")
+        self.assertEqual(records["knowledge_grant_saved"].status, "reader")
+        self.assertEqual(records["knowledge_document_cleanup_completed"].status, "complete")
+        serialized_records = str([record.__dict__ for record in captured.records])
+        for private_value in ("PRIVATE_BODY_MARKER", "PRIVATE_TITLE_MARKER", "PRIVATE_SUMMARY_MARKER", "paper.md", str(self.files.root_dir)):
+            self.assertNotIn(private_value, serialized_records)
+
     async def test_dedup_batch_cross_library_and_byte_identity(self):
         raw = b"# A\r\nx"
         items = await self.service.upload_imports("alice", self.library_id, [("a.md", raw), ("other.md", raw), ("a.txt", b"bad"), ("a.md", b"# A\nx")])

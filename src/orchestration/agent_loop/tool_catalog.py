@@ -22,6 +22,7 @@ class CapabilityVisibilityContext:
     pinned_skill_bundle_revision: str | None = None
     safe_mcp_server_profiles: tuple[UserMCPServerProfile, ...] = ()
     public_capability_allowlist: frozenset[str] | None = None
+    knowledge_scope: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.authenticated_owner_scope.strip():
@@ -111,7 +112,9 @@ class AgentToolCatalogBuilder:
             else self._policies
         )
         for descriptor in self._registry.list_for_visibility(context, public_only=True):
-            if descriptor.kind != "skill" and descriptor.capability_id != "mcp.dispatch":
+            if descriptor.kind not in {"skill", "knowledge"} and descriptor.capability_id != "mcp.dispatch":
+                continue
+            if descriptor.kind == "knowledge" and context.knowledge_scope is None:
                 continue
             policy = available_policies.get(descriptor.capability_id)
             if not isinstance(policy, CapabilityInvocationPolicy):
@@ -135,6 +138,25 @@ class AgentToolCatalogBuilder:
 def default_agent_invocation_policy(
     descriptor: CapabilityDescriptor,
 ) -> CapabilityInvocationPolicy | None:
+    if descriptor.kind == "knowledge":
+        fields = ["cursor"]
+        required: list[str] = []
+        if descriptor.capability_id != "knowledge.list_libraries":
+            fields.append("library_id")
+            required.append("library_id")
+        if descriptor.capability_id == "knowledge.read_document":
+            fields.append("document_id")
+            required.append("document_id")
+        if descriptor.capability_id not in {
+            "knowledge.list_libraries", "knowledge.read_index", "knowledge.read_document"
+        }:
+            return None
+        return CapabilityInvocationPolicy(
+            model_allowed_fields=tuple(fields),
+            input_schema={"type": "object", "properties": {
+                key: {"type": "string", "minLength": 1} for key in fields
+            }, "required": required, "additionalProperties": False},
+        )
     if descriptor.kind == "skill" or descriptor.source == "skill":
         return CapabilityInvocationPolicy(
             model_allowed_fields=("query",),

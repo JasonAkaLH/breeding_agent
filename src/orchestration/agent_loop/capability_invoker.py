@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
@@ -43,6 +44,7 @@ from .result_projection import (
 )
 from .runner import AgentCallExecution
 from .transient_results import AgentTransientSkillResultStage
+from .knowledge_results import KNOWLEDGE_CAPABILITY_IDS
 
 
 @dataclass(slots=True)
@@ -105,6 +107,7 @@ class AgentCapabilityInvoker:
         result_projection_observer: Callable[..., Any] | None = None,
         metrics_recorder: AgentMetricsRecorder | None = None,
         invocation_hook: Callable[..., Any] | None = None,
+        knowledge_result_budget_loader: Callable[..., Any] | None = None,
     ) -> None:
         self._invocation = invocation_service
         self._runs = runs
@@ -120,6 +123,7 @@ class AgentCapabilityInvoker:
         self._observe_result_projection = result_projection_observer
         self._metrics = metrics_recorder
         self._invocation_hook = invocation_hook
+        self._knowledge_result_budget_loader = knowledge_result_budget_loader
 
     async def resume(
         self,
@@ -203,7 +207,7 @@ class AgentCapabilityInvoker:
                 AgentCallOutcomeStatus.ABORTED,
                 safe_error_code="agent_invocation_projection_missing",
             )
-        if allow_result_reuse:
+        if allow_result_reuse and capability_id not in KNOWLEDGE_CAPABILITY_IDS:
             try:
                 reuse_receipt = await self._reuse_completed_result(
                     run=run,
@@ -230,6 +234,21 @@ class AgentCapabilityInvoker:
         metadata = dict(self._load_metadata(run))
         metadata["agent_run_id"] = run.run_id
         metadata["agent_model_edition"] = run.binding.model_edition
+        if capability_id in KNOWLEDGE_CAPABILITY_IDS:
+            metadata["knowledge_provider_call_id"] = call.call_id
+            if self._knowledge_result_budget_loader is not None:
+                page_budget = self._knowledge_result_budget_loader(run, call_item)
+                if hasattr(page_budget, "__await__"):
+                    page_budget = await page_budget
+                metadata["knowledge_result_token_budget"] = page_budget
+            else:
+                items = await self._runs.list_items(run.run_id)
+                user = next((item for item in items if item.sequence == 1 and item.kind is AgentItemKind.USER_MESSAGE), None)
+                budget_payload = json.loads(user.payload_json).get("context_budget") if user is not None else None
+                if budget_payload is not None:
+                    budget = AgentContextBudget.from_payload(budget_payload)
+                    batch_size = sum(item.kind is AgentItemKind.TOOL_CALL and item.parent_item_id == call_item.parent_item_id for item in items)
+                    metadata["knowledge_result_token_budget"] = max(1, min(50_000, budget.total_context_limit_tokens // 2 // max(1, batch_size)))
         if self._activate_delegated_skill is not None and capability_id.startswith(
             "skill."
         ):
@@ -341,6 +360,7 @@ class AgentCapabilityInvoker:
 
             return await lease_handle.run_ownership_bound(run_with_current)
 
+        invocation_started = time.monotonic()
         result = await self._invocation.invoke(
             invocation_request,
             node,
@@ -387,6 +407,10 @@ class AgentCapabilityInvoker:
             status = AgentCallOutcomeStatus.ABORTED
         else:
             status = AgentCallOutcomeStatus.FAILED
+        if capability_id in KNOWLEDGE_CAPABILITY_IDS and self._metrics is not None:
+            self._metrics.record("agent_tool_calls_total", capability_kind="knowledge", outcome=status.value)
+            self._metrics.record("agent_tool_call_duration_seconds", max(0.0, time.monotonic() - invocation_started),
+                                 capability_kind="knowledge")
         continuation_locator = None
         if status in {
             AgentCallOutcomeStatus.WAITING_FOR_INPUT,
@@ -762,7 +786,9 @@ class AgentCapabilityInvoker:
                 projection_mode = str(projection.projection_mode or "")
             safe_result = projection.safe_result_payload
             projected_size = (
-                safe_result.get("projected_size_bytes", 0)
+                canonicalize_agent_payload(dict(safe_result)).size_bytes
+                if capability_id in KNOWLEDGE_CAPABILITY_IDS and isinstance(safe_result, Mapping)
+                else safe_result.get("projected_size_bytes", 0)
                 if isinstance(safe_result, Mapping)
                 else 0
             )
@@ -860,6 +886,8 @@ def _committed_completed_result_payload(
 
 
 def _capability_kind(capability_id: str) -> str:
+    if capability_id in KNOWLEDGE_CAPABILITY_IDS:
+        return "knowledge"
     if capability_id == "mcp.dispatch":
         return "mcp"
     if capability_id.startswith("skill."):

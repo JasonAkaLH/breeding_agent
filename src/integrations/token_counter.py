@@ -4,6 +4,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
 from typing import Any
 
 import httpx
@@ -230,7 +231,7 @@ def _split_cached_counts(texts: Sequence[str], settings: _TokenizationSettings) 
     assert settings.base_url is not None and settings.model is not None
     base_url = settings.base_url.rstrip("/")
     for index, text in enumerate(texts):
-        key = (base_url, settings.model, text)
+        key = (base_url, settings.model, hashlib.sha256(text.encode("utf-8")).hexdigest())
         cached_value = _TOKENIZATION_CACHE.get(key)
         if cached_value is not None:
             _TOKENIZATION_CACHE.move_to_end(key)
@@ -256,7 +257,10 @@ def _merge_remote_counts(
     for index, text, count in zip(missing_indexes, missing_texts, counts, strict=True):
         parsed = int(count)
         cached[index] = parsed
-        _cache_token_count((base_url, settings.model, text), parsed)
+        _cache_token_count(
+            (base_url, settings.model, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+            parsed,
+        )
 
 
 def _cache_token_count(key: tuple[str, str, str], count: int) -> None:

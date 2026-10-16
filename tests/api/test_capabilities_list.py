@@ -66,6 +66,9 @@ entrypoints:
             capability_ids,
             {
                 "skill.generic_data_lookup",
+                "knowledge.list_libraries",
+                "knowledge.read_index",
+                "knowledge.read_document",
             },
         )
         self.assertNotIn("legacy.query", capability_ids)

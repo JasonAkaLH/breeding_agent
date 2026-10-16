@@ -38,7 +38,7 @@ async function page(t,url='http://localhost:8000/api-doc') {
 
 for(const [url,base] of [['http://host.example:8000/api-doc','http://host.example:8000'],['https://host.example/seedpilot/api-doc','https://host.example/seedpilot'],['https://host.example/seedpilot/api-doc/','https://host.example/seedpilot'],['file:///tmp/api-doc.html','http://127.0.0.1:8000']]) {
   test('document hydrates and resolves its own links at '+url,async t=>{
-    const p=await page(t,url);assert.equal(p.document.querySelectorAll('.endpoint').length,33);assert.equal(p.document.querySelectorAll('.schema').length,60);
+    const p=await page(t,url);assert.equal(p.document.querySelectorAll('.endpoint').length,57);assert.equal(p.document.querySelectorAll('.schema').length,70);
     assert.equal(p.document.querySelector('#base-url').value,base);
     for(const a of p.document.querySelectorAll('[data-doc-link]'))assert.equal(a.href,new URL(base+'/'+a.dataset.docLink).href);
     assert.ok(p.document.querySelector('#request-op-post-api-v1-auth-login').textContent.includes(base+'/api/v1/auth/login'));
@@ -60,7 +60,7 @@ test('search, category, schema navigation and deep links reveal complete details
   p.input('#endpoint-search','SSE');assert.equal(visible()[0].id,'op-get-api-v1-tasks-task-id-events');
   p.input('#endpoint-search','POST routing_mode');assert.equal(visible().length,1);assert.ok(visible()[0].textContent.includes('提交消息'));
   p.input('#group-filter','auth','change');assert.equal(visible().length,0);assert.equal(p.document.querySelector('#empty-results').hidden,false);
-  p.document.querySelector('a[href="#op-post-api-v1-auth-login"]').click();assert.equal(p.document.querySelector('#op-post-api-v1-auth-login').open,true);assert.equal(visible().length,33);
+  p.document.querySelector('a[href="#op-post-api-v1-auth-login"]').click();assert.equal(p.document.querySelector('#op-post-api-v1-auth-login').open,true);assert.equal(visible().length,57);
   p.document.querySelector('#collapse-all').click();assert.equal(p.document.querySelectorAll('.endpoint[open]').length,0);
   p.input('#schema-search','missing-schema');
   p.document.querySelector('a[href="#schema-AuthTokenResponse"]').click();assert.equal(p.document.querySelector('#schema-AuthTokenResponse').hidden,false);assert.equal(p.document.querySelector('#schema-AuthTokenResponse').open,true);
@@ -73,6 +73,26 @@ test('every generated fetch example parses as TypeScript',async t=>{
   }
   assert.ok(p.document.querySelector('#op-get-api-v1-tasks-task-id-events').textContent.includes('SSE 事件流'));
   assert.ok(p.document.querySelector('#op-delete-api-v1-mcp-servers-server-id').textContent.includes('UserMCPDeletePendingResponse'));
+});
+test('knowledge examples preserve multipart fields and read Markdown as text',async t=>{
+  const p=await page(t);
+  p.input('#group-filter','knowledge','change');
+  assert.equal([...p.document.querySelectorAll('.endpoint')].filter(x=>!x.hidden).length,24);
+  const upload=p.document.querySelector('#request-op-post-api-v1-knowledge-libraries-library-id-imports').textContent;
+  assert.ok(upload.includes("form.append('files', file)"));
+  assert.ok(upload.includes('replacement_document_id'));
+  assert.ok(!upload.includes("'Content-Type':"));
+  const content=p.document.querySelector('#request-op-get-api-v1-knowledge-libraries-library-id-documents-document-id-content').textContent;
+  assert.ok(content.includes('/library_example/documents/document_example/content?download=false'));
+  assert.ok(content.includes('await response.text()'));
+  assert.ok(!content.includes('response.json()'));
+  const preview=p.document.querySelector('#op-get-api-v1-knowledge-libraries-library-id-imports-import-id-content').textContent;
+  assert.ok(preview.includes('Markdown 文本流'));
+  p.input('#code-language','curl','change');
+  const curl=p.document.querySelector('#request-op-post-api-v1-knowledge-libraries-library-id-imports').textContent;
+  assert.ok(curl.includes("-F 'files=@/path/to/paper.md'"));
+  assert.ok(!curl.includes('conversation_id='));
+  for(const code of p.document.querySelectorAll('[id^="request-op-"]'))assert.ok(!code.textContent.includes('/undefined'));
 });
 test('SSE decoder handles UTF-8 and CRLF across single-byte boundaries and multiline data',async()=>{
   const api=loadExample();const expected=event('agent.reasoning_delta');expected.payload={delta:'中文🌾',ordinal:0,sample_id:'sample1'};
