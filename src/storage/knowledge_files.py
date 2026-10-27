@@ -30,7 +30,7 @@ def _fsync(directory: Path) -> None:
 
 
 class KnowledgeFileStore:
-    """Private, independent Markdown files. References never contain host paths."""
+    """Private source and Markdown files. References never contain host paths."""
 
     def __init__(self, root_dir: str | Path) -> None:
         self._root_dir = Path(root_dir).absolute()
@@ -41,10 +41,10 @@ class KnowledgeFileStore:
         return self._root_dir
 
     @staticmethod
-    def build_reference(library_id: str, resource_id: str, sha256: str) -> str:
-        if not _SHA.fullmatch(sha256):
+    def build_reference(library_id: str, resource_id: str, sha256: str, extension: str = "md") -> str:
+        if not _SHA.fullmatch(sha256) or extension not in {"md", "pdf"}:
             raise ValueError("invalid_knowledge_sha256")
-        return f"{_component(library_id)}/{_component(resource_id)}/{sha256}.md"
+        return f"{_component(library_id)}/{_component(resource_id)}/{sha256}.{extension}"
 
     body_ref = build_reference
 
@@ -64,10 +64,11 @@ class KnowledgeFileStore:
 
     def _body_path(self, body_ref: str, *, create: bool = False) -> Path:
         parts = body_ref.split("/") if isinstance(body_ref, str) else []
-        if len(parts) != 3 or not parts[2].endswith(".md"):
+        if len(parts) != 3 or not parts[2].endswith((".md", ".pdf")):
             raise ValueError("invalid_knowledge_reference")
         library_id, resource_id, name = parts
-        expected = self.build_reference(library_id, resource_id, name[:-3])
+        stem, extension = name.rsplit(".", 1)
+        expected = self.build_reference(library_id, resource_id, stem, extension)
         if expected != body_ref:
             raise ValueError("invalid_knowledge_reference")
         directory = self._root_dir
@@ -92,11 +93,12 @@ class KnowledgeFileStore:
                 raise ValueError("knowledge_file_permissions")
             return source.read()
 
-    def _put_body(self, library_id: str, resource_id: str, raw: bytes) -> dict:
+    def _put_body(self, library_id: str, resource_id: str, raw: bytes, extension: str = "md") -> dict:
         # Decode validates UTF-8 without rewriting BOM, newline or Unicode bytes.
-        raw.decode("utf-8-sig")
+        if extension == "md":
+            raw.decode("utf-8-sig")
         sha256 = hashlib.sha256(raw).hexdigest()
-        body_ref = self.build_reference(library_id, resource_id, sha256)
+        body_ref = self.build_reference(library_id, resource_id, sha256, extension)
         path = self._body_path(body_ref, create=True)
         if (path.parent.parent / ".deleted").exists() or (
             path.parent / f".{sha256}.deleted"
@@ -127,9 +129,9 @@ class KnowledgeFileStore:
                 os.unlink(temporary)
         return {"body_ref": body_ref, "sha256": sha256, "size_bytes": len(raw)}
 
-    def put_body(self, library_id: str, resource_id: str, raw: bytes) -> dict:
+    def put_body(self, library_id: str, resource_id: str, raw: bytes, extension: str = "md") -> dict:
         with self._index_lock(library_id):
-            return self._put_body(library_id, resource_id, raw)
+            return self._put_body(library_id, resource_id, raw, extension)
 
     def read_body(self, body_ref: str, sha256: str | None = None) -> bytes:
         path = self._body_path(body_ref)

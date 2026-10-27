@@ -16,6 +16,7 @@ LEGACY_AUTH_TABLES = (
 
 
 def bootstrap_sqlite_database(engine: Engine) -> None:
+    _migrate_knowledge_parsed_body_columns(engine)
     _migrate_mcp_result_authority_columns(engine)
     _prepare_empty_mcp_dispatch_aggregate_cutover(engine)
     _migrate_username_owner_columns(engine)
@@ -32,6 +33,18 @@ def bootstrap_sqlite_database(engine: Engine) -> None:
     _drop_legacy_auth_tables(engine)
     SQLiteBase.metadata.create_all(engine)
     _ensure_cp7_mutation_triggers(engine)
+
+
+def _migrate_knowledge_parsed_body_columns(engine: Engine) -> None:
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        for table in ("knowledge_import", "knowledge_document"):
+            if not inspector.has_table(table):
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table)}
+            for column in ("parsed_body_ref", "parsed_body_sha256"):
+                if column not in columns:
+                    connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} TEXT"))
 
 
 def _prepare_empty_mcp_dispatch_aggregate_cutover(engine: Engine) -> None:

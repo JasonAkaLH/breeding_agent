@@ -11,6 +11,20 @@ from src.storage.knowledge_files import KnowledgeFileStore
 
 
 class KnowledgeFilesTest(unittest.TestCase):
+    def test_pdf_and_text_are_independent_private_files(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        source = self.store.put_body("one", "draft", text_pdf("Body"), "pdf")
+        text = self.store.put_body("one", "draft", b"Body", "md")
+        self.assertTrue(source["body_ref"].endswith(".pdf"))
+        self.store.delete_body(source["body_ref"])
+        self.assertEqual(self.store.read_body(text["body_ref"]), b"Body")
+        with self.assertRaises(ValueError):
+            self.store.put_body("one", "draft", text_pdf("Body"), "pdf")
+        self.store.delete_library_files("one")
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_body(text["body_ref"])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.store = KnowledgeFileStore(Path(self.directory.name) / "knowledge")

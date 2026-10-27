@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-10-27：双格式实施检查点 A：固定 pypdf==6.21.2（BSD-3-Clause），新增本地逐页文字层解析、明确失败与内部资源上限、私有 PDF/Markdown 文件引用、两张知识库表的 nullable 解析列、旧 SQLite 幂等增列及 PostgreSQL schema v13。解析/文件/schema 定向回归通过；无 OCR、新服务或部署。后续领域/API/页面与真实评测证据由同日实施记录接续。
+
 - 2026-10-27：基于用户确认的双格式设计和 `main@9aba682` 新增文献知识库完整交付接续实施计划；明确原件/阅读正文/版本哈希、两表 nullable 解析字段、SQLite 增列与 PostgreSQL v13、claim/CAS 双文件清理、原件下载与 Markdown 导出、页面和 Agent 实际请求、全部 AC-01～AC-33 与真实环境验收。原计划第 8 节保留设计摘要并统一指向接续计划；同步 PRD、证据范围及 Future Work。仅文档，未修改业务代码、数据库、依赖或部署。License Requirement：后续计划采用 BSD-3-Clause 的 pypdf，本次未安装。
 
 - 2026-10-27：按用户确认将文献库输入扩展为 Markdown 与文字型 PDF，扫描版暂不处理；补充原件保留、解析 Markdown、原始字节 SHA-256 判重、人工审核、双文件替换清理与 AC-30～AC-33。实施计划第 8 节列出本地解析、兼容 schema、下载接口、页面与回归方案；同步索引并明确既有证据仅覆盖 Markdown。本次仅文档，未修改业务代码、数据库、依赖或部署。License Requirement：方案拟采用 BSD-3-Clause 的 pypdf，当前未安装依赖。
