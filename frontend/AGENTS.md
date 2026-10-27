@@ -30,6 +30,7 @@
 
 ## Verification
 
+- For concurrent user manual acceptance, serve a completed build with `npm run preview` and the existing local API proxy. Keep that preview separate from development HMR so source edits do not interrupt the user's page or confound flicker reports.
 - Run focused component/parser/runtime tests before the full frontend suite.
 - Knowledge changes additionally cover `src/api/knowledgeClient.test.ts`, `src/components/KnowledgeSettingsPanel.test.tsx`, `src/hooks/useKnowledgeSelection.test.tsx`, and selection/submit races in `src/App.test.tsx`.
 - For CP7 terminal or MCP result-Artifact projection changes, run `src/api/taskEvents.test.ts`, `src/domain/taskEvents.test.ts`, `src/components/MCPRuntimeStatus.test.tsx`, and the restore/replay cases in `src/App.test.tsx`.
