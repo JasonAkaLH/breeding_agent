@@ -138,6 +138,52 @@ class _ReadingModel:
 
 
 class KnowledgeFlowE2ETest(E2EAPITestCase):
+    async def test_missing_citations_are_repaired_before_publication_without_tool_replay(self):
+        await self._configure()
+        library_id = await self._create_library()
+        document_id = await self._publish(library_id, (EARLY_FACT + "\n" + TAIL_FACT).encode())
+        model = self._bind_reading_model(library_id, document_id)
+        sample = model.sample_agent
+        bad = "UNCITED_CANDIDATE_SHOULD_NOT_PERSIST"
+        repairs = []
+        async def missing_once(request):
+            result = await sample(request)
+            if ":knowledge-answer-" in request.request_id:
+                repairs.append(request)
+            elif not result.tool_calls and result.visible_text == ANSWER:
+                return model._sample(request, text=bad)
+            return result
+        model.sample_agent = missing_once
+        task_id = await self._ask(library_id, "conv-citation-repair")
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(sum(len(request.tools) > 0 for request in repairs), 1)
+        run = await self.runtime.agent_task_projection.get_agent_run(task_id)
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        self.assertNotIn(bad, "".join(item.payload_json for item in items))
+        self.assertEqual(sum(item.kind is AgentItemKind.TOOL_CALL for item in items), 3)
+
+    async def test_invalid_citation_repair_is_bounded_and_never_published(self):
+        await self._configure()
+        library_id = await self._create_library()
+        document_id = await self._publish(library_id, (EARLY_FACT + "\n" + TAIL_FACT).encode())
+        model = self._bind_reading_model(library_id, document_id)
+        sample = model.sample_agent
+        repairs = []
+        bad = "INVALID_CITATION_MUST_NOT_PERSIST"
+        async def invalid_final(request):
+            result = await sample(request)
+            if ":knowledge-answer-" in request.request_id:
+                repairs.append(request)
+            return result if result.tool_calls else model._sample(request, text=bad)
+        model.sample_agent = invalid_final
+        task_id = await self._ask(library_id, "conv-citation-exhausted", expected_status="failed")
+        self.assertEqual(len(repairs), 2)
+        run = await self.runtime.agent_task_projection.get_agent_run(task_id)
+        self.assertEqual(run.terminal_reason_code, "knowledge_answer_citation_invalid")
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        self.assertNotIn(bad, "".join(item.payload_json for item in items))
+        self.assertEqual(sum(item.kind is AgentItemKind.TOOL_CALL for item in items), 3)
+
     async def _configure(self, *, context_window: int = 1_024_000) -> None:
         config = test_llm_config()
         config["model_editions"]["options"][0]["trim_max_tokens"] = context_window
@@ -212,7 +258,7 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         runner._compaction_service._model = model
         return model
 
-    async def _ask(self, library_id: str, conversation_id: str):
+    async def _ask(self, library_id: str, conversation_id: str, *, expected_status="completed"):
         selected = await self.client.put(
             f"/api/v1/conversations/{conversation_id}/knowledge-selection",
             json={"mode": "selected", "library_ids": [library_id]},
@@ -228,7 +274,7 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         )
         self.assertEqual(response.status_code, 202, response.text)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"], timeout=20)
-        self.assertEqual(terminal["status"], "completed", terminal)
+        self.assertEqual(terminal["status"], expected_status, terminal)
         return response.json()["task_id"]
 
     @staticmethod
@@ -400,8 +446,15 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
             "libraries": [{"id": "rice", "name": "Light experiments", "documents": [{"id": "paper1", "path": "paper.pdf"}, {"id": "same-source", "path": "paper.pdf"}]}],
             "questions": [{"id": "q1", "text": "Report full-text experimental results", "library_ids": ["rice"], "expected_document_ids": ["paper1"], "expected_facts": ["17", "23"]}],
         }))
-        with patch("src.api.runtime.build_api_runtime", return_value=self.runtime):
-            report = await evaluate(SimpleNamespace(config="unused.yaml", timeout=10), load_manifest(manifest_file))
+        import yaml
+        config_file = self.workspace / "eval-config.yaml"
+        config_text = yaml.safe_dump(test_llm_config())
+        config_file.write_text(config_text)
+        with patch("src.api.runtime.build_api_runtime", return_value=self.runtime) as build:
+            report = await evaluate(SimpleNamespace(config=str(config_file), timeout=10, context_window=16000), load_manifest(manifest_file))
+        self.assertEqual(build.call_args.kwargs["main_agent_llm_config"]["model_editions"]["options"][0]["trim_max_tokens"], 16000)
+        self.assertNotIn("main_agent_llm_config_path", build.call_args.kwargs)
+        self.assertEqual(config_file.read_text(), config_text)
         result = report["results"][0]
         self.assertEqual(report["ingestion_model_calls"], 1)
         self.assertEqual(result["status"], "completed")
@@ -410,6 +463,7 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         self.assertTrue(result["expected_documents_completely_read"])
         self.assertTrue(result["expected_facts_present"], result)
         self.assertTrue(result["expected_bibliographic_titles_present"])
+        self.assertTrue(result["citation_format_valid"])
         self.assertFalse(result["all_usage_available"])
         self.assertEqual(result["model_calls"], 4)
         rendered = json.dumps(report)

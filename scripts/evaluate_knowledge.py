@@ -26,6 +26,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+class EvaluationFailure(Exception):
+    def __init__(self, phase: str, code: str):
+        self.report = {"error": "knowledge_evaluation_failed", "phase": phase, "code": code,
+                       "private_details_omitted": True}
+        super().__init__(code)
+
+
 def load_manifest(path: Path) -> dict:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or set(manifest) != {"libraries", "questions"}:
@@ -75,15 +82,20 @@ class _MeasuredModel:
 
     async def sample_agent(self, request):
         started = time.perf_counter()
-        result = await self.delegate.sample_agent(request)
-        self.calls.append({
-            "compaction": request.request_id.startswith("agent-compaction:"),
-            "seconds": round(time.perf_counter() - started, 3),
-            "prompt_tokens": result.usage.prompt_tokens,
-            "completion_tokens": result.usage.completion_tokens,
-            "usage_status": result.usage.status,
-        })
-        return result
+        result = None
+        try:
+            result = await self.delegate.sample_agent(request)
+            return result
+        finally:
+            self.calls.append({
+                "compaction": request.request_id.startswith("agent-compaction:"),
+                "citation_repair": ":knowledge-answer-" in request.request_id,
+                "seconds": round(time.perf_counter() - started, 3),
+                "prompt_tokens": result.usage.prompt_tokens if result else None,
+                "completion_tokens": result.usage.completion_tokens if result else None,
+                "usage_status": result.usage.status if result else "unavailable",
+                "status": "returned" if result else "failed",
+            })
 
 
 async def evaluate(args, manifest: dict) -> dict:
@@ -93,15 +105,24 @@ async def evaluate(args, manifest: dict) -> dict:
     from src.api.runtime import build_api_runtime
     from src.core.enums import MessageRole
     from src.orchestration.agent_loop.models import AgentItemKind
+    from src.orchestration.agent_loop.knowledge_answers import source_answer_error
 
     with tempfile.TemporaryDirectory(prefix="knowledge-evaluation-") as temporary:
         root = Path(temporary)
         # Explicitly isolate evaluation from any configured application database and Sidecar.
         with patch.dict("os.environ", {"MAF_STATE_STORE_BACKEND": "sqlite", "MAF_RUST_RUNTIME_STORE_MODE": "off"}):
+            model_config = {"main_agent_llm_config_path": Path(args.config)}
+            if getattr(args, "context_window", None) is not None:
+                import yaml
+
+                config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+                for option in config.get("model_editions", {}).get("options", []):
+                    option["trim_max_tokens"] = args.context_window
+                model_config = {"main_agent_llm_config": config}
             runtime = build_api_runtime(
                 database_path=root / "evaluation.sqlite", audit_log_path=root / "audit.jsonl",
                 master_key_bytes=os.urandom(32),
-                knowledge_store_path=root / "knowledge", main_agent_llm_config_path=Path(args.config),
+                knowledge_store_path=root / "knowledge", **model_config,
                 skill_roots=[], enable_conversation_memory=False,
                 enable_conversation_title_llm=False,
                 enable_user_mcp=False, enable_user_mcp_routing=False,
@@ -111,14 +132,20 @@ async def evaluate(args, manifest: dict) -> dict:
             owner = "knowledge-evaluation"
             library_map, document_map, titles = {}, {}, {}
             extraction_calls = []
+            extraction_failure = None
             llm_runtime = runtime.knowledge_service.extractor.llm_runtime
             generate_text = llm_runtime.generate_text
 
             async def measured_extraction(*args, **kwargs):
+                nonlocal extraction_failure
                 call_started = time.perf_counter()
-                result = await generate_text(*args, **kwargs)
-                extraction_calls.append(round(time.perf_counter() - call_started, 3))
-                return result
+                try:
+                    return await generate_text(*args, **kwargs)
+                except Exception:
+                    extraction_failure = "provider_call_failed"
+                    raise
+                finally:
+                    extraction_calls.append(round(time.perf_counter() - call_started, 3))
 
             llm_runtime.generate_text = measured_extraction
             ingestion_started = time.perf_counter()
@@ -134,11 +161,12 @@ async def evaluate(args, manifest: dict) -> dict:
                         titles[document["id"]] = imported["title"]
                         continue
                     if "import_id" not in imported:
-                        raise ValueError("knowledge_evaluation_upload_failed")
+                        raise EvaluationFailure("upload", "upload_failed")
+                    extraction_failure = None
                     await runtime.knowledge_service.process_pending()
                     draft = await runtime.knowledge_service.get_import(owner, created["library_id"], imported["import_id"])
                     if draft["status"] != "awaiting_review":
-                        raise ValueError("knowledge_evaluation_extraction_failed")
+                        raise EvaluationFailure("ingestion", extraction_failure or "extraction_or_parsing_failed")
                     # --live explicitly authorizes publishing extraction results only in this temporary store.
                     published = await runtime.knowledge_service.confirm_import(
                         owner, created["library_id"], imported["import_id"], expected_revision=draft["revision"],
@@ -197,11 +225,15 @@ async def evaluate(args, manifest: dict) -> dict:
                     if offset == pages[0]["total_characters"]:
                         complete.add(document_id)
                 calls = measured.calls[call_start:]
+                sources = await runner._context_builder.knowledge_answer_sources(run=run, items=items)
+                citation_error = source_answer_error(answer, sources)
                 results.append({
                     "question_id": question["id"], "status": str(current.status),
                     "terminal_reason_code": run.terminal_reason_code,
                     "seconds": round(time.perf_counter() - question_started, 3),
                     "model_calls": len(calls), "compaction_calls": sum(call["compaction"] for call in calls),
+                    "citation_repair_calls": sum(call["citation_repair"] for call in calls),
+                    "failed_model_calls": sum(call["status"] == "failed" for call in calls),
                     "prompt_tokens": sum(call["prompt_tokens"] or 0 for call in calls),
                     "completion_tokens": sum(call["completion_tokens"] or 0 for call in calls),
                     "all_usage_available": all(call["usage_status"] == "available" for call in calls),
@@ -212,6 +244,7 @@ async def evaluate(args, manifest: dict) -> dict:
                     "expected_documents_completely_read": expected.issubset(complete),
                     "expected_facts_present": all(fact.casefold() in answer.casefold() for fact in question.get("expected_facts", [])),
                     "citation_marker_present": bool(re.search(r"\[\d+\]", answer)),
+                    "citation_format_valid": citation_error is None and (bool(sources) or not expected),
                     "expected_bibliographic_titles_present": all(titles[key] in answer for key in question.get("expected_document_ids", [])),
                     "required_compaction_observed": not question.get("require_compaction", False) or any(call["compaction"] for call in calls),
                     "citation_meaning_requires_human_review": True,
@@ -234,18 +267,24 @@ def main(argv=None) -> int:
     parser.add_argument("--corpus", required=True, help="Explicit authorized corpus manifest")
     parser.add_argument("--live", action="store_true", help="Allow actual provider calls and temporary import confirmation")
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--context-window", type=int, help="Evaluation-only context window override in memory")
     args = parser.parse_args(argv)
     try:
+        if args.context_window is not None and args.context_window < 2000:
+            raise ValueError("knowledge_evaluation_context_invalid")
         manifest = load_manifest(Path(args.corpus))
         if not args.live:
             print(json.dumps({"live": False, "libraries": len(manifest["libraries"]), "questions": len(manifest["questions"])}))
             return 0
         report = asyncio.run(evaluate(args, manifest))
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        checks = ("expected_documents_read", "expected_documents_completely_read", "expected_facts_present", "expected_bibliographic_titles_present", "required_compaction_observed")
+        checks = ("expected_documents_read", "expected_documents_completely_read", "expected_facts_present", "expected_bibliographic_titles_present", "required_compaction_observed", "citation_format_valid")
         return 0 if all(result["status"] == "completed" and all(result[key] for key in checks)
                         and (result["citation_marker_present"] or result["documents_read"] == 0)
                         for result in report["results"]) else 2
+    except EvaluationFailure as exc:
+        print(json.dumps(exc.report), file=sys.stderr)
+        return 2
     except Exception:
         print(json.dumps({"error": "knowledge_evaluation_failed", "private_details_omitted": True}), file=sys.stderr)
         return 2

@@ -23,6 +23,21 @@ class RecordingRuntime:
 
 
 class ExtractionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_model_json_is_reextracted_once_without_coercion(self):
+        runtime = RecordingRuntime()
+        generate = runtime.generate_text
+        calls = []
+        async def flaky(prompt, **options):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return '{"year":"2021","summary":"PRIVATE_BAD_RESPONSE"}'
+            return await generate(prompt, **options)
+        runtime.generate_text = flaky
+        result = await KnowledgeMetadataExtractor(runtime, token_counter=lambda text: len(text))("# Full text")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["title"], "Full text")
+        self.assertNotIn("PRIVATE_BAD_RESPONSE", calls[1])
+
     async def test_every_segment_is_processed_and_frontmatter_has_priority(self):
         runtime = RecordingRuntime()
         extractor = KnowledgeMetadataExtractor(runtime, max_input_tokens=1800, token_counter=lambda text: len(text))

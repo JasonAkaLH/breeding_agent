@@ -184,6 +184,29 @@ class _FakeLeaseStore:
 
 
 class AgentLeaseControllerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lost_lease_at_phase_entry_never_starts_operation(self):
+        store = _FakeLeaseStore(fail_renew=True)
+        controller = AgentLeaseController(store, ttl_seconds=30)
+        handle = await controller.acquire("run", owner_id="worker")
+        started = []
+        async def operation(_handle):
+            started.append(True)
+        with self.assertRaises(AgentLeaseLost):
+            await controller.run_active_phase("context_preflight", handle, operation)
+        self.assertEqual(started, [])
+
+    async def test_consecutive_short_phases_renew_before_the_timer_restarts(self):
+        store = _FakeLeaseStore()
+        controller = AgentLeaseController(store, ttl_seconds=30)
+        handle = await controller.acquire("run", owner_id="worker")
+        observed = []
+        async def short_phase(current):
+            observed.append(current.current.token)
+        for phase in ("context_preflight", "model_sample", "capability_wave", "context_preflight"):
+            await controller.run_active_phase(phase, handle, short_phase)
+        self.assertEqual(store.renew_count, 4)
+        self.assertEqual(observed, ["token-2", "token-3", "token-4", "token-5"])
+
     async def test_heartbeat_waits_for_an_ownership_bound_database_operation(self) -> None:
         renew_allowed = asyncio.Event()
 
@@ -245,7 +268,7 @@ class AgentLeaseControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(store.renew_count, len(ACTIVE_LEASE_PHASES))
 
     async def test_heartbeat_loss_cancels_active_operation(self) -> None:
-        store = _FakeLeaseStore(fail_renew=True)
+        store = _FakeLeaseStore()
 
         async def immediate_sleep(_seconds: float) -> None:
             await asyncio.sleep(0)
@@ -255,6 +278,7 @@ class AgentLeaseControllerTest(unittest.IsolatedAsyncioTestCase):
         cancelled = asyncio.Event()
 
         async def operation(_handle):
+            store.fail_renew = True
             try:
                 await asyncio.Event().wait()
             finally:

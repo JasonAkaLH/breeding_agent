@@ -184,6 +184,46 @@ class KnowledgeResultResolver:
         self._service = service
         self._load_scope = scope_loader
 
+    async def answer_sources(self, *, run: Any, items: tuple) -> list[dict[str, Any]]:
+        calls = {item.item_id: item for item in items if item.kind is AgentItemKind.TOOL_CALL}
+        documents: dict[tuple[str, str], list[tuple]] = {}
+        for item in sorted(items, key=lambda item: item.sequence):
+            if item.kind is not AgentItemKind.TOOL_RESULT or item.state.value != "committed":
+                continue
+            payload = json.loads(item.payload_json)
+            result = payload.get("safe_result")
+            if not is_knowledge_result(result):
+                continue
+            ref = validate_knowledge_result(result)["reference"]
+            if ref is not None and ref["capability_id"] == "knowledge.read_document":
+                key = (ref["library_id"], ref["document_id"])
+                documents.setdefault(key, []).append((item, payload, ref))
+        sources = []
+        for number, records in enumerate(documents.values(), 1):
+            item, payload, ref = records[-1]
+            call = calls.get(str(item.source_call_item_id))
+            if call is None:
+                raise ValueError("agent_knowledge_reference_identity_invalid")
+            view = (await self.resolve_tool_result(
+                run=run, call_item=call, result_item=item, durable_payload=payload,
+            ))["safe_result"]
+            source = {"citation": number, "library_id": ref["library_id"], "document_id": ref["document_id"],
+                      "status": view["status"], "complete": False, "metadata": {}}
+            if view["status"] == "available":
+                ranges = sorted((value[2]["start"], value[2]["end"]) for value in records
+                                if value[2]["version"] == ref["version"])
+                contiguous = 0
+                for start, end in ranges:
+                    if start > contiguous:
+                        break
+                    contiguous = max(contiguous, end)
+                source.update({"version": ref["version"], "metadata": view["metadata"],
+                               "read_characters": contiguous, "total_characters": ref["total_characters"],
+                               "complete": contiguous == ref["total_characters"],
+                               "next_cursor": encode_knowledge_cursor(ref, contiguous) if contiguous < ref["total_characters"] else None})
+            sources.append(source)
+        return sources
+
     async def resolve_tool_result(self, *, run: Any, call_item: Any, result_item: Any,
                                   durable_payload: Mapping[str, Any]) -> dict[str, Any]:
         result = validate_knowledge_result(durable_payload.get("safe_result"))

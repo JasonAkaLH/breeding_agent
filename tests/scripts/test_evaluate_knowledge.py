@@ -8,7 +8,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from scripts.evaluate_knowledge import load_manifest, main
+from scripts.evaluate_knowledge import EvaluationFailure, _MeasuredModel, load_manifest, main
 
 
 class EvaluateKnowledgeTest(unittest.TestCase):
@@ -28,10 +28,19 @@ class EvaluateKnowledgeTest(unittest.TestCase):
     def test_empty_library_answer_does_not_require_a_fabricated_citation(self):
         with tempfile.TemporaryDirectory() as temporary:
             path, _ = self._manifest(Path(temporary))
-            result = {"status": "completed", "documents_read": 0, "citation_marker_present": False,
+            result = {"status": "completed", "documents_read": 0, "citation_marker_present": False, "citation_format_valid": True,
                       **dict.fromkeys(("expected_documents_read", "expected_documents_completely_read", "expected_facts_present", "expected_bibliographic_titles_present", "required_compaction_observed"), True)}
             with patch("scripts.evaluate_knowledge.evaluate", new_callable=AsyncMock, return_value={"results": [result]}), redirect_stdout(StringIO()):
                 self.assertEqual(main(["--config", "never-read.yaml", "--corpus", str(path), "--live"]), 0)
+
+    def test_marker_alone_does_not_pass_citation_acceptance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _ = self._manifest(Path(temporary))
+            result = {"status": "completed", "documents_read": 1, "citation_marker_present": True,
+                      "citation_format_valid": False,
+                      **dict.fromkeys(("expected_documents_read", "expected_documents_completely_read", "expected_facts_present", "expected_bibliographic_titles_present", "required_compaction_observed"), True)}
+            with patch("scripts.evaluate_knowledge.evaluate", new_callable=AsyncMock, return_value={"results": [result]}), redirect_stdout(StringIO()):
+                self.assertEqual(main(["--config", "never-read.yaml", "--corpus", str(path), "--live"]), 2)
 
     def _manifest(self, root: Path):
         (root / "private-literature.md").write_text("PRIVATE FULL TEXT", encoding="utf-8")
@@ -86,6 +95,29 @@ class EvaluateKnowledgeTest(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), {"error": "knowledge_evaluation_failed", "private_details_omitted": True})
         self.assertNotIn("PRIVATE", output.getvalue())
         self.assertNotIn(temporary, output.getvalue())
+
+    def test_ingestion_failure_has_closed_phase_and_code(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _ = self._manifest(Path(temporary))
+            output = StringIO()
+            with redirect_stderr(output), patch("scripts.evaluate_knowledge.evaluate", new_callable=AsyncMock, side_effect=EvaluationFailure("ingestion", "provider_call_failed")):
+                self.assertEqual(main(["--config", "never-read.yaml", "--corpus", str(path), "--live"]), 2)
+            self.assertEqual(json.loads(output.getvalue())["code"], "provider_call_failed")
+            self.assertNotIn(temporary, output.getvalue())
+
+
+class MeasuredModelTest(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_attempt_is_counted_without_response_or_error_text(self):
+        from types import SimpleNamespace
+
+        measured = _MeasuredModel(SimpleNamespace(sample_agent=AsyncMock(side_effect=ValueError("PRIVATE RESPONSE"))))
+        with self.assertRaises(ValueError):
+            await measured.sample_agent(SimpleNamespace(request_id="sample:knowledge-answer-1"))
+        self.assertEqual(len(measured.calls), 1)
+        self.assertTrue(measured.calls[0]["citation_repair"])
+        self.assertEqual(measured.calls[0]["status"], "failed")
+        self.assertEqual(measured.calls[0]["usage_status"], "unavailable")
+        self.assertNotIn("PRIVATE", json.dumps(measured.calls))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ from .models import (
     AgentItem,
     AgentItemKind,
     AgentItemState,
+    AgentMessage,
     AgentModelContextLengthError,
     AgentRun,
     AgentRunStatus,
@@ -39,6 +40,7 @@ from .tool_catalog import (
     CapabilityVisibilityContext,
 )
 from .terminal_events import build_agent_terminal_event
+from .knowledge_answers import answer_error, has_knowledge_sources
 
 
 MAX_AGENT_REASONING_BYTES = 524_288
@@ -153,6 +155,7 @@ class AgentLoopRunner:
         required_tool_name = initial_required_tool_name
         reasoning_bytes_published = 0
         reasoning_truncated = False
+        knowledge_repairs = 0
         while True:
             self._check_cancel(cancellation)
             run = await self._require_active_run(run_id)
@@ -208,13 +211,13 @@ class AgentLoopRunner:
                     candidate_run: AgentRun,
                     candidate_items: tuple[AgentItem, ...],
                 ):
-                    return await candidate_builder.build(
-                        run=candidate_run,
-                        items=candidate_items,
-                        catalog=catalog,
-                        trusted_facts=trusted_facts,
-                        current_user_input=current_user_input,
-                        tool_choice=choice,
+                    return await self._leases.run_active_phase(
+                        "context_preflight", handle,
+                        lambda _handle: candidate_builder.build(
+                            run=candidate_run, items=candidate_items, catalog=catalog,
+                            trusted_facts=trusted_facts, current_user_input=current_user_input,
+                            tool_choice=choice,
+                        ),
                     )
 
                 try:
@@ -402,6 +405,45 @@ class AgentLoopRunner:
                     )
                 except AgentModelContextLengthError:
                     return await self._fail_context_run(run_id, handle)
+            if not sample.tool_calls and use_total_preflight and has_knowledge_sources(model_request):
+                # Recheck live sources after sampling; do not publish stale or
+                # uncited library facts merely because the model stopped.
+                while True:
+                    latest = await self._require_active_run(run_id)
+                    checked = await build_candidate(latest, await self._runs.list_items(run_id))
+                    error = answer_error(sample.visible_text, checked.request)
+                    if error is None:
+                        break
+                    if knowledge_repairs >= 2:
+                        return await self._fail_context_run(run_id, handle, safe_error_code=error)
+                    knowledge_repairs += 1
+                    repair = replace(
+                        checked.request,
+                        request_id=f"{checked.request.request_id}:knowledge-answer-{knowledge_repairs}",
+                        messages=(
+                            *checked.request.messages,
+                            AgentMessage("assistant", sample.visible_text),
+                            AgentMessage("system", (
+                                f"上一候选答案未满足 {error}。按当前阅读进度继续读正文，"
+                                "或修正此答案的正文数字引用并逐字复制 sources 中的 bibliography_line。"
+                                "保留全部作者及完整标题。不要声称未完成的阅读已完成。"
+                            )),
+                        ),
+                        cancellation=cancellation,
+                    )
+                    async def count_repair(_handle):
+                        return await candidate_builder.count_request(repair)
+                    repair_tokens = await self._leases.run_active_phase("context_preflight", handle, count_repair)
+                    if repair_tokens > checked.preflight.total_context_limit_tokens:
+                        return await self._fail_context_run(run_id, handle, safe_error_code=error)
+                    try:
+                        sample = await self._leases.run_active_phase(
+                            "model_sample", handle, lambda _handle: self._model.sample_agent(repair),
+                        )
+                    except AgentModelContextLengthError:
+                        return await self._fail_context_run(run_id, handle)
+                    if sample.tool_calls:
+                        break
             self._check_cancel(cancellation)
             latest = await self._require_active_run(run_id)
             committed = await self._writer.commit_agent_sample(

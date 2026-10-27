@@ -23,6 +23,7 @@ from .result_projection import (
 )
 from .tool_catalog import AgentToolCatalog
 from .knowledge_results import is_knowledge_result
+from .knowledge_answers import answer_guard
 
 
 KNOWLEDGE_CONTEXT_RULES = (
@@ -77,6 +78,11 @@ class AgentContextBuilder:
             )
         return results
 
+    async def knowledge_answer_sources(self, *, run: AgentRun, items: tuple[AgentItem, ...]) -> list[dict]:
+        if self._knowledge_result_resolver is None:
+            return []
+        return await self._knowledge_result_resolver.answer_sources(run=run, items=items)
+
     def build(
         self,
         *,
@@ -88,6 +94,7 @@ class AgentContextBuilder:
         tool_choice: AgentToolChoice | None = None,
         skill_result_artifacts: Mapping[str, Artifact | None] | None = None,
         knowledge_result_views: Mapping[str, Mapping[str, Any]] | None = None,
+        knowledge_answer_sources: list[dict] | None = None,
     ) -> AgentModelRequest:
         messages: list[AgentMessage] = [
             AgentMessage(role="system", content=self._rules.stable_rules),
@@ -195,6 +202,8 @@ class AgentContextBuilder:
                 raise ValueError("agent_current_user_input_empty")
             messages.append(AgentMessage(role="user", content=current_user_input))
         messages.append(AgentMessage(role="system", content=self._rules.final_guard))
+        if knowledge_answer_sources:
+            messages.append(AgentMessage(role="system", content=answer_guard(knowledge_answer_sources)))
         return AgentModelRequest(
             request_id=f"agent-sample:{run.run_id}:r{run.revision}",
             binding=run.binding,

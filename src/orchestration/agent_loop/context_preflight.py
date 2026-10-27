@@ -99,6 +99,7 @@ class AgentContextCandidateBuilder:
             tool_choice=tool_choice,
             skill_result_artifacts=skill_result_artifacts,
             knowledge_result_views=knowledge_result_views,
+            knowledge_answer_sources=await self._context_builder.knowledge_answer_sources(run=run, items=items),
         )
         required_call_ids = _unconsumed_full_result_provider_call_ids(items)
         required_fragments: list[str] = [_framing_fragment()]

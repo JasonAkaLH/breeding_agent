@@ -105,6 +105,35 @@ def _catalog():
 
 
 class KnowledgeResultTest(unittest.IsolatedAsyncioTestCase):
+    async def test_read_progress_survives_compaction_and_revalidates_current_source(self):
+        service = _Service("evidence " * 1000)
+        executor = KnowledgeExecutor(service, token_counter=lambda text, _edition: len(text) // 4)
+        first = await executor.execute(_request(knowledge_result_token_budget=600))
+        ref = first.output_payload["reference"]
+        first_items = _items(first.output_payload)
+        cursor = ref["next_cursor"]
+        last = await executor.execute(_request({"library_id": "lib-1", "document_id": "doc-1", "cursor": cursor}))
+        last_items = _items(last.output_payload)
+        call_payload = json.loads(last_items[2].payload_json)
+        call_payload["arguments_json"] = json.dumps({"library_id": "lib-1", "document_id": "doc-1", "cursor": cursor})
+        more = (replace(last_items[2], item_id="call2", sequence=6, payload_json=json.dumps(call_payload)),
+                replace(last_items[3], item_id="result2", sequence=7, source_call_item_id="call2"))
+        resolver = KnowledgeResultResolver(service=service, scope_loader=lambda _run: SCOPE)
+        run = replace(_run(), compacted_through_sequence=4, next_item_sequence=8)
+        sources = await resolver.answer_sources(run=run, items=(*first_items, *more))
+        self.assertTrue(sources[0]["complete"])
+        self.assertEqual(sources[0]["read_characters"], len(service.text))
+        self.assertNotIn(service.text[:100], json.dumps(sources))
+        partial = await resolver.answer_sources(run=run, items=first_items)
+        self.assertFalse(partial[0]["complete"])
+        self.assertEqual(partial[0]["next_cursor"], cursor)
+        service.version = "e" * 64
+        changed = await resolver.answer_sources(run=run, items=(*first_items, *more))
+        self.assertEqual(changed[0]["status"], "changed")
+        service.allowed = False
+        denied = await resolver.answer_sources(run=run, items=(*first_items, *more))
+        self.assertEqual(denied[0]["status"], "forbidden")
+
     async def test_pdf_source_only_version_change_invalidates_cursor_and_reference(self):
         service = _Service("PDF parsed evidence " * 1000)
         service.version = "a" * 64
@@ -218,7 +247,7 @@ class KnowledgeResultTest(unittest.IsolatedAsyncioTestCase):
             token_counter=lambda fragments, _binding: sum(map(len, fragments)),
         )
         candidate = await builder.build(run=_run(), items=items, catalog=AgentToolCatalog((), {}))
-        self.assertIn("唯一实验细节", candidate.request.messages[-2].content)
+        self.assertIn("唯一实验细节", next(message.content for message in candidate.request.messages if message.role == "tool"))
         self.assertGreater(candidate.preflight.transient_tokens, len(service.text))
         self.assertEqual(candidate.preflight.decision, AgentContextPreflightDecision.FATAL_REQUIRED_SEGMENTS_TOO_LARGE)
         compaction = AgentCompactionService(runs=None, writer=None, model=None, lease_controller=None,

@@ -131,11 +131,12 @@ class AgentCompactionService:
             )
             if not covered:
                 raise RuntimeError("agent_context_required_segments_too_large")
-            request, covered = await self._largest_fitting_request(
-                run=run,
-                all_items=items,
-                covered=covered,
-                token_limit=current.preflight.total_context_limit_tokens,
+            request, covered = await self._leases.run_active_phase(
+                "context_preflight", handle,
+                lambda _handle: self._largest_fitting_request(
+                    run=run, all_items=items, covered=covered,
+                    token_limit=current.preflight.total_context_limit_tokens,
+                ),
             )
             covered_range = (covered[0].sequence, covered[-1].sequence)
             if covered_range == prior_range:

@@ -4,7 +4,7 @@
 
 ## 目录速览
 
-- `evaluate_knowledge.py`：文献知识库真实文献/问题集评测；显式配置与 Markdown/PDF corpus 清单（原件重复可返回已有文献/草稿），默认仅校验，`--live` 才调用现有模型；使用临时隔离知识库，报告不含正文、完整问答、凭据或宿主路径。
+- `evaluate_knowledge.py`：文献知识库真实文献/问题集评测；显式配置与 Markdown/PDF corpus 清单（原件重复可返回已有文献/草稿），默认仅校验，`--live` 才调用现有模型；使用临时隔离知识库，报告不含正文、完整问答、凭据或宿主路径；`--context-window` 只在内存覆盖测试窗口，记录失败/引用纠正调用并校验正文数字与实际书目对应。
 - `update_api_doc_contract.py`：离线同步前端 API 接入文档内嵌 OpenAPI 合同与 TypeScript 示例；`--check` 检查漂移，不启动 runtime、数据库或网络。
 - `check_docker_cmd_policy.sh`：校验本地 `docker_cmd/` 目录及旧根路径 `docker_cmd.md` 的 Git 忽略和未跟踪保护。
 - `run_fullstack_dev.py`：本地拉起前后端用于人工验证。
