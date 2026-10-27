@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from src.capabilities.knowledge import KnowledgeError, KnowledgeService
+from src.capabilities.knowledge.service import document_text_version
 from src.storage.knowledge_files import KnowledgeFileStore
 from src.storage.knowledge_repository import KnowledgeRepository
 from src.storage.sqlite.bootstrap import bootstrap_sqlite_database
@@ -19,6 +21,235 @@ async def extract(text):
 
 
 class KnowledgeServiceTest(unittest.IsolatedAsyncioTestCase):
+    def test_pdf_text_version_binds_both_hashes_and_markdown_remains_legacy(self):
+        source = {"body_ref": "lib/id/source.pdf", "sha256": "a" * 64,
+                  "parsed_body_ref": "lib/id/parsed.md", "parsed_body_sha256": "b" * 64}
+        version = document_text_version(source)
+        self.assertEqual(len(version), 64)
+        for field in ("sha256", "parsed_body_sha256"):
+            self.assertNotEqual(document_text_version({**source, field: "c" * 64}), version)
+        self.assertEqual(document_text_version({**source, "body_ref": "lib/id/source.md"}), source["sha256"])
+
+    async def pdf_draft(self, raw=None, **kwargs):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        raw = raw or text_pdf("Full evidence", "Final evidence")
+        item = (await self.service.upload_imports("alice", self.library_id, [("paper.pdf", raw)], **kwargs))[0]
+        self.assertIn("import_id", item)
+        await self.service.process_pending()
+        return await self.service.get_import("alice", self.library_id, item["import_id"])
+
+    async def test_all_four_format_replacements_keep_id_and_clean_both_files(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        document = await self.published()
+        for filename, raw in [("one.pdf", text_pdf("One")), ("two.pdf", text_pdf("Two")), ("three.md", b"# Three"), ("four.md", b"# Four")]:
+            with self.subTest(filename=filename):
+                old_refs = [ref for ref in (document["body_ref"], document["parsed_body_ref"]) if ref]
+                item = (await self.service.upload_imports("alice", self.library_id, [(filename, raw)], replacement_document_id=document["document_id"]))[0]
+                await self.service.process_pending()
+                current = await self.service.confirm_import("alice", self.library_id, item["import_id"])
+                self.assertEqual(current["status"], "published")
+                self.assertEqual(current["document_id"], document["document_id"])
+                document = self.repo.get_document(document["document_id"])
+                self.assertEqual((await self.service.download_document("alice", self.library_id, document["document_id"]))["content"], raw)
+                for ref in old_refs:
+                    with self.assertRaises(FileNotFoundError):
+                        self.files.read_body(ref)
+                with self.assertRaises(KnowledgeError):
+                    await self.service.download_import_source("alice", self.library_id, item["import_id"])
+
+    async def test_pdf_dedup_uses_source_bytes_and_cross_library_is_independent(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        raw = text_pdf("Identical parsed text")
+        items = await asyncio.gather(*(self.service.upload_imports("alice", self.library_id, [("a.pdf", raw)]) for _ in range(3)))
+        self.assertEqual(len({items[0]["import_id"] for items in items}), 1)
+        await self.service.process_pending()
+        first = await self.service.confirm_import("alice", self.library_id, items[0][0]["import_id"])
+        duplicate = (await self.service.upload_imports("alice", self.library_id, [("different.pdf", raw)]))[0]
+        self.assertEqual(duplicate["document_id"], first["document_id"])
+        changed_source = raw + b"\n% Source-only change\n"
+        second = await self.pdf_draft(changed_source)
+        other = await self.service.confirm_import("alice", self.library_id, second["import_id"])
+        read1 = await self.service.read_document("alice", self.library_id, first["document_id"])
+        read2 = await self.service.read_document("alice", self.library_id, other["document_id"])
+        self.assertEqual(read1["sha256"], read2["sha256"])
+        self.assertNotEqual(read1["version"], read2["version"])
+        independent = await self.service.create_library("alice", "Independent")
+        uploaded = (await self.service.upload_imports("alice", independent["library_id"], [("same.pdf", raw)]))[0]
+        self.assertNotIn("duplicate_type", uploaded)
+
+    async def test_pdf_parse_failure_never_reaches_extractor_or_manual_confirmation(self):
+        from tests.capabilities.knowledge.pdf_fixtures import unreadable_page_pdf
+        from unittest.mock import AsyncMock
+
+        self.service.extractor = AsyncMock()
+        for raw, error in [(unreadable_page_pdf(mixed=True), "pdf_page_text_unavailable"), (b"%PDF-broken", "pdf_unreadable")]:
+            draft = await self.pdf_draft(raw)
+            self.assertEqual(draft["error_code"], error)
+            self.assertFalse(draft["text_ready"])
+            with self.assertRaises(KnowledgeError):
+                await self.service.edit_import("alice", self.library_id, draft["import_id"], {"title": "Manual", "summary": "Manual"}, expected_revision=draft["revision"])
+            with self.assertRaises(KnowledgeError):
+                await self.service.confirm_import("alice", self.library_id, draft["import_id"])
+        self.service.extractor.assert_not_called()
+
+    async def test_registered_missing_text_recovers_and_metadata_failure_is_reviewable(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        item = (await self.service.upload_imports("alice", self.library_id, [("a.pdf", text_pdf("Recover text"))]))[0]
+        original_put = self.files.put_body
+        with patch.object(self.files, "put_body", side_effect=OSError("PRIVATE internal content")):
+            await self.service.process_pending()
+        failed = self.repo.get_import(item["import_id"])
+        missing_ref = failed["parsed_body_ref"]
+        self.assertTrue(missing_ref)
+        self.assertFalse((await self.service.get_import("alice", self.library_id, item["import_id"]))["text_ready"])
+        await self.service.retry_import("alice", self.library_id, item["import_id"])
+        async def failed_metadata(_):
+            raise RuntimeError("PRIVATE reference body")
+        self.service.extractor = failed_metadata
+        self.assertEqual(self.files.put_body, original_put)
+        await self.service.process_pending()
+        draft = await self.service.get_import("alice", self.library_id, item["import_id"])
+        self.assertEqual(draft["error_code"], "extraction_failed")
+        self.assertTrue(draft["text_ready"])
+        edited = await self.service.edit_import("alice", self.library_id, item["import_id"], {"title": "Reviewed", "summary": "Reviewed full evidence"}, expected_revision=draft["revision"])
+        result = await self.service.confirm_import("alice", self.library_id, item["import_id"], expected_revision=edited["revision"])
+        self.assertEqual(result["status"], "published")
+        with self.assertRaises(FileNotFoundError):
+            self.files.read_body(missing_ref)
+
+    async def test_discard_while_registered_text_write_is_late_cannot_leave_a_copy(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        item = (await self.service.upload_imports("alice", self.library_id, [("slow.pdf", text_pdf("Late write"))]))[0]
+        started, finish = threading.Event(), threading.Event()
+        put = self.files.put_body
+        def slow(*args, **kwargs):
+            started.set()
+            if not finish.wait(5):
+                raise AssertionError("Write test release timed out")
+            return put(*args, **kwargs)
+        with patch.object(self.files, "put_body", side_effect=slow):
+            processing = asyncio.create_task(self.service.process_pending())
+            self.assertTrue(await asyncio.to_thread(started.wait, 3))
+            current = self.repo.get_import(item["import_id"])
+            self.assertTrue(current["parsed_body_ref"])
+            try:
+                await self.service.discard_import("alice", self.library_id, item["import_id"])
+            finally:
+                finish.set()
+            await processing
+        row = self.repo.get_import(item["import_id"])
+        self.assertEqual(row["status"], "discarded")
+        self.assertFalse(row["cleanup_pending"])
+        for ref in (row["body_ref"], row["parsed_body_ref"]):
+            with self.assertRaises(FileNotFoundError):
+                self.files.read_body(ref)
+
+    async def test_parser_claim_takeover_and_cancellation_do_not_publish_late_text(self):
+        from src.capabilities.knowledge.pdf import parse_pdf
+        from src.storage.sqlalchemy_models import KnowledgeImportRow
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        for cancel in (False, True):
+            started, finish, finished = threading.Event(), threading.Event(), threading.Event()
+            def slow(raw):
+                started.set()
+                if not finish.wait(5):
+                    raise AssertionError("Parser release timed out")
+                try:
+                    return parse_pdf(raw)
+                finally:
+                    finished.set()
+            item = (await self.service.upload_imports("alice", self.library_id, [("slow.pdf", text_pdf(str(cancel)))]))[0]
+            with patch("src.capabilities.knowledge.service.parse_pdf", side_effect=slow):
+                processing = asyncio.create_task(self.service.process_pending())
+                self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                if cancel:
+                    processing.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await processing
+                else:
+                    with self.repo.session_factory() as session:
+                        session.get(KnowledgeImportRow, item["import_id"]).claim_expires_at = 0
+                        session.commit()
+                    adopted = self.repo.claim_import("replacement-worker")
+                    self.assertEqual(adopted["import_id"], item["import_id"])
+                finish.set()
+                self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+                if not cancel:
+                    await processing
+            current = self.repo.get_import(item["import_id"])
+            self.assertIsNone(current["parsed_body_ref"])
+            if not cancel:
+                self.assertEqual(current["claim_token"], adopted["claim_token"])
+                with self.repo.session_factory() as session:
+                    session.get(KnowledgeImportRow, item["import_id"]).claim_expires_at = 0
+                    session.commit()
+            await self.service.process_pending()
+            self.assertEqual(self.repo.get_import(item["import_id"])["status"], "awaiting_review")
+            await self.service.discard_import("alice", self.library_id, item["import_id"])
+
+    async def test_late_parser_cannot_write_after_discard_or_library_delete(self):
+        from src.capabilities.knowledge.pdf import parse_pdf
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        for delete_library in (False, True):
+            started, finish = threading.Event(), threading.Event()
+            def slow(raw):
+                started.set()
+                if not finish.wait(5):
+                    raise AssertionError("Parser test release timed out")
+                return parse_pdf(raw)
+            item = (await self.service.upload_imports("alice", self.library_id, [("slow.pdf", text_pdf(str(delete_library)))]))[0]
+            with patch("src.capabilities.knowledge.service.parse_pdf", side_effect=slow):
+                processing = asyncio.create_task(self.service.process_pending())
+                self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                try:
+                    if delete_library:
+                        await self.service.delete_library("alice", self.library_id)
+                    else:
+                        await self.service.discard_import("alice", self.library_id, item["import_id"])
+                finally:
+                    finish.set()
+                await processing
+            row = self.repo.get_import(item["import_id"])
+            self.assertEqual(row["status"], "discarded")
+            self.assertIsNone(row["parsed_body_ref"])
+            with self.assertRaises(FileNotFoundError):
+                self.files.read_body(row["body_ref"])
+
+    async def test_pdf_source_text_gate_and_pair_cleanup(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        raw = text_pdf("FIRST full text", "LAST detail")
+        item = (await self.service.upload_imports("alice", self.library_id, [("paper.pdf", raw)]))[0]
+        self.assertEqual(item["status"], "pending")
+        with self.assertRaises(KnowledgeError):
+            await self.service.edit_import("alice", self.library_id, item["import_id"], {"title": "Manual", "summary": "Manual"}, expected_revision=item["revision"])
+        await self.service.process_pending()
+        draft = await self.service.get_import("alice", self.library_id, item["import_id"])
+        self.assertTrue(draft["text_ready"])
+        self.assertEqual((await self.service.download_import_source("alice", self.library_id, item["import_id"]))["content"], raw)
+        preview = await self.service.preview_import("alice", self.library_id, item["import_id"])
+        self.assertIn("LAST detail", preview["text"])
+        published = await self.service.confirm_import("alice", self.library_id, item["import_id"])
+        document = self.repo.get_document(published["document_id"])
+        source = await self.service.download_document("alice", self.library_id, document["document_id"])
+        text = await self.service.read_document("alice", self.library_id, document["document_id"])
+        self.assertEqual(source["content"], raw)
+        self.assertEqual(text["sha256"], document["parsed_body_sha256"])
+        self.assertNotEqual(text["version"], text["sha256"])
+        with self.assertRaises(KnowledgeError):
+            await self.service.preview_import("alice", self.library_id, item["import_id"])
+        await self.service.delete_document("alice", self.library_id, document["document_id"])
+        for ref in (document["body_ref"], document["parsed_body_ref"]):
+            with self.assertRaises(FileNotFoundError):
+                self.files.read_body(ref)
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.engine = create_sqlite_engine(Path(self.directory.name) / "state.db")

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from src.storage.knowledge_files import KnowledgeFileStore
 from src.storage.knowledge_repository import KnowledgeConflict, KnowledgeRepository
@@ -20,6 +20,29 @@ from src.storage.sqlite.session import (
 
 
 class KnowledgeRepositoryContract:
+    def test_pdf_claim_pair_publication_and_cleanup_contract(self):
+        library = self.library()
+        sha = hashlib.sha256(b"pdf-source").hexdigest()
+        ref = KnowledgeFileStore.build_reference(library["library_id"], uuid4().hex, sha, "pdf")
+        row = self.repo.register_import(library["library_id"], sha, "paper.pdf", ref)
+        row = self.repo.update_import(row["import_id"], row["revision"], title="Paper", summary="Full findings", status="awaiting_review")
+        with self.assertRaises(KnowledgeConflict):
+            self.repo.publish_import(row["import_id"], row["revision"])
+        self.repo.update_import(row["import_id"], row["revision"], status="pending")
+        claim = self.repo.claim_import("worker")
+        parsed_sha = hashlib.sha256(b"parsed text").hexdigest()
+        parsed_ref = KnowledgeFileStore.build_reference(library["library_id"], uuid4().hex, parsed_sha)
+        with self.assertRaises(KnowledgeConflict):
+            self.repo.register_parsed_body(row["import_id"], claim["revision"], "wrong", sha, parsed_ref, parsed_sha)
+        registered = self.repo.register_parsed_body(row["import_id"], claim["revision"], claim["claim_token"], sha, parsed_ref, parsed_sha)
+        with self.assertRaises(KnowledgeConflict):
+            self.repo.update_import(row["import_id"], claim["revision"], claim_token=claim["claim_token"], status="awaiting_review")
+        reviewed = self.repo.update_import(row["import_id"], registered["revision"], claim_token=claim["claim_token"], status="awaiting_review")
+        document = self.publish(reviewed)
+        self.assertEqual(document["parsed_body_ref"], parsed_ref)
+        deleted = self.repo.delete_document(document["document_id"])
+        self.assertEqual(set(deleted["cleanup_refs"]), {ref, parsed_ref})
+
     def library(self, owner="alice"):
         return self.repo.create_library(owner, "研究", "说明")
 
@@ -283,8 +306,21 @@ class KnowledgeRepositoryTest(KnowledgeRepositoryContract, unittest.TestCase):
         self.directory.cleanup()
 
     def test_additive_bootstrap_and_existing_business_data(self):
+        library = self.library()
+        draft = self.draft(library)
+        document = self.publish(self.draft(library, b"published old Markdown"))
+        self.repo.grant(library["library_id"], "bob")
         self.repo.save_selection("alice", "before", "auto", [])
+        # This engine is the test's disposable SQLite file, never an app database.
+        with self.engine.begin() as connection:
+            for table in ("knowledge_import", "knowledge_document"):
+                for column in ("parsed_body_ref", "parsed_body_sha256"):
+                    connection.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
         bootstrap_sqlite_database(self.engine)
+        bootstrap_sqlite_database(self.engine)
+        self.assertIsNone(self.repo.get_import(draft["import_id"])["parsed_body_ref"])
+        self.assertEqual(self.repo.get_document(document["document_id"])["sha256"], document["sha256"])
+        self.assertEqual(self.repo.list_grants(library["library_id"])[0]["subject_id"], "bob")
         self.assertEqual(self.repo.get_selection("alice", "before")["mode"], "auto")
         self.assertEqual(
             len(inspect(self.engine).get_table_names()), len(SQLiteBase.metadata.tables)

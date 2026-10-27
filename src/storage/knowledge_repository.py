@@ -63,6 +63,10 @@ def _revision(row: Any, expected: int | None) -> None:
         raise KnowledgeConflict("knowledge_revision_conflict")
 
 
+def _body_refs(row: Any) -> list[str]:
+    return [ref for ref in (row.body_ref, row.parsed_body_ref) if ref]
+
+
 class KnowledgeRepository:
     """Shared synchronous SQLAlchemy transactions; no Task authority or body payloads."""
 
@@ -283,7 +287,7 @@ class KnowledgeRepository:
         parts = body_ref.split("/")
         if (
             len(parts) != 3
-            or KnowledgeFileStore.build_reference(library_id, parts[1], sha256)
+            or KnowledgeFileStore.build_reference(library_id, parts[1], sha256, "pdf" if filename.lower().endswith(".pdf") else "md")
             != body_ref
         ):
             raise ValueError("invalid_knowledge_body_reference")
@@ -382,7 +386,7 @@ class KnowledgeRepository:
             _revision(row, expected_revision)
             if row.status in {"discarded", "published", "publishing"}:
                 raise KnowledgeConflict("knowledge_import_no_longer_draft")
-            if claim_token is not None and row.claim_token != claim_token:
+            if claim_token is not None and (row.claim_token != claim_token or (row.claim_expires_at or 0) <= time.time()):
                 raise KnowledgeConflict("knowledge_import_claim_conflict")
             if changes.get("status") in {"publishing", "published", "discarded"}:
                 raise ValueError("knowledge_import_transition_requires_operation")
@@ -432,6 +436,38 @@ class KnowledgeRepository:
                 return _record(row)
             return None
 
+    def register_parsed_body(
+        self, import_id: str, expected_revision: int, claim_token: str,
+        source_sha256: str, parsed_body_ref: str, parsed_body_sha256: str,
+    ) -> dict:
+        from .knowledge_files import KnowledgeFileStore
+
+        with self._write() as session:
+            row = session.get(KnowledgeImportRow, import_id)
+            if row is None:
+                raise KnowledgeNotFound("knowledge_import_unavailable")
+            self._library(session, row.library_id)
+            session.refresh(row)
+            _revision(row, expected_revision)
+            if (row.status != "processing" or row.claim_token != claim_token
+                    or (row.claim_expires_at or 0) <= time.time()
+                    or row.sha256 != source_sha256 or not row.body_ref.endswith(".pdf")):
+                raise KnowledgeConflict("knowledge_import_claim_conflict")
+            parts = parsed_body_ref.split("/")
+            if (len(parts) != 3 or KnowledgeFileStore.build_reference(
+                row.library_id, parts[1], parsed_body_sha256,
+            ) != parsed_body_ref):
+                raise ValueError("invalid_knowledge_parsed_reference")
+            if row.parsed_body_ref and row.parsed_body_ref != parsed_body_ref:
+                row.cleanup_refs = list(dict.fromkeys([*row.cleanup_refs, row.parsed_body_ref]))
+                row.cleanup_pending = True
+            row.parsed_body_ref = parsed_body_ref
+            row.parsed_body_sha256 = parsed_body_sha256
+            row.revision += 1
+            row.updated_at = int(time.time())
+            session.flush()
+            return _record(row)
+
     def renew_import_claim(
         self, import_id: str, claim_token: str, lease_seconds: int = 120
     ) -> bool:
@@ -445,6 +481,7 @@ class KnowledgeRepository:
                 library.status != "active"
                 or row.status != "processing"
                 or row.claim_token != claim_token
+                or (row.claim_expires_at or 0) <= time.time()
             ):
                 return False
             row.claim_expires_at = int(time.time()) + max(1, lease_seconds)
@@ -490,6 +527,9 @@ class KnowledgeRepository:
             _revision(imported, expected_revision)
             if imported.status not in {"awaiting_review", "failed"}:
                 raise KnowledgeConflict("knowledge_import_not_ready_for_confirmation")
+            if (bool(imported.parsed_body_ref) != bool(imported.parsed_body_sha256)
+                    or (imported.body_ref.endswith(".pdf") and not imported.parsed_body_ref)):
+                raise KnowledgeConflict("knowledge_text_not_ready")
             if not imported.title.strip() or not imported.summary.strip():
                 raise ValueError("knowledge_title_summary_required")
             duplicate = self._duplicate(
@@ -516,11 +556,12 @@ class KnowledgeRepository:
                 ):
                     raise KnowledgeConflict("knowledge_replacement_target_changed")
                 _revision(document, imported.target_revision)
-                previous = document.body_ref
+                previous = _body_refs(document)
                 document.revision += 1
-                if previous != imported.body_ref:
+                obsolete = [ref for ref in previous if ref not in _body_refs(imported)]
+                if obsolete:
                     document.cleanup_refs = list(
-                        dict.fromkeys([*document.cleanup_refs, previous])
+                        dict.fromkeys([*document.cleanup_refs, *obsolete])
                     )
                     document.cleanup_pending = True
             else:
@@ -534,7 +575,7 @@ class KnowledgeRepository:
                     created_at=now,
                 )
                 session.add(document)
-            for key in _METADATA | {"filename", "body_ref", "sha256"}:
+            for key in _METADATA | {"filename", "body_ref", "sha256", "parsed_body_ref", "parsed_body_sha256"}:
                 setattr(document, key, getattr(imported, key))
             document.publication_state = "publishing"
             document.updated_at = now
@@ -567,6 +608,9 @@ class KnowledgeRepository:
                 document is None
                 or document.status != "active"
                 or document.sha256 != imported.sha256
+                or document.body_ref != imported.body_ref
+                or document.parsed_body_ref != imported.parsed_body_ref
+                or document.parsed_body_sha256 != imported.parsed_body_sha256
             ):
                 raise KnowledgeConflict("knowledge_publication_changed")
             if (
@@ -612,7 +656,7 @@ class KnowledgeRepository:
     @staticmethod
     def _discard(row: KnowledgeImportRow) -> None:
         if row.status != "published":
-            row.cleanup_refs = list(dict.fromkeys([*row.cleanup_refs, row.body_ref]))
+            row.cleanup_refs = list(dict.fromkeys([*row.cleanup_refs, *_body_refs(row)]))
             row.cleanup_pending = True
         row.status = "discarded"
         row.claim_token = None
@@ -652,7 +696,7 @@ class KnowledgeRepository:
             _revision(row, expected_revision)
             row.status = "deleted"
             row.revision += 1
-            row.cleanup_refs = list(dict.fromkeys([*row.cleanup_refs, row.body_ref]))
+            row.cleanup_refs = list(dict.fromkeys([*row.cleanup_refs, *_body_refs(row)]))
             row.cleanup_pending = True
             for imported in session.scalars(
                 select(KnowledgeImportRow).where(
@@ -690,7 +734,7 @@ class KnowledgeRepository:
                 document.status = "deleted"
                 document.revision += 1
                 document.cleanup_refs = list(
-                    dict.fromkeys([*document.cleanup_refs, document.body_ref])
+                    dict.fromkeys([*document.cleanup_refs, *_body_refs(document)])
                 )
                 document.cleanup_pending = True
             for imported in session.scalars(

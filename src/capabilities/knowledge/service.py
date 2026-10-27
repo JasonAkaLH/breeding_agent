@@ -13,6 +13,7 @@ from src.auth.services import normalize_username
 
 from .access import AccessSubjectResolver, KnowledgeError, LibraryAccessService
 from .extraction import LiteratureMetadata, decode_markdown, validate_metadata
+from .pdf import MAX_PDF_BYTES, PdfTextError, parse_pdf
 
 logger = logging.getLogger(__name__)
 _PUBLIC_FIELDS = frozenset({
@@ -34,7 +35,27 @@ def _public(record: Mapping[str, Any]) -> dict[str, Any]:
         result["extraction_model"] = result["model_edition"]
     if result.get("error"):
         result["error_code"] = result["error"]
+    if "body_ref" in record:
+        result["source_format"] = "pdf" if record["body_ref"].endswith(".pdf") else "markdown"
     return result
+
+
+def document_text_version(item: Mapping[str, Any]) -> str:
+    if not item["body_ref"].endswith(".pdf"):
+        return item["sha256"]
+    if not item.get("parsed_body_ref") or not item.get("parsed_body_sha256"):
+        raise KnowledgeError("knowledge_text_not_ready", status_code=409)
+    return hashlib.sha256(
+        f"knowledge-pdf-text-v1\0{item['sha256']}\0{item['parsed_body_sha256']}".encode()
+    ).hexdigest()
+
+
+def _filename(item: Mapping[str, Any], *, markdown: bool = False) -> str:
+    name = item["filename"].replace("\\", "/").rsplit("/", 1)[-1].replace("\r", "").replace("\n", "")
+    if not item["body_ref"].endswith(".pdf") and name.lower().endswith((".md", ".markdown")):
+        return name
+    extension = ".pdf" if item["body_ref"].endswith(".pdf") and not markdown else ".md"
+    return name.rsplit(".", 1)[0] + extension
 
 
 class KnowledgeService:
@@ -64,6 +85,8 @@ class KnowledgeService:
         try:
             return await asyncio.to_thread(operation, *args, **kwargs)
         except KnowledgeError:
+            raise
+        except PdfTextError:
             raise
         except Exception as exc:
             name = type(exc).__name__
@@ -189,9 +212,18 @@ class KnowledgeService:
         self, actor: str, library_id: str, filename: str, raw: bytes, replacement_document_id: str | None,
     ) -> dict[str, Any]:
         self.access.require_permission(actor, library_id, "write")
-        if not filename.lower().endswith((".md", ".markdown")):
-            raise KnowledgeError("markdown_file_required")
-        decode_markdown(raw)
+        if not filename.lower().endswith((".md", ".markdown", ".pdf")):
+            raise KnowledgeError("knowledge_format_unsupported")
+        if len(raw) > MAX_PDF_BYTES:
+            raise KnowledgeError("knowledge_file_too_large")
+        extension = "pdf" if filename.lower().endswith(".pdf") else "md"
+        if extension == "pdf":
+            if not raw.startswith(b"%PDF-"):
+                raise KnowledgeError("pdf_unreadable")
+        else:
+            if raw.startswith(b"%PDF-"):
+                raise KnowledgeError("knowledge_format_unsupported")
+            decode_markdown(raw)
         sha = hashlib.sha256(raw).hexdigest()
         target_revision = None
         if replacement_document_id:
@@ -200,7 +232,7 @@ class KnowledgeService:
                 return {**_public(target), "duplicate_type": "document", "unchanged": True}
             target_revision = target["revision"]
         import_id = uuid4().hex
-        body_ref = self.files.build_reference(library_id, import_id, sha)
+        body_ref = self.files.build_reference(library_id, import_id, sha, extension)
         item = self.repository.register_import(
             library_id, sha, filename, body_ref, replacement_document_id=replacement_document_id,
             target_revision=target_revision, import_id=import_id, status="uploading",
@@ -208,7 +240,8 @@ class KnowledgeService:
         if item.get("duplicate_type"):
             return {**_public(item), "duplicate_type": item["duplicate_type"]}
         try:
-            self.files.put_body(library_id, import_id, raw)
+            self.files.put_body(library_id, import_id, raw, extension)
+            self.files.read_body(body_ref, sha256=sha)
             # Deletion/discard can race disk I/O; a late upload must never resurrect a draft.
             self.access.require_permission(actor, library_id, "write")
             current = self.repository.get_import(import_id)
@@ -226,21 +259,64 @@ class KnowledgeService:
     async def list_imports(self, actor: str, library_id: str) -> list[dict[str, Any]]:
         def load() -> list[dict[str, Any]]:
             self.access.require_permission(actor, library_id, "write")
-            return [_public(item) for item in self.repository.list_imports(library_id, include_discarded=True)
+            return [self._import_public(item) for item in self.repository.list_imports(library_id, include_discarded=True)
                     if item["status"] != "discarded" or item.get("cleanup_pending") or item.get("error")]
         return await self._run(load)
 
     async def get_import(self, actor: str, library_id: str, import_id: str) -> dict[str, Any]:
-        return await self._run(lambda: _public(self._import(actor, library_id, import_id)))
+        return await self._run(lambda: self._import_public(self._import(actor, library_id, import_id)))
+
+    @staticmethod
+    def _require_draft(item: Mapping[str, Any]) -> None:
+        if item["status"] in {"published", "publishing", "discarded"}:
+            raise KnowledgeError("import_unavailable", status_code=404)
+
+    def _read_text(self, item: Mapping[str, Any]) -> tuple[bytes, str]:
+        if item["body_ref"].endswith(".pdf"):
+            if not item.get("parsed_body_ref") or not item.get("parsed_body_sha256"):
+                raise KnowledgeError("knowledge_text_not_ready", status_code=409)
+            ref, sha = item["parsed_body_ref"], item["parsed_body_sha256"]
+        else:
+            ref, sha = item["body_ref"], item["sha256"]
+        raw = self.files.read_body(ref, sha256=sha)
+        decode_markdown(raw)
+        return raw, sha
+
+    def _import_public(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        result = _public(item)
+        result["text_ready"] = False
+        if item["status"] not in {"uploading", "published", "publishing", "discarded"}:
+            try:
+                self._read_text(item)
+                self.files.read_body(item["body_ref"], sha256=item["sha256"])
+                result["text_ready"] = True
+            except (OSError, ValueError, KnowledgeError):
+                pass
+        return result
+
+    def _recheck_import(self, actor: str, library_id: str, item: Mapping[str, Any]) -> None:
+        current = self._import(actor, library_id, item["import_id"])
+        self._require_draft(current)
+        if current["revision"] != item["revision"]:
+            raise KnowledgeError("import_state_changed", status_code=409)
 
     async def preview_import(self, actor: str, library_id: str, import_id: str) -> dict[str, Any]:
         def read() -> dict[str, Any]:
             item = self._import(actor, library_id, import_id)
-            if item["status"] == "discarded":
-                raise KnowledgeError("import_unavailable", status_code=404)
+            self._require_draft(item)
+            raw, sha = self._read_text(item)
+            self._recheck_import(actor, library_id, item)
+            return {"text": decode_markdown(raw), "sha256": sha, "filename": _filename(item, markdown=True)}
+        return await self._run(read)
+
+    async def download_import_source(self, actor: str, library_id: str, import_id: str) -> dict[str, Any]:
+        def read() -> dict[str, Any]:
+            item = self._import(actor, library_id, import_id)
+            self._require_draft(item)
             raw = self.files.read_body(item["body_ref"], sha256=item["sha256"])
-            self._import(actor, library_id, import_id)
-            return {"text": decode_markdown(raw), "sha256": item["sha256"], "filename": item["filename"]}
+            self._recheck_import(actor, library_id, item)
+            return {"content": raw, "sha256": item["sha256"], "filename": _filename(item),
+                    "media_type": "application/pdf" if item["body_ref"].endswith(".pdf") else "text/markdown"}
         return await self._run(read)
 
     async def edit_import(
@@ -250,6 +326,8 @@ class KnowledgeService:
             item = self._import(actor, library_id, import_id)
             if item["status"] not in {"awaiting_review", "failed", "pending", "processing"}:
                 raise KnowledgeError("import_state_changed", status_code=409)
+            self.files.read_body(item["body_ref"], sha256=item["sha256"])
+            self._read_text(item)
             merged = {key: item.get(key, field.get_default(call_default_factory=True))
                       for key, field in LiteratureMetadata.model_fields.items()}
             merged.update(metadata)
@@ -291,6 +369,7 @@ class KnowledgeService:
                 raise KnowledgeError("import_not_ready", status_code=409)
             validate_metadata({key: item.get(key) for key in LiteratureMetadata.model_fields}, required=True)
             self.files.read_body(item["body_ref"], sha256=item["sha256"])
+            self._read_text(item)
             self.repository.publish_import(
                 import_id, expected_revision if expected_revision is not None else item["revision"],
             )
@@ -367,18 +446,27 @@ class KnowledgeService:
             raise KnowledgeError("publication_incomplete", status_code=409)
 
     async def read_document(self, actor: str, library_id: str, document_id: str) -> dict[str, Any]:
-        result = await self.download_document(actor, library_id, document_id)
+        result = await self.download_document_text(actor, library_id, document_id)
         return {key: value for key, value in {**result, "text": decode_markdown(result["content"])}.items() if key != "content"}
 
     async def download_document(self, actor: str, library_id: str, document_id: str) -> dict[str, Any]:
+        return await self._download_document(actor, library_id, document_id, markdown=False)
+
+    async def download_document_text(self, actor: str, library_id: str, document_id: str) -> dict[str, Any]:
+        return await self._download_document(actor, library_id, document_id, markdown=True)
+
+    async def _download_document(self, actor: str, library_id: str, document_id: str, *, markdown: bool) -> dict[str, Any]:
         def read() -> dict[str, Any]:
             item = self._document(actor, library_id, document_id)
-            raw = self.files.read_body(item["body_ref"], sha256=item["sha256"])
+            raw, sha = self._read_text(item) if markdown else (
+                self.files.read_body(item["body_ref"], sha256=item["sha256"]), item["sha256"],
+            )
             current = self._document(actor, library_id, document_id)
-            if current["sha256"] != item["sha256"]:
+            if document_text_version(current) != document_text_version(item):
                 raise KnowledgeError("document_changed", status_code=409)
-            return {"library_id": library_id, "document_id": document_id, "sha256": item["sha256"],
-                    "filename": item["filename"], "content": raw,
+            return {"library_id": library_id, "document_id": document_id, "sha256": sha,
+                    "version": document_text_version(item), "filename": _filename(item, markdown=markdown), "content": raw,
+                    "media_type": "text/markdown" if markdown or not item["body_ref"].endswith(".pdf") else "application/pdf",
                     "metadata": {key: item.get(key) for key in LiteratureMetadata.model_fields}}
         return await self._run(read)
 
@@ -462,8 +550,10 @@ class KnowledgeService:
 
     def _finish_import(self, item: Mapping[str, Any]) -> None:
         try:
-            self._ensure_index(item["library_id"])
             document = self.repository.get_document(item["document_id"])
+            self.files.read_body(document["body_ref"], sha256=document["sha256"])
+            self._read_text(document)
+            self._ensure_index(item["library_id"])
             self._cleanup_document(document)
             for ref in item.get("cleanup_refs", []):
                 self.files.delete_body(ref)
@@ -533,10 +623,19 @@ class KnowledgeService:
             heartbeat = asyncio.create_task(self._renew_claim(item))
             started = time.perf_counter()
             try:
+                if item["body_ref"].endswith(".pdf"):
+                    try:
+                        raw, _ = await self._run(self._read_text, item)
+                    except (OSError, ValueError, KnowledgeError):
+                        source = await self._run(self.files.read_body, item["body_ref"], sha256=item["sha256"])
+                        text = await self._run(parse_pdf, source)
+                        item = await self._run(self._store_parsed_text, item, text.encode("utf-8"))
+                    raw, _ = await self._run(self._read_text, item)
+                else:
+                    raw, _ = await self._run(self._read_text, item)
+                text = decode_markdown(raw)
                 if self.extractor is None:
                     raise KnowledgeError("knowledge_extractor_unavailable")
-                raw = await self._run(self.files.read_body, item["body_ref"], sha256=item["sha256"])
-                text = decode_markdown(raw)
                 result = self.extractor(text)
                 if inspect.isawaitable(result):
                     result = await result
@@ -549,6 +648,8 @@ class KnowledgeService:
             except asyncio.CancelledError:
                 await self._run(self._fail_extraction, item, "pending", None)
                 raise
+            except PdfTextError as exc:
+                await self._run(self._fail_extraction, item, "failed", exc.code)
             except Exception:
                 await self._run(self._fail_extraction, item, "failed", "extraction_failed")
             finally:
@@ -557,6 +658,28 @@ class KnowledgeService:
                     await heartbeat
                 except asyncio.CancelledError:
                     pass
+
+    def _store_parsed_text(self, item: Mapping[str, Any], raw: bytes) -> dict[str, Any]:
+        sha = hashlib.sha256(raw).hexdigest()
+        resource_id = f"{item['import_id']}_{uuid4().hex}"
+        ref = self.files.build_reference(item["library_id"], resource_id, sha)
+        current = self.repository.register_parsed_body(
+            item["import_id"], item["revision"], item["claim_token"], item["sha256"], ref, sha,
+        )
+        self._require_processing(current)
+        self.files.put_body(item["library_id"], resource_id, raw)
+        self._require_processing(current)
+        self.files.read_body(ref, sha256=sha)
+        return current
+
+    def _require_processing(self, item: Mapping[str, Any]) -> None:
+        library = self.repository.get_library(item["library_id"])
+        current = self.repository.get_import(item["import_id"])
+        if (not library or library["status"] != "active" or not current
+                or current["status"] != "processing" or current["revision"] != item["revision"]
+                or current["claim_token"] != item["claim_token"]
+                or (current.get("claim_expires_at") or 0) <= time.time()):
+            raise KnowledgeError("import_state_changed", status_code=409)
 
     async def _renew_claim(self, item: Mapping[str, Any]) -> None:
         while True:
@@ -581,7 +704,8 @@ class KnowledgeService:
 
     def _fail_extraction(self, item: Mapping[str, Any], status: str, error: str | None) -> None:
         current = self.repository.get_import(item["import_id"])
-        if (current and current["status"] == "processing" and current.get("claim_token") == item.get("claim_token")):
+        if (current and current["status"] == "processing" and current.get("claim_token") == item.get("claim_token")
+                and (current.get("claim_expires_at") or 0) > time.time()):
             self.repository.update_import(
                 current["import_id"], current["revision"], status=status, error=error, claim_token=item.get("claim_token"),
             )
