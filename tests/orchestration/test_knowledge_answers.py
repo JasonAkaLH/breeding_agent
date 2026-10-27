@@ -27,6 +27,7 @@ class KnowledgeAnswersTest(unittest.TestCase):
         request = self.request([self.source(complete=False, next_cursor="continue")])
         answer = "完整阅读后的事实 [1].\n[1] Known Author. Known title. 2021. 10.1/known."
         self.assertEqual(answer_error(answer, request), "knowledge_answer_read_incomplete")
+        self.assertEqual(answer_error("尚未完整阅读；" + answer, request), "knowledge_answer_read_incomplete")
 
     def test_missing_bibliographic_fields_must_stay_explicitly_unknown(self):
         request = self.request([self.source(metadata={"title": "Manual", "authors": [], "year": None, "doi": None})])
