@@ -234,10 +234,14 @@ export function KnowledgeSettingsPanel({ api, onLibrariesChanged }: Props) {
         const files = Array.from(event.target.files ?? []); event.target.value = '';
         if (selectedId && files.length) void run(() => api.uploadKnowledgeImports(selectedId, files));
       }} />
-      <Modal destroyOnHidden title={libraryForm?.id ? '编辑文献库' : '创建文献库'} open={libraryForm !== null} confirmLoading={busy} onCancel={() => setLibraryForm(null)} onOk={() => {
+      {/* Finish closing before the native upload picker can open; retain focus restoration. */}
+      <Modal destroyOnHidden transitionName="" maskTransitionName="" title={libraryForm?.id ? '编辑文献库' : '创建文献库'} open={libraryForm !== null} confirmLoading={busy} onCancel={() => setLibraryForm(null)} onOk={async () => {
         if (!libraryForm?.name.trim()) { setError('文献库名称不能为空。'); return; }
         const form = libraryForm;
-        void run(() => form.id ? api.patchKnowledgeLibrary(form.id, { name: form.name.trim(), description: form.description, revision: form.revision }) : api.createKnowledgeLibrary({ name: form.name.trim(), description: form.description }), () => setLibraryForm(null));
+        const target = selectedRef.current;
+        let saved = false;
+        await run(() => form.id ? api.patchKnowledgeLibrary(form.id, { name: form.name.trim(), description: form.description, revision: form.revision }) : api.createKnowledgeLibrary({ name: form.name.trim(), description: form.description }), () => { saved = true; });
+        if (saved && mounted.current && target === selectedRef.current) setLibraryForm(null);
       }}>
         {error ? <Alert type="error" message={error} /> : null}
         <label>文献库名称<Input value={libraryForm?.name ?? ''} onChange={(event) => setLibraryForm((old) => old && ({ ...old, name: event.target.value }))} /></label>

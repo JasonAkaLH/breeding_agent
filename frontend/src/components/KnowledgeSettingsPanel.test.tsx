@@ -29,6 +29,34 @@ async function openLibrary(api: KnowledgeApi) {
 }
 
 describe('KnowledgeSettingsPanel', () => {
+  it.each(['save', 'cancel'])('removes the library dialog before uploads can resume after %s', async (action) => {
+    const api = makeApi();
+    const view = render(<ConfigProvider theme={{ token: { motion: true } }}><KnowledgeSettingsPanel api={api} /></ConfigProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: '稻种文献' }));
+    await screen.findByRole('heading', { name: '已入库文献' });
+    const trigger = screen.getByRole('button', { name: '创建文献库' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog', { name: '创建文献库' });
+    const input = within(dialog).getByLabelText('文献库名称');
+    input.focus();
+    fireEvent.change(input, { target: { value: '新文献库' } });
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: action === 'save' ? 'OK' : 'Cancel' }));
+      });
+      expect(screen.getByRole('button', { name: '上传文献' })).toBeEnabled();
+      expect(dialog).not.toBeInTheDocument();
+      expect(globalThis.document.querySelector('.ant-modal-wrap')).toBeNull();
+      expect(trigger).toHaveFocus();
+      expect(api.uploadKnowledgeImports).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it('separates PDF source downloads, Markdown export and text preview for a reader', async () => {
     const api = makeApi({
       listKnowledgeLibraries: vi.fn(async () => ({ libraries: [{ ...library, role: 'reader' }] })),
