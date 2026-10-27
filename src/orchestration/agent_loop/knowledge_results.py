@@ -152,7 +152,7 @@ async def load_knowledge_resource(service: Any, scope: Mapping[str, Any], *, cap
     result = await service.read_document(actor, library_id, document_id)
     metadata = {key: value for key, value in dict(result.get("metadata") or {}).items()
                 if key in {"title", "authors", "year", "doi"}}
-    return {"text": result["text"], "version": result["sha256"], "metadata": metadata}
+    return {"text": result["text"], "version": result["version"], "metadata": metadata}
 
 
 def knowledge_model_view(result: Mapping[str, Any], text: str | None = None,

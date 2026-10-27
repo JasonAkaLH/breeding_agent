@@ -16,7 +16,7 @@ function makeApi(overrides: Partial<KnowledgeApi> = {}) {
     listKnowledgeImports: vi.fn(async () => ({ imports: [draft] })), uploadKnowledgeImports: vi.fn(async () => ({ results: [{ filename: 'new.md', status: 'queued' }, { filename: 'bad.md', status: 'failed', error: '不是 UTF-8' }, { document_id: 'existing', status: 'active', duplicate_type: 'document' }] })),
     patchKnowledgeImport: vi.fn(async () => draft), confirmKnowledgeImport: vi.fn(async () => ({ ...draft, status: 'publishing' })),
     confirmKnowledgeImports: vi.fn(async () => ({ results: [{ import_id: 'imp', status: 'published' }, { import_id: 'failed', status: 'failed', error: '字段缺失' }] })),
-    retryKnowledgeImport: vi.fn(async () => draft), discardKnowledgeImport: vi.fn(async () => undefined), readKnowledgeContent: vi.fn(async () => '# 完整原文'), downloadKnowledgeDocument: vi.fn(async () => undefined),
+    retryKnowledgeImport: vi.fn(async () => draft), discardKnowledgeImport: vi.fn(async () => undefined), readKnowledgeContent: vi.fn(async () => '# 完整原文'), downloadKnowledgeSource: vi.fn(async () => undefined), downloadKnowledgeDocument: vi.fn(async () => undefined),
     listKnowledgeGrants: vi.fn(async () => ({ grants: [{ grant_id: 'grant', library_id: 'lib', subject_type: 'user', subject_id: 'bob', role: 'reader' }] })),
     createKnowledgeGrant: vi.fn(async () => ({})), deleteKnowledgeGrant: vi.fn(async () => undefined),
     ...overrides,
@@ -25,10 +25,48 @@ function makeApi(overrides: Partial<KnowledgeApi> = {}) {
 async function openLibrary(api: KnowledgeApi) {
   render(<ConfigProvider theme={{ token: { motion: false } }}><KnowledgeSettingsPanel api={api} /></ConfigProvider>);
   fireEvent.click(await screen.findByRole('button', { name: '稻种文献' }));
-  await screen.findByRole('button', { name: '阅读全文' });
+  await screen.findByRole('heading', { name: '已入库文献' });
 }
 
 describe('KnowledgeSettingsPanel', () => {
+  it('separates PDF source downloads, Markdown export and text preview for a reader', async () => {
+    const api = makeApi({
+      listKnowledgeLibraries: vi.fn(async () => ({ libraries: [{ ...library, role: 'reader' }] })),
+      listKnowledgeDocuments: vi.fn(async () => ({ documents: [{ ...document, filename: 'paper.pdf', source_format: 'pdf' }] })),
+    });
+    await openLibrary(api);
+    fireEvent.click(screen.getByRole('button', { name: '下载原 PDF' }));
+    await waitFor(() => expect(api.downloadKnowledgeSource).toHaveBeenCalledWith('lib', 'documents', 'doc', 'paper.pdf'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '导出 Markdown' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '导出 Markdown' }));
+    await waitFor(() => expect(api.downloadKnowledgeDocument).toHaveBeenCalledWith('lib', 'doc', 'paper.md'));
+    expect(screen.queryByRole('button', { name: '下载 Markdown' })).not.toBeInTheDocument();
+  });
+
+  it('blocks confirmation and metadata editing until PDF text is ready, while retaining source and retry', async () => {
+    const pdf = { ...draft, filename: 'scan.pdf', source_format: 'pdf' as const, status: 'failed', text_ready: false, error_code: 'pdf_page_text_unavailable' };
+    const api = makeApi({ listKnowledgeDocuments: vi.fn(async () => ({ documents: [] })), listKnowledgeImports: vi.fn(async () => ({ imports: [pdf] })) });
+    await openLibrary(api);
+    expect(screen.getByRole('button', { name: '确认入库' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '编辑审核字段' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '预览提取正文' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '确认所选文献' })).toBeDisabled();
+    expect(screen.getByText(/部分页面无法提取文字/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '下载原 PDF' }));
+    await waitFor(() => expect(api.downloadKnowledgeSource).toHaveBeenCalledWith('lib', 'imports', 'imp', 'scan.pdf'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '重试提取' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '重试提取' }));
+    await waitFor(() => expect(api.retryKnowledgeImport).toHaveBeenCalledWith('lib', 'imp'));
+  });
+
+  it('allows manual review when PDF text is ready after metadata extraction failed', async () => {
+    const api = makeApi({ listKnowledgeImports: vi.fn(async () => ({ imports: [{ ...draft, source_format: 'pdf', status: 'failed', text_ready: true, error_code: 'extraction_failed' }] })) });
+    await openLibrary(api);
+    expect(screen.getByRole('button', { name: '确认入库' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '编辑审核字段' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '预览提取正文' })).toBeEnabled();
+  });
+
   it('shows publication and cleanup work without claiming the document is readable', async () => {
     const api = makeApi({ listKnowledgeDocuments: vi.fn(async () => ({ documents: [{ ...document, publication_state: 'pending', cleanup_pending: true, error_code: 'cleanup_failed' }] })) });
     await openLibrary(api);
@@ -82,7 +120,7 @@ describe('KnowledgeSettingsPanel', () => {
     await openLibrary(api);
     expect(screen.getByRole('region', { name: '共享给我' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '编辑文献库' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '批量上传 Markdown' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '上传文献' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '编辑元数据' })).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '导入审核' })).not.toBeInTheDocument();
     expect(api.listKnowledgeImports).not.toHaveBeenCalled();
@@ -99,7 +137,7 @@ describe('KnowledgeSettingsPanel', () => {
   it('supports batch uploads and shows each accepted or failed item accurately', async () => {
     const api = makeApi(); await openLibrary(api);
     const files = [new File(['# body'], 'new.md'), new File(['bad'], 'bad.md')];
-    fireEvent.change(screen.getByLabelText('批量上传文献 Markdown'), { target: { files } });
+    fireEvent.change(screen.getByLabelText('批量上传文献'), { target: { files } });
     await waitFor(() => expect(api.uploadKnowledgeImports).toHaveBeenCalledWith('lib', files));
     expect(await screen.findByText('new.md：待处理')).toBeInTheDocument();
     expect(screen.getByText('不是 UTF-8')).toBeInTheDocument();
@@ -127,7 +165,7 @@ describe('KnowledgeSettingsPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '替换正文' }));
     expect(screen.getByText(/确认前原正文仍可用/)).toBeInTheDocument();
     const file = new File(['# new body'], 'replacement.md');
-    fireEvent.change(screen.getByLabelText('上传替换正文 Markdown'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传替换文献'), { target: { files: [file] } });
     await waitFor(() => expect(api.uploadKnowledgeImports).toHaveBeenCalledWith('lib', [file], 'doc'));
     expect(api.confirmKnowledgeImport).not.toHaveBeenCalled();
   });

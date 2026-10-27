@@ -259,8 +259,12 @@ class AgentContextCandidateBuilder:
         reserved_calls = {item.source_call_item_id for item in items
                           if item.kind is AgentItemKind.TOOL_RESULT and item.state is AgentItemState.RESERVED}
         remaining = sum(item.item_id in reserved_calls for item in calls.values())
-        # The page counter includes its provider message envelope, metadata and cursor.
-        return max(0, min(50_000, (candidate.preflight.total_context_limit_tokens - mandatory) // max(1, remaining)))
+        # A subsequent compaction replaces consumed history with a new system
+        # summary. Leave half the remaining context for that summary and future
+        # progress; filling the entire limit makes the unconsumed page fatal.
+        # The page counter includes its provider envelope, metadata and cursor.
+        available = max(0, candidate.preflight.total_context_limit_tokens - mandatory)
+        return min(50_000, available // 2 // max(1, remaining))
 
     async def _count_fragments(
         self,

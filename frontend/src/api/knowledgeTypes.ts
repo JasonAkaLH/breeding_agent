@@ -30,6 +30,8 @@ export interface KnowledgeDocument extends KnowledgeMetadata {
   library_id: string;
   filename: string;
   sha256: string;
+  source_format?: 'markdown' | 'pdf';
+  text_ready?: boolean;
   status: string;
   revision: number;
   cleanup_status?: string;
@@ -44,6 +46,8 @@ export interface KnowledgeImport extends KnowledgeMetadata {
   library_id: string;
   filename: string;
   sha256: string;
+  source_format?: 'markdown' | 'pdf';
+  text_ready?: boolean;
   status: string;
   revision: number;
   replacement_document_id?: string | null;

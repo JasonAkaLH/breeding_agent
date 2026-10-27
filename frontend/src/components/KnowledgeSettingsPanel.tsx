@@ -15,6 +15,15 @@ const statusLabels: Record<string, string> = {
   deleted: '已删除', discarded: '已丢弃', duplicate: '重复，已复用', completed: '已完成', index_pending: '索引待修复',
 };
 const statusLabel = (status: string) => statusLabels[status] ?? status;
+const errorLabels: Record<string, string> = {
+  pdf_unreadable: 'PDF 损坏或无法读取，请上传可读文件。', pdf_encrypted: '暂不支持加密 PDF，请上传未加密原件。',
+  pdf_no_text: 'PDF 没有可提取文字，扫描版暂不处理。', pdf_page_text_unavailable: '部分页面无法提取文字，扫描页和纯图形页暂不处理，请对照原件。',
+  pdf_limit_exceeded: 'PDF 超过解析资源限制，请改传较小的文献。', knowledge_text_not_ready: '提取正文尚未就绪，请等待处理或重试。',
+  knowledge_format_unsupported: '请选择 Markdown 或 PDF 文件。', knowledge_file_too_large: '单文件不能超过 20 MiB。',
+  extraction_failed: '元数据提取失败；正文就绪时可手工完善审核字段或重试。', knowledge_file_unavailable: '文件存储暂不可用，请稍后重试。',
+};
+const errorLabel = (code?: string | null) => code ? errorLabels[code] ?? code : '';
+const reviewable = (item: KnowledgeImport) => ['awaiting_review', 'failed', 'ready', 'draft'].includes(item.status) && item.text_ready !== false;
 const importEditable = (item: KnowledgeImport) => ['uploading', 'pending', 'queued', 'extracting', 'processing', 'awaiting_review', 'ready', 'draft', 'failed'].includes(item.status);
 
 export function KnowledgeSettingsPanel({ api, onLibrariesChanged }: Props) {
@@ -155,7 +164,7 @@ export function KnowledgeSettingsPanel({ api, onLibrariesChanged }: Props) {
             <Button disabled={busy || library.status !== 'active'} onClick={() => void showContent('index', undefined, `${library.name} 索引`)}>查看 Markdown 索引</Button>
             {owner ? <>
               <Button disabled={busy || library.status !== 'active'} onClick={() => setLibraryForm({ id: library.library_id, revision: library.revision, name: library.name, description: library.description })}>编辑文献库</Button>
-              <Button disabled={busy || library.status !== 'active'} onClick={() => filesRef.current?.click()}>批量上传 Markdown</Button>
+              <Button disabled={busy || library.status !== 'active'} onClick={() => filesRef.current?.click()}>上传文献</Button>
               <Button danger disabled={busy} onClick={() => requireDelete('删除文献库', '删除后立即停止读取并撤销共享，随后清理所有正文和草稿。清理未完成时会保留可恢复状态；历史回答保持原样。', () => api.deleteKnowledgeLibrary(library.library_id, library.revision))}>删除文献库</Button>
             </> : null}
           </Space>
@@ -169,13 +178,14 @@ export function KnowledgeSettingsPanel({ api, onLibrariesChanged }: Props) {
               {document.doi ? <Typography.Text>DOI：{document.doi}</Typography.Text> : null}
               {document.keywords.length ? <Typography.Text>关键词：{document.keywords.join('、')}</Typography.Text> : null}
               <Typography.Paragraph>{document.summary}</Typography.Paragraph>
-              <Space wrap><Tag>{statusLabel(document.status === 'active' && !readable ? 'publishing' : document.status)}</Tag>{document.cleanup_status ? <Tag>{statusLabel(document.cleanup_status)}</Tag> : null}</Space>
+              <Space wrap><Tag>{document.source_format === 'pdf' ? 'PDF' : 'Markdown'}</Tag><Tag>{statusLabel(document.status === 'active' && !readable ? 'publishing' : document.status)}</Tag>{document.cleanup_status ? <Tag>{statusLabel(document.cleanup_status)}</Tag> : null}</Space>
               {document.cleanup_pending ? <Tag>清理未完成</Tag> : null}
               {document.publication_state && document.publication_state !== 'complete' ? <Tag>发布：{statusLabel(document.publication_state)}</Tag> : null}
               {document.error || document.error_code ? <Alert type="warning" message={document.error ?? document.error_code} /> : null}
               <Space wrap>
                 <Button disabled={busy || !readable} onClick={() => void showContent('documents', document.document_id, document.title)}>阅读全文</Button>
-                <Button disabled={busy || !readable} onClick={() => void run(() => api.downloadKnowledgeDocument(library.library_id, document.document_id, document.filename || `${document.title}.md`))}>下载 Markdown</Button>
+                <Button disabled={busy || !readable} onClick={() => void run(() => api.downloadKnowledgeDocument(library.library_id, document.document_id, document.source_format === 'pdf' ? document.filename.replace(/\.pdf$/i, '.md') : document.filename || `${document.title}.md`))}>{document.source_format === 'pdf' ? '导出 Markdown' : '下载 Markdown'}</Button>
+                {document.source_format === 'pdf' ? <Button disabled={busy || !readable} onClick={() => void run(() => api.downloadKnowledgeSource(library.library_id, 'documents', document.document_id, document.filename))}>下载原 PDF</Button> : null}
                 {owner ? <>
                   <Button disabled={busy || !readable} onClick={() => editMetadata({ kind: 'document', record: document })}>编辑元数据</Button>
                   <Button disabled={busy || !readable} onClick={() => setReplacement(document)}>替换正文</Button>
@@ -187,22 +197,23 @@ export function KnowledgeSettingsPanel({ api, onLibrariesChanged }: Props) {
           })}
           {owner && library.status === 'active' ? <section aria-label="导入审核">
             <Typography.Title level={5}>导入审核</Typography.Title>
-            <Typography.Paragraph type="secondary">提取完成后仍需人工确认；标题和检索简述必填，其余字段可留空。</Typography.Paragraph>
-            <Button disabled={busy || checked.length === 0} onClick={() => void run(() => api.confirmKnowledgeImports(library.library_id, imports.filter((item) => checked.includes(item.import_id)).map((item) => ({ import_id: item.import_id, revision: item.revision }))))}>确认所选文献</Button>
+            <Typography.Paragraph type="secondary">支持 Markdown 和 PDF。PDF 仅提取文字层，不识别扫描页、图片或页面视觉语义，请对照原件审核。正文就绪后仍需人工确认；标题和检索简述必填，其余字段可留空。</Typography.Paragraph>
+            <Button disabled={busy || !imports.some((item) => checked.includes(item.import_id) && reviewable(item))} onClick={() => void run(() => api.confirmKnowledgeImports(library.library_id, imports.filter((item) => checked.includes(item.import_id) && reviewable(item)).map((item) => ({ import_id: item.import_id, revision: item.revision }))))}>确认所选文献</Button>
             {imports.map((item) => <Card key={item.import_id} size="small" title={item.filename}>
               <Space direction="vertical" className="knowledge-settings">
-                <Space><Tag>{statusLabel(item.status)}</Tag>{item.replacement_document_id ? <Tag>替换草稿</Tag> : null}</Space>
+                <Space><Tag>{item.source_format === 'pdf' ? 'PDF' : 'Markdown'}</Tag><Tag>{statusLabel(item.status)}</Tag>{item.replacement_document_id ? <Tag>替换草稿</Tag> : null}</Space>
                 <Typography.Text>{item.title || '标题待补全'}</Typography.Text>
                 <Typography.Paragraph>{item.summary || '检索简述待补全'}</Typography.Paragraph>
                 {item.cleanup_pending ? <Tag>清理未完成</Tag> : null}
                 {item.publication_state && item.publication_state !== 'complete' ? <Tag>发布：{statusLabel(item.publication_state)}</Tag> : null}
-                {item.error || item.error_code ? <Alert type="error" message={item.error ?? item.error_code} /> : null}
+                {item.error || item.error_code ? <Alert type="error" message={errorLabel(item.error ?? item.error_code)} /> : null}
                 <Space wrap>
-                  {importEditable(item) ? <Checkbox checked={checked.includes(item.import_id)} onChange={(event) => setChecked((old) => event.target.checked ? [...old, item.import_id] : old.filter((id) => id !== item.import_id))}>选择 {item.filename}</Checkbox> : null}
-                  <Button disabled={busy} onClick={() => void showContent('imports', item.import_id, item.filename)}>查看原始 Markdown</Button>
+                  {reviewable(item) ? <Checkbox checked={checked.includes(item.import_id)} onChange={(event) => setChecked((old) => event.target.checked ? [...old, item.import_id] : old.filter((id) => id !== item.import_id))}>选择 {item.filename}</Checkbox> : null}
+                  <Button disabled={busy || item.text_ready === false || !importEditable(item)} onClick={() => void showContent('imports', item.import_id, item.filename)}>{item.source_format === 'pdf' ? '预览提取正文' : '查看原始 Markdown'}</Button>
+                  {item.source_format === 'pdf' && importEditable(item) ? <Button disabled={busy} onClick={() => void run(() => api.downloadKnowledgeSource(library.library_id, 'imports', item.import_id, item.filename))}>下载原 PDF</Button> : null}
                   {importEditable(item) ? <>
-                    <Button disabled={busy} onClick={() => editMetadata({ kind: 'import', record: item })}>编辑审核字段</Button>
-                    <Button disabled={busy || !item.title?.trim() || !item.summary?.trim()} onClick={() => void run(() => api.confirmKnowledgeImport(library.library_id, item.import_id, item.revision))}>确认入库</Button>
+                    <Button disabled={busy || item.text_ready === false} onClick={() => editMetadata({ kind: 'import', record: item })}>编辑审核字段</Button>
+                    <Button disabled={busy || !reviewable(item) || !item.title?.trim() || !item.summary?.trim()} onClick={() => void run(() => api.confirmKnowledgeImport(library.library_id, item.import_id, item.revision))}>确认入库</Button>
                     {item.status === 'failed' ? <Button disabled={busy} onClick={() => void run(() => api.retryKnowledgeImport(library.library_id, item.import_id))}>重试提取</Button> : null}
                     <Button danger disabled={busy} onClick={() => requireDelete('丢弃导入草稿', '丢弃后清理上传文件和处理临时文件，不改变已入库的当前正文。', () => api.discardKnowledgeImport(library.library_id, item.import_id, item.revision))}>丢弃草稿</Button>
                   </> : null}
@@ -218,8 +229,8 @@ export function KnowledgeSettingsPanel({ api, onLibrariesChanged }: Props) {
           </section> : null}
         </Space>
       </Card> : null}
-      {results ? <section aria-label="逐项处理结果"><Typography.Title level={5}>逐项处理结果</Typography.Title>{results.results.map((item, index) => <Alert key={`${item.import_id ?? item.filename}-${index}`} type={item.error ? 'error' : 'info'} message={`${item.filename ?? item.import_id ?? item.document_id ?? index + 1}：${item.duplicate_type ? '重复，已复用' : statusLabel(item.status)}${item.unchanged ? '（正文未变）' : ''}`} description={item.error} />)}</section> : null}
-      <input ref={filesRef} className="file-input-hidden" aria-label="批量上传文献 Markdown" type="file" accept=".md,.markdown,text/markdown" multiple onChange={(event) => {
+      {results ? <section aria-label="逐项处理结果"><Typography.Title level={5}>逐项处理结果</Typography.Title>{results.results.map((item, index) => <Alert key={`${item.import_id ?? item.filename}-${index}`} type={item.error ? 'error' : 'info'} message={`${item.filename ?? item.import_id ?? item.document_id ?? index + 1}：${item.duplicate_type ? '重复，已复用' : statusLabel(item.status)}${item.unchanged ? '（正文未变）' : ''}`} description={errorLabel(item.error)} />)}</section> : null}
+      <input ref={filesRef} className="file-input-hidden" aria-label="批量上传文献" type="file" accept=".md,.markdown,.pdf,text/markdown,application/pdf" multiple onChange={(event) => {
         const files = Array.from(event.target.files ?? []); event.target.value = '';
         if (selectedId && files.length) void run(() => api.uploadKnowledgeImports(selectedId, files));
       }} />
@@ -239,9 +250,9 @@ export function KnowledgeSettingsPanel({ api, onLibrariesChanged }: Props) {
       </Modal>
       <Modal destroyOnHidden title={preview?.title} open={preview !== null} width={900} footer={null} onCancel={() => setPreview(null)}><MarkdownText content={preview?.text ?? ''} /></Modal>
       <Modal destroyOnHidden title="替换正文" open={replacement !== null} footer={null} onCancel={() => setReplacement(null)}>
-        <Typography.Paragraph>为“{replacement?.title}”上传新的 Markdown。新草稿须经人工审核；确认前原正文仍可用，确认后将清除旧正文及受管副本，不保留历史正文。</Typography.Paragraph>
-        <Button disabled={busy} onClick={() => replacementRef.current?.click()}>选择替换 Markdown</Button>
-        <input ref={replacementRef} className="file-input-hidden" aria-label="上传替换正文 Markdown" type="file" accept=".md,.markdown,text/markdown" onChange={(event) => {
+        <Typography.Paragraph>为“{replacement?.title}”上传新的 Markdown 或 PDF。新草稿须经人工审核；确认前原正文仍可用，确认后将清理旧原件、旧解析正文及受管副本，不保留历史正文。</Typography.Paragraph>
+        <Button disabled={busy} onClick={() => replacementRef.current?.click()}>选择替换文献</Button>
+        <input ref={replacementRef} className="file-input-hidden" aria-label="上传替换文献" type="file" accept=".md,.markdown,.pdf,text/markdown,application/pdf" onChange={(event) => {
           const file = event.target.files?.[0]; event.target.value = '';
           if (selectedId && replacement && file) void run(() => api.uploadKnowledgeImports(selectedId, [file], replacement.document_id), () => setReplacement(null));
         }} />

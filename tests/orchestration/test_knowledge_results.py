@@ -61,6 +61,7 @@ class _Service:
         if not self.allowed:
             raise _Denied()
         return {"text": self.text, "sha256": hashlib.sha256(self.text.encode()).hexdigest(),
+                "version": getattr(self, "version", hashlib.sha256(self.text.encode()).hexdigest()),
                 "metadata": {"title": "文献一", "authors": ["作者甲"], "year": 2026, "doi": None}}
 
 
@@ -104,6 +105,20 @@ def _catalog():
 
 
 class KnowledgeResultTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pdf_source_only_version_change_invalidates_cursor_and_reference(self):
+        service = _Service("PDF parsed evidence " * 1000)
+        service.version = "a" * 64
+        executor = KnowledgeExecutor(service, token_counter=lambda text, _edition: len(text) // 4)
+        first = await executor.execute(_request(knowledge_result_token_budget=600))
+        self.assertIsNone(first.error)
+        service.version = "b" * 64
+        changed = await executor.execute(_request({"library_id": "lib-1", "document_id": "doc-1", "cursor": first.output_payload["reference"]["next_cursor"]}))
+        self.assertEqual(changed.output_payload["status"], "changed")
+        resolver = KnowledgeResultResolver(service=service, scope_loader=lambda _run: SCOPE)
+        items = _items(first.output_payload)
+        view = await resolver.resolve_tool_result(run=_run(), call_item=items[2], result_item=items[3], durable_payload=json.loads(items[3].payload_json))
+        self.assertEqual(view["safe_result"]["status"], "changed")
+
     async def test_utf8_pages_are_contiguous_and_durable_results_contain_no_body(self):
         service = _Service("\ufeff" + "稻🌾增产 17%。\r\n" * 500)
         executor = KnowledgeExecutor(service, token_counter=lambda text, _edition: len(text) // 4)

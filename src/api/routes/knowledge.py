@@ -136,7 +136,21 @@ async def get_import(library_id: str, import_id: str, request: Request):
 async def preview_import(library_id: str, import_id: str, request: Request):
     actor = (await require_authenticated_user(request)).username
     result = await _call(_service(request).preview_import, actor, library_id, import_id)
-    return Response(result["text"], media_type="text/markdown", headers={"Cache-Control": "no-store"})
+    return Response(result["text"], media_type="text/markdown", headers={"Cache-Control": "no-store", "X-Content-SHA256": result["sha256"]})
+
+
+def _file_response(result, *, download: bool = True):
+    headers = {"Cache-Control": "no-store", "X-Content-SHA256": result["sha256"]}
+    if download:
+        filename = quote(result["filename"], safe="")
+        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{filename}"
+    return Response(result["content"], media_type=result["media_type"], headers=headers)
+
+
+@router.get("/knowledge/libraries/{library_id}/imports/{import_id}/source")
+async def download_import_source(library_id: str, import_id: str, request: Request):
+    actor = (await require_authenticated_user(request)).username
+    return _file_response(await _call(_service(request).download_import_source, actor, library_id, import_id))
 
 
 @router.patch("/knowledge/libraries/{library_id}/imports/{import_id}")
@@ -199,12 +213,14 @@ async def delete_document(library_id: str, document_id: str, request: Request, r
 @router.get("/knowledge/libraries/{library_id}/documents/{document_id}/content")
 async def read_document(library_id: str, document_id: str, request: Request, download: bool = False):
     actor = (await require_authenticated_user(request)).username
-    result = await _call(_service(request).download_document, actor, library_id, document_id)
-    headers = {"Cache-Control": "no-store", "X-Content-SHA256": result["sha256"]}
-    if download:
-        filename = quote(result.get("filename") or "document.md", safe="")
-        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{filename}"
-    return Response(result["content"], media_type="text/markdown", headers=headers)
+    result = await _call(_service(request).download_document_text, actor, library_id, document_id)
+    return _file_response(result, download=download)
+
+
+@router.get("/knowledge/libraries/{library_id}/documents/{document_id}/source")
+async def download_document_source(library_id: str, document_id: str, request: Request):
+    actor = (await require_authenticated_user(request)).username
+    return _file_response(await _call(_service(request).download_document, actor, library_id, document_id))
 
 
 @router.get("/knowledge/libraries/{library_id}/grants")

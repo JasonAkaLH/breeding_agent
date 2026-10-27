@@ -1,5 +1,7 @@
 # API 更新日志：`main` 与 `prod` 全量差异扫描
 
+- 2026-10-27：文献库支持 Markdown/PDF 混合导入；新增 owner 草稿及 owner/reader 当前文献 `/source` 原件下载。`/content` 固定为 Markdown，各下载返回自身 SHA-256 与 no-store；新增 source_format/text_ready、PDF 解析错误与确认门禁，已发布/丢弃草稿禁止回读。新增客户端显式 rendition 示例。
+
 > 扫描日期：2026-07-10
 >
 > 比较基线：`main@bd0fd2d` 对 `prod@e7ede32`

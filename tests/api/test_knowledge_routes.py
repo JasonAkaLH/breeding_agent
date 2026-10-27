@@ -11,6 +11,63 @@ FIELDS = {"title": "育种试验", "authors": ["研究者"], "year": 2026, "doi"
 
 
 class KnowledgeRoutesTest(APITestCase):
+    async def test_pdf_source_content_hash_acl_and_old_draft_gates(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf, unreadable_page_pdf
+
+        library = await self._library()
+        base = f"/api/v1/knowledge/libraries/{library['library_id']}"
+        raw = text_pdf("FIRST source", "LAST source")
+        result = await self.client.post(base + "/imports", files=[
+            ("files", ("资料.PDF", raw, "text/plain")),
+            ("files", ("invalid.pdf", b"not pdf", "application/pdf")),
+            ("files", ("disguised.md", raw, "text/markdown")),
+            ("files", ("scan.pdf", unreadable_page_pdf(), "application/pdf")),
+        ])
+        accepted, invalid, disguised, scan = result.json()["imports"]
+        self.assertEqual(accepted["status"], "pending")
+        self.assertEqual([invalid["status"], disguised["status"]], ["failed", "failed"])
+        draft_url = f"{base}/imports/{accepted['import_id']}"
+        source = await self.client.get(draft_url + "/source")
+        self.assertEqual(source.content, raw)
+        self.assertTrue(source.headers["content-type"].startswith("application/pdf"))
+        self.assertEqual(source.headers["x-content-sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(source.headers["cache-control"], "no-store")
+        self.assertEqual((await self.client.get(draft_url + "/content")).status_code, 409)
+        await self.runtime.knowledge_service.process_pending()
+        scan_url = f"{base}/imports/{scan['import_id']}"
+        failed = (await self.client.get(scan_url)).json()
+        self.assertFalse(failed["text_ready"])
+        edited = await self.client.patch(scan_url, json={"revision": failed["revision"], "metadata": FIELDS})
+        self.assertEqual(edited.status_code, 409)
+        preview = await self.client.get(draft_url + "/content")
+        self.assertIn("LAST source", preview.text)
+        self.assertTrue(preview.headers["content-type"].startswith("text/markdown"))
+        self.assertEqual(preview.headers["x-content-sha256"], hashlib.sha256(preview.content).hexdigest())
+        draft = (await self.client.get(draft_url)).json()
+        published = (await self.client.post(draft_url + "/confirm", json={"revision": draft["revision"]})).json()
+        for suffix in ("/source", "/content"):
+            self.assertEqual((await self.client.get(draft_url + suffix)).status_code, 404)
+        doc_url = f"{base}/documents/{published['document_id']}"
+        exported = await self.client.get(doc_url + "/content?download=true")
+        self.assertEqual(exported.content, preview.content)
+        self.assertTrue(exported.headers["content-disposition"].endswith(".md"))
+        self.assertEqual(exported.headers["x-content-sha256"], hashlib.sha256(exported.content).hexdigest())
+        other = await self._library()
+        cross = doc_url.replace(library["library_id"], other["library_id"])
+        self.assertEqual((await self.client.get(cross + "/source")).status_code, 404)
+        await self.login("bob")
+        self.assertEqual((await self.client.get(doc_url + "/source")).status_code, 403)
+        await self.login("acc-1")
+        grant = (await self.client.post(base + "/grants", json={"subject_type": "user", "subject_id": "bob", "role": "reader"})).json()
+        await self.login("bob")
+        self.assertEqual((await self.client.get(doc_url + "/source")).content, raw)
+        self.assertEqual((await self.client.get(draft_url + "/source")).status_code, 403)
+        await self.login("acc-1")
+        await self.client.delete(base + "/grants/" + grant["grant_id"])
+        await self.login("bob")
+        for suffix in ("/source", "/content"):
+            self.assertEqual((await self.client.get(doc_url + suffix)).status_code, 403)
+
     async def asyncSetUp(self):
         await super().asyncSetUp()
 

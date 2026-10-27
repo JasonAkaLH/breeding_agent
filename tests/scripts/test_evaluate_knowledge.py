@@ -12,6 +12,27 @@ from scripts.evaluate_knowledge import load_manifest, main
 
 
 class EvaluateKnowledgeTest(unittest.TestCase):
+    def test_mixed_format_manifest_and_empty_library_are_accepted(self):
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path, manifest = self._manifest(root)
+            ((root / "paper.PDF").resolve()).write_bytes(text_pdf("Full evidence"))
+            manifest["libraries"][0]["documents"].append({"id": "pdf1", "path": "paper.PDF"})
+            manifest["libraries"].append({"id": "empty", "name": "Empty", "documents": []})
+            path.write_text(json.dumps(manifest))
+            loaded = load_manifest(path)
+            self.assertEqual(loaded["libraries"][0]["documents"][1]["resolved_path"], (root / "paper.PDF").resolve())
+
+    def test_empty_library_answer_does_not_require_a_fabricated_citation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _ = self._manifest(Path(temporary))
+            result = {"status": "completed", "documents_read": 0, "citation_marker_present": False,
+                      **dict.fromkeys(("expected_documents_read", "expected_documents_completely_read", "expected_facts_present", "expected_bibliographic_titles_present", "required_compaction_observed"), True)}
+            with patch("scripts.evaluate_knowledge.evaluate", new_callable=AsyncMock, return_value={"results": [result]}), redirect_stdout(StringIO()):
+                self.assertEqual(main(["--config", "never-read.yaml", "--corpus", str(path), "--live"]), 0)
+
     def _manifest(self, root: Path):
         (root / "private-literature.md").write_text("PRIVATE FULL TEXT", encoding="utf-8")
         manifest = {

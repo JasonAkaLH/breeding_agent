@@ -89,7 +89,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     retryKnowledgeImport: vi.fn(),
     discardKnowledgeImport: vi.fn(),
     readKnowledgeContent: vi.fn(),
-    downloadKnowledgeDocument: vi.fn(),
+    downloadKnowledgeSource: vi.fn(async () => undefined), downloadKnowledgeDocument: vi.fn(),
     listKnowledgeGrants: vi.fn(async () => ({ grants: [] })),
     createKnowledgeGrant: vi.fn(),
     deleteKnowledgeGrant: vi.fn(),

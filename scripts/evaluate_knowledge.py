@@ -49,7 +49,7 @@ def load_manifest(path: Path) -> dict:
         for document in library["documents"]:
             identifier(document["id"], document_ids)
             candidate = (path.parent / document["path"]).resolve()
-            if not candidate.is_relative_to(path.parent.resolve()) or candidate.suffix.lower() != ".md" or not candidate.is_file():
+            if not candidate.is_relative_to(path.parent.resolve()) or candidate.suffix.lower() not in {".md", ".markdown", ".pdf"} or not candidate.is_file():
                 raise ValueError("knowledge_evaluation_document_invalid")
             document["resolved_path"] = candidate
     for question in questions:
@@ -127,8 +127,14 @@ async def evaluate(args, manifest: dict) -> dict:
                 library_map[library["id"]] = created["library_id"]
                 for document in library["documents"]:
                     imported = (await runtime.knowledge_service.upload_imports(
-                        owner, created["library_id"], [("literature.md", document["resolved_path"].read_bytes())],
+                        owner, created["library_id"], [("literature" + document["resolved_path"].suffix, document["resolved_path"].read_bytes())],
                     ))[0]
+                    if imported.get("duplicate_type") == "document":
+                        document_map[document["id"]] = imported["document_id"]
+                        titles[document["id"]] = imported["title"]
+                        continue
+                    if "import_id" not in imported:
+                        raise ValueError("knowledge_evaluation_upload_failed")
                     await runtime.knowledge_service.process_pending()
                     draft = await runtime.knowledge_service.get_import(owner, created["library_id"], imported["import_id"])
                     if draft["status"] != "awaiting_review":
@@ -193,6 +199,7 @@ async def evaluate(args, manifest: dict) -> dict:
                 calls = measured.calls[call_start:]
                 results.append({
                     "question_id": question["id"], "status": str(current.status),
+                    "terminal_reason_code": run.terminal_reason_code,
                     "seconds": round(time.perf_counter() - question_started, 3),
                     "model_calls": len(calls), "compaction_calls": sum(call["compaction"] for call in calls),
                     "prompt_tokens": sum(call["prompt_tokens"] or 0 for call in calls),
@@ -235,8 +242,10 @@ def main(argv=None) -> int:
             return 0
         report = asyncio.run(evaluate(args, manifest))
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        checks = ("expected_documents_read", "expected_documents_completely_read", "expected_facts_present", "citation_marker_present", "expected_bibliographic_titles_present", "required_compaction_observed")
-        return 0 if all(result["status"] == "completed" and all(result[key] for key in checks) for result in report["results"]) else 2
+        checks = ("expected_documents_read", "expected_documents_completely_read", "expected_facts_present", "expected_bibliographic_titles_present", "required_compaction_observed")
+        return 0 if all(result["status"] == "completed" and all(result[key] for key in checks)
+                        and (result["citation_marker_present"] or result["documents_read"] == 0)
+                        for result in report["results"]) else 2
     except Exception:
         print(json.dumps({"error": "knowledge_evaluation_failed", "private_details_omitted": True}), file=sys.stderr)
         return 2

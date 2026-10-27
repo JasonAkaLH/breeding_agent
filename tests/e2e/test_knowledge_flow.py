@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -180,10 +181,10 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["library_id"]
 
-    async def _publish(self, library_id: str, raw: bytes):
+    async def _publish(self, library_id: str, raw: bytes, filename="experiment.md"):
         response = await self.client.post(
             f"/api/v1/knowledge/libraries/{library_id}/imports",
-            files=[("files", ("experiment.md", raw, "text/markdown"))],
+            files=[("files", (filename, raw, "application/octet-stream"))],
         )
         self.assertEqual(response.status_code, 202, response.text)
         import_id = response.json()["imports"][0]["import_id"]
@@ -244,17 +245,29 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         test.assertIsNone(ordered[-1]["reference"]["next_cursor"])
 
     async def test_approved_raw_body_reaches_model_after_index_and_answer_survives_delete(self):
+        await self._approved_body_chain(pdf=False)
+
+    async def test_approved_pdf_text_reaches_model_after_index_and_answer_survives_delete(self):
+        await self._approved_body_chain(pdf=True)
+
+    async def _approved_body_chain(self, *, pdf):
         await self._configure()
         library_id = await self._create_library()
         raw = ("\ufeff# Light and yield experiment\r\n\r\n" + EARLY_FACT + "\r\n" + TAIL_FACT).encode()
-        document_id = await self._publish(library_id, raw)
+        expected_text = raw.decode("utf-8-sig")
+        if pdf:
+            from src.capabilities.knowledge.pdf import parse_pdf
+            from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+            raw = text_pdf(EARLY_FACT, TAIL_FACT)
+            expected_text = parse_pdf(raw)
+        document_id = await self._publish(library_id, raw, "experiment.pdf" if pdf else "experiment.md")
         self.assertIn(EARLY_FACT, self.extracted[0])
         self.assertIn(TAIL_FACT, self.extracted[0])
         download = await self.client.get(
             f"/api/v1/knowledge/libraries/{library_id}/documents/{document_id}/content?download=true"
         )
-        self.assertEqual(download.content, raw)
-        self.assertEqual(download.headers["x-content-sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(download.content, expected_text.encode() if pdf else raw)
+        self.assertEqual(download.headers["x-content-sha256"], hashlib.sha256(download.content).hexdigest())
         model = self._bind_reading_model(library_id, document_id)
         task_id = await self._ask(library_id, "conv-knowledge-chain")
         self.assertEqual(
@@ -263,7 +276,7 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
             )],
             ["knowledge.list_libraries", "knowledge.read_index", "knowledge.read_document"],
         )
-        self._assert_coverage(self, model.pages["knowledge.read_document"], raw.decode("utf-8-sig"))
+        self._assert_coverage(self, model.pages["knowledge.read_document"], expected_text)
         history_url = "/api/v1/conversations/conv-knowledge-chain/messages"
         messages = (await self.client.get(history_url)).json()["messages"]
         answer = next(message["content"] for message in messages if message["role"] == "assistant")
@@ -291,10 +304,27 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         self.assertEqual(after, messages)
 
     async def test_long_index_full_body_and_compaction_use_actual_ranges(self):
+        await self._long_body_compaction(pdf=False)
+
+    async def test_long_pdf_full_body_and_compaction_use_actual_ranges(self):
+        await self._long_body_compaction(pdf=True)
+
+    async def test_pdf_pages_leave_room_for_compaction_with_matching_token_counters(self):
+        await self._long_body_compaction(pdf=True, matching_counters=True)
+
+    async def _long_body_compaction(self, *, pdf, matching_counters=False):
         await self._configure(context_window=40_000)
+        if matching_counters:
+            self.executor._token_counter = lambda text, _edition: len(text)
         library_id = await self._create_library()
         raw = ("# Light and yield experiment\n" + EARLY_FACT + "\n" + PRIVATE_PARAGRAPH * 1_850 + TAIL_FACT).encode()
-        document_id = await self._publish(library_id, raw)
+        expected_text = raw.decode()
+        if pdf:
+            from src.capabilities.knowledge.pdf import parse_pdf
+            from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+            raw = text_pdf(EARLY_FACT, *[PRIVATE_PARAGRAPH * 15 for _ in range(124)], TAIL_FACT)
+            expected_text = parse_pdf(raw)
+        document_id = await self._publish(library_id, raw, "long.pdf" if pdf else "long.md")
         service = self.runtime.knowledge_service
         for number in range(28):
             imported = (await service.upload_imports("acc-1", library_id, [(f"other-{number}.md", f"# Other {number}\nMethods".encode())]))[0]
@@ -314,7 +344,7 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         self.assertGreater(len(model.pages["knowledge.read_index"]), 1)
         self.assertGreater(len(model.pages["knowledge.read_document"]), 1)
         self._assert_coverage(self, model.pages["knowledge.read_index"], index)
-        self._assert_coverage(self, model.pages["knowledge.read_document"], raw.decode())
+        self._assert_coverage(self, model.pages["knowledge.read_document"], expected_text)
         self.assertTrue(model.compaction_requests, "The scenario must actually compact")
         self.assertTrue(any(EARLY_FACT in model._render(request) for request in model.compaction_requests))
         self.assertTrue(any(EARLY_FACT in fragment for fragment in self.counted_fragments))
@@ -328,6 +358,8 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
                 self.assertLess(len(item.payload_json.encode()), 131_072)
         audit = (self.workspace / "audit.jsonl").read_text()
         self.assertNotIn(PRIVATE_PARAGRAPH.strip(), audit)
+        with sqlite3.connect(f"file:{self.workspace / 'phase6-api.sqlite3'}?mode=ro", uri=True) as connection:
+            self.assertNotIn(PRIVATE_PARAGRAPH.strip(), "\n".join(connection.iterdump()))
         messages = (await self.client.get("/api/v1/conversations/conv-knowledge-long/messages")).json()["messages"]
         self.assertEqual(next(message["content"] for message in messages if message["role"] == "assistant"), ANSWER)
 
@@ -360,11 +392,12 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
                 return json.loads(await inner.llm_runtime.generate_text(text))
 
         service.extractor = Extractor()
-        corpus_file = self.workspace / "paper.md"
-        corpus_file.write_text("# Light and yield experiment\n" + EARLY_FACT + "\n" + TAIL_FACT)
+        from tests.capabilities.knowledge.pdf_fixtures import text_pdf
+        corpus_file = self.workspace / "paper.pdf"
+        corpus_file.write_bytes(text_pdf(EARLY_FACT, TAIL_FACT))
         manifest_file = self.workspace / "corpus.json"
         manifest_file.write_text(json.dumps({
-            "libraries": [{"id": "rice", "name": "Light experiments", "documents": [{"id": "paper1", "path": "paper.md"}]}],
+            "libraries": [{"id": "rice", "name": "Light experiments", "documents": [{"id": "paper1", "path": "paper.pdf"}, {"id": "same-source", "path": "paper.pdf"}]}],
             "questions": [{"id": "q1", "text": "Report full-text experimental results", "library_ids": ["rice"], "expected_document_ids": ["paper1"], "expected_facts": ["17", "23"]}],
         }))
         with patch("src.api.runtime.build_api_runtime", return_value=self.runtime):
@@ -373,7 +406,7 @@ class KnowledgeFlowE2ETest(E2EAPITestCase):
         self.assertEqual(report["ingestion_model_calls"], 1)
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["library_ids_read"], ["rice"])
-        self.assertEqual(result["document_ids_read"], ["paper1"])
+        self.assertEqual(result["document_ids_read"], ["paper1", "same-source"])
         self.assertTrue(result["expected_documents_completely_read"])
         self.assertTrue(result["expected_facts_present"], result)
         self.assertTrue(result["expected_bibliographic_titles_present"])

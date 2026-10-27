@@ -22,6 +22,10 @@ describe('knowledge API client', () => {
       expect(Array.from(new Uint8Array(await blob.arrayBuffer()))).toEqual(Array.from(original));
       expect(click).toHaveBeenCalledOnce();
       expect(revokeObjectURL).toHaveBeenCalledWith('blob:knowledge');
+      await api.downloadKnowledgeSource('lib/a', 'documents', 'doc/a', 'original.pdf');
+      await api.downloadKnowledgeSource('lib/a', 'imports', 'imp/a', 'draft.pdf');
+      expect(fetcher).toHaveBeenNthCalledWith(2, '/api/v1/knowledge/libraries/lib%2Fa/documents/doc%2Fa/source', expect.objectContaining({ headers: { Authorization: 'Bearer secret' } }));
+      expect(fetcher).toHaveBeenNthCalledWith(3, '/api/v1/knowledge/libraries/lib%2Fa/imports/imp%2Fa/source', expect.objectContaining({ headers: { Authorization: 'Bearer secret' } }));
     } finally {
       URL.createObjectURL = previousCreate;
       URL.revokeObjectURL = previousRevoke;

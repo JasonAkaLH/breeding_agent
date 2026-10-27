@@ -120,7 +120,16 @@ export function createApi(baseUrl: string) {
     }
   }
 
-  return { request, login, events, setToken(value: string) { token = value; } };
+  // rendition is explicit: source preserves PDF/Markdown bytes; content exports Markdown.
+  async function knowledgeFile(libraryId: string, resource: 'documents' | 'imports', id: string, rendition: 'source' | 'content') {
+    const response = await fetch(`${base}/api/v1/knowledge/libraries/${encodeURIComponent(libraryId)}/${resource}/${encodeURIComponent(id)}/${rendition}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await check(response);
+    return { blob: await response.blob(), sha256: response.headers.get('X-Content-SHA256') };
+  }
+
+  return { request, login, events, knowledgeFile, setToken(value: string) { token = value; } };
 }
 
 // 首次接入：传入测试用户名，onEvent 更新界面。需要中止订阅时传入 AbortController.signal。

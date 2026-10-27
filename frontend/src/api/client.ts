@@ -50,6 +50,7 @@ export interface KnowledgeApi {
   discardKnowledgeImport(libraryId: string, importId: string, revision?: number): Promise<void>;
   readKnowledgeContent(libraryId: string, resource: 'index' | 'documents' | 'imports', resourceId?: string): Promise<string>;
   downloadKnowledgeDocument(libraryId: string, documentId: string, filename: string): Promise<void>;
+  downloadKnowledgeSource(libraryId: string, resource: 'documents' | 'imports', resourceId: string, filename: string): Promise<void>;
   listKnowledgeGrants(libraryId: string): Promise<{ grants: KnowledgeGrant[] }>;
   createKnowledgeGrant(libraryId: string, username: string): Promise<KnowledgeGrant>;
   deleteKnowledgeGrant(libraryId: string, grantId: string): Promise<void>;
@@ -181,6 +182,17 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     return response;
   }
 
+  async function downloadFile(path: string, filename: string): Promise<void> {
+    const blob = await (await rawRequest(path)).blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.rel = 'noreferrer';
+    try { document.body.appendChild(link); link.click(); }
+    finally { link.remove(); URL.revokeObjectURL(url); }
+  }
+
   return {
     uiModes: UI_MODES,
     listKnowledgeLibraries: () => request('/api/v1/knowledge/libraries'),
@@ -207,16 +219,8 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       const response = await rawRequest(contentPath(id, resource, item));
       return resource === 'index' ? ((await response.json()) as { text: string }).text : response.text();
     },
-    downloadKnowledgeDocument: async (id, doc, filename) => {
-      const blob = await (await rawRequest(`${contentPath(id, 'documents', doc)}?download=true`)).blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      link.rel = 'noreferrer';
-      try { document.body.appendChild(link); link.click(); }
-      finally { link.remove(); URL.revokeObjectURL(url); }
-    },
+    downloadKnowledgeDocument: (id, doc, filename) => downloadFile(`${contentPath(id, 'documents', doc)}?download=true`, filename),
+    downloadKnowledgeSource: (id, resource, item, filename) => downloadFile(`${knowledgePath(id)}/${resource}/${encodeURIComponent(item)}/source`, filename),
     listKnowledgeGrants: (id) => request(`${knowledgePath(id)}/grants`),
     createKnowledgeGrant: (id, username) => request(`${knowledgePath(id)}/grants`, { method: 'POST', body: JSON.stringify({ subject_type: 'user', subject_id: username, role: 'reader' }) }),
     deleteKnowledgeGrant: (id, grant) => request(`${knowledgePath(id)}/grants/${encodeURIComponent(grant)}`, { method: 'DELETE' }),
