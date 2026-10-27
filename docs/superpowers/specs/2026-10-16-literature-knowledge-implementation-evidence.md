@@ -4,8 +4,8 @@
 - 变更前基线：`main@6db96e1`；既有失败在该 HEAD 的隔离源码副本复现。
 - 需求来源：[PRD 24](../../prd/backend/24-文献知识库原生CapabilityPRD.md)。
 - 实施依据：[完整实施计划](2026-10-16-literature-knowledge-implementation-plan.md)。
-- 当前结论：知识库仓库实现已有确定性自动验收证据；真实 PostgreSQL 和真实育种文献模型评测仍缺环境证据，不能据此宣布 AC-27 或整个 PRD 验收完成。
-- 2026-10-27 范围说明：以下记录仅对应原 Markdown 实现及当时的 AC-01～AC-29。新增 PDF 格式、原件/解析正文与 AC-30～AC-33 尚未实施或验证，不能由本记录推定通过；后续执行见[双格式完整交付实施计划](2026-10-27-literature-knowledge-pdf-implementation-plan.md)。
+- 当时结论：知识库仓库实现已有确定性自动验收证据；真实 PostgreSQL 和真实育种文献模型评测仍缺环境证据，不能据此宣布 AC-27 或整个 PRD 验收完成。
+- 2026-10-27 范围说明：以下记录仅对应原 Markdown 实现及当时的 AC-01～AC-29。本记录不证明新增 PDF 格式、原件/解析正文与 AC-30～AC-33。双格式现已实施，结果独立记录在[PDF 实施证据](2026-10-27-literature-knowledge-pdf-implementation-evidence.md)，不将旧结果推定为新格式或真实模型通过。
 - 本记录不含文献全文、问题与回答正文、模型完整请求、凭据或本地部署文件内容；没有执行部署或生产数据操作。
 
 ## 1. 已执行的知识库链路验证

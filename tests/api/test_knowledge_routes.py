@@ -105,6 +105,9 @@ class KnowledgeRoutesTest(APITestCase):
         base = f"/api/v1/knowledge/libraries/{library['library_id']}"
         raw = b"\xef\xbb\xbf# trial\r\n\nExact original bytes.\n"
         draft = await self._draft(library["library_id"], raw)
+        preview = await self.client.get(f"{base}/imports/{draft['import_id']}/content")
+        self.assertEqual(preview.content, raw)
+        self.assertEqual(preview.headers["x-content-sha256"], hashlib.sha256(preview.content).hexdigest())
         self.assertEqual((await self.client.get(base + "/documents")).json(), {"documents": []})
         self.assertNotIn(FIELDS["title"], (await self.client.get(base + "/index")).json()["text"])
         edited = await self.client.patch(

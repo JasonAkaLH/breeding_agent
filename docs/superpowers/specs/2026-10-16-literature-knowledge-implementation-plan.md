@@ -338,7 +338,7 @@ Ruff 路径按最终实际新增或修改文件补齐；不能因清零既有无
 
 ### 8.1 已确认范围与实现选择
 
-用户已确认同时支持 Markdown 和 PDF，扫描版 PDF 暂不处理。本节保留设计摘要，具体数据字段、API 语义、开发检查点和全量验收以[双格式完整交付实施计划](2026-10-27-literature-knowledge-pdf-implementation-plan.md)为准；尚未修改业务代码、数据库或依赖。
+用户已确认同时支持 Markdown 和 PDF，扫描版 PDF 暂不处理。本节保留设计摘要，具体数据字段、API 语义、开发检查点和全量验收以[双格式完整交付实施计划](2026-10-27-literature-knowledge-pdf-implementation-plan.md)为准；双格式已实施，本地 SQLite 与真实素材结果见[PDF 实施证据](2026-10-27-literature-knowledge-pdf-implementation-evidence.md)，真实模型质量仍未整体关闭。
 
 - 保留上传原件，原始字节的完整 SHA-256 继续承担同库判重；不按标题、解析文字或 DOI 合并跨格式文件。
 - Markdown 沿用当前原文路径。PDF 在入库后台本地逐页提取已有文字层，生成带页界标记的 UTF-8 Markdown；Agent 继续只读索引与 Markdown 正文，不另设 PDF 问答工具。

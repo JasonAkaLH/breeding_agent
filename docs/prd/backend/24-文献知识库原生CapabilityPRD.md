@@ -2,8 +2,8 @@
 
 - **编号**：后端专题 PRD 24。
 - **日期**：2026-10-15。
-- **最近修订**：2026-10-27，用户确认 Markdown 与文字型 PDF 双格式设计，扫描版 PDF 暂不处理；保留原件，以 Markdown 作为阅读正文。
-- **状态**：原 Markdown 范围已完成仓库接入与自动验收；新增 PDF 范围尚未实施。真实 PostgreSQL 和真实育种文献模型评测仍待补，尚未整体关闭验收或部署。既有结果见[实施验证记录](../../superpowers/specs/2026-10-16-literature-knowledge-implementation-evidence.md)，后续执行见[双格式完整交付实施计划](../../superpowers/specs/2026-10-27-literature-knowledge-pdf-implementation-plan.md)。
+- **最近修订**：2026-10-27，用户确认 Markdown 与文字型 PDF 双格式设计，扫描版 PDF 暂不处理；保留原件，以 Markdown 作为阅读正文；已实施并记录实测结果。原件、解析全文及 index.md 仅存本地文件，SQL 只存既有元数据、状态、权限与文件引用。
+- **状态**：Markdown/PDF 双格式仓库接入及本地 SQLite 自动验证完成；按用户确认，本次 SQLite 实测替代真实 PostgreSQL，后者只验证 v13 静态合同。真实模型评测已执行，但引用格式、最终回答稳定性和部分失败原因仍未闭合，未整体关闭 AC-27/NFR-05，未部署。结果见[双格式实施证据](../../superpowers/specs/2026-10-27-literature-knowledge-pdf-implementation-evidence.md)；旧 Markdown 证据单独保留。
 - **项目与代码基线**：`breeding_agent`，当前 `main` 分支。
 - **范围**：原生知识库能力、文献入库与存储、库级共享、会话选库，以及配套管理页面和问答行为。
 - **交付口径**：一次完整交付本文范围，不将已确认需求划为简化版和后续增强版。正式团队管理只预留接口，不属于本次功能。

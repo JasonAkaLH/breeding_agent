@@ -3,7 +3,9 @@
 ## 1. 状态、依据与范围
 
 - 日期：2026-10-27。
-- 状态：`planned_not_implemented`。本次只编写计划，不修改业务代码、数据库、依赖或部署配置。
+- 状态：`implemented_local_sqlite_verified_model_acceptance_partial`。已按本计划实施，检查点 A `450ba1d`、B `082e892`、C～E `1cbded9`；最终代码、实际回归与真实模型结果见[PDF 实施证据](2026-10-27-literature-knowledge-pdf-implementation-evidence.md)。未部署。
+- 执行调整（2026-10-27 用户确认）：本次数据库实测使用 SQLite 替代真实 PostgreSQL；PostgreSQL 保留 v13 manifest/reconciliation 静态合同，不把 SQLite 结果宣称为 PostgreSQL 事务结果。
+- 存储澄清（2026-10-27 用户再次确认）：原件、解析 Markdown 和 index.md 均在本地私有文件目录；SQL 不保存 PDF 二进制或解析全文，只保存既有元数据、权限、状态、相对文件引用与哈希。工具持久化小引用，发送给 LLM 时才从文件装载文字。
 - 产品依据：[PRD 24](../../prd/backend/24-文献知识库原生CapabilityPRD.md)，包含用户已确认的 Markdown / PDF 双格式输入和“扫描版暂不处理”。
 - 代码基线：`main@9aba682`。当前工作区另有本轮形成的 PRD、原实施计划、证据范围说明、文档索引和 CHANGELOG 修订；实施时保留这些修改并重新检查 HEAD。
 - 接续关系：[原实施计划](2026-10-16-literature-knowledge-implementation-plan.md)的 0～F 已完成 Markdown 仓库接入；原 G 的真实环境验收未闭合。本文是新增 PDF 和剩余整体验收的执行入口，原计划第 8 节保留设计摘要，不再维护第二套开发顺序。
@@ -34,7 +36,7 @@
 
 ### 3.1 原件、阅读正文与三个哈希用途
 
-在 `KnowledgeImportRow` 和 `KnowledgeDocumentRow` 各增加两个可空字段：`parsed_body_ref`、`parsed_body_sha256`。原 `body_ref`、`sha256` 保持上传原件含义。字段命名是本计划的实施选择，不增加用户配置。
+解析全文不写入任何 SQL 表。文件存储是正文唯一持久来源，`index.md` 是按修订生成的文件投影；数据库仅记录控制状态与文件位置。在 `KnowledgeImportRow` 和 `KnowledgeDocumentRow` 各增加两个可空字段：`parsed_body_ref`、`parsed_body_sha256`。原 `body_ref`、`sha256` 保持上传原件含义。字段命名是本计划的实施选择，不增加用户配置。
 
 | 对象 | Markdown 上传 | PDF 上传 |
 |---|---|---|
@@ -237,7 +239,7 @@ PDF 版本可采用 `SHA256("knowledge-pdf-text-v1\0" + source_sha256 + "\0" + p
 
 ## 7. 验证命令与环境
 
-以下是未来实施命令，需按实际新增文件补齐；本次文档完成不表示它们已运行。
+以下保留实施验证命令；实际执行计数、环境边界和失败复现以同日实施证据为准。
 
 ```bash
 # 每阶段先选择相关模块；新增 parser 的测试模块在阶段 0 创建。
@@ -266,4 +268,4 @@ PostgreSQL 仅使用 `MAF_POSTGRES_KNOWLEDGE_TEST_DSN` 或隔离测试 helper �
 
 代码实现、真实验收、发布和部署分别记录。PDF 解析成功不等于审核入库；代码/替身测试通过不等于真实模型质量通过；真实环境缺口不构成缩减已确认需求的理由。
 
-License Requirement：本次只新增和修订实施文档，无依赖安装或第三方代码引入。后续实现只计划新增 `pypdf`（BSD-3-Clause）用于本地文字层解析；版本及许可随实施验证记录，不引入 OCR 或新的常驻服务。
+License Requirement：实施固定 `pypdf==6.21.2`（BSD-3-Clause），用于本地文字层解析；不引入 OCR、模型 SDK 或新的常驻服务。

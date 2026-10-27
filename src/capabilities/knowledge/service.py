@@ -306,7 +306,7 @@ class KnowledgeService:
             self._require_draft(item)
             raw, sha = self._read_text(item)
             self._recheck_import(actor, library_id, item)
-            return {"text": decode_markdown(raw), "sha256": sha, "filename": _filename(item, markdown=True)}
+            return {"text": decode_markdown(raw), "content": raw, "sha256": sha, "filename": _filename(item, markdown=True)}
         return await self._run(read)
 
     async def download_import_source(self, actor: str, library_id: str, import_id: str) -> dict[str, Any]:

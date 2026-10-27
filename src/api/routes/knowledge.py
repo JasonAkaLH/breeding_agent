@@ -136,7 +136,7 @@ async def get_import(library_id: str, import_id: str, request: Request):
 async def preview_import(library_id: str, import_id: str, request: Request):
     actor = (await require_authenticated_user(request)).username
     result = await _call(_service(request).preview_import, actor, library_id, import_id)
-    return Response(result["text"], media_type="text/markdown", headers={"Cache-Control": "no-store", "X-Content-SHA256": result["sha256"]})
+    return Response(result["content"], media_type="text/markdown", headers={"Cache-Control": "no-store", "X-Content-SHA256": result["sha256"]})
 
 
 def _file_response(result, *, download: bool = True):
