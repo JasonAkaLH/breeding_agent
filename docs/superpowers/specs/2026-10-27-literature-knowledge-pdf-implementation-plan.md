@@ -3,7 +3,7 @@
 ## 1. 状态、依据与范围
 
 - 日期：2026-10-27。
-- 状态：`implemented_local_sqlite_verified_model_acceptance_partial`。已按本计划实施，检查点 A `450ba1d`、B `082e892`、C～E `1cbded9`；最终代码、实际回归与真实模型结果见[PDF 实施证据](2026-10-27-literature-knowledge-pdf-implementation-evidence.md)。未部署。
+- 状态：`accepted_local_sqlite`。已按本计划实施，检查点 A `450ba1d`、B `082e892`、C～E `1cbded9`，接续引用/租约修复 `101e7e2`、严格完整阅读 `fe0115b`；最终代码、实际回归与真实模型结果见[PDF 实施证据](2026-10-27-literature-knowledge-pdf-implementation-evidence.md)。未部署。
 - 执行调整（2026-10-27 用户确认）：本次数据库实测使用 SQLite 替代真实 PostgreSQL；PostgreSQL 保留 v13 manifest/reconciliation 静态合同，不把 SQLite 结果宣称为 PostgreSQL 事务结果。
 - 存储澄清（2026-10-27 用户再次确认）：原件、解析 Markdown 和 index.md 均在本地私有文件目录；SQL 不保存 PDF 二进制或解析全文，只保存既有元数据、权限、状态、相对文件引用与哈希。工具持久化小引用，发送给 LLM 时才从文件装载文字。
 - 产品依据：[PRD 24](../../prd/backend/24-文献知识库原生CapabilityPRD.md)，包含用户已确认的 Markdown / PDF 双格式输入和“扫描版暂不处理”。

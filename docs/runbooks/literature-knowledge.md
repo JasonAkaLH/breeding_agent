@@ -29,6 +29,19 @@ PDF 解析固定 pypdf==6.21.2（BSD-3-Clause），plain 文字模式与默认�
 
 真实文献模型评测使用 `scripts/evaluate_knowledge.py --help` 查看清单格式，并提供已授权 Markdown/PDF 文献和问题集；先校验清单，显式 `--live` 才执行。记录实际选库、选文献、完整覆盖、引用、延迟及模型调用/token；引用语义还需对照正文人工核验。合成文献和替身测试不作为真实质量结果。
 
+实际文献读取后，Agent 请求会加入仅存内存的连续阅读进度与当前书目。可读文献须按游标读完整个文字正文；最终答案提交前检查正文数字引用、书目与缺字段，最多纠正两次。`knowledge_answer_read_incomplete` / `knowledge_answer_citation_invalid` 表示未通过该检查，无效候选不会发布。授权失效或版本变化须重新读取，不能继续引用旧正文。
+
+上下文预检、压缩准备、模型、工具和最终发布阶段均保持租约；阶段入口先续租，内部 TTL/3 心跳，避免连续短阶段重置计时而失租。元数据结构失败只重提取一次，provider 故障不重试。排查时使用 closed 状态与调用计数，不开启正文或凭据日志。
+
+评测示例（仅对已授权语料/端点）：
+
+```bash
+conda run -n multi_agent python scripts/evaluate_knowledge.py --config config.yaml --corpus /path/to/authorized/manifest.json
+conda run -n multi_agent python scripts/evaluate_knowledge.py --config config.yaml --corpus /path/to/authorized/manifest.json --context-window 16000 --live
+```
+
+`--context-window` 只修改内存配置，原文件不变；报告包含失败/纠正次数和 `citation_format_valid`，仍需人工对照正文检查引用语义。问题集声明必需压缩时，窗口过大而未发生压缩也算验收未通过。300 项受控干扰索引和 300 篇真实 PDF 存储检查分别记录，均不宣称是 300 篇真实模型质量评测。
+
 ## 发布与回退边界
 
 后端新增管理/选库接口和三个原生知识库工具，前端应配套发布；保留现有 MCP/Skill、消息与 SSE 合同。先完成隔离环境检查，再按既有发布流程授权部署。
@@ -37,4 +50,4 @@ PDF 解析固定 pypdf==6.21.2（BSD-3-Clause），plain 文字模式与默认�
 
 备份只用于受控灾难恢复，不提供历史正文功能。恢复可能带回已清除的正文时，须单独确认恢复点和数据影响；不能作为普通功能回退。任何回退或恢复均不复核、改写或删除既有聊天答案。
 
-License Requirement：复用现有依赖，无新增第三方依赖或许可变化。
+License Requirement：PDF 使用 pypdf==6.21.2（BSD-3-Clause）；本轮稳定性与引用修复复用现有依赖，无新增许可变化。
