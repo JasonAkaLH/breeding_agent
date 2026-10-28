@@ -153,7 +153,7 @@ LLM stream 抛错、provider 返回错误、内部处理失败时：
   "stage": "llm_streaming",
   "error_code": "provider_stream_interrupted",
   "error_type": "timeout",
-  "model_edition": "deepseek-v4-flash-260425",
+  "model_edition": "deepseek-v4-1-flash-261017",
   "thinking_enabled": false,
   "reasoning_effort": "minimal",
   "partial_output_discarded": true,

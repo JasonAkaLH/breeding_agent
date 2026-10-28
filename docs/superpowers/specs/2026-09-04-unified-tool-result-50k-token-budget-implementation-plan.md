@@ -418,8 +418,9 @@ API key或响应正文。对三款配置模型分别验证：
   `AgentCallResultProjector.project()`生产/测试调用均已`await`。现有`asyncio.run`只位于MCP runtime
   同步桥和operator migration，不在本Result投影路径；剩余byte上限均为raw/mapping/checkpoint/manifest
   基础设施安全边界，不裁剪业务Result；
+- 2026-10-28 版本引用更新：下述 Flash 标识已统一为当前目标版本，tokenization 数值仍为历史验证记录，不表示已对新版本复测；
 - 三模型真实`POST /tokenization`使用同一中英文、emoji和组合字符输入：
-  `deepseek-v4-flash-ga-260731`与`deepseek-v4-pro-ga-260813`均返回180,001 tokens、字符切点50,000；
+  `deepseek-v4-1-flash-261017`与`deepseek-v4-pro-ga-260813`均返回180,001 tokens、字符切点50,000；
   `glm-5-2-260617`返回209,998 tokens、字符切点42,858。三者均`truncated=true`、保留50,000-token
   budget且每个逻辑Result恰好1次HTTP请求；未输出Endpoint、API key或响应正文；
 - `docker_cmd.md`存在、权限0600、Git-ignored且未跟踪；未读取或修改其内容。最终工作树仅允许本

@@ -9,10 +9,10 @@ from src.integrations.model_editions import model_reasoning_effort_configs
 def _config() -> dict:
     return {
         "model_editions": {
-            "default": "deepseek-v4-flash-260425",
+            "default": "deepseek-v4-1-flash-261017",
             "options": [
                 {
-                    "value": "deepseek-v4-flash-260425",
+                    "value": "deepseek-v4-1-flash-261017",
                     "label": "DeepSeek V4 Flash",
                     "reasoning_efforts": {
                         "options": [
@@ -51,7 +51,7 @@ class LLMRequestOptionsTest(unittest.TestCase):
     def setUp(self) -> None:
         config = _config()
         self.registry = model_reasoning_effort_configs(config)
-        self.default_model = "deepseek-v4-flash-260425"
+        self.default_model = "deepseek-v4-1-flash-261017"
 
     def resolve(self, metadata: dict, *, fallback: str | None = None):
         return resolve_llm_request_options(
@@ -92,7 +92,7 @@ class LLMRequestOptionsTest(unittest.TestCase):
 
     def test_configured_state_default_wins_over_factory_fallback(self) -> None:
         options = self.resolve(
-            {"model_edition": "deepseek-v4-flash-260425", "deep_thinking": True},
+            {"model_edition": "deepseek-v4-1-flash-261017", "deep_thinking": True},
             fallback="minimal",
         )
 
@@ -100,7 +100,7 @@ class LLMRequestOptionsTest(unittest.TestCase):
 
     def test_deepseek_allows_high_when_thinking_is_disabled(self) -> None:
         options = self.resolve({
-            "model_edition": "deepseek-v4-flash-260425",
+            "model_edition": "deepseek-v4-1-flash-261017",
             "deep_thinking": False,
             "main_agent_reasoning_effort": "high",
         })
@@ -118,7 +118,7 @@ class LLMRequestOptionsTest(unittest.TestCase):
     def test_default_model_is_used_when_request_omits_model_edition(self) -> None:
         options = self.resolve({"deep_thinking": True, "main_agent_reasoning_effort": "max"})
 
-        self.assertEqual(options.model_edition, "deepseek-v4-flash-260425")
+        self.assertEqual(options.model_edition, "deepseek-v4-1-flash-261017")
         self.assertEqual(options.reasoning_effort, "max")
 
     def test_rejects_disabling_model_without_disabled_efforts(self) -> None:
@@ -131,7 +131,7 @@ class LLMRequestOptionsTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "does not support thinking=disabled"):
             resolve_llm_request_options(
-                {"model_edition": "deepseek-v4-flash-260425", "deep_thinking": False},
+                {"model_edition": "deepseek-v4-1-flash-261017", "deep_thinking": False},
                 model_reasoning_configs=registry,
                 default_model_edition=self.default_model,
             )

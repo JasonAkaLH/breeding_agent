@@ -80,9 +80,9 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       ],
     })),
     getModelEditions: vi.fn(async () => ({
-      default_model_edition: 'deepseek-v4-flash-260425',
+      default_model_edition: 'deepseek-v4-1-flash-261017',
       options: [
-        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
+        { value: 'deepseek-v4-1-flash-261017', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
         { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro', reasoning_efforts: deepseekReasoningEfforts },
       ],
     })),
@@ -1693,7 +1693,7 @@ describe('App', () => {
       deepThinking: false,
       reasoningEffort: 'high',
     })));
-    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-flash-260425' }));
+    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-1-flash-261017' }));
     await screen.findByText('思考内容');
     await screen.findByText('先分析。');
     const reasoningBox = screen.getByText('思考内容').closest('.reasoning-box');
@@ -2714,9 +2714,9 @@ describe('App', () => {
   it('falls back when switching to a model that does not support the current disabled effort', async () => {
     const api = makeApi({
       getModelEditions: vi.fn(async () => ({
-        default_model_edition: 'deepseek-v4-flash-260425',
+        default_model_edition: 'deepseek-v4-1-flash-261017',
         options: [
-          { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
+          { value: 'deepseek-v4-1-flash-261017', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
           { value: 'doubao-seed-2-1-pro-260628', label: '豆包Seed 2.1 Pro', reasoning_efforts: doubaoReasoningEfforts },
         ],
       })),
