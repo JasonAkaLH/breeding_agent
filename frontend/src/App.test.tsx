@@ -25,9 +25,9 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       ],
     })),
     getModelEditions: vi.fn(async () => ({
-      default_model_edition: 'deepseek-v4-flash-260425',
+      default_model_edition: 'deepseek-v4-1-flash-261017',
       options: [
-        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash' },
+        { value: 'deepseek-v4-1-flash-261017', label: 'DeepSeek V4 Flash' },
         { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro' },
       ],
     })),
@@ -1321,7 +1321,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'chat' })));
-    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-flash-260425' }));
+    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-1-flash-261017' }));
     await screen.findByText('思考内容');
     await screen.findByText('先分析。');
     const reasoningBox = screen.getByText('思考内容').closest('.reasoning-box');

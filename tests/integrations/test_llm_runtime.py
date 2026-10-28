@@ -77,9 +77,9 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "api_key": "test",
                 "base_url": "http://example.test",
                 "model_editions": {
-                    "default": "deepseek-v4-flash-260425",
+                    "default": "deepseek-v4-1-flash-261017",
                     "options": [
-                        {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
+                        {"value": "deepseek-v4-1-flash-261017", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
                         {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro", "trim_max_tokens": 2048000},
                     ],
                 },
@@ -87,14 +87,14 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
             config_source="injected_config",
         )
 
-        first = await runtime.generate_text("p1", model_edition="deepseek-v4-flash-260425")
-        second = await runtime.generate_text("p2", model_edition="deepseek-v4-flash-260425")
+        first = await runtime.generate_text("p1", model_edition="deepseek-v4-1-flash-261017")
+        second = await runtime.generate_text("p2", model_edition="deepseek-v4-1-flash-261017")
         third = await runtime.generate_text("p3", model_edition="deepseek-v4-pro-260425")
 
-        self.assertEqual(first, "deepseek-v4-flash-260425")
-        self.assertEqual(second, "deepseek-v4-flash-260425")
+        self.assertEqual(first, "deepseek-v4-1-flash-261017")
+        self.assertEqual(second, "deepseek-v4-1-flash-261017")
         self.assertEqual(third, "deepseek-v4-pro-260425")
-        self.assertEqual([client.model for client in FakeClient.instances], ["deepseek-v4-flash-260425", "deepseek-v4-pro-260425"])
+        self.assertEqual([client.model for client in FakeClient.instances], ["deepseek-v4-1-flash-261017", "deepseek-v4-pro-260425"])
         self.assertEqual([client.kwargs["config"]["trim_max_tokens"] for client in FakeClient.instances], [1024000, 2048000])
         self.assertEqual(FakeClient.instances[0].calls, ["p1", "p2"])
 
@@ -116,14 +116,14 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "base_url": "http://example.test",
                 "trim_max_tokens": 123,
                 "model_editions": {
-                    "default": "deepseek-v4-flash-260425",
-                    "options": [{"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"}],
+                    "default": "deepseek-v4-1-flash-261017",
+                    "options": [{"value": "deepseek-v4-1-flash-261017", "label": "DeepSeek V4 Flash"}],
                 },
             },
             config_source="injected_config",
         )
 
-        await runtime.generate_text("p", model_edition="deepseek-v4-flash-260425")
+        await runtime.generate_text("p", model_edition="deepseek-v4-1-flash-261017")
 
         self.assertNotIn("trim_max_tokens", FakeClient.instances[0].kwargs["config"])
 

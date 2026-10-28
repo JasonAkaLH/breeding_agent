@@ -12,9 +12,9 @@ class ModelEditionSelectionAPITest(APITestCase):
             "api_key": "test",
             "base_url": "http://example.test",
             "model_editions": {
-                "default": "deepseek-v4-flash-260425",
+                "default": "deepseek-v4-1-flash-261017",
                 "options": [
-                    {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
+                    {"value": "deepseek-v4-1-flash-261017", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
                     {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro", "trim_max_tokens": 1024000},
                 ],
             },
@@ -29,9 +29,9 @@ class ModelEditionSelectionAPITest(APITestCase):
         self.assertEqual(
             response.json(),
             {
-                "default_model_edition": "deepseek-v4-flash-260425",
+                "default_model_edition": "deepseek-v4-1-flash-261017",
                 "options": [
-                    {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"},
+                    {"value": "deepseek-v4-1-flash-261017", "label": "DeepSeek V4 Flash"},
                     {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro"},
                 ],
             },
@@ -113,7 +113,7 @@ class ModelEditionSelectionAPITest(APITestCase):
                 "content": "用 flash 回答",
                 "routing_mode": "auto",
                 "capability_id": None,
-                "model_edition": "deepseek-v4-flash-260425",
+                "model_edition": "deepseek-v4-1-flash-261017",
                 "metadata": {},
             },
         )
@@ -122,15 +122,15 @@ class ModelEditionSelectionAPITest(APITestCase):
         task_id = response.json()["task_id"]
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual([client.model_edition for client in RecordingLLM.instances], ["deepseek-v4-flash-260425"])
+        self.assertEqual([client.model_edition for client in RecordingLLM.instances], ["deepseek-v4-1-flash-261017"])
         self.assertGreaterEqual(len(RecordingLLM.instances[0].calls), 2)
-        self.assertTrue(all(call["model_edition"] == "deepseek-v4-flash-260425" for call in RecordingLLM.instances[0].calls))
+        self.assertTrue(all(call["model_edition"] == "deepseek-v4-1-flash-261017" for call in RecordingLLM.instances[0].calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         accepted = next(event for event in events if event.event_type == "task.accepted")
-        self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-flash-260425")
+        self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-1-flash-261017")
         llm_call = next(event for event in events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(llm_call.payload["model_edition"], "deepseek-v4-flash-260425")
+        self.assertEqual(llm_call.payload["model_edition"], "deepseek-v4-1-flash-261017")
 
     async def test_interrupt_resume_preserves_frontend_model_and_reasoning_metadata(self) -> None:
         skill_root = self.workspace / "skill-model-resume"
