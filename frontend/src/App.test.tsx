@@ -72,27 +72,6 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     login: vi.fn(async () => ({ user: { username: 'alice' }, access_token: 'maf_tok_login' })),
     logout: vi.fn(async () => ({ logged_out: true })),
     me: vi.fn(async () => ({ user: { username: 'alice' } })),
-    listKnowledgeLibraries: vi.fn(async () => ({ libraries: [] })),
-    getKnowledgeSelection: vi.fn(async () => ({ mode: 'auto' as const, library_ids: [] })),
-    saveKnowledgeSelection: vi.fn(async (_id, selection) => selection),
-    createKnowledgeLibrary: vi.fn(),
-    patchKnowledgeLibrary: vi.fn(),
-    deleteKnowledgeLibrary: vi.fn(),
-    listKnowledgeDocuments: vi.fn(async () => ({ documents: [] })),
-    patchKnowledgeDocument: vi.fn(),
-    deleteKnowledgeDocument: vi.fn(),
-    listKnowledgeImports: vi.fn(async () => ({ imports: [] })),
-    uploadKnowledgeImports: vi.fn(),
-    patchKnowledgeImport: vi.fn(),
-    confirmKnowledgeImport: vi.fn(),
-    confirmKnowledgeImports: vi.fn(),
-    retryKnowledgeImport: vi.fn(),
-    discardKnowledgeImport: vi.fn(),
-    readKnowledgeContent: vi.fn(),
-    downloadKnowledgeSource: vi.fn(async () => undefined), downloadKnowledgeDocument: vi.fn(),
-    listKnowledgeGrants: vi.fn(async () => ({ grants: [] })),
-    createKnowledgeGrant: vi.fn(),
-    deleteKnowledgeGrant: vi.fn(),
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
     listCapabilities: vi.fn(async () => ({
       capabilities: [
@@ -304,67 +283,6 @@ async function expectComposerFocused() {
 }
 
 describe('App', () => {
-  const knowledgeLibrary = { library_id: 'lib-a', name: '水稻研究', description: '水稻', owner_username: 'alice', role: 'owner' as const, status: 'active', revision: 1, index_revision: 0 };
-
-  it('waits for the latest selection before Enter submits and preserves the chosen request scope', async () => {
-    const saved = deferred<void>();
-    let persisted = { mode: 'auto' as 'auto' | 'selected', library_ids: [] as string[] };
-    let snapshot: typeof persisted | null = null;
-    const api = makeApi({
-      listKnowledgeLibraries: vi.fn(async () => ({ libraries: [knowledgeLibrary] })),
-      saveKnowledgeSelection: vi.fn(async (_id, selection) => { await saved.promise; persisted = selection; return selection; }),
-      submitMessage: vi.fn(async () => { snapshot = persisted; return { conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }; }),
-    });
-    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
-    fireEvent.click(screen.getByText('文献库：全部可访问库'));
-    fireEvent.click(await screen.findByRole('checkbox', { name: '水稻研究' }));
-    expect(screen.getByText(/文献库：水稻研究/)).toBeInTheDocument();
-    const input = screen.getByRole('textbox', { name: '请输入问题' });
-    fireEvent.change(input, { target: { value: '研究结论是什么？' } });
-    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
-    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
-    expect(api.submitMessage).not.toHaveBeenCalled();
-    expect(input).toHaveValue('研究结论是什么？');
-    await act(async () => saved.resolve());
-    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(1));
-    expect(snapshot).toEqual({ mode: 'selected', library_ids: ['lib-a'] });
-  });
-
-  it('blocks new questions after selection failure without clearing input or falling back', async () => {
-    const api = makeApi({
-      listKnowledgeLibraries: vi.fn(async () => ({ libraries: [knowledgeLibrary] })),
-      saveKnowledgeSelection: vi.fn(async () => { throw new Error('选库保存失败'); }),
-    });
-    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
-    fireEvent.click(screen.getByText('文献库：全部可访问库'));
-    fireEvent.click(await screen.findByRole('checkbox', { name: '水稻研究' }));
-    await screen.findByText('选库保存失败');
-    const input = screen.getByRole('textbox', { name: '请输入问题' });
-    fireEvent.change(input, { target: { value: '保留这个问题' } });
-    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
-    await waitFor(() => expect(input).toHaveValue('保留这个问题'));
-    expect(api.submitMessage).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
-  });
-
-  it('abandons a queued new question when the user switches conversations before selection saves', async () => {
-    const saved = deferred<void>();
-    const api = makeApi({
-      listKnowledgeLibraries: vi.fn(async () => ({ libraries: [knowledgeLibrary] })),
-      saveKnowledgeSelection: vi.fn(async (_id, selection) => { await saved.promise; return selection; }),
-      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'other', username: 'alice', status: 'active', current_task_id: null, title: '另一会话', created_at: null, updated_at: null }] })),
-    });
-    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
-    fireEvent.click(screen.getByText('文献库：全部可访问库'));
-    fireEvent.click(await screen.findByRole('checkbox', { name: '水稻研究' }));
-    const input = screen.getByRole('textbox', { name: '请输入问题' });
-    fireEvent.change(input, { target: { value: '旧会话的问题' } });
-    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
-    fireEvent.click(screen.getByRole('button', { name: '另一会话' }));
-    await waitFor(() => expect(api.getKnowledgeSelection).toHaveBeenCalledWith('other'));
-    await act(async () => saved.resolve());
-    expect(api.submitMessage).not.toHaveBeenCalled();
-  });
   it('merges live fallback notices only onto matching assistant task history', () => {
     const notice = {
       scope: 'full' as const,
@@ -484,7 +402,7 @@ describe('App', () => {
     expect(within(userCard).getByRole('button', { name: '退出登录' })).toBeInTheDocument();
     expect(within(workspace).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument();
     fireEvent.click(accountSettingsButton);
-    expect(await screen.findByRole('dialog', { name: '用户账户设置' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'MCP 服务与授权' })).toBeInTheDocument();
     expect(await screen.findByText('尚未配置 MCP 服务')).toBeInTheDocument();
     expect(api.listMCPServers).toHaveBeenCalledTimes(2);
     expect(api.listMCPGrants).toHaveBeenCalledTimes(1);
@@ -1179,11 +1097,9 @@ describe('App', () => {
     expect(eventSource.urls).toEqual([]);
   });
 
-  it('restores waiting-for-input and continues the same task despite a failed selection save for the next question', async () => {
+  it('restores waiting-for-input state and continues the same task after an answer', async () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
-      listKnowledgeLibraries: vi.fn(async () => ({ libraries: [knowledgeLibrary] })),
-      saveKnowledgeSelection: vi.fn(async () => { throw new Error('下一问题选库保存失败'); }),
       listConversations: vi.fn(async () => ({
         conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
       })),
@@ -1237,9 +1153,6 @@ describe('App', () => {
 
     expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
     expect(await screen.findByText(/等待补充/)).toBeInTheDocument();
-    fireEvent.click(screen.getByText('文献库：全部可访问库'));
-    fireEvent.click(await screen.findByRole('checkbox', { name: '水稻研究' }));
-    await screen.findByText('下一问题选库保存失败');
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 

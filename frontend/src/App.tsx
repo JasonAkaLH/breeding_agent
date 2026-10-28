@@ -39,9 +39,6 @@ import { MCPApprovalDialog } from './components/MCPApprovalDialog';
 import { InterruptComposerStatus, InterruptQuestionText } from './components/InterruptPresentation';
 import { MCPResultArtifactNotice, MCPRuntimeStatus } from './components/MCPRuntimeStatus';
 import { MCPSettingsPanel } from './components/MCPSettingsPanel';
-import { KnowledgeSettingsPanel } from './components/KnowledgeSettingsPanel';
-import { KnowledgeLibrarySelector } from './components/KnowledgeLibrarySelector';
-import { useKnowledgeSelection } from './hooks/useKnowledgeSelection';
 import SlashCommandMenu from './components/SlashCommandMenu';
 import './styles.css';
 
@@ -270,12 +267,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     authHeaderProvider: () => tokenRef.current,
   }), [eventSourceFactory]);
   const [conversationId, setConversationId] = useState('');
-  const knowledge = useKnowledgeSelection(api, authUser?.username, conversationId);
-  const authUsernameRef = useRef(authUser?.username);
-  authUsernameRef.current = authUser?.username;
-  const knowledgeSubmitPendingRef = useRef<symbol | null>(null);
-  const [settingsSection, setSettingsSection] = useState<'mcp' | 'knowledge'>('mcp');
-  useEffect(() => { knowledgeSubmitPendingRef.current = null; }, [authUser?.username, conversationId]);
   const mode: ChatMode = 'chat';
   const [modelEditionOptions, setModelEditionOptions] = useState<ModelEditionOption[]>([]);
   const [defaultModelEdition, setDefaultModelEdition] = useState<ModelEdition | null>(null);
@@ -972,7 +963,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setPendingUploads([]);
     setSelectedMCPServerCommand(null);
     setMCPServerMenuOpen(false);
-    setMCPSettingsOpen(false);
     clearCurrentTaskRuntime({ closeSubscription: true });
   }
 
@@ -992,7 +982,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setMCPServerCommands([]);
     setSelectedMCPServerCommand(null);
     setMCPServerMenuOpen(false);
-    setMCPSettingsOpen(false);
     updateCurrentTaskId(null);
     updateCurrentAssistantId(null);
     setPendingInterrupt(null);
@@ -1411,30 +1400,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       await handleInterruptAnswer(content, pendingInterrupt);
       return;
     }
-    if (knowledgeSubmitPendingRef.current) return;
-    const knowledgeSubmission = Symbol('knowledge-submission');
-    knowledgeSubmitPendingRef.current = knowledgeSubmission;
-    const releaseKnowledgeSubmission = () => {
-      if (knowledgeSubmitPendingRef.current === knowledgeSubmission) knowledgeSubmitPendingRef.current = null;
-    };
-    const targetUsername = authUser.username;
-    try {
-      const saved = await knowledge.ensureSaved();
-      if (!saved || authUsernameRef.current !== targetUsername || conversationIdRef.current !== targetConversationId) {
-        releaseKnowledgeSubmission();
-        return;
-      }
-    } catch (error) {
-      releaseKnowledgeSubmission();
-      showTransientNotice(friendlyError(error));
-      return;
-    }
     const draftSnapshot = draftAttachments.slice();
     let uploadedDrafts: UploadedDraftAttachment[] = [];
     try {
       uploadedDrafts = await uploadDraftAttachments(targetConversationId, draftSnapshot);
     } catch {
-      releaseKnowledgeSubmission();
       if (commandKind === 'mcp') {
         setSelectedMCPServerCommand(null);
         setMCPServerMenuOpen(false);
@@ -1444,24 +1414,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const refreshedMessages = uploadedDrafts.length > 0
       ? await loadConversationMessages(targetConversationId).catch(() => null)
       : null;
-    try {
-      if (!await knowledge.ensureSaved()) {
-        releaseKnowledgeSubmission();
-        await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
-        return;
-      }
-    } catch (error) {
-      releaseKnowledgeSubmission();
-      await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
-      resetDraftAttachmentStatus(draftSnapshot);
-      showTransientNotice(friendlyError(error));
-      return;
-    }
-    if (authUsernameRef.current !== targetUsername || conversationIdRef.current !== targetConversationId) {
-      releaseKnowledgeSubmission();
-      await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
-      return;
-    }
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     initializedWorkspaceConversationIdRef.current = targetConversationId;
@@ -1496,7 +1448,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     updateCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState(createSubmittingTaskState());
-    releaseKnowledgeSubmission();
 
     try {
       const accepted = await api.submitMessage({
@@ -2608,17 +2559,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       ))}
                     </Space>
                   ) : null}
-                  <KnowledgeLibrarySelector
-                    libraries={knowledge.libraries}
-                    selection={knowledge.selection}
-                    loading={knowledge.loading}
-                    saving={knowledge.saving}
-                    error={knowledge.error}
-                    running={active || Boolean(pendingInterrupt)}
-                    onChange={knowledge.change}
-                    onRetry={knowledge.retry}
-                    onReload={knowledge.reload}
-                  />
                   <div className={`composer-input-stack${pendingInterrupt ? ' composer-input-stack-interrupt' : ''}`}>
                     {pendingInterrupt ? <InterruptComposerStatus onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
                     <div ref={composerRootRef} className="send-row" role="group" aria-label="消息发送栏">
@@ -2694,7 +2634,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                             aria-label="发送"
                             className="composer-send-button composer-image-button"
                             onClick={handleSubmit}
-                            disabled={!canSubmitComposer || uploadingFile || (!pendingInterrupt && (knowledge.loading || knowledge.saving || knowledge.requiresReselection || Boolean(knowledge.error)))}
+                            disabled={!canSubmitComposer || uploadingFile}
                           >
                             <img
                               aria-hidden="true"
@@ -2764,21 +2704,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           </section>
         </main>
         <Drawer
-          title="用户账户设置"
+          title="MCP 服务与授权"
           width={720}
           open={mcpSettingsOpen}
           onClose={() => setMCPSettingsOpen(false)}
           destroyOnHidden
         >
-          <Space className="account-settings-sections">
-            <Button type={settingsSection === 'mcp' ? 'primary' : 'default'} onClick={() => setSettingsSection('mcp')}>MCP 服务与授权</Button>
-            <Button type={settingsSection === 'knowledge' ? 'primary' : 'default'} onClick={() => setSettingsSection('knowledge')}>文献知识库</Button>
-          </Space>
-          {settingsSection === 'knowledge' ? <KnowledgeSettingsPanel key={authUser?.username} api={api} onLibrariesChanged={knowledge.reload} /> : <MCPSettingsPanel
+          <MCPSettingsPanel
             api={api}
             onError={(error) => showTransientNotice(friendlyError(error))}
             onServersChanged={() => void refreshMCPServerCommands()}
-          />}
+          />
         </Drawer>
         <MCPApprovalDialog
           approval={taskState.mcp.approval}

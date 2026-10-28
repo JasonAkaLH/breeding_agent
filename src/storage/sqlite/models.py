@@ -62,12 +62,6 @@ from src.storage.sqlalchemy_models import (
     SlotCollectionRow,
     SlotEventRow,
     CheckpointRow,
-    KnowledgeLibraryRow,
-    KnowledgeDocumentRow,
-    KnowledgeImportRow,
-    LibraryGrantRow,
-    ConversationKnowledgeSelectionRow,
-    KnowledgeQueryScopeRow,
 )
 
 
@@ -133,10 +127,4 @@ __all__ = [
     "SlotCollectionRow",
     "SlotEventRow",
     "CheckpointRow",
-    "KnowledgeLibraryRow",
-    "KnowledgeDocumentRow",
-    "KnowledgeImportRow",
-    "LibraryGrantRow",
-    "ConversationKnowledgeSelectionRow",
-    "KnowledgeQueryScopeRow",
 ]

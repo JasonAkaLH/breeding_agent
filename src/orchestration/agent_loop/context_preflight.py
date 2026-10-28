@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -25,7 +25,6 @@ from .models import (
 from .observability import AgentMetricsRecorder
 from .result_artifacts import skill_result_artifact_id_from_durable_payload
 from .result_projection import parse_tool_result_reuse_receipt
-from .knowledge_results import is_knowledge_result
 from .tool_catalog import AgentToolCatalog
 
 
@@ -89,7 +88,6 @@ class AgentContextCandidateBuilder:
         skill_result_artifacts = await self._preload_skill_result_artifacts(
             run, items
         )
-        knowledge_result_views = await self._context_builder.preload_knowledge_results(run=run, items=items)
         request = self._context_builder.build(
             run=run,
             items=items,
@@ -98,8 +96,6 @@ class AgentContextCandidateBuilder:
             current_user_input=current_user_input,
             tool_choice=tool_choice,
             skill_result_artifacts=skill_result_artifacts,
-            knowledge_result_views=knowledge_result_views,
-            knowledge_answer_sources=await self._context_builder.knowledge_answer_sources(run=run, items=items),
         )
         required_call_ids = _unconsumed_full_result_provider_call_ids(items)
         required_fragments: list[str] = [_framing_fragment()]
@@ -239,34 +235,6 @@ class AgentContextCandidateBuilder:
         ]
         return await self._count_fragments(fragments, request.binding)
 
-    async def knowledge_result_budget(
-        self, *, run: AgentRun, items: tuple[AgentItem, ...], catalog: AgentToolCatalog,
-        call_item: AgentItem, trusted_facts: tuple[str, ...] = (),
-    ) -> int:
-        """Reserve a real tool message for every outstanding read in this sample.
-
-        Knowledge tools execute sequentially, so already completed results are loaded
-        and counted again before allocating the next page. Consumed history may compact.
-        """
-        candidate = await self.build(run=run, items=items, catalog=catalog, trusted_facts=trusted_facts)
-        calls = {item.item_id: item for item in items if item.kind is AgentItemKind.TOOL_CALL
-                 and item.parent_item_id == call_item.parent_item_id}
-        provider_ids = {str(json.loads(item.payload_json).get("call_id")) for item in calls.values()}
-        messages = tuple(message for message in candidate.request.messages
-                         if message.role in {"system", "user"}
-                         or (message.role == "tool" and message.tool_call_id in provider_ids)
-                         or any(call.call_id in provider_ids for call in message.tool_calls))
-        mandatory = await self.count_request(replace(candidate.request, messages=messages))
-        reserved_calls = {item.source_call_item_id for item in items
-                          if item.kind is AgentItemKind.TOOL_RESULT and item.state is AgentItemState.RESERVED}
-        remaining = sum(item.item_id in reserved_calls for item in calls.values())
-        # A subsequent compaction replaces consumed history with a new system
-        # summary. Leave half the remaining context for that summary and future
-        # progress; filling the entire limit makes the unconsumed page fatal.
-        # The page counter includes its provider envelope, metadata and cursor.
-        available = max(0, candidate.preflight.total_context_limit_tokens - mandatory)
-        return min(50_000, available // 2 // max(1, remaining))
-
     async def _count_fragments(
         self,
         fragments: Sequence[str],
@@ -377,7 +345,6 @@ def _item_is_full_result_transport(item: AgentItem) -> bool:
             )
             or safe_result.get("projection_mode") == "artifact_backed"
             or parse_tool_result_reuse_receipt(safe_result) is not None
-            or is_knowledge_result(safe_result)
         )
     )
 
@@ -407,7 +374,6 @@ def _message_contains_full_skill_result(message: AgentMessage) -> bool:
         in {
             "maf.agent.skill_result_full.v1",
             "maf.agent.mcp_result_full.v1",
-            "maf.agent.knowledge_content.v1",
         }
     )
 

@@ -25,24 +25,6 @@ from src.state.postgres.schema_reconciler import (
 
 
 class PostgresSchemaReconcilerTest(unittest.TestCase):
-    def test_knowledge_v13_only_adds_four_nullable_text_columns(self):
-        manifest = build_postgres_fresh_cutover_schema_manifest()
-        self.assertTrue(manifest.schema_version.endswith(".v13"))
-        inspection = SchemaInspection.from_manifest(manifest)
-        for table in ("knowledge_import", "knowledge_document"):
-            columns = dict(inspection.tables[table])
-            for column in ("parsed_body_ref", "parsed_body_sha256"):
-                self.assertEqual(columns.pop(column), "text")
-            inspection = inspection.with_table_columns(table, columns)
-        plan = plan_postgres_schema_reconciliation(manifest, inspection)
-        self.assertEqual(plan.operator_only_actions, ())
-        alterations = [action for action in plan.actions if action.kind == "add_column"]
-        self.assertEqual(len(alterations), 4)
-        sql = plan.sql_script()
-        for table in ("knowledge_import", "knowledge_document"):
-            for column in ("parsed_body_ref", "parsed_body_sha256"):
-                self.assertIn(f"ALTER TABLE {table} ADD COLUMN {column}", sql)
-
     def test_normalizes_postgres_not_in_array_rewrite(self) -> None:
         expected = "status NOT IN ('claimed', 'active')"
         inspected = (

@@ -106,7 +106,6 @@
 | Skill 运行闭环 Workbench 分步实施 | `docs/prd/backend/skill-workbench/README.md` | 将 Workbench 总纲拆成 Policy/runtime state/stage placement、内部 capability/executor、runtime loop/finalizer/Skill refinement、事件 graph prompt 脱敏、contract quality diagnostics 五个阶段；父兼容入口保留在 `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` |
 | 能力缺失 LLM fallback 披露 | `docs/prd/backend/23-能力缺失LLMFallback披露PRD.md` | 无匹配 Skill/MCP/capability 时由 Planner/Replanner 标记 fallback，任务 completed 停止 Workbench，并通过正文、事件、metadata 和前端 notice 披露事实；父兼容入口保留，实施拆分见 `docs/prd/backend/capability-missing-fallback/README.md` |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
-| 文献知识库原生 Capability | `docs/prd/backend/24-文献知识库原生CapabilityPRD.md` | 独立 knowledge 能力、Markdown 全文与审核索引、只读共享、会话选库和正文清理；需求已确认，尚未实施 |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
 | 大语言模型提示词信封分步实施 | `docs/prd/backend/prompt-envelope/README.md` | 将 prompt 组装拆成测试基线、核心模型、主代理迁移、记忆候选、工具信息分层、多调用场景档案、消息原生运行时、供应商缓存八个可独立验收阶段 |
 | MCP Runtime 联合改造 Phase | `docs/prd/MCP/README.md` | 把 MCP 长任务流式 SSE 与 Rust MCP sidecar 作为同一最终交付目标拆成 Phase PRD |
@@ -300,7 +299,6 @@
 - Skill 运行闭环 Workbench 兼容入口：`docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md`。
 - Skill 运行闭环 Workbench 分步 PRD：`docs/prd/backend/skill-workbench/README.md`。
 - 能力缺失 LLM fallback 披露兼容入口：`docs/prd/backend/23-能力缺失LLMFallback披露PRD.md`。
-- 文献知识库原生 Capability PRD：`docs/prd/backend/24-文献知识库原生CapabilityPRD.md`。
 - 能力缺失 LLM fallback 披露分步 PRD：`docs/prd/backend/capability-missing-fallback/README.md`。
 - 统一同模型 Agent Loop 分阶段 PRD：`docs/prd/backend/unified-agent-loop/README.md`（Phase 0～5已`proof_complete`；Phase 6已`cutover_complete`且当前执行控制面只剩Agent Loop；Phase 7备份恢复、physical schema/proto删除和最终证明已`complete`）。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。

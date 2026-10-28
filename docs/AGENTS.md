@@ -8,18 +8,12 @@
 - `CentOS容器部署适配评估报告.pdf`：上述报告的 PDF 导出版，含页码、跨页表头、网页链接与仓库文件引用附录；正文以 Markdown 源文为准。
 - `api/`：前端接入手册 `api-doc.html`、可复制/下载的 `frontend-example.ts` 和 API 更新日志；HTML 内嵌当前 OpenAPI 快照，由 `scripts/update_api_doc_contract.py` 同步，接口语义以路由/DTO/runtime 为准。
 - `prd/`：产品 / 架构 PRD，按 backend、frontend、rust、MCP 等主题组织。
-- `prd/backend/24-文献知识库原生CapabilityPRD.md`：完整知识库专题 PRD；双格式仓库接入及本地 SQLite 验证完成，全文仅存本地文件，扫描 PDF 暂不处理；引用/失租/提前结束已修复，授权真实样本及受控规模验收闭合；已知无关基线失败单列，未部署。
 - `runbooks/`：运维与部署运行手册。
 - `runbooks/mcp-first-production-enablement.md`：新用户 MCP 功能的一次性管理员 check/apply、显式约束/角色前置条件、精确重试与常驻凭据边界。
 - `runbooks/user-mcp-gateway.md`：用户级 MCP Gateway 密钥、容量、基础发布和故障边界。
 - `runbooks/user-mcp-phase3-rollout.md`：Phase 3 canonical routing、cohort/实例准入、8 条权威安全红线、PostgreSQL 分角色 HMAC evidence/ledger、consumer × capability schema-contract 连续性与同事务 durable migration audit、CP-0 恢复、回滚和 legacy 删除门禁。
 - `checkpoint/`：checkpoint、time-travel、thread event 等设计与实施计划。
 - `superpowers/specs/`：本地设计草案、spec 与阶段性方案。
-- `superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md`：原 Markdown 实施与检查点记录，第 8 节保留双格式设计摘要；后续开发统一按 2026-10-27 接续计划执行，避免两套开发顺序。
-- `superpowers/specs/2026-10-27-literature-knowledge-pdf-implementation-plan.md`：文献库双格式实施入口；检查点 A/B/C～E 已提交，本地 SQLite/双文件恢复/管理/API/Agent 及 schema v13 合同已验证；用户确认 SQLite 替代真实 PostgreSQL，授权样本与受控规模质量已闭合，已知基线失败见实施证据，未部署。
-- `superpowers/specs/2026-10-16-literature-knowledge-implementation-evidence.md`：原 Markdown 范围 29 项验收证据、实际回归结果、既有失败及真实 PostgreSQL/真实文献模型评测缺口；不覆盖新增 PDF；当前双格式证据另见 2026-10-27 记录。
-- `superpowers/specs/2026-10-27-literature-knowledge-pdf-implementation-evidence.md`：双格式源码检查点、AC-01～AC-33 索引、实际测试/既有失败、739 页与 300 篇本地检查、历史失败与最终真实评测、租约/引用修复及低敏 metrics JSON；全文不进 SQL。
-- `runbooks/literature-knowledge.md`：知识库持久根、共享 SQL schema、异步恢复、最小验证、真实评测和发布回退边界。
 - `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md`：旧 `1e48266` API 供第三方程序调用新版后端的独立兼容服务计划；通过 51999 的 `/seedpilot/compat/` 分流，兼容容器无额外宿主机端口，覆盖请求/结果/SSE/补参与新版 Web 原路径对照；仅计划，尚未实施。
 - `superpowers/specs/2026-09-22-agent-prompt-diagnostics-design.md`：dev单任务Prompt诊断边界、验证计划、临时开启/查看/关闭命令；只观察SDK参数元数据，不记录正文或凭据。
 - `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md`：用户自定义 MCP 新功能首次生产启用设计；一次性管理员初始化复用发布记录，保留正常启动校验，不迁移旧用户配置；设计已批准，按同名 implementation plan 实施；须用新 Backend 重新完成恢复库演练。
@@ -132,9 +126,6 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `prd/backend/24-文献知识库原生CapabilityPRD.md` | `accepted_local_sqlite`；双格式、本地与授权样本验收完成 | 本轮无待补模型验收项；4 项无关既有失败单列，PostgreSQL 按用户指令由 SQLite 替代。仅另获指令后发布/部署。 |
-| `superpowers/specs/2026-10-16-literature-knowledge-implementation-plan.md` | `superseded_by_dual_format_execution`；保留原 0 至 F 记录 | 当前状态和质量缺口统一见 2026-10-27 接续计划/证据。 |
-| `superpowers/specs/2026-10-27-literature-knowledge-pdf-implementation-plan.md` | `accepted_local_sqlite`；A～F 与接续修复完成 | 真实样本、自动选库、相近标题、多来源和受控300项索引证据已归档；保留历史失败及真实规模边界，不自动部署。 |
 | `CentOS容器部署适配评估报告.md` | `assessment_only_pending_target`；CentOS 版本待定，允许容器部署 | 确认系统/CPU/容器运行时及网络条件后复核工作量；后续如实施，再完成挂载、生产配置与实机验收，本次不修改代码或部署。 |
 | `superpowers/specs/2026-09-24-legacy-frontend-api-compatibility-implementation-plan.md` | `planned_not_implemented`；第三方旧 API 走 `51999/seedpilot/compat/`，新版 Web 走原路径 | 后续按 P0～P7 完成旧 API 合同固定、独立兼容服务、入口分流、请求/结果/SSE/补参转换、第三方联调与新版 Web 对照；当前仅文档，不修改新版业务代码、镜像、数据库或生产。 |
 | `superpowers/specs/2026-09-18-mcp-first-production-enablement-design.md` | `image_published_pending_server_rehearsal`；首次初始化代码与新 Backend 已验收发布 | 在服务器拉取固定工件，重新完成恢复库结构与首次初始化演练；正式数据库尚未执行新迁移或准入。 |

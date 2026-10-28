@@ -14,7 +14,6 @@ from .transient_results import (
     AGENT_TRANSIENT_SKILL_RESULT_PROJECTION_REVISION,
     transient_skill_result_stage_ref,
 )
-from .knowledge_results import KNOWLEDGE_CAPABILITY_IDS, KNOWLEDGE_RESULT_SCHEMA, validate_knowledge_result
 
 
 SKILL_RESULT_PROJECTION_REVISION = "skill-result-v1"
@@ -199,25 +198,6 @@ class AgentCallResultProjector:
         except (TypeError, ValueError):
             return _rejected("agent_result_invalid")
         raw_sha256 = hashlib.sha256(canonical_raw).hexdigest()
-
-        if capability_id in KNOWLEDGE_CAPABILITY_IDS:
-            try:
-                if artifact_ids or continuation_locator is not None:
-                    raise ValueError("knowledge_result_cannot_stage_artifacts")
-                safe = validate_knowledge_result(raw_value if outcome == "completed" else {
-                    "schema": KNOWLEDGE_RESULT_SCHEMA, "status": "unavailable", "reference": None,
-                })
-                canonicalize_agent_payload({"safe_result": safe, "artifact_refs": [],
-                                            "call_item_id": call_item_id, "outcome": outcome,
-                                            "safe_error_code": safe_error_code})
-            except (TypeError, ValueError):
-                return _rejected("agent_result_invalid", canonical_raw=canonical_raw, raw_sha256=raw_sha256)
-            return AgentCallResultProjection(
-                safe_result_payload=safe, canonical_raw_bytes=canonical_raw, raw_sha256=raw_sha256,
-                original_size_bytes=len(canonical_raw), projection_revision="knowledge-reference-v1",
-                projection_mode="knowledge_reference", projection_truncated=False,
-                spill_required=False, spill_artifact_id=None,
-            )
 
         if _is_delegated_model_result(raw_value):
             return await self._delegated(

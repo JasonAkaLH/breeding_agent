@@ -1801,39 +1801,3 @@ body {
   line-height: 1.55;
   white-space: normal;
 }
-
-.knowledge-settings,
-.knowledge-selector-body {
-  width: 100%;
-}
-
-.knowledge-settings label {
-  display: block;
-  margin-top: 10px;
-}
-
-.knowledge-settings section > .ant-card,
-.knowledge-settings section > .ant-alert {
-  margin-top: 10px;
-}
-
-.knowledge-selector {
-  width: 100%;
-  margin-bottom: 8px;
-  font-size: 13px;
-}
-
-.knowledge-selector summary {
-  cursor: pointer;
-  color: var(--text-secondary, #666);
-}
-
-.knowledge-selector-body {
-  padding: 10px 0;
-  max-height: 40vh;
-  overflow-y: auto;
-}
-
-.account-settings-sections {
-  margin-bottom: 20px;
-}

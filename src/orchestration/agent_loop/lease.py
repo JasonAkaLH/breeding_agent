@@ -10,7 +10,7 @@ from .repository import AgentTaskLeaseStore
 
 
 T = TypeVar("T")
-ACTIVE_LEASE_PHASES = frozenset({"context_preflight", "model_sample", "compaction", "capability_wave", "final_publish"})
+ACTIVE_LEASE_PHASES = frozenset({"model_sample", "compaction", "capability_wave", "final_publish"})
 
 
 @dataclass(slots=True)
@@ -61,9 +61,6 @@ class AgentLeaseController(Generic[T]):
     ) -> T:
         if phase not in ACTIVE_LEASE_PHASES:
             raise ValueError(f"unsupported Agent lease phase: {phase}")
-        # Short consecutive phases may each finish before the first heartbeat.
-        # Renew at the boundary so restarting the timer cannot starve the lease.
-        await self._renew(handle)
         operation_task = asyncio.create_task(operation(handle))
         heartbeat_task = asyncio.create_task(self._heartbeat(handle))
         try:
@@ -107,15 +104,15 @@ class AgentLeaseController(Generic[T]):
     async def _heartbeat(self, handle: AgentLeaseHandle) -> None:
         while True:
             await self._sleep(self.heartbeat_interval_seconds)
-            await self._renew(handle)
+            try:
+                async def renew(lease: AgentTaskLease) -> None:
+                    handle.current = await self._store.renew_task_lease(
+                        lease.run_id,
+                        owner_id=lease.owner_id,
+                        token=lease.token,
+                        ttl_seconds=self.ttl_seconds,
+                    )
 
-    async def _renew(self, handle: AgentLeaseHandle) -> None:
-        try:
-            async def renew(lease: AgentTaskLease) -> None:
-                handle.current = await self._store.renew_task_lease(
-                    lease.run_id, owner_id=lease.owner_id,
-                    token=lease.token, ttl_seconds=self.ttl_seconds,
-                )
-            await handle.run_ownership_bound(renew)
-        except Exception as exc:
-            raise AgentLeaseLost("agent_task_lease_lost") from exc
+                await handle.run_ownership_bound(renew)
+            except Exception as exc:
+                raise AgentLeaseLost("agent_task_lease_lost") from exc

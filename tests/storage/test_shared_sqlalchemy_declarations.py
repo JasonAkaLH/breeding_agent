@@ -74,7 +74,7 @@ class SharedSQLAlchemyDeclarationsTest(unittest.TestCase):
         row_names = tuple(
             node.name for node in shared_tree.body if isinstance(node, ast.ClassDef)
         )
-        self.assertEqual(len(row_names), 67)
+        self.assertEqual(len(row_names), 61)
         self.assertEqual(tuple(legacy_models.__all__), row_names)
         for name in row_names:
             shared_row = getattr(sqlalchemy_models, name)
@@ -95,7 +95,7 @@ class SharedSQLAlchemyDeclarationsTest(unittest.TestCase):
             )
 
     def test_postgres_runtime_schema_uses_the_shared_metadata(self) -> None:
-        self.assertEqual(len(SQLiteBase.metadata.tables), 67)
+        self.assertEqual(len(SQLiteBase.metadata.tables), 61)
         self.assertEqual(
             runtime_schema.POSTGRES_RUNTIME_TABLES,
             tuple(sorted(SQLiteBase.metadata.tables)),

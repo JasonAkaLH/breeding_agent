@@ -31,32 +31,6 @@ import type {
   UploadFileResponse,
   UploadListResponse,
 } from './types';
-import type { KnowledgeBatchResult, KnowledgeDocument, KnowledgeGrant, KnowledgeImport, KnowledgeLibrary, KnowledgeMetadata, KnowledgeSelection } from './knowledgeTypes';
-
-export interface KnowledgeApi {
-  listKnowledgeLibraries(): Promise<{ libraries: KnowledgeLibrary[] }>;
-  createKnowledgeLibrary(input: { name: string; description: string }): Promise<KnowledgeLibrary>;
-  patchKnowledgeLibrary(libraryId: string, input: { name: string; description: string; revision: number }): Promise<KnowledgeLibrary>;
-  deleteKnowledgeLibrary(libraryId: string, revision?: number): Promise<KnowledgeLibrary | undefined>;
-  listKnowledgeDocuments(libraryId: string): Promise<{ documents: KnowledgeDocument[] }>;
-  patchKnowledgeDocument(libraryId: string, documentId: string, input: { metadata: KnowledgeMetadata; revision: number }): Promise<KnowledgeDocument>;
-  deleteKnowledgeDocument(libraryId: string, documentId: string, revision?: number): Promise<KnowledgeDocument | undefined>;
-  listKnowledgeImports(libraryId: string): Promise<{ imports: KnowledgeImport[] }>;
-  uploadKnowledgeImports(libraryId: string, files: File[], replacementDocumentId?: string): Promise<KnowledgeBatchResult>;
-  patchKnowledgeImport(libraryId: string, importId: string, input: { metadata: KnowledgeMetadata; revision: number }): Promise<KnowledgeImport>;
-  confirmKnowledgeImport(libraryId: string, importId: string, revision: number): Promise<KnowledgeImport>;
-  confirmKnowledgeImports(libraryId: string, imports: Array<{ import_id: string; revision: number }>): Promise<KnowledgeBatchResult>;
-  retryKnowledgeImport(libraryId: string, importId: string): Promise<KnowledgeImport>;
-  discardKnowledgeImport(libraryId: string, importId: string, revision?: number): Promise<void>;
-  readKnowledgeContent(libraryId: string, resource: 'index' | 'documents' | 'imports', resourceId?: string): Promise<string>;
-  downloadKnowledgeDocument(libraryId: string, documentId: string, filename: string): Promise<void>;
-  downloadKnowledgeSource(libraryId: string, resource: 'documents' | 'imports', resourceId: string, filename: string): Promise<void>;
-  listKnowledgeGrants(libraryId: string): Promise<{ grants: KnowledgeGrant[] }>;
-  createKnowledgeGrant(libraryId: string, username: string): Promise<KnowledgeGrant>;
-  deleteKnowledgeGrant(libraryId: string, grantId: string): Promise<void>;
-  getKnowledgeSelection(conversationId: string): Promise<KnowledgeSelection>;
-  saveKnowledgeSelection(conversationId: string, selection: KnowledgeSelection): Promise<KnowledgeSelection>;
-}
 
 export interface UiModeOption {
   key: ChatMode;
@@ -77,7 +51,7 @@ export interface SubmitMessageInput {
   capabilityId?: string | null;
 }
 
-export interface ApiClient extends KnowledgeApi {
+export interface ApiClient {
   uiModes: UiModeOption[];
   login(input: { username: string }): Promise<AuthTokenResponse>;
   logout(): Promise<LogoutResponse>;
@@ -169,63 +143,8 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     return (await response.json()) as T;
   }
 
-  const knowledgePath = (libraryId: string) => `/api/v1/knowledge/libraries/${encodeURIComponent(libraryId)}`;
-  const contentPath = (libraryId: string, resource: 'index' | 'documents' | 'imports', resourceId?: string) => (
-    resource === 'index' ? `${knowledgePath(libraryId)}/index` : `${knowledgePath(libraryId)}/${resource}/${encodeURIComponent(resourceId ?? '')}/content`
-  );
-  async function rawRequest(path: string, init?: RequestInit): Promise<Response> {
-    const response = await fetcher(`${baseUrl}${path}`, { ...init, credentials: 'same-origin', headers: authHeaders() });
-    if (!response.ok) {
-      if (response.status === 401) options.onUnauthorized?.();
-      throw await toApiError(response);
-    }
-    return response;
-  }
-
-  async function downloadFile(path: string, filename: string): Promise<void> {
-    const blob = await (await rawRequest(path)).blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.rel = 'noreferrer';
-    try { document.body.appendChild(link); link.click(); }
-    finally { link.remove(); URL.revokeObjectURL(url); }
-  }
-
   return {
     uiModes: UI_MODES,
-    listKnowledgeLibraries: () => request('/api/v1/knowledge/libraries'),
-    createKnowledgeLibrary: (input) => request('/api/v1/knowledge/libraries', { method: 'POST', body: JSON.stringify(input) }),
-    patchKnowledgeLibrary: (id, input) => request(knowledgePath(id), { method: 'PATCH', body: JSON.stringify(input) }),
-    deleteKnowledgeLibrary: (id, revision) => request(`${knowledgePath(id)}${revision === undefined ? '' : `?revision=${revision}`}`, { method: 'DELETE' }),
-    listKnowledgeDocuments: (id) => request(`${knowledgePath(id)}/documents`),
-    patchKnowledgeDocument: (id, doc, input) => request(`${knowledgePath(id)}/documents/${encodeURIComponent(doc)}`, { method: 'PATCH', body: JSON.stringify(input) }),
-    deleteKnowledgeDocument: (id, doc, revision) => request(`${knowledgePath(id)}/documents/${encodeURIComponent(doc)}${revision === undefined ? '' : `?revision=${revision}`}`, { method: 'DELETE' }),
-    listKnowledgeImports: (id) => request(`${knowledgePath(id)}/imports`),
-    uploadKnowledgeImports: async (id, files, replacement) => {
-      const data = new FormData();
-      files.forEach((file) => data.append('files', file));
-      if (replacement) data.append('replacement_document_id', replacement);
-      const response = await (await rawRequest(`${knowledgePath(id)}/imports`, { method: 'POST', body: data })).json() as { imports: KnowledgeBatchResult['results'] };
-      return { results: response.imports };
-    },
-    patchKnowledgeImport: (id, item, input) => request(`${knowledgePath(id)}/imports/${encodeURIComponent(item)}`, { method: 'PATCH', body: JSON.stringify(input) }),
-    confirmKnowledgeImport: (id, item, revision) => request(`${knowledgePath(id)}/imports/${encodeURIComponent(item)}/confirm`, { method: 'POST', body: JSON.stringify({ revision }) }),
-    confirmKnowledgeImports: (id, imports) => request(`${knowledgePath(id)}/imports/confirm`, { method: 'POST', body: JSON.stringify({ imports }) }),
-    retryKnowledgeImport: (id, item) => request(`${knowledgePath(id)}/imports/${encodeURIComponent(item)}/retry`, { method: 'POST' }),
-    discardKnowledgeImport: (id, item, revision) => request(`${knowledgePath(id)}/imports/${encodeURIComponent(item)}${revision === undefined ? '' : `?revision=${revision}`}`, { method: 'DELETE' }),
-    readKnowledgeContent: async (id, resource, item) => {
-      const response = await rawRequest(contentPath(id, resource, item));
-      return resource === 'index' ? ((await response.json()) as { text: string }).text : response.text();
-    },
-    downloadKnowledgeDocument: (id, doc, filename) => downloadFile(`${contentPath(id, 'documents', doc)}?download=true`, filename),
-    downloadKnowledgeSource: (id, resource, item, filename) => downloadFile(`${knowledgePath(id)}/${resource}/${encodeURIComponent(item)}/source`, filename),
-    listKnowledgeGrants: (id) => request(`${knowledgePath(id)}/grants`),
-    createKnowledgeGrant: (id, username) => request(`${knowledgePath(id)}/grants`, { method: 'POST', body: JSON.stringify({ subject_type: 'user', subject_id: username, role: 'reader' }) }),
-    deleteKnowledgeGrant: (id, grant) => request(`${knowledgePath(id)}/grants/${encodeURIComponent(grant)}`, { method: 'DELETE' }),
-    getKnowledgeSelection: (id) => request(`/api/v1/conversations/${encodeURIComponent(id)}/knowledge-selection`),
-    saveKnowledgeSelection: (id, selection) => request(`/api/v1/conversations/${encodeURIComponent(id)}/knowledge-selection`, { method: 'PUT', body: JSON.stringify({ mode: selection.mode, library_ids: selection.library_ids }) }),
     login: (input) => request<AuthTokenResponse>('/api/v1/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username: input.username }),

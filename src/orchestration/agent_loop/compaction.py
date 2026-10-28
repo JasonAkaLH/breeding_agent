@@ -27,7 +27,6 @@ from .models import (
 )
 from .repository import AgentAtomicWriter, AgentRunRepository
 from .observability import AgentMetricsRecorder
-from .knowledge_results import is_knowledge_result
 
 
 Repreflight = Callable[
@@ -58,7 +57,6 @@ class AgentCompactionService:
         candidate_builder: AgentContextCandidateBuilder,
         transient_result_resolver: Any | None = None,
         transient_result_cleaner: Any | None = None,
-        knowledge_result_resolver: Any | None = None,
         metrics_recorder: AgentMetricsRecorder | None = None,
         minimum_suffix_items: int = 2,
     ) -> None:
@@ -71,7 +69,6 @@ class AgentCompactionService:
         self._candidate_builder = candidate_builder
         self._transient_result_resolver = transient_result_resolver
         self._transient_result_cleaner = transient_result_cleaner
-        self._knowledge_result_resolver = knowledge_result_resolver
         self._metrics = metrics_recorder
         self._minimum_suffix_items = minimum_suffix_items
 
@@ -131,12 +128,11 @@ class AgentCompactionService:
             )
             if not covered:
                 raise RuntimeError("agent_context_required_segments_too_large")
-            request, covered = await self._leases.run_active_phase(
-                "context_preflight", handle,
-                lambda _handle: self._largest_fitting_request(
-                    run=run, all_items=items, covered=covered,
-                    token_limit=current.preflight.total_context_limit_tokens,
-                ),
+            request, covered = await self._largest_fitting_request(
+                run=run,
+                all_items=items,
+                covered=covered,
+                token_limit=current.preflight.total_context_limit_tokens,
             )
             covered_range = (covered[0].sequence, covered[-1].sequence)
             if covered_range == prior_range:
@@ -208,24 +204,11 @@ class AgentCompactionService:
         current = covered
         while current:
             source_digest = agent_compaction_source_digest(current)
-            knowledge_views = {}
-            calls = {item.item_id: item for item in current if item.kind is AgentItemKind.TOOL_CALL}
-            for item in current:
-                payload = json.loads(item.payload_json)
-                if item.kind is not AgentItemKind.TOOL_RESULT or not is_knowledge_result(payload.get("safe_result")):
-                    continue
-                call = calls.get(str(item.source_call_item_id))
-                if call is None or self._knowledge_result_resolver is None:
-                    raise RuntimeError("agent_knowledge_reference_unavailable")
-                knowledge_views[item.item_id] = await self._knowledge_result_resolver.resolve_tool_result(
-                    run=run, call_item=call, result_item=item, durable_payload=payload,
-                )
             prompt = _compaction_prompt(
                 run,
                 current,
                 source_digest=source_digest,
                 transient_result_resolver=self._transient_result_resolver,
-                knowledge_result_views=knowledge_views,
             )
             if prompt is not None:
                 request = AgentModelRequest(
@@ -242,10 +225,7 @@ class AgentCompactionService:
                                 "Summarize only the supplied durable Agent items. "
                                 "Preserve facts, decisions, errors and unresolved "
                                 "obligations. Return plain summary text and do not "
-                                "call tools. Preserve literature facts with document/library IDs, "
-                                "versions, and exact read ranges/progress; do not copy full passages. "
-                                "A summary is not a fresh source read. Unavailable or changed "
-                                "knowledge cannot support current citations; retain its unavailability."
+                                "call tools."
                             ),
                         ),
                         AgentMessage(role="user", content=prompt),
@@ -271,7 +251,6 @@ def _compaction_prompt(
     *,
     source_digest: str,
     transient_result_resolver: Any | None,
-    knowledge_result_views: dict[str, Any] | None = None,
 ) -> str | None:
     source_items = []
     calls = {
@@ -281,14 +260,6 @@ def _compaction_prompt(
     }
     for item in items:
         item_payload = json.loads(item.payload_json)
-        if (
-            item.kind is AgentItemKind.TOOL_RESULT
-            and isinstance(item_payload, dict)
-            and is_knowledge_result(item_payload.get("safe_result"))
-        ):
-            if knowledge_result_views is None or item.item_id not in knowledge_result_views:
-                raise RuntimeError("agent_knowledge_reference_unavailable")
-            item_payload = knowledge_result_views[item.item_id]
         if (
             item.sequence == 1
             and item.kind is AgentItemKind.USER_MESSAGE

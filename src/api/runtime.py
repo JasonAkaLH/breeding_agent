@@ -47,17 +47,6 @@ from src.capabilities.mcp_dispatch import (
 )
 from src.capabilities.mcp_tool import build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.capabilities.knowledge.extraction import KnowledgeMetadataExtractor
-from src.capabilities.knowledge.service import KnowledgeService
-from src.capabilities.knowledge.executor import KnowledgeExecutor
-from src.capabilities.knowledge.registration import (
-    KNOWLEDGE_CAPABILITY_DESCRIPTORS,
-    build_local_knowledge_instance,
-)
-from src.api.knowledge_runtime import KnowledgeRuntimeMixin
-from src.storage.knowledge_repository import KnowledgeConflict, KnowledgeRepository
-from src.storage.knowledge_files import KnowledgeFileStore
-from src.orchestration.agent_loop.knowledge_results import KnowledgeResultResolver
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.contracts import MCPRemoteTaskStoragePort
 from src.core.errors import MessageIdentityConflictError, ModelUnavailableError
@@ -726,7 +715,6 @@ class _MCPShadowInvocationHandle:
 class ApiRuntime(
     ConversationFileSelectionRuntimeMixin,
     ConversationUploadRuntimeMixin,
-    KnowledgeRuntimeMixin,
 ):
     def __init__(
         self,
@@ -813,14 +801,10 @@ class ApiRuntime(
         submission_admission_coordinator: SubmissionAdmissionCoordinator | None = None,
         prepared_agent_recovery_loader: PreparedAgentRecoveryLoader | None = None,
         expected_submission_authority_receipt_sha256: str | None = None,
-        knowledge_service: KnowledgeService | None = None,
-        knowledge_repository: KnowledgeRepository | None = None,
     ) -> None:
         self._engine = engine
         self._mcp_rollout_engine = mcp_rollout_engine
         self.storage = storage
-        self.knowledge_service = knowledge_service
-        self.knowledge_repository = knowledge_repository
         self.capability_registry = capability_registry
         self.instance_registry = instance_registry
         self.event_broker = event_broker
@@ -1765,26 +1749,7 @@ class ApiRuntime(
             skill_activation=skill_activation,
         )
         try:
-            if getattr(self, "knowledge_repository", None) is not None:
-                if existing_message is None:
-                    await asyncio.to_thread(
-                        self.knowledge_repository.freeze_scope,
-                        authenticated_username, conversation_id, message_id,
-                    )
-                else:
-                    # An exact replay of a pre-knowledge message must not acquire
-                    # a new scope from today's conversation preference.
-                    await asyncio.to_thread(
-                        self.knowledge_repository.get_scope, message_id,
-                        actor=authenticated_username, conversation_id=conversation_id,
-                    )
             admitted = await self.storage.admit_submission(admission_request)
-        except KnowledgeConflict as exc:
-            if exc.code == "knowledge_conversation_unavailable":
-                raise PermissionError(f"Conversation is not available: {conversation_id}") from exc
-            if exc.code == "knowledge_scope_identity_mismatch":
-                raise MessageIdentityConflictError() from exc
-            raise SubmissionAdmissionUnavailableError() from exc
         except Exception as exc:
             raise SubmissionAdmissionUnavailableError() from exc
         if admitted.disposition is SubmissionAdmissionDisposition.CONVERSATION_BUSY:
@@ -2876,10 +2841,6 @@ class ApiRuntime(
             profile.server_id for profile in profiles
         ]
         activation = continuation.get("skill_activation")
-        metadata.update(await self._knowledge_scope_metadata(
-            actor=record.username, conversation_id=record.conversation_id,
-            root_message_id=record.message_id,
-        ))
         return AgentExecutionRequest(
             task_id=record.task_id,
             conversation_id=record.conversation_id,
@@ -4449,7 +4410,6 @@ class ApiRuntime(
         *,
         await_durable_start: bool = False,
     ) -> asyncio.Task[None]:
-        request = await self._with_knowledge_scope(request)
         initialized = getattr(
             self, "_submission_initialized_agent_runs", {}
         ).get(request.task_id)
@@ -5479,10 +5439,6 @@ class ApiRuntime(
                 updated_at=self._utcnow_naive(),
                 runner_id=runner_id,
             )
-            if getattr(self, "knowledge_repository", None) is not None:
-                await asyncio.to_thread(
-                    self.knowledge_repository.delete_conversation_context, conversation_id,
-                )
             deleted_counts = await self.storage.delete_conversation_physical(conversation_id)
             if (
                 self._conversation_delete_local_runner_ids.get(conversation_id)
@@ -10675,8 +10631,6 @@ class ApiRuntime(
                 await self.storage.expire_user_mcp_scope_leases(now=self._utcnow_naive())
             if self.user_mcp_config_service is not None:
                 await self.user_mcp_config_service.start()
-            if getattr(self, "knowledge_service", None) is not None:
-                await self.knowledge_service.start()
             if self.postgres_mcp_invalidation_bus is not None:
                 try:
                     await self.postgres_mcp_invalidation_bus.start()
@@ -11231,7 +11185,6 @@ class ApiRuntime(
                 ).strip()
                 or None,
                 safe_mcp_server_profiles=profiles,
-                knowledge_scope=metadata.get("knowledge_scope"),
             ),
             cancellation=self._agent_cancellation_token(task.task_id),
         )
@@ -11387,10 +11340,6 @@ class ApiRuntime(
                 expected_upload_ids=prepared.selected_upload_ids,
             )
         )
-        metadata.update(await self._knowledge_scope_metadata(
-            actor=conversation.username, conversation_id=task.conversation_id,
-            root_message_id=task.root_message_id,
-        ))
 
         self._restore_prepared_bundle_revisions(
             task_id=task.task_id,
@@ -12948,8 +12897,6 @@ class ApiRuntime(
             return
 
     async def shutdown(self) -> None:
-        if getattr(self, "knowledge_service", None) is not None:
-            await self.knowledge_service.shutdown()
         coordinator = getattr(self, "_submission_admission_coordinator", None)
         try:
             if coordinator is not None:
@@ -14228,7 +14175,6 @@ def build_api_runtime(
     enable_conversation_memory_resolution_llm: bool = True,
     artifact_store_path: str | Path | None = None,
     conversation_file_store_path: str | Path | None = None,
-    knowledge_store_path: str | Path | None = None,
     runtime_sidecar_client: Any | None = None,
     skill_sandbox_client: Any | None = None,
     enable_user_mcp: bool | None = None,
@@ -14829,7 +14775,6 @@ def build_api_runtime(
     )
 
     capability_registry = CapabilityRegistry()
-    _register_capability_descriptors(capability_registry, KNOWLEDGE_CAPABILITY_DESCRIPTORS)
     skill_runtime_state = SkillRuntimeState(
         skill_roots=roots,
         public_skill_roots=resolved_public_skill_roots,
@@ -14839,7 +14784,6 @@ def build_api_runtime(
     )
 
     instance_registry = InstanceRegistry()
-    instance_registry.register(build_local_knowledge_instance())
     _sync_skill_capability_registry(capability_registry, instance_registry, skill_runtime_state)
 
     _record_skill_capability_startup_audit(audit_sink, skill_runtime_state.active_bundle.skill_capabilities)
@@ -15959,24 +15903,6 @@ def build_api_runtime(
         main_agent_llm_config=main_agent_llm_config,
         platform_llm_config=platform_llm_config,
     )
-    knowledge_repository = KnowledgeRepository(primary_session_factory)
-    knowledge_files = KnowledgeFileStore(
-        knowledge_store_path or (Path(database_path).parent / "knowledge")
-    )
-
-    async def knowledge_user_exists(username: str) -> bool:
-        return await storage.get_auth_user_token(username) is not None
-
-    knowledge_service = KnowledgeService(
-        knowledge_repository, knowledge_files,
-        extractor=KnowledgeMetadataExtractor(main_agent_llm_runtime),
-        user_exists=knowledge_user_exists,
-    )
-
-    async def count_knowledge_page(text: str, model_edition: str) -> int:
-        return await get_num_of_tokens_from_messages_async(
-            [text], config=config_for_model_edition(resolved_model_edition_config, model_edition),
-        )
     cancellation_service = CancellationService(
         storage,
         event_sink=event_broker,
@@ -15990,7 +15916,6 @@ def build_api_runtime(
     )
     composite_executor = CompositeExecutor(
         [
-            KnowledgeExecutor(knowledge_service, token_counter=count_knowledge_page),
             SkillExecutor(
                 runtime_state=skill_runtime_state,
                 script_runner=skill_script_runner,
@@ -16053,16 +15978,6 @@ def build_api_runtime(
         agent_transient_skill_result_store
     )
     runtime_holder: dict[str, ApiRuntime] = {}
-
-    async def load_knowledge_scope(run):
-        runtime = runtime_holder.get("runtime")
-        if runtime is None:
-            raise RuntimeError("knowledge_runtime_unavailable")
-        return await runtime._knowledge_scope_for_run(run)
-
-    knowledge_result_resolver = KnowledgeResultResolver(
-        service=knowledge_service, scope_loader=load_knowledge_scope,
-    )
 
     async def agent_invocation_hook(**values: Any):
         runtime = runtime_holder.get("runtime")
@@ -16229,35 +16144,6 @@ def build_api_runtime(
                 visibility=EventVisibility.FRONTEND,
             )
         )
-    async def knowledge_result_budget(run, call_item):
-        runtime = runtime_holder["runtime"]
-        task = await storage.get_task(run.task_id)
-        if task is None or task.conversation_id != run.conversation_id:
-            raise RuntimeError("knowledge_task_identity_mismatch")
-        metadata = dict(invocation_contexts.request_metadata(run))
-        scope = await load_knowledge_scope(run)
-        profiles = await runtime.available_user_mcp_server_profiles(
-            str(scope["actor"]) if scope is not None else "",
-            execution_mode=task.mcp_execution_mode,
-        )
-        visibility = CapabilityVisibilityContext(
-            authenticated_owner_scope=str(metadata.get("agent_owner_scope") or "runtime-default"),
-            execution_path=str(task.mcp_execution_mode or "default"),
-            pinned_skill_bundle_revision=str(metadata.get("skill_bundle_revision") or "").strip() or None,
-            safe_mcp_server_profiles=profiles,
-            knowledge_scope=scope,
-        )
-        trusted_facts = tuple(
-            json.dumps({key: metadata[key]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-            for key in ("capability_missing_fallback", "conversation_memory", "mcp_remote_task_result_projection", "slot_collection", "uploaded_artifacts")
-            if key in metadata
-        )
-        return await agent_context_candidate_builder.knowledge_result_budget(
-            run=run, items=await agent_repository.list_items(run.run_id),
-            catalog=AgentToolCatalogBuilder(capability_registry).build(visibility),
-            call_item=call_item, trusted_facts=trusted_facts,
-        )
-
     agent_invoker = AgentCapabilityInvoker(
         invocation_service=invocation_service,
         runs=agent_repository,
@@ -16274,7 +16160,6 @@ def build_api_runtime(
         transient_result_stager=agent_transient_skill_result_store.stage,
         result_projection_observer=observe_agent_result_projection,
         invocation_hook=agent_invocation_hook,
-        knowledge_result_budget_loader=knowledge_result_budget,
     )
     lease_controller = AgentLeaseController(agent_repository, ttl_seconds=30)
     agent_transient_result_resolver = AgentTransientSkillResultResolver(
@@ -16301,7 +16186,6 @@ def build_api_runtime(
         ),
         transient_result_resolver=agent_transient_result_resolver,
         skill_result_artifact_resolver=agent_skill_result_artifact_resolver,
-        knowledge_result_resolver=knowledge_result_resolver,
     )
 
     async def count_agent_context_tokens(fragments, binding):
@@ -16326,7 +16210,6 @@ def build_api_runtime(
         candidate_builder=agent_context_candidate_builder,
         transient_result_resolver=agent_transient_result_resolver,
         transient_result_cleaner=agent_transient_result_cleaner,
-        knowledge_result_resolver=knowledge_result_resolver,
     )
     agent_runner = AgentLoopRunner(
         runs=agent_repository,
@@ -16459,8 +16342,6 @@ def build_api_runtime(
     runtime = ApiRuntime(
         engine=engine,
         storage=storage,
-        knowledge_service=knowledge_service,
-        knowledge_repository=knowledge_repository,
         capability_registry=capability_registry,
         instance_registry=instance_registry,
         event_broker=event_broker,

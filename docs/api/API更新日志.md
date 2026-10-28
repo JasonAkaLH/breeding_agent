@@ -1,7 +1,5 @@
 # API 更新日志：`main` 与 `prod` 全量差异扫描
 
-- 2026-10-27：文献库支持 Markdown/PDF 混合导入；新增 owner 草稿及 owner/reader 当前文献 `/source` 原件下载。`/content` 固定为 Markdown，各下载返回自身 SHA-256 与 no-store；新增 source_format/text_ready、PDF 解析错误与确认门禁，已发布/丢弃草稿禁止回读。新增客户端显式 rendition 示例。
-
 > 扫描日期：2026-07-10
 >
 > 比较基线：`main@bd0fd2d` 对 `prod@e7ede32`
@@ -9,23 +7,6 @@
 > 比较方向：本文默认描述“`main` 相对 `prod`”的变化；反向差异会单独标注。
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
-
-## 2026-10-16 增量：文献知识库原生 Capability
-
-新增 24 个文献库管理与会话选库操作，完整 method/path、请求 DTO 和示例见
-`api-doc.html` 的“文献知识库”及完整接口参考；OpenAPI 快照包含当前知识库请求结构。
-所有操作使用现有 Bearer 登录身份，客户端不提供 owner 或任意受管文件路径。
-
-- `/api/v1/knowledge/libraries`：创建和列出个人库、共享库；库详情支持读取、修订号更新及删除。
-- `/knowledge/libraries/{library_id}/imports`：`multipart/form-data` 的重复 `files` 字段批量上传已有 Markdown，可用 `replacement_document_id` 显式创建替换草稿。202 只表示接收，返回逐篇状态；读取草稿、修正字段、重试提取、逐篇或批量确认、丢弃均仅限 owner。
-- `/knowledge/libraries/{library_id}/documents`、`/index`：读取当前已入库文献和 Markdown 索引。文献 metadata 更新要求当前 revision；正文替换必须重新审核。标题和简述必填，其余书目字段可空，year 为整数或 null。
-- `/documents/{document_id}/content`：预览或以 `download=true` 导出原始 Markdown 字节，返回 `X-Content-SHA256` 及 `Cache-Control: no-store`。同库以原始字节 SHA-256 判重，跨库独立保存；替换和删除清理旧正文，`cleanup_pending` 表示未完成状态，不能当作完整成功。
-- `/grants`：owner 向已有用户名授予立即生效、幂等的 user/reader 共享；reader 可读、导出、问答，不能维护、读取草稿或管理共享名单。撤销返回 204，新的受管读取和下载立即复验权限；历史聊天答案保留。
-- `/api/v1/conversations/{conversation_id}/knowledge-selection`：GET/PUT 保存会话选库。auto 对应全部可访问库，selected 至少一个库。首次发消息前保存可创建当前用户绑定的空会话；同会话串行保存，新问题按钮和回车发送须等待最近一次保存成功，失败保留输入且不发送。运行中修改只影响下一次提问；重试和恢复沿用提交时固定范围。指定库全部失效时要求重选，禁止自动扩大范围。
-
-知识库是独立的 `knowledge` 原生能力，Agent 通过库描述、索引和全文依次读取；不新增 MCP Server
-或 Skill。正文与索引分页传输，持久化工具结果只保存有界引用和书目信息，不复制正文到历史结果。
-本条记录描述仓库接口变化，不表示已部署到 prod。
 
 ## 2026-09-04 增量：Tool Result统一50,000-token预算与Frontend完整展示
 

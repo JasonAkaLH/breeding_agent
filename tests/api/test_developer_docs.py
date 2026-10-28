@@ -81,20 +81,9 @@ class DeveloperDocsContractTest(unittest.TestCase):
                 if item['body'] is not None:
                     TypeAdapter(route.body_field.field_info.annotation).validate_python(item['body'])
                 elif route.body_field is not None:
-                    operation = self.app.openapi()['paths'][route.path][item['method'].lower()]
-                    self.assertIn('multipart/form-data', operation['requestBody']['content'])
+                    self.assertEqual(item['path'], '/api/v1/conversations/uploads')
                 if item['response'] is not None:
-                    response_model = route.response_model
-                    if item['method'] == 'DELETE' and item['path'] == '/api/v1/mcp/servers/{server_id}':
-                        response_model = UserMCPDeletePendingResponse
-                    if response_model is not None:
-                        TypeAdapter(response_model).validate_python(item['response'])
-                    else:
-                        # Knowledge endpoints currently expose JSON records without
-                        # a response DTO; these illustrative records claim no schema.
-                        self.assertEqual(item['group'], 'knowledge')
-                        self.assertIsInstance(item['response'], dict)
-                        json.dumps(item['response'])
+                    TypeAdapter(route.response_model or UserMCPDeletePendingResponse).validate_python(item['response'])
                 if '/mcp-calls/' in item['path']:
                     enum = MCPContinueStatus if item['path'].endswith('/continue') else MCPCancelStatus
                     self.assertIn(item['response']['status'], {status.value for status in enum})
@@ -109,7 +98,7 @@ class DeveloperDocsContractTest(unittest.TestCase):
         parser.feed(self.source)
         self.assertEqual(len(parser.ids), len(set(parser.ids)))
         self.assertTrue(set(parser.anchors).issubset(set(parser.ids)))
-        for section in ('quickstart', 'conventions', 'chat', 'streaming', 'interrupts', 'files', 'mcp', 'knowledge', 'reference', 'schemas', 'checklist'):
+        for section in ('quickstart', 'conventions', 'chat', 'streaming', 'interrupts', 'files', 'mcp', 'reference', 'schemas', 'checklist'):
             self.assertIn(section, parser.ids)
 
 

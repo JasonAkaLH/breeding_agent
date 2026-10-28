@@ -287,7 +287,6 @@ class AgentLoopOrchestrator:
             ).strip()
             or None,
             safe_mcp_server_profiles=request.available_mcp_servers,
-            knowledge_scope=request.metadata.get("knowledge_scope"),
         )
         required_name = initial_required_tool_name(
             task.routing_mode,

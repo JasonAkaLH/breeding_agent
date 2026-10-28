@@ -46,19 +46,6 @@ class APIRouteContractTest(unittest.TestCase):
             "DELETE /api/v1/mcp/grants/{grant_id}",
             "POST /api/v1/tasks/{task_id}/mcp-calls/{call_ref}/continue",
             "POST /api/v1/tasks/{task_id}/mcp-calls/{call_ref}/cancel",
-            "PATCH /api/v1/knowledge/libraries/{library_id}",
-            "DELETE /api/v1/knowledge/libraries/{library_id}",
-            "POST /api/v1/knowledge/libraries/{library_id}/imports",
-            "POST /api/v1/knowledge/libraries/{library_id}/imports/confirm",
-            "PATCH /api/v1/knowledge/libraries/{library_id}/imports/{import_id}",
-            "POST /api/v1/knowledge/libraries/{library_id}/imports/{import_id}/confirm",
-            "POST /api/v1/knowledge/libraries/{library_id}/imports/{import_id}/retry",
-            "DELETE /api/v1/knowledge/libraries/{library_id}/imports/{import_id}",
-            "PATCH /api/v1/knowledge/libraries/{library_id}/documents/{document_id}",
-            "DELETE /api/v1/knowledge/libraries/{library_id}/documents/{document_id}",
-            "POST /api/v1/knowledge/libraries/{library_id}/grants",
-            "DELETE /api/v1/knowledge/libraries/{library_id}/grants/{grant_id}",
-            "PUT /api/v1/conversations/{conversation_id}/knowledge-selection",
         }
         violations = [
             f"{','.join(sorted(route.methods or []))} {route.path}"

@@ -4,7 +4,6 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 
@@ -207,24 +206,6 @@ class _LogicalTraceRepository:
 
 
 class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
-    async def test_slow_context_preflight_keeps_the_claim_alive(self):
-        await self._initialize_budgeted_run(100_000)
-        repository = SQLiteAgentRepository(self.sessions, now_fn=datetime.utcnow)
-        calls = 0
-        async def slow_count(fragments, _binding):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                await asyncio.sleep(0.22)
-            return sum(map(len, fragments))
-        model = _ContextAwareQueuedModel(self.binding, [("final answer", ())])
-        runner = self._runner(model, _RecordingInvoker(), repository=repository,
-                              enable_preflight=True, token_counter=slow_count)
-        runner._leases = AgentLeaseController(repository, ttl_seconds=0.09)
-        result = await runner.run("run-1")
-        self.assertEqual(result.state, "final_candidate")
-        self.assertGreater(result.lease_handle.current.revision, 2)
-
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1010,10 +991,8 @@ class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
             trace,
             [
                 "repository.acquire_task_lease",
-                "repository.renew_task_lease",
                 "model.sample",
                 "repository.commit_agent_sample",
-                "repository.renew_task_lease",
                 "capability.invoke",
                 "repository.commit_agent_call_outcome",
                 "repository.release_waiting_task_lease",

@@ -11,8 +11,6 @@
 - `src/components/MathFormula.tsx`: React lifecycle boundary for asynchronous formula conversion and readable fallback.
 - `src/components/mathJaxRuntime.ts`: lazy, same-origin, self-hosted MathJax runtime.
 - `src/components/MCPSettingsPanel.tsx`: user-scoped MCP Server configuration and Grant management; new public HTTP endpoints require an explicit plaintext-risk confirmation, and save failures stay visible inside the active modal.
-- `src/components/KnowledgeSettingsPanel.tsx`, `src/api/knowledgeTypes.ts`: account-settings literature library management, owner-only imports/review/maintenance/sharing, authenticated Markdown/PDF source downloads and Markdown text previews/exports, and read-only shared-library views. Persisted processing states and per-item batch outcomes must remain visible; accepting an upload is not publication success. PDF confirmation/editing requires validated text_ready; metadata extraction failures with ready text remain reviewable. PDF visuals and scanned pages are not recognized. Create/edit library dialogs have no transition animation, and close after a successful save/refresh so the enabled trigger can regain focus. Their closed portals must be removed before the native upload picker can open.
-- `src/components/KnowledgeLibrarySelector.tsx`, `src/hooks/useKnowledgeSelection.ts`: conversation-scoped auto/selected library preferences. Serialize writes for each account/conversation and wait for the latest successful save before clearing new-question input or submitting. Failed saves retain input; stale responses cannot cross accounts/conversations. Current-task interrupt/resume paths keep their original scope.
 - `src/api/taskEvents.ts`, `src/domain/taskEvents.ts`: authenticated task-event transport and deterministic reducer；以closed Agent frontend events作为正式Run终态，按interrupt/node跟踪multi-waiting，仅渲染transient Agent reasoning；不消费旧Planner/soft-Skill/replan事件；CP7 terminal events和MCP result-Artifact projections使用closed payload、canonical per-Call folding、冲突检测和显式resync。
 - `src/api/client.ts`, `src/domain/slashCommands.ts`, `src/domain/mcpServerCommands.ts`: chat submission routing intent boundary；所有调用点显式提交closed `auto | hint | force_capability`，Skill picker/Slash只生成单消息`hint + skill.*`，MCP `$Server`保持`force_capability + mcp.dispatch + mcp_server_binding`，client仅做发请求前的组合guard而不推导routing。
 - `src/domain/artifacts.ts`: artifact display projection; `producer_node_id` and Artifact ID are opaque correlation keys and must not be parsed for capability or product semantics. MCP结果只接受`artifact_type=mcp_result`与strict `maf.mcp.business_result_view.v1`，非法DTO安全降级，不读取raw `storage_ref`，不执行字符、byte或Token长度校验，并从assistant-answer selection排除。
@@ -30,9 +28,7 @@
 
 ## Verification
 
-- For concurrent user manual acceptance, serve a completed build with `npm run preview` and the existing local API proxy. Keep that preview separate from development HMR so source edits do not interrupt the user's page or confound flicker reports.
 - Run focused component/parser/runtime tests before the full frontend suite.
-- Knowledge changes additionally cover `src/api/knowledgeClient.test.ts`, `src/components/KnowledgeSettingsPanel.test.tsx`, `src/hooks/useKnowledgeSelection.test.tsx`, and selection/submit races in `src/App.test.tsx`.
 - For CP7 terminal or MCP result-Artifact projection changes, run `src/api/taskEvents.test.ts`, `src/domain/taskEvents.test.ts`, `src/components/MCPRuntimeStatus.test.tsx`, and the restore/replay cases in `src/App.test.tsx`.
 - Run `npm run typecheck` and `npm run build` for production changes.
 - Verify both root and configured subpath builds when changing asset URLs or Vite base handling.

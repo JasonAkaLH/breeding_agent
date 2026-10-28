@@ -63,21 +63,6 @@ class TokenCounterTests(unittest.TestCase):
         request.assert_called_once()
         self.assertEqual(list(request.call_args.args[0]), ["hello tiktoken", "上下文裁剪"])
 
-    def test_provider_cache_reuses_counts_without_retaining_source_text(self) -> None:
-        config = {
-            "api_key": "test-key",
-            "base_url": "https://ark.example.test/api/v3",
-            "model_edition": "deepseek-v4-flash-260425",
-        }
-        source = "private literature experiment detail not retained in token cache"
-        with patch("src.integrations.token_counter._request_token_counts_sync", return_value=[9]) as request:
-            self.assertEqual(get_num_of_tokens_from_text(source, config=config), 9)
-            self.assertEqual(get_num_of_tokens_from_text(source, config=config), 9)
-        request.assert_called_once()
-        self.assertEqual(len(_TOKENIZATION_CACHE), 1)
-        self.assertNotIn(source, repr(_TOKENIZATION_CACHE))
-        self.assertEqual(len(next(iter(_TOKENIZATION_CACHE))[2]), 64)
-
     def test_falls_back_to_tiktoken_when_provider_tokenization_fails(self) -> None:
         config = {
             "api_key": "test-key",
