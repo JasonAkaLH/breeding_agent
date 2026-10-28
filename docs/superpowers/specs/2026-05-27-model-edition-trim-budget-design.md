@@ -13,9 +13,9 @@
 
 ```yaml
 model_editions:
-  default: deepseek-v4-flash-260425
+  default: deepseek-v4-1-flash-261017
   options:
-    - value: deepseek-v4-flash-260425
+    - value: deepseek-v4-1-flash-261017
       label: DeepSeek V4 Flash
       trim_max_tokens: 1024000
     - value: deepseek-v4-pro-260425

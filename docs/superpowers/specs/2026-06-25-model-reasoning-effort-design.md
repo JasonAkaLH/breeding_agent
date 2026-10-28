@@ -51,9 +51,9 @@
 
 ```yaml
 model_editions:
-  default: deepseek-v4-flash-260425
+  default: deepseek-v4-1-flash-261017
   options:
-    - value: deepseek-v4-flash-260425
+    - value: deepseek-v4-1-flash-261017
       label: DeepSeek V4 Flash
       trim_max_tokens: 1024000
       reasoning_efforts:
@@ -139,7 +139,7 @@ model_editions:
 
 ```json
 {
-  "default_model_edition": "deepseek-v4-flash-260425",
+  "default_model_edition": "deepseek-v4-1-flash-261017",
   "options": [
     {
       "value": "doubao-seed-2-1-pro-260628",

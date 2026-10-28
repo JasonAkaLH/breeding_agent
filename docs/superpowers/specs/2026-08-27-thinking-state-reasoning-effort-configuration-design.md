@@ -17,9 +17,11 @@ disabled-thinking effort。
 smoke。请求使用产品相同的显式 `thinking.type` 与 `reasoning_effort` 组合，不保留回答正文、密钥或
 provider request ID：
 
+2026-10-28 版本引用更新：下表 Flash 标识已统一为当前目标版本，结果仍为历史 smoke 记录，不表示已对新版本复测。
+
 | 模型 | `thinking=enabled` | `thinking=disabled` |
 |---|---|---|
-| `deepseek-v4-flash-ga-260731` | `minimal / low / medium / high / xhigh / max` 全部接受 | `minimal / low / medium / high / xhigh / max` 全部接受 |
+| `deepseek-v4-1-flash-261017` | `minimal / low / medium / high / xhigh / max` 全部接受 | `minimal / low / medium / high / xhigh / max` 全部接受 |
 | `deepseek-v4-pro-ga-260813` | `minimal / low / medium / high / xhigh / max` 全部接受 | `minimal / low / medium / high / xhigh / max` 全部接受 |
 | `glm-5-2-260617` | `minimal / low / medium / high / xhigh / max` 全部接受 | `minimal / low / medium / high / xhigh / max` 全部接受 |
 | `doubao-seed-2-1-pro-260628` | `minimal / low / medium / high` 全部接受 | 仅 `minimal` 接受；其他三档返回 HTTP 400 `InvalidParameter` |
@@ -59,7 +61,7 @@ provider request ID：
 ```yaml
 model_editions:
   options:
-    - value: deepseek-v4-flash-ga-260731
+    - value: deepseek-v4-1-flash-261017
       label: DeepSeek V4 Flash GA
       reasoning_efforts:
         options:

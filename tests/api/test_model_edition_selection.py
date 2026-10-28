@@ -65,10 +65,10 @@ class ModelEditionSelectionAPITest(APITestCase):
             "base_url": "http://example.test",
             "tokenization": {"enabled": False},
             "model_editions": {
-                "default": "deepseek-v4-flash-260425",
+                "default": "deepseek-v4-1-flash-261017",
                 "options": [
                     {
-                        "value": "deepseek-v4-flash-260425",
+                        "value": "deepseek-v4-1-flash-261017",
                         "label": "DeepSeek V4 Flash",
                         "trim_max_tokens": 1024000,
                         "reasoning_efforts": self._deepseek_reasoning(),
@@ -101,10 +101,10 @@ class ModelEditionSelectionAPITest(APITestCase):
         self.assertEqual(
             response.json(),
             {
-                "default_model_edition": "deepseek-v4-flash-260425",
+                "default_model_edition": "deepseek-v4-1-flash-261017",
                 "options": [
                     {
-                        "value": "deepseek-v4-flash-260425",
+                        "value": "deepseek-v4-1-flash-261017",
                         "label": "DeepSeek V4 Flash",
                         "reasoning_efforts": self._deepseek_reasoning(),
                     },
@@ -150,7 +150,7 @@ class ModelEditionSelectionAPITest(APITestCase):
                 "content": "你好",
                 "routing_mode": "auto",
                 "capability_id": None,
-                "model_edition": "deepseek-v4-flash-260425",
+                "model_edition": "deepseek-v4-1-flash-261017",
                 "metadata": {"deep_thinking": False, "main_agent_reasoning_effort": "high"},
             },
         )
@@ -201,7 +201,7 @@ class ModelEditionSelectionAPITest(APITestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(
             [option["value"] for option in response.json()["options"]],
-            ["deepseek-v4-flash-260425", "doubao-seed-2-1-pro-260628"],
+            ["deepseek-v4-1-flash-261017", "doubao-seed-2-1-pro-260628"],
         )
 
     async def test_runtime_fails_closed_when_default_is_not_agent_ready(self) -> None:
@@ -268,7 +268,7 @@ class ModelEditionSelectionAPITest(APITestCase):
                 "content": "用 flash 回答",
                 "routing_mode": "auto",
                 "capability_id": None,
-                "model_edition": "deepseek-v4-flash-260425",
+                "model_edition": "deepseek-v4-1-flash-261017",
                 "metadata": {},
             },
         )
@@ -277,13 +277,13 @@ class ModelEditionSelectionAPITest(APITestCase):
         task_id = response.json()["task_id"]
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual([client.model_edition for client in RecordingLLM.instances], ["deepseek-v4-flash-260425"])
+        self.assertEqual([client.model_edition for client in RecordingLLM.instances], ["deepseek-v4-1-flash-261017"])
         self.assertEqual(len(RecordingLLM.instances[0].calls), 1)
-        self.assertTrue(all(call["model_edition"] == "deepseek-v4-flash-260425" for call in RecordingLLM.instances[0].calls))
+        self.assertTrue(all(call["model_edition"] == "deepseek-v4-1-flash-261017" for call in RecordingLLM.instances[0].calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         accepted = next(event for event in events if event.event_type == "task.accepted")
-        self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-flash-260425")
+        self.assertEqual(accepted.payload["model_edition"], "deepseek-v4-1-flash-261017")
 
     async def test_interrupt_resume_preserves_frontend_model_and_reasoning_metadata(self) -> None:
         skill_root = self.workspace / "skill-model-resume"

@@ -87,10 +87,10 @@ describe('createApiClient', () => {
 
   it('loads model edition choices from backend config', async () => {
     const response = {
-      default_model_edition: 'deepseek-v4-flash-260425',
+      default_model_edition: 'deepseek-v4-1-flash-261017',
       options: [
         {
-          value: 'deepseek-v4-flash-260425',
+          value: 'deepseek-v4-1-flash-261017',
           label: 'DeepSeek V4 Flash',
           reasoning_efforts: {
             options: [

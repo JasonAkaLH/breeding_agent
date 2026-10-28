@@ -39,7 +39,7 @@ class TokenCounterTests(unittest.TestCase):
         config = {
             "api_key": "test-key",
             "base_url": "https://ark.example.test/api/v3",
-            "model_edition": "deepseek-v4-flash-260425",
+            "model_edition": "deepseek-v4-1-flash-261017",
         }
 
         with patch("src.integrations.token_counter._request_token_counts_sync", return_value=[11]) as request:
@@ -53,7 +53,7 @@ class TokenCounterTests(unittest.TestCase):
         config = {
             "api_key": "test-key",
             "base_url": "https://ark.example.test/api/v3",
-            "model_edition": "deepseek-v4-flash-260425",
+            "model_edition": "deepseek-v4-1-flash-261017",
         }
 
         with patch("src.integrations.token_counter._request_token_counts_sync", return_value=[5, 3]) as request:
@@ -67,7 +67,7 @@ class TokenCounterTests(unittest.TestCase):
         config = {
             "api_key": "test-key",
             "base_url": "https://ark.example.test/api/v3",
-            "model_edition": "deepseek-v4-flash-260425",
+            "model_edition": "deepseek-v4-1-flash-261017",
         }
 
         with patch("src.integrations.token_counter._request_token_counts_sync", side_effect=RuntimeError("network")):
@@ -77,7 +77,7 @@ class TokenCounterTests(unittest.TestCase):
         config = {
             "api_key": "test-key",
             "base_url": "https://ark.example.test/api/v3",
-            "model_edition": "deepseek-v4-flash-260425",
+            "model_edition": "deepseek-v4-1-flash-261017",
             "tokenization": {"fallback_to_tiktoken": False},
         }
 
@@ -98,7 +98,7 @@ class TokenCounterTests(unittest.TestCase):
             {
                 "api_key": "test-key",
                 "base_url": "https://ark.example.test/api/v3",
-                "model_edition": "deepseek-v4-flash-260425",
+                "model_edition": "deepseek-v4-1-flash-261017",
                 "tokenization": {"timeout": 99},
             }
         )
@@ -298,7 +298,7 @@ class TokenCounterTests(unittest.TestCase):
         config = {
             "api_key": "test-key",
             "base_url": "https://ark.example.test/api/v3",
-            "model_edition": "deepseek-v4-flash-260425",
+            "model_edition": "deepseek-v4-1-flash-261017",
         }
 
         async def fake_request(texts, settings):
