@@ -4,12 +4,13 @@ use crate::{
     AgentStateReceipt, ArtifactRecord, BundleRevisionResult, CancellationToken,
     ClaimPendingSubmissionRequest, ClaimPendingSubmissionResponse,
     CloseConversationAdmissionRequest, CloseConversationAdmissionResponse, CommitAgentStateRequest,
-    ConversationAdmissionCloseDisposition, EventCursor, GetSubmissionPreparationRequest,
-    MessageIdentityDisposition, MessageIdentityKind, MessageIdentityRecord, NodeTransitionResult,
-    PrepareSubmissionHandoffRequest, RenewSubmissionClaimRequest, ReserveMessageIdentityRequest,
-    ReserveMessageIdentityResponse, SubmissionAdmissionDisposition, SubmissionAdmissionRecord,
-    SubmissionClaim, SubmissionHandoffState, SubmissionPreparationState, SubmissionProjectionState,
-    TaskNodeRecord, TaskRecord, TaskRouteAssignment, idempotency_conflict, idempotency_key,
+    ConversationAdmissionCloseDisposition, EventCursor, FailSubmissionRequest,
+    GetSubmissionPreparationRequest, MessageIdentityDisposition, MessageIdentityKind,
+    MessageIdentityRecord, NodeTransitionResult, PrepareSubmissionHandoffRequest,
+    RenewSubmissionClaimRequest, ReserveMessageIdentityRequest, ReserveMessageIdentityResponse,
+    SubmissionAdmissionDisposition, SubmissionAdmissionRecord, SubmissionClaim,
+    SubmissionHandoffState, SubmissionPreparationState, SubmissionProjectionState, TaskNodeRecord,
+    TaskRecord, TaskRouteAssignment, idempotency_conflict, idempotency_key,
     initial_no_server_task_transition_shape, message_identity_is_exact_replay, migration_blocked,
     new_submission_claim, require_idempotency_key, validate_admit_submission_request,
     validate_agent_final_commit_shape, validate_agent_final_projection, validate_agent_item_record,
@@ -212,6 +213,14 @@ impl RuntimeSidecarSqliteAdapter {
             })
             .transpose()?;
         if operation == "create_run" {
+            if task_record_by_id(&transaction, &run.task_id)?.is_some_and(|task| task.status == "failed")
+                && transaction.query_row(
+                    "SELECT 1 FROM submission_admissions WHERE task_id=?1 AND admission_state='closed' AND handoff_state='pending'",
+                    rusqlite::params![&run.task_id], |_| Ok(()),
+                ).optional().map_err(|error| sqlite_error("check failed submission before AgentRun failed", error))?.is_some()
+            {
+                return Err(write_failed("cannot create AgentRun for failed closed submission"));
+            }
             let task_bound = transaction
                 .query_row(
                     "SELECT 1 FROM agent_runs WHERE task_id = ?1",
@@ -2217,6 +2226,43 @@ impl RuntimeSidecarSqliteAdapter {
                         rusqlite::params![&request.message_id, &request.handoff_kind, &request.handoff_identity, request.now_ms],
                     )
                     .map_err(|error| sqlite_error("acknowledge submission handoff failed", error))?;
+                Ok(false)
+            },
+        )
+    }
+
+    pub fn fail_submission(
+        &self,
+        request: FailSubmissionRequest,
+    ) -> Result<(SubmissionAdmissionRecord, bool), RuntimeSidecarError> {
+        if request.reason_code != "submission_preparation_failed" {
+            return Err(write_failed("submission failure reason is invalid"));
+        }
+        self.update_admission_with_claim(
+            &request.message_id, &request.workflow_owner, &request.claim_token, request.now_ms,
+            |transaction, record| {
+                let task = task_record_by_id(transaction, &record.task_id)?
+                    .ok_or_else(|| write_failed("submission Task is missing"))?;
+                let has_run = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE task_id=?1)",
+                    rusqlite::params![&record.task_id], |row| row.get::<_, bool>(0),
+                ).map_err(|error| sqlite_error("check submission Agent Run failed", error))?;
+                if record.handoff_state == SubmissionHandoffState::HandedOff || task.status != "accepted" || has_run {
+                    return Ok(false);
+                }
+                let mut failed = task.clone();
+                failed.status = "failed".to_owned();
+                failed.updated_at = Some(request.now_ms.to_string());
+                validate_task_update(&task, &failed)?;
+                upsert_task_record(transaction, &failed)?;
+                transaction.execute(
+                    "UPDATE submission_admissions SET admission_state='closed', claim_owner=NULL, claim_token=NULL, claim_expires_at_ms=NULL, updated_at_ms=?2 WHERE message_id=?1",
+                    rusqlite::params![&request.message_id, request.now_ms],
+                ).map_err(|error| sqlite_error("close failed submission failed", error))?;
+                transaction.execute(
+                    "UPDATE submission_conversations SET active_task_id=NULL, revision=revision+1, updated_at_ms=?3 WHERE conversation_id=?1 AND active_task_id=?2",
+                    rusqlite::params![&record.conversation_id, &record.task_id, request.now_ms],
+                ).map_err(|error| sqlite_error("release failed submission failed", error))?;
                 Ok(false)
             },
         )

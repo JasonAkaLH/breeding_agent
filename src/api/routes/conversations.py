@@ -87,7 +87,14 @@ async def submit_message(body: SubmitMessageRequest, request: Request) -> Messag
     except SubmissionAdmissionUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": exc.code},
+            detail={
+                "code": exc.code,
+                **(
+                    {"message_id": exc.message_id, "task_id": exc.task_id}
+                    if exc.message_id is not None and exc.task_id is not None
+                    else {}
+                ),
+            },
         ) from exc
     except MessageIdentityConflictError as exc:
         raise HTTPException(

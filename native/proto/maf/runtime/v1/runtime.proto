@@ -40,6 +40,7 @@ service RuntimeSidecar {
   rpc PrepareSubmissionHandoff(PrepareSubmissionHandoffRequest) returns (SubmissionAdmissionResponse);
   rpc GetSubmissionPreparation(GetSubmissionPreparationRequest) returns (GetSubmissionPreparationResponse);
   rpc AcknowledgeSubmissionHandoff(AcknowledgeSubmissionHandoffRequest) returns (SubmissionAdmissionResponse);
+  rpc FailSubmission(FailSubmissionRequest) returns (SubmissionAdmissionResponse);
   rpc CloseConversationAdmission(CloseConversationAdmissionRequest) returns (CloseConversationAdmissionResponse);
   rpc ReserveMessageIdentity(ReserveMessageIdentityRequest) returns (ReserveMessageIdentityResponse);
 }
@@ -330,6 +331,14 @@ message AcknowledgeSubmissionHandoffRequest {
   string handoff_identity = 6;
   SubmissionHandoffState expected_state = 7;
   int64 now_ms = 8;
+}
+
+message FailSubmissionRequest {
+  string message_id = 1;
+  string workflow_owner = 2;
+  string claim_token = 3;
+  string reason_code = 4;
+  int64 now_ms = 5;
 }
 
 message SubmissionAdmissionResponse {

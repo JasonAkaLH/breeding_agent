@@ -28,7 +28,11 @@ from src.orchestration.agent_loop.models import (
 NOW = datetime(2026, 8, 27, 12, 0, 0)
 
 
-def _record(*, continuation: dict[str, object] | None = None) -> SubmissionRecoveryRecord:
+def _record(
+    *,
+    continuation: dict[str, object] | None = None,
+    explicit_upload_ids: tuple[str, ...] = (),
+) -> SubmissionRecoveryRecord:
     return SimpleNamespace(
         username="alice",
         conversation_id="conversation-1",
@@ -39,7 +43,7 @@ def _record(*, continuation: dict[str, object] | None = None) -> SubmissionRecov
                 "content": "hello",
                 "metadata": {
                     "__maf_private_submission_input_v1": {
-                        "explicit_upload_ids": [],
+                        "explicit_upload_ids": list(explicit_upload_ids),
                         "selector_metadata": {},
                     }
                 },
@@ -76,6 +80,37 @@ class _ExactEventStorage:
 
 
 class SubmissionPreparationCallbacksTest(unittest.IsolatedAsyncioTestCase):
+    def test_selector_inputs_preserve_persisted_unsorted_upload_order(self) -> None:
+        upload_ids = ("upload-b", "upload-a")
+        continuation = {
+            "upload_refs": [{"upload_id": item} for item in sorted(upload_ids)],
+        }
+        record = _record(continuation=continuation, explicit_upload_ids=upload_ids)
+        original_projection = record.message_projection
+        original_continuation = record.continuation
+        runtime = object.__new__(ApiRuntime)
+
+        metadata, selected, pending = runtime._submission_selector_inputs(
+            record, json.loads(record.continuation)
+        )
+
+        self.assertEqual(selected, upload_ids)
+        self.assertEqual(metadata, {})
+        self.assertIsNone(pending)
+        self.assertEqual(record.message_projection, original_projection)
+        self.assertEqual(record.continuation, original_continuation)
+
+    def test_unsorted_selector_inputs_still_reject_missing_upload_ref(self) -> None:
+        record = _record(explicit_upload_ids=("upload-b", "upload-a"))
+        runtime = object.__new__(ApiRuntime)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "submission_selector_upload_ref_missing"
+        ):
+            runtime._submission_selector_inputs(
+                record, {"upload_refs": [{"upload_id": "upload-a"}]}
+            )
+
     @staticmethod
     def _terminal_prepared(kind: str) -> dict[str, object]:
         return {

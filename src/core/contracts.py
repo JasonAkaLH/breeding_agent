@@ -82,6 +82,8 @@ from .models import (
     SubmissionClaimRequest,
     SubmissionClaimResult,
     SubmissionHandoffAcknowledgementRequest,
+    SubmissionFailureRequest,
+    SubmissionFailureResult,
     SubmissionPreparationLookup,
     SubmissionPreparationReceipt,
     SubmissionPreparationReceiptComponent,
@@ -1322,6 +1324,10 @@ class ConversationTaskAdmissionPort(Protocol):
     async def acknowledge_submission_handoff(
         self, request: SubmissionHandoffAcknowledgementRequest
     ) -> SubmissionAdmissionPhase: ...
+
+    async def fail_submission(
+        self, request: SubmissionFailureRequest
+    ) -> SubmissionFailureResult: ...
 
     async def close_conversation_admission(
         self, request: ConversationAdmissionCloseRequest

@@ -487,6 +487,13 @@ logger = logging.getLogger(__name__)
 class SubmissionAdmissionUnavailableError(RuntimeError):
     code = "submission_admission_unavailable"
 
+    def __init__(
+        self, *, message_id: str | None = None, task_id: str | None = None
+    ) -> None:
+        super().__init__(self.code)
+        self.message_id = message_id
+        self.task_id = task_id
+
 
 class SkillHintUnavailableError(RuntimeError):
     code = "skill_hint_unavailable"
@@ -888,6 +895,7 @@ class ApiRuntime(
         ) = None
         self._agent_skill_result_janitor: AgentSkillResultArtifactJanitor | None = None
         self._submission_claim_owner = f"api-submission:{uuid4().hex}"
+        self._submission_request_locks: WeakValueDictionary[tuple[str | None, str], asyncio.Lock] = WeakValueDictionary()
         self._submission_claim_ttl = timedelta(seconds=30)
         self._expected_submission_authority_receipt_sha256 = (
             expected_submission_authority_receipt_sha256
@@ -1133,6 +1141,24 @@ class ApiRuntime(
         *,
         authenticated_username: str | None = None,
     ) -> dict[str, object]:
+        if request.client_message_id is None:
+            return await self._submit_chat_message(
+                conversation_id, request, authenticated_username=authenticated_username
+            )
+        key = (authenticated_username, request.client_message_id)
+        lock = self._submission_request_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await self._submit_chat_message(
+                conversation_id, request, authenticated_username=authenticated_username
+            )
+
+    async def _submit_chat_message(
+        self,
+        conversation_id: str,
+        request: SubmitMessageRequest,
+        *,
+        authenticated_username: str | None = None,
+    ) -> dict[str, object]:
         root_submission_replay = await self._is_existing_root_submission(
             request.client_message_id
         )
@@ -1156,7 +1182,7 @@ class ApiRuntime(
             "conversation_id": conversation_id,
             "message_id": message.message_id,
             "task_id": task.task_id,
-            "status": "accepted",
+            "status": "failed" if task.status == TaskStatus.FAILED else "accepted",
             "action": "task_accepted",
         }
 
@@ -1821,7 +1847,9 @@ class ApiRuntime(
                 reclaim_exact=reclaim_exact,
             )
         except Exception as exc:
-            raise SubmissionAdmissionUnavailableError() from exc
+            raise SubmissionAdmissionUnavailableError(
+                message_id=record.message_id, task_id=record.task_id
+            ) from exc
         if recovery.recovered_count:
             title_metadata = self._drop_user_supplied_system_metadata(
                 request.metadata
@@ -3097,13 +3125,11 @@ class ApiRuntime(
             or any(not isinstance(value, Mapping) for value in selector_metadata.values())
         ):
             raise RuntimeError("submission_selector_private_input_invalid")
+        # The frozen message preserves submission order, including legacy records.
+        # Fingerprints and selector receipts apply canonical sorting separately.
         normalized_explicit_upload_ids = self._normalize_upload_ids(
             private_input["explicit_upload_ids"]
         )
-        if list(normalized_explicit_upload_ids) != sorted(
-            set(normalized_explicit_upload_ids)
-        ):
-            raise RuntimeError("submission_selector_private_input_invalid")
         explicit_upload_ids = tuple(
             upload_id
             for upload_id in normalized_explicit_upload_ids
@@ -3724,6 +3750,36 @@ class ApiRuntime(
 
     def skill_revision_error_code(self, revision: object) -> str | None:
         return self._skill_recovery_error_code(revision)
+
+    async def materialize_submission_failure(
+        self, record: SubmissionRecoveryRecord
+    ) -> None:
+        task = await self.storage.get_task(record.task_id)
+        if task is None or task.status != TaskStatus.FAILED:
+            return
+        if (
+            task.conversation_id != record.conversation_id
+            or task.root_message_id != record.message_id
+        ):
+            raise RuntimeError("submission_terminal_task_identity_mismatch")
+        saved, _duplicate = await self.storage.append_event_exact(
+            EventRecord(
+                event_id=f"evt-submission-failed:{record.task_id}",
+                conversation_id=record.conversation_id,
+                task_id=record.task_id,
+                event_type="task.failed",
+                visibility=EventVisibility.FRONTEND,
+                payload={
+                    "status": "failed",
+                    "error": {"code": "submission_preparation_failed"},
+                },
+                created_at=task.updated_at,
+            )
+        )
+        # SQL closes the task and writes this event atomically before this callback.
+        # Publish the same durable ID so existing SSE subscribers see the failure.
+        await self.event_broker.publish(saved)
+        await self._clear_conversation_current_task(task.conversation_id, task.task_id)
 
     async def materialize_terminal_handoff(
         self,

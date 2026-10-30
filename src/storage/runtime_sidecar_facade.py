@@ -266,6 +266,7 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
         "submission_projection_acknowledge",
         "submission_handoff_prepare",
         "submission_handoff_acknowledge",
+        "submission_fail",
     }:
         _validate_submission_admission_record(response.get("admission"))
         if not isinstance(response.get("duplicate"), bool):

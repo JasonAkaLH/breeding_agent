@@ -62,9 +62,9 @@ use codec::{
     agent_item_record_to_pb, agent_run_record_from_pb, agent_run_record_to_pb,
     agent_state_response_to_pb, artifact_from_pb, artifact_response_to_pb,
     bundle_revision_response_to_pb, claim_pending_request_from_pb, claim_pending_response_to_pb,
-    close_request_from_pb, close_response_to_pb, cursor_to_pb, get_preparation_request_from_pb,
-    get_preparation_response_to_pb, handoff_ack_request_from_pb, health_state_to_pb,
-    idempotency_from_pb, lease_response_to_pb, list_artifacts_response_to_pb,
+    close_request_from_pb, close_response_to_pb, cursor_to_pb, failure_request_from_pb,
+    get_preparation_request_from_pb, get_preparation_response_to_pb, handoff_ack_request_from_pb,
+    health_state_to_pb, idempotency_from_pb, lease_response_to_pb, list_artifacts_response_to_pb,
     missing_features_from_error, pb_idempotency_key, prepare_handoff_request_from_pb,
     projection_ack_request_from_pb, readiness_state_to_pb, renew_claim_request_from_pb,
     reserve_request_from_pb, reserve_response_to_pb, submission_admission_response_to_pb,
@@ -423,6 +423,15 @@ pub struct AcknowledgeSubmissionHandoffRequest {
     pub handoff_kind: String,
     pub handoff_identity: String,
     pub expected_state: SubmissionHandoffState,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailSubmissionRequest {
+    pub message_id: String,
+    pub workflow_owner: String,
+    pub claim_token: String,
+    pub reason_code: String,
     pub now_ms: i64,
 }
 
@@ -1781,6 +1790,58 @@ impl RuntimeSidecarKernel {
         Ok((entry.record.clone(), false))
     }
 
+    pub fn fail_submission(
+        &mut self,
+        request: FailSubmissionRequest,
+    ) -> Result<(SubmissionAdmissionRecord, bool), RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        if request.reason_code != "submission_preparation_failed" {
+            return Err(write_failed("submission failure reason is invalid"));
+        }
+        let entry = self
+            .submission_admissions
+            .get(&request.message_id)
+            .ok_or_else(|| idempotency_conflict("submission admission is unknown"))?;
+        validate_submission_claim(
+            entry,
+            &request.workflow_owner,
+            &request.claim_token,
+            request.now_ms,
+        )?;
+        let record = entry.record.clone();
+        let task = self
+            .tasks
+            .get(&record.task_id)
+            .ok_or_else(|| write_failed("submission Task is missing"))?;
+        if record.handoff_state == SubmissionHandoffState::HandedOff
+            || task.status != "accepted"
+            || self.agent_task_runs.contains_key(&record.task_id)
+        {
+            return Ok((record, false));
+        }
+        let mut failed = task.clone();
+        failed.status = "failed".to_owned();
+        failed.updated_at = Some(request.now_ms.to_string());
+        validate_task_update(task, &failed)?;
+        self.tasks.insert(record.task_id.clone(), failed);
+        if let Some(guard) = self
+            .submission_conversations
+            .get_mut(&record.conversation_id)
+            && guard.active_task_id.as_deref() == Some(record.task_id.as_str())
+        {
+            guard.active_task_id = None;
+            guard.revision += 1;
+        }
+        let entry = self
+            .submission_admissions
+            .get_mut(&request.message_id)
+            .ok_or_else(|| write_failed("submission admission disappeared"))?;
+        entry.record.closed = true;
+        entry.record.updated_at_ms = request.now_ms;
+        entry.claim = None;
+        Ok((entry.record.clone(), false))
+    }
+
     pub fn close_conversation_admission(
         &mut self,
         request: CloseConversationAdmissionRequest,
@@ -2071,6 +2132,20 @@ impl RuntimeSidecarKernel {
             return Ok((receipt.run.clone(), receipt.items.clone(), true));
         }
         if request.operation == "create_run" {
+            if self
+                .tasks
+                .get(&run.task_id)
+                .is_some_and(|task| task.status == "failed")
+                && self.submission_admissions.values().any(|entry| {
+                    entry.record.task_id == run.task_id
+                        && entry.record.closed
+                        && entry.record.handoff_state == SubmissionHandoffState::Pending
+                })
+            {
+                return Err(write_failed(
+                    "cannot create AgentRun for failed closed submission",
+                ));
+            }
             if request.expected_revision != 0 || run.revision != 0 || !request.items.is_empty() {
                 return Err(write_failed("create_run Agent state shape is invalid"));
             }
@@ -3259,6 +3334,13 @@ impl RuntimeSidecarService {
         request: AcknowledgeSubmissionHandoffRequest,
     ) -> SubmissionAdmissionResponse {
         submission_admission_result(self.kernel.acknowledge_submission_handoff(request))
+    }
+
+    pub fn fail_submission(
+        &mut self,
+        request: FailSubmissionRequest,
+    ) -> SubmissionAdmissionResponse {
+        submission_admission_result(self.kernel.fail_submission(request))
     }
 
     pub fn close_conversation_admission(
@@ -4524,6 +4606,21 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                 duplicate: false,
                 error: Some(error.into()),
             },
+        };
+        Ok(tonic::Response::new(submission_admission_response_to_pb(
+            response,
+        )))
+    }
+
+    async fn fail_submission(
+        &self,
+        request: tonic::Request<runtime_pb::FailSubmissionRequest>,
+    ) -> Result<tonic::Response<runtime_pb::SubmissionAdmissionResponse>, tonic::Status> {
+        let request = failure_request_from_pb(request.into_inner());
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            submission_admission_result(self.run_sqlite_write(|| adapter.fail_submission(request))?)
+        } else {
+            self.lock()?.fail_submission(request)
         };
         Ok(tonic::Response::new(submission_admission_response_to_pb(
             response,

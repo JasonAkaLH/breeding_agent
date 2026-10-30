@@ -2,8 +2,8 @@ use maf_runtime_sidecar::{
     AcknowledgeSubmissionHandoffRequest, AcknowledgeSubmissionProjectionRequest,
     AdmitSubmissionRequest, AgentItemRecord, AgentRunRecord, ArtifactRecord,
     ClaimPendingSubmissionRequest, CloseConversationAdmissionRequest, CommitAgentStateRequest,
-    ConversationAdmissionCloseDisposition, GetSubmissionPreparationRequest, Idempotency,
-    MessageIdentityKind, MessageIdentityRecord, PrepareSubmissionHandoffRequest,
+    ConversationAdmissionCloseDisposition, FailSubmissionRequest, GetSubmissionPreparationRequest,
+    Idempotency, MessageIdentityKind, MessageIdentityRecord, PrepareSubmissionHandoffRequest,
     RenewSubmissionClaimRequest, ReserveMessageIdentityRequest, RuntimeSidecarSqliteAdapter,
     SubmissionAdmissionDisposition, SubmissionAuthorityImportRequest,
     SubmissionConversationImportRecord, SubmissionHandoffState, SubmissionPreparationState,
@@ -898,6 +898,80 @@ fn different_empty_finalization_bundle(finalized_at_ms: i64) -> (String, Vec<u8>
     let mut receipt_value: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
     receipt_value["finalization_receipt_sha256"] = serde_json::json!(digest);
     (digest, subject, canonical(receipt_value))
+}
+
+#[test]
+fn sqlite_submission_failure_survives_reopen_and_rejects_stale_claims() {
+    let db_path = temp_db_path("submission-failure");
+    let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+    let (digest, subject, receipt) = empty_finalization_bundle(8);
+    adapter
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 8)
+        .unwrap();
+    let created = adapter
+        .admit_submission(sqlite_admission_request(
+            "failed-message",
+            "failed-task",
+            "failed-conversation",
+        ))
+        .unwrap();
+    let claim = created.claim.unwrap();
+    let request = FailSubmissionRequest {
+        message_id: "failed-message".to_owned(),
+        workflow_owner: claim.owner,
+        claim_token: claim.token,
+        reason_code: "submission_preparation_failed".to_owned(),
+        now_ms: 11,
+    };
+    let mut stale = request.clone();
+    stale.claim_token = "stale-token".to_owned();
+    assert!(adapter.fail_submission(stale).is_err());
+    assert!(adapter.fail_submission(request).unwrap().0.closed);
+    drop(adapter);
+    let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+    assert_eq!(
+        reopened.get_task("failed-task").unwrap().unwrap().status,
+        "failed"
+    );
+    let mut run = agent_run(0);
+    run.task_id = "failed-task".to_owned();
+    run.conversation_id = "failed-conversation".to_owned();
+    let late_run = CommitAgentStateRequest {
+        operation: "create_run".to_owned(),
+        run: Some(run),
+        items: Vec::new(),
+        expected_revision: 0,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: "late-run".to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+        task_nodes: Vec::new(),
+        artifacts: Vec::new(),
+        final_projection_json: None,
+        task: None,
+    };
+    assert!(reopened.commit_agent_state(late_run).is_err());
+    let replay = reopened
+        .admit_submission(sqlite_admission_request(
+            "failed-message",
+            "other-task",
+            "failed-conversation",
+        ))
+        .unwrap();
+    assert!(replay.admission.unwrap().closed);
+    assert!(replay.claim.is_none());
+    let next = reopened
+        .admit_submission(sqlite_admission_request(
+            "next-message",
+            "next-task",
+            "failed-conversation",
+        ))
+        .unwrap();
+    assert_eq!(next.disposition, SubmissionAdmissionDisposition::Created);
+    drop(reopened);
+    let _ = std::fs::remove_file(db_path);
 }
 
 fn sqlite_admission_request(

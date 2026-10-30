@@ -7,12 +7,13 @@ import json
 import os
 import re
 import weakref
+from uuid import uuid4
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, NoReturn, cast
 
-from sqlalchemy import and_, delete, func, null, or_, select, text, update
+from sqlalchemy import JSON, and_, delete, func, null, or_, select, text, type_coerce, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, aliased, sessionmaker
@@ -129,6 +130,8 @@ from src.core.models import (
     SubmissionClaimResult,
     SubmissionClaimRenewalRequest,
     SubmissionHandoffAcknowledgementRequest,
+    SubmissionFailureRequest,
+    SubmissionFailureResult,
     SubmissionHandoffState,
     SubmissionPreparationLookup,
     SubmissionPreparationReceipt,
@@ -1146,6 +1149,7 @@ _SUBMISSION_ADMISSION_RECEIPT_KEY = "__maf_private_submission_admission_v1"
 _SUBMISSION_ADMISSION_RECEIPT_SCHEMA = "maf.sql_submission_admission_receipt.v1"
 _SUBMISSION_INPUT_METADATA_KEY = "__maf_private_submission_input_v1"
 _SUBMISSION_HANDOFF_METADATA_KEY = "__maf_private_submission_handoff_v1"
+_SUBMISSION_STATE_METADATA_KEY = "__maf_private_submission_state_v1"
 _SUBMISSION_HANDOFF_METADATA_SCHEMA = "maf.sql_submission_handoff.v1"
 _SUBMISSION_PROJECTION_DOMAIN = b"maf.submission.projection.v1\0"
 _SUBMISSION_CONTINUATION_DOMAIN = b"maf.submission.continuation.v1\0"
@@ -1155,6 +1159,7 @@ def _projection_message_metadata(value: object) -> dict[str, Any]:
     metadata = _message_metadata_object(value)
     metadata.pop(_SUBMISSION_ADMISSION_RECEIPT_KEY, None)
     metadata.pop(_SUBMISSION_HANDOFF_METADATA_KEY, None)
+    metadata.pop(_SUBMISSION_STATE_METADATA_KEY, None)
     return metadata
 
 
@@ -1329,10 +1334,11 @@ def _sql_submission_result(
     message_created_at: datetime | None,
     private_receipt: Mapping[str, Any],
     private_handoff: Mapping[str, Any] | None = None,
+    closed: bool = False,
 ) -> SubmissionAdmissionResult:
     handoff = _submission_private_handoff(private_handoff)
     phase = SubmissionAdmissionPhase(
-        admission_state=SubmissionAdmissionState.OPEN,
+        admission_state=(SubmissionAdmissionState.CLOSED if closed else SubmissionAdmissionState.OPEN),
         projection_state=SubmissionProjectionState.PROJECTED,
         preparation_state=(
             SubmissionPreparationState.PREPARED
@@ -1391,6 +1397,42 @@ def _sql_submission_result(
     )
 
 
+def _sql_submission_recovery_record(
+    message: MessageRow, task: Task, username: str
+) -> SubmissionRecoveryRecord:
+    metadata = _message_metadata_object(message.message_metadata)
+    state = metadata[_SUBMISSION_STATE_METADATA_KEY]
+    receipt = metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY]
+    request = SubmissionAdmissionRequest(
+        username=username,
+        conversation_id=message.conversation_id,
+        message_id=message.message_id,
+        task=replace(task, status=TaskStatus.ACCEPTED),
+        idempotency_key=receipt["idempotency_key"],
+        request_fingerprint=receipt["request_fingerprint"],
+        conversation_projection=state["conversation_projection"].encode(),
+        message_projection=state["message_projection"].encode(),
+        projection_sha256=state["projection_sha256"],
+        continuation=state["continuation"].encode(),
+        continuation_sha256=state["continuation_sha256"],
+        message_created_at=message.created_at,
+        claim_owner=state.get("claim_owner") or "recovery",
+        claim_expires_at=message.created_at,
+    )
+    _submission_projection_values(request)
+    result = _sql_submission_result(
+        disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+        request=request,
+        task=task,
+        message_created_at=message.created_at,
+        private_receipt=receipt,
+        private_handoff=metadata.get(_SUBMISSION_HANDOFF_METADATA_KEY),
+        closed=bool(state["closed"]),
+    )
+    assert result.record is not None
+    return result.record
+
+
 def _canonical_sql_replay_request(
     request: SubmissionAdmissionRequest,
     *,
@@ -1402,6 +1444,30 @@ def _canonical_sql_replay_request(
 
     if message.created_at is None or task.created_at is None:
         raise RuntimeError("submission_admission_identity_corrupt")
+
+    state = _message_metadata_object(message.message_metadata).get(
+        _SUBMISSION_STATE_METADATA_KEY
+    )
+    if state is not None:
+        frozen = replace(
+            request,
+            task=replace(
+                request.task,
+                task_id=task.task_id,
+                root_message_id=message.message_id,
+                created_at=task.created_at,
+                updated_at=task.created_at,
+            ),
+            message_id=message.message_id,
+            message_created_at=message.created_at,
+            conversation_projection=state["conversation_projection"].encode(),
+            message_projection=state["message_projection"].encode(),
+            projection_sha256=state["projection_sha256"],
+            continuation=state["continuation"].encode(),
+            continuation_sha256=state["continuation_sha256"],
+        )
+        _submission_projection_values(frozen)
+        return frozen
 
     def timestamp(value: datetime) -> str:
         aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
@@ -4360,6 +4426,7 @@ class SQLiteStateRepository:
             _SUBMISSION_ADMISSION_RECEIPT_KEY in incoming_metadata
             or _SUBMISSION_INPUT_METADATA_KEY in incoming_metadata
             or _SUBMISSION_HANDOFF_METADATA_KEY in incoming_metadata
+            or _SUBMISSION_STATE_METADATA_KEY in incoming_metadata
         ):
             raise ValueError("message_private_metadata_reserved")
         existing = self._session.scalar(
@@ -4414,6 +4481,7 @@ class SQLiteStateRepository:
                     _SUBMISSION_ADMISSION_RECEIPT_KEY,
                     _SUBMISSION_INPUT_METADATA_KEY,
                     _SUBMISSION_HANDOFF_METADATA_KEY,
+                    _SUBMISSION_STATE_METADATA_KEY,
                 }
             }
             existing.content = message.content
@@ -4505,11 +4573,25 @@ class SQLiteStateRepository:
         if (
             _SUBMISSION_ADMISSION_RECEIPT_KEY in metadata
             or _SUBMISSION_HANDOFF_METADATA_KEY in metadata
+            or _SUBMISSION_STATE_METADATA_KEY in metadata
         ):
             raise ValueError("submission_message_private_metadata_invalid")
         metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY] = _submission_private_receipt(
             request
         )
+        metadata[_SUBMISSION_STATE_METADATA_KEY] = {
+            "schema": "maf.sql_submission_state.v1",
+            "conversation_projection": request.conversation_projection.decode(),
+            "message_projection": request.message_projection.decode(),
+            "projection_sha256": request.projection_sha256,
+            "continuation": request.continuation.decode(),
+            "continuation_sha256": request.continuation_sha256,
+            "claim_owner": None,
+            "claim_token": None,
+            "claim_expires_at": None,
+            "closed": False,
+            "failure_reason_code": None,
+        }
         message = MessageRow(
             message_id=request.message_id,
             conversation_id=request.conversation_id,
@@ -4608,6 +4690,7 @@ class SQLiteStateRepository:
         if (
             _SUBMISSION_ADMISSION_RECEIPT_KEY in expected_metadata
             or _SUBMISSION_HANDOFF_METADATA_KEY in expected_metadata
+            or _SUBMISSION_STATE_METADATA_KEY in expected_metadata
         ):
             raise RuntimeError("submission_projection_conflict")
         if existing is None:
@@ -4716,13 +4799,287 @@ class SQLiteStateRepository:
             return replace(result, phase=None, record=None)
         return result
 
+    def claim_submission_sql(
+        self,
+        *,
+        message_id: str,
+        claim_owner: str,
+        now: datetime,
+        claim_expires_at: datetime,
+    ) -> tuple[SubmissionRecoveryRecord | None, str | None]:
+        now = (
+            now.astimezone(timezone.utc).replace(tzinfo=None)
+            if now.tzinfo is not None
+            else now
+        )
+        claim_expires_at = (
+            claim_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if claim_expires_at.tzinfo is not None
+            else claim_expires_at
+        )
+        message = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == message_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if message is None:
+            return None, None
+        metadata = _message_metadata_object(message.message_metadata)
+        state = metadata.get(_SUBMISSION_STATE_METADATA_KEY)
+        if state is None:
+            return None, None
+        conversation = self._session.get(ConversationRow, message.conversation_id)
+        task = self._session.get(TaskRow, message.task_id)
+        if conversation is None or task is None or conversation.status != "active":
+            raise RuntimeError("submission_admission_identity_corrupt")
+        record = _sql_submission_recovery_record(
+            message, _row_to_task(task), conversation.username
+        )
+        if (
+            state["closed"]
+            or record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF
+            or task.status in _TERMINAL_TASK_STATUSES
+        ):
+            return record, None
+        expiry = state.get("claim_expires_at")
+        if expiry is not None and datetime.fromisoformat(expiry) > now:
+            if state["claim_owner"] != claim_owner:
+                return record, None
+            return record, state["claim_token"]
+        token = uuid4().hex
+        message.message_metadata = {
+            **metadata,
+            _SUBMISSION_STATE_METADATA_KEY: {
+                **state,
+                "claim_owner": claim_owner,
+                "claim_token": token,
+                "claim_expires_at": claim_expires_at.isoformat(),
+            },
+        }
+        self._session.flush()
+        return record, token
+
+    def claim_pending_submission_sql(
+        self, request: SubmissionClaimRequest
+    ) -> tuple[SubmissionClaimResult, str | None]:
+        if (
+            request.after_created_at is not None
+            and request.after_created_at.tzinfo is not None
+        ):
+            request = replace(
+                request,
+                after_created_at=request.after_created_at.astimezone(
+                    timezone.utc
+                ).replace(tzinfo=None),
+            )
+        metadata = type_coerce(MessageRow.message_metadata, JSON)
+        state = metadata[_SUBMISSION_STATE_METADATA_KEY]
+        handoff = metadata[_SUBMISSION_HANDOFF_METADATA_KEY][
+            "handoff_state"
+        ].as_string()
+        pending_query = (
+            select(MessageRow)
+            .join(TaskRow, TaskRow.task_id == MessageRow.task_id)
+            .where(
+                TaskRow.status.not_in(_TERMINAL_TASK_STATUSES),
+                state["schema"].as_string() == "maf.sql_submission_state.v1",
+                state["closed"].as_boolean().is_(False),
+                or_(handoff.is_(None), handoff != "handed_off"),
+            )
+        )
+        if request.after_created_at is not None:
+            pending_query = pending_query.where(
+                or_(
+                    MessageRow.created_at > request.after_created_at,
+                    and_(
+                        MessageRow.created_at == request.after_created_at,
+                        MessageRow.message_id > (request.after_message_id or ""),
+                    ),
+                )
+            )
+        pending_count = self._session.scalar(
+            select(func.count()).select_from(pending_query.subquery())
+        )
+        row = self._session.scalar(
+            pending_query.order_by(MessageRow.created_at, MessageRow.message_id).limit(
+                1
+            )
+        )
+        earliest = None
+        if row is not None:
+            record, token = self.claim_submission_sql(
+                message_id=row.message_id,
+                claim_owner=request.claim_owner,
+                now=request.now,
+                claim_expires_at=request.claim_expires_at,
+            )
+            if token is not None:
+                return SubmissionClaimResult(
+                    found=True,
+                    authority_state=SubmissionAuthorityState.FINALIZED,
+                    finalization_receipt_sha256=None,
+                    pending_count=pending_count,
+                    record=record,
+                ), token
+            state = _message_metadata_object(row.message_metadata)[
+                _SUBMISSION_STATE_METADATA_KEY
+            ]
+            if state.get("claim_expires_at"):
+                expiry = datetime.fromisoformat(state["claim_expires_at"])
+                earliest = expiry
+        return SubmissionClaimResult(
+            found=False,
+            authority_state=SubmissionAuthorityState.FINALIZED,
+            finalization_receipt_sha256=None,
+            pending_count=pending_count,
+            earliest_claim_expires_at=earliest,
+        ), None
+
+    def _require_submission_claim_sql(self, record, owner, token, now):
+        now = (
+            now.astimezone(timezone.utc).replace(tzinfo=None)
+            if now.tzinfo is not None
+            else now
+        )
+        message = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == record.message_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            message is None
+            or message.task_id != record.task_id
+            or message.conversation_id != record.conversation_id
+        ):
+            raise RuntimeError("submission_claim_invalid")
+        metadata = _message_metadata_object(message.message_metadata)
+        state = metadata.get(_SUBMISSION_STATE_METADATA_KEY)
+        if state is not None and (
+            state["closed"]
+            or state["claim_owner"] != owner
+            or state["claim_token"] != token
+            or state["claim_expires_at"] is None
+            or datetime.fromisoformat(state["claim_expires_at"]) <= now
+        ):
+            raise RuntimeError("submission_claim_invalid")
+        return message, metadata, state
+
+    def renew_submission_claim_sql(
+        self, *, record, owner, token, now, claim_expires_at
+    ):
+        claim_expires_at = (
+            claim_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if claim_expires_at.tzinfo is not None
+            else claim_expires_at
+        )
+        message, metadata, state = self._require_submission_claim_sql(
+            record, owner, token, now
+        )
+        if state is None:
+            return token
+        renewed = uuid4().hex
+        message.message_metadata = {
+            **metadata,
+            _SUBMISSION_STATE_METADATA_KEY: {
+                **state,
+                "claim_token": renewed,
+                "claim_expires_at": claim_expires_at.isoformat(),
+            },
+        }
+        self._session.flush()
+        return renewed
+
+    def fail_submission_sql(self, *, record, owner, token, failed_at, reason_code):
+        failed_at = (
+            failed_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if failed_at.tzinfo is not None
+            else failed_at
+        )
+        message, metadata, state = self._require_submission_claim_sql(
+            record, owner, token, failed_at
+        )
+        conversation = self._session.scalar(
+            select(ConversationRow)
+            .where(ConversationRow.conversation_id == record.conversation_id)
+            .with_for_update()
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == record.task_id).with_for_update()
+        )
+        if (
+            conversation is None
+            or conversation.username != record.username
+            or task is None
+        ):
+            raise RuntimeError("submission_claim_invalid")
+        phase = (
+            _sql_submission_recovery_record(
+                message, _row_to_task(task), record.username
+            ).phase
+            if state is not None
+            else record.phase
+        )
+        has_run = (
+            self._session.scalar(
+                select(AgentRunRow.run_id).where(AgentRunRow.task_id == record.task_id)
+            )
+            is not None
+        )
+        if (
+            phase.handoff_state is SubmissionHandoffState.HANDED_OFF
+            or has_run
+            or task.status != "accepted"
+        ):
+            return SubmissionFailureResult(False, phase)
+        if reason_code != "submission_preparation_failed":
+            raise ValueError("submission_failure_reason_invalid")
+        task.status = "failed"
+        task.updated_at = failed_at
+        if state is not None:
+            message.message_metadata = {
+                **metadata,
+                _SUBMISSION_STATE_METADATA_KEY: {
+                    **state,
+                    "closed": True,
+                    "failure_reason_code": reason_code,
+                    "claim_owner": None,
+                    "claim_token": None,
+                    "claim_expires_at": None,
+                },
+            }
+        if conversation.current_task_id == record.task_id:
+            conversation.current_task_id = None
+            conversation.updated_at = failed_at
+        self._session.add(
+            EventRecordRow(
+                event_id=f"evt-submission-failed:{record.task_id}",
+                conversation_id=record.conversation_id,
+                task_id=record.task_id,
+                event_type="task.failed",
+                visibility=str(EventVisibility.FRONTEND),
+                payload={"status": "failed", "error": {"code": reason_code}},
+                created_at=failed_at,
+            )
+        )
+        self._session.flush()
+        return SubmissionFailureResult(
+            True, replace(phase, admission_state=SubmissionAdmissionState.CLOSED)
+        )
+
     def prepare_submission_handoff_sql(
         self,
         *,
         record: SubmissionRecoveryRecord,
         prepared_execution: bytes,
         prepared_execution_sha256: str,
+        claim_owner: str | None = None,
+        claim_token: str | None = None,
+        now: datetime | None = None,
     ) -> SubmissionPreparationRecord:
+        if now is not None:
+            self._require_submission_claim_sql(record, claim_owner, claim_token, now)
         message = self._session.scalar(
             select(MessageRow)
             .where(MessageRow.message_id == record.message_id)
@@ -4778,7 +5135,12 @@ class SQLiteStateRepository:
         prepared_execution_sha256: str,
         handoff_kind: str,
         handoff_identity: str,
+        claim_owner: str | None = None,
+        claim_token: str | None = None,
+        now: datetime | None = None,
     ) -> SubmissionAdmissionPhase:
+        if now is not None:
+            self._require_submission_claim_sql(record, claim_owner, claim_token, now)
         message = self._session.scalar(
             select(MessageRow)
             .where(MessageRow.message_id == record.message_id)
@@ -18284,11 +18646,23 @@ class SQLiteStorage(StoragePort):
                 and result.record.phase.handoff_state
                 is SubmissionHandoffState.PENDING
             ):
+                claimed, token = await self._run(
+                    lambda state, collab: state.claim_submission_sql(
+                        message_id=result.message_id,
+                        claim_owner=request.claim_owner,
+                        now=request.message_created_at,
+                        claim_expires_at=request.claim_expires_at,
+                    )
+                )
+                if claimed is not None:
+                    result = replace(result, record=claimed, phase=claimed.phase)
+                    if token is None:
+                        return result
                 handle = self._new_submission_handle(
                     mode="sql",
                     message_id=result.record.message_id,
                     owner=request.claim_owner,
-                    token=None,
+                    token=token,
                     record=result.record,
                 )
                 return replace(result, handle=handle)
@@ -18325,11 +18699,19 @@ class SQLiteStorage(StoragePort):
         self, request: SubmissionClaimRequest
     ) -> SubmissionClaimResult:
         if self._task_authority_mode() != "enforce":
-            return SubmissionClaimResult(
-                found=False,
-                authority_state=SubmissionAuthorityState.FINALIZED,
-                finalization_receipt_sha256=None,
+            result, token = await self._run(
+                lambda state, collab: state.claim_pending_submission_sql(request)
             )
+            if result.record is None or token is None:
+                return result
+            handle = self._new_submission_handle(
+                mode="sql",
+                message_id=result.record.message_id,
+                owner=request.claim_owner,
+                token=token,
+                record=result.record,
+            )
+            return replace(result, handle=handle)
         client = self._submission_sidecar_client("submission_pending_claim")
         now_ms = _datetime_epoch_ms(request.now)
         response = await _resolve_runtime_sidecar_call(
@@ -18379,7 +18761,23 @@ class SQLiteStorage(StoragePort):
     ) -> SubmissionAdmissionHandle:
         binding = self._submission_binding(request.handle)
         if binding["mode"] == "sql":
-            return request.handle
+            token = await self._run(
+                lambda state, collab: state.renew_submission_claim_sql(
+                    record=binding["record"],
+                    owner=binding["owner"],
+                    token=binding["token"],
+                    now=request.now,
+                    claim_expires_at=request.claim_expires_at,
+                )
+            )
+            del self._submission_claims[request.handle]
+            return self._new_submission_handle(
+                mode="sql",
+                message_id=binding["message_id"],
+                owner=binding["owner"],
+                token=token,
+                record=binding["record"],
+            )
         now_ms = _datetime_epoch_ms(request.now)
         client = self._submission_sidecar_client("submission_claim_renew")
         response = await _resolve_runtime_sidecar_call(
@@ -18443,6 +18841,7 @@ class SQLiteStorage(StoragePort):
                     record=current,
                     prepared_execution=request.prepared_execution,
                     prepared_execution_sha256=request.prepared_execution_sha256,
+                    claim_owner=binding["owner"], claim_token=binding["token"], now=request.prepared_at,
                 )
             )
             updated = replace(
@@ -18504,6 +18903,7 @@ class SQLiteStorage(StoragePort):
                     prepared_execution_sha256=request.prepared_execution_sha256,
                     handoff_kind=request.handoff_kind,
                     handoff_identity=request.handoff_identity,
+                    claim_owner=binding["owner"], claim_token=binding["token"], now=request.acknowledged_at,
                 )
             )
         else:
@@ -18524,6 +18924,40 @@ class SQLiteStorage(StoragePort):
             phase = _submission_recovery_record(response["admission"]).phase
         del self._submission_claims[request.handle]
         return phase
+
+    async def fail_submission(
+        self, request: SubmissionFailureRequest
+    ) -> SubmissionFailureResult:
+        binding = self._submission_binding(request.handle)
+        record = binding["record"]
+        if binding["mode"] == "sql":
+            result = await self._run(
+                lambda state, collab: state.fail_submission_sql(
+                    record=record,
+                    owner=binding["owner"],
+                    token=binding["token"],
+                    failed_at=request.failed_at,
+                    reason_code=request.reason_code,
+                )
+            )
+        else:
+            response = await _resolve_runtime_sidecar_call(
+                self._submission_sidecar_client("submission_fail").fail_submission(
+                    message_id=binding["message_id"],
+                    workflow_owner=binding["owner"],
+                    claim_token=binding["token"],
+                    reason_code=request.reason_code,
+                    now_ms=_datetime_epoch_ms(request.failed_at),
+                )
+            )
+            updated = _submission_recovery_record(response["admission"])
+            result = SubmissionFailureResult(
+                updated.phase.admission_state is SubmissionAdmissionState.CLOSED,
+                updated.phase,
+            )
+        if result.failed:
+            del self._submission_claims[request.handle]
+        return result
 
     async def close_conversation_admission(
         self, request: ConversationAdmissionCloseRequest

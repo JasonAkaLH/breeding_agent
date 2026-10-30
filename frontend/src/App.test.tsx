@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App, { mergeHistoryWithLiveFallbackNotices } from './App';
-import type { ApiClient } from './api/client';
+import { ApiError, type ApiClient } from './api/client';
 import type { ConversationMessagesResponse, DeleteConversationResponse, TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
 import { COMPOSER_PLACEHOLDERS } from './domain/composerPlaceholders';
@@ -2542,7 +2542,7 @@ describe('App', () => {
     expect(within(getConversationFilesDrawer()).queryByText(/second.csv/)).not.toBeInTheDocument();
   });
 
-  it('refreshes saved resources when submit fails and rollback delete fails', async () => {
+  it('preserves uploaded files and reuses the same request after a lost response', async () => {
     const residualUpload = {
       upload_id: 'upl-1',
       conversation_id: 'conv-test',
@@ -2558,25 +2558,58 @@ describe('App', () => {
       listConversationUploads: vi.fn()
         .mockResolvedValueOnce({ conversation_id: 'conv-test', uploads: [] })
         .mockResolvedValue({ conversation_id: 'conv-test', uploads: [residualUpload] }),
-      submitMessage: vi.fn(async () => {
-        throw new Error('submit failed');
-      }),
+      submitMessage: vi.fn<ApiClient['submitMessage']>()
+        .mockRejectedValueOnce(new TypeError('response lost'))
+        .mockResolvedValue({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }),
       deleteConversationUpload: vi.fn(async () => {
         throw new Error('delete failed');
       }),
     });
-    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'residual.csv', { type: 'text/csv' });
     fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做分析' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    await waitFor(() => expect(api.deleteConversationUpload).toHaveBeenCalledWith(expect.any(String), 'upl-1'));
-    await waitFor(() => expect(api.listConversationUploads).toHaveBeenCalledTimes(2));
+    const retry = await screen.findByRole('button', { name: '重试提交' });
+    expect(api.deleteConversationUpload).not.toHaveBeenCalled();
+    const firstRequest = vi.mocked(api.submitMessage).mock.calls[0][0];
+    expect(firstRequest.clientMessageId).toBeTruthy();
+    expect(firstRequest.metadata?.upload_ids).toEqual(['upl-1']);
+    fireEvent.click(retry);
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.submitMessage).mock.calls[1][0]).toEqual(firstRequest);
+    expect(api.uploadConversationFile).toHaveBeenCalledTimes(1);
+    expect(api.deleteConversationUpload).not.toHaveBeenCalled();
     await openConversationFilesDrawer(1);
     expect(await screen.findByText(/residual.csv/)).toBeInTheDocument();
     expect(await screen.findByText(/Skill 可用/)).toBeInTheDocument();
+  });
+
+  it('keeps uploaded files after confirmed preparation failure and allows a fresh submission', async () => {
+    const api = makeApi({
+      submitMessage: vi.fn<ApiClient['submitMessage']>()
+        .mockResolvedValueOnce({ conversation_id: 'conv-test', message_id: 'failed-message', task_id: 'failed-task', status: 'failed' })
+        .mockResolvedValue({ conversation_id: 'conv-test', message_id: 'next-message', task_id: 'next-task', status: 'accepted' }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    const file = new File(['id,value\nA,1\n'], 'retained.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析文件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await screen.findAllByText('任务准备失败，已上传文件已保留，可以重新发送。');
+    expect(api.deleteConversationUpload).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '重试提交' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '再次分析文件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
+    const requests = vi.mocked(api.submitMessage).mock.calls.map(([request]) => request);
+    expect(requests[0].clientMessageId).toBeTruthy();
+    expect(requests[1].clientMessageId).not.toBe(requests[0].clientMessageId);
+    expect(api.uploadConversationFile).toHaveBeenCalledTimes(1);
+    await openConversationFilesDrawer(1);
+    expect(await screen.findByText(/retained.csv/)).toBeInTheDocument();
   });
 
   it('submits deep thinking flag from the composer function menu', async () => {
@@ -3314,9 +3347,7 @@ describe('App', () => {
   it('shows a friendly busy-conversation error', async () => {
     const api = makeApi({
       submitMessage: vi.fn(async () => {
-        const error = new Error('busy') as Error & { userMessage: string };
-        error.userMessage = '当前会话已有任务运行中，请等待完成或取消后再继续。';
-        throw error;
+        throw new ApiError(409, { code: 'conversation_busy' }, '当前会话已有任务运行中，请等待完成或取消后再继续。');
       }),
     });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
