@@ -16,6 +16,8 @@ from src.core.models import (
     Conversation,
     ConversationFileResource,
     Message,
+    SubmissionFailureProjection,
+    SubmissionHandoffState,
     Task,
     TaskInputAttachment,
     TaskNode,
@@ -37,7 +39,53 @@ class _StopStartup(RuntimeError):
 
 
 class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    def test_skill_result_janitor_runs_after_agent_recovery_before_background_services(self) -> None:
+    async def test_running_failure_marker_requires_exact_handoff_proof(self):
+        projection = SubmissionFailureProjection("owner", "conv", "message", "task")
+        runtime = object.__new__(ApiRuntime)
+        complete = AsyncMock()
+        preparation = AsyncMock(return_value=None)
+        runtime.storage = SimpleNamespace(
+            list_pending_submission_failure_projections=AsyncMock(
+                return_value=[projection]
+            ),
+            get_task=AsyncMock(
+                return_value=SimpleNamespace(
+                    task_id="task",
+                    conversation_id="conv",
+                    root_message_id="message",
+                    status=TaskStatus.RUNNING,
+                )
+            ),
+            get_submission_preparation=preparation,
+            complete_submission_failure_projection=complete,
+        )
+        runtime.agent_run_repository = SimpleNamespace(
+            get_run_for_task=AsyncMock(return_value=None)
+        )
+        await runtime._recover_submission_failure_projections()
+        complete.assert_not_awaited()
+        preparation.return_value = SimpleNamespace(
+            task_id="task",
+            conversation_id="conv",
+            message_id="message",
+            handoff_state=SubmissionHandoffState.PENDING,
+        )
+        await runtime._recover_submission_failure_projections()
+        complete.assert_not_awaited()
+        preparation.return_value.handoff_state = SubmissionHandoffState.HANDED_OFF
+        preparation.return_value.message_id = "another-message"
+        with self.assertRaisesRegex(
+            RuntimeError, "submission_terminal_task_identity_mismatch"
+        ):
+            await runtime._recover_submission_failure_projections()
+        complete.assert_not_awaited()
+        preparation.return_value.message_id = "message"
+        await runtime._recover_submission_failure_projections()
+        complete.assert_awaited_once_with(projection)
+
+    def test_skill_result_janitor_runs_after_agent_recovery_before_background_services(
+        self,
+    ) -> None:
         source = inspect.getsource(ApiRuntime.start)
         self.assertLess(
             source.index("await self._recover_agent_runs()"),

@@ -288,6 +288,47 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
             )
         )
 
+    async def test_running_preparation_failure_and_interrupt_open_have_one_winner(self):
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        admitted = await self.storage.admit_submission(request)
+        node = await self.storage.save_task_node(
+            TaskNode(
+                node_id=f"{self.task_id}:file_selection",
+                task_id=self.task_id,
+                capability_id="agent.file_selection",
+                status="running",
+            )
+        )
+        await self.storage.save_task(replace(request.task, status="running"))
+        other = PostgreSQLStorage(self.session_factory, mcp_task_authority_mode="off")
+        opened, failed = await asyncio.gather(
+            other.save_task_node(replace(node, status="waiting_for_input")),
+            self.storage.fail_submission(
+                SubmissionFailureRequest(
+                    handle=admitted.handle,
+                    failed_at=request.message_created_at,
+                )
+            ),
+            return_exceptions=True,
+        )
+        self.assertNotIsInstance(failed, BaseException)
+        task = await self.storage.get_task(self.task_id)
+        node = await self.storage.get_task_node(node.node_id)
+        if failed.failed:
+            self.assertIsInstance(opened, RuntimeError)
+            self.assertIn("submission_preparation_closed", str(opened))
+            self.assertEqual(str(task.status), "failed")
+            self.assertEqual(str(node.status), "failed")
+        else:
+            self.assertNotIsInstance(opened, BaseException)
+            self.assertEqual(str(task.status), "running")
+            self.assertEqual(str(node.status), "waiting_for_input")
+            self.assertEqual(await self.storage.list_events_for_task(self.task_id), [])
+
     async def test_failure_projection_markers_are_private_paged_and_owner_bound(
         self,
     ) -> None:

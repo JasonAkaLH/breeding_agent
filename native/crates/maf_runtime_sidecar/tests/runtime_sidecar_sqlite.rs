@@ -901,6 +901,73 @@ fn different_empty_finalization_bundle(finalized_at_ms: i64) -> (String, Vec<u8>
 }
 
 #[test]
+fn sqlite_running_submission_preparation_preserves_an_input_handoff() {
+    for status in [
+        "running",
+        "waiting_for_input",
+        "ready_to_resume",
+        "completed",
+    ] {
+        let db_path = temp_db_path(&format!("running-preparation-{status}"));
+        let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+        let (digest, subject, receipt) = empty_finalization_bundle(8);
+        adapter
+            .finalize_empty_submission_authority(&digest, &subject, &receipt, 8)
+            .unwrap();
+        let created = adapter
+            .admit_submission(sqlite_admission_request("message", "task", "conversation"))
+            .unwrap();
+        let mut task = adapter.get_task("task").unwrap().unwrap();
+        task.status = "running".to_owned();
+        adapter
+            .submit_task_record(task, "task-running", Some("accepted"))
+            .unwrap();
+        let node = TaskNodeRecord {
+            node_id: "task:sheet_selection".to_owned(),
+            task_id: "task".to_owned(),
+            capability_id: "agent.sheet_selection".to_owned(),
+            assigned_instance_id: None,
+            status: status.to_owned(),
+            input_refs: Vec::new(),
+            output_refs: Vec::new(),
+            started_at: None,
+            finished_at: None,
+        };
+        adapter
+            .transition_node(
+                "task",
+                &node.node_id.clone(),
+                status,
+                "",
+                "node",
+                Some(node),
+            )
+            .unwrap();
+        let claim = created.claim.unwrap();
+        let result = adapter
+            .fail_submission(FailSubmissionRequest {
+                message_id: "message".to_owned(),
+                workflow_owner: claim.owner,
+                claim_token: claim.token,
+                reason_code: "submission_preparation_failed".to_owned(),
+                now_ms: 11,
+            })
+            .unwrap();
+        assert_eq!(result.0.closed, status == "running");
+        drop(adapter);
+        let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+        assert_eq!(
+            reopened.get_task("task").unwrap().unwrap().status,
+            if status == "running" {
+                "failed"
+            } else {
+                "running"
+            }
+        );
+    }
+}
+
+#[test]
 fn sqlite_submission_failure_survives_reopen_and_rejects_stale_claims() {
     let db_path = temp_db_path("submission-failure");
     let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();

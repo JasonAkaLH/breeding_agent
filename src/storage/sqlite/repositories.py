@@ -5143,10 +5143,32 @@ class SQLiteStateRepository:
             )
             is not None
         )
+        running_preparation = False
+        if task.status == "running":
+            # Waiting/ready nodes already belong to a durable input handoff.
+            # Only exclusively running preparation nodes remain safe to close.
+            nodes = list(
+                self._session.scalars(
+                    select(TaskNodeRow)
+                    .where(
+                        TaskNodeRow.task_id == record.task_id,
+                        TaskNodeRow.status.not_in(_TERMINAL_NODE_STATUSES),
+                    )
+                    .with_for_update()
+                )
+            )
+            running_preparation = bool(nodes) and all(
+                node.node_id in {
+                    f"{record.task_id}:file_selection",
+                    f"{record.task_id}:sheet_selection",
+                }
+                and node.status == "running"
+                for node in nodes
+            )
         if (
             phase.handoff_state is SubmissionHandoffState.HANDED_OFF
             or has_run
-            or task.status != "accepted"
+            or (task.status != "accepted" and not running_preparation)
         ):
             return SubmissionFailureResult(False, phase)
         if reason_code != "submission_preparation_failed":

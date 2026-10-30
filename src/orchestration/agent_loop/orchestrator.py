@@ -142,9 +142,12 @@ class AgentLoopOrchestrator:
         has_activation = request.skill_activation_payload_json is not None
         if (str(task.routing_mode) == "hint") != has_activation:
             raise AgentStorageConflict("agent_hint_activation_presence_mismatch")
-        task = await self._ensure_task_running(task)
-        if not _task_matches_request(task, request):
-            raise AgentStorageConflict("agent_task_identity_mismatch")
+        if task.status not in {
+            TaskStatus.ACCEPTED,
+            TaskStatus.PLANNING,
+            TaskStatus.RUNNING,
+        }:
+            raise AgentStorageConflict("agent_task_not_startable")
         binding = self._binding_factory(request)
         context_budget = (
             self._context_budget_factory(binding)
@@ -169,6 +172,11 @@ class AgentLoopOrchestrator:
                 if run is None:
                     raise create_error
         _validate_run_identity(run, expected_run, check_binding=True)
+        # A failed create must leave an unstarted submission eligible for closure.
+        # The durable Run fences preparation failure before Task becomes running.
+        task = await self._ensure_task_running(task)
+        if not _task_matches_request(task, request):
+            raise AgentStorageConflict("agent_task_identity_mismatch")
         initialized = await self._writer.commit_agent_user_message(
             AgentUserMessageCommit(
                 run_id=run.run_id,

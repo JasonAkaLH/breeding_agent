@@ -30,6 +30,7 @@ from src.core.models import (
     SubmissionProjectionAcknowledgementRequest,
     SubmissionRecoveryRecord,
     Task,
+    TaskNode,
 )
 from src.storage.sqlalchemy_models import ConversationRow, EventRecordRow, MessageRow, TaskRow
 from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage
@@ -241,6 +242,46 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
             ).current_task_id,
             request.task.task_id,
         )
+
+    def test_running_preparation_closes_only_before_waiting_for_input(self) -> None:
+        async def scenario():
+            for status in (
+                "running",
+                "waiting_for_input",
+                "ready_to_resume",
+                "completed",
+            ):
+                with self.subTest(status=status):
+                    request = _request(
+                        message_id=f"message-{status}",
+                        task_id=f"task-{status}",
+                        conversation_id=f"conversation-{status}",
+                    )
+                    admitted = await self.storage.admit_submission(request)
+                    await self.storage.save_task_node(
+                        TaskNode(
+                            node_id=f"{request.task.task_id}:file_selection",
+                            task_id=request.task.task_id,
+                            capability_id="agent.file_selection",
+                            status=status,
+                        )
+                    )
+                    await self.storage.save_task(
+                        replace(request.task, status=TaskStatus.RUNNING)
+                    )
+                    failed = await self.storage.fail_submission(
+                        SubmissionFailureRequest(
+                            handle=admitted.handle,
+                            failed_at=request.message_created_at,
+                        )
+                    )
+                    self.assertEqual(failed.failed, status == "running")
+                    task = await self.storage.get_task(request.task.task_id)
+                    self.assertEqual(
+                        str(task.status), "failed" if failed.failed else "running"
+                    )
+
+        asyncio.run(scenario())
 
     def test_expired_worker_cannot_fail_or_renew_reclaimed_submission(self) -> None:
         request = _request()

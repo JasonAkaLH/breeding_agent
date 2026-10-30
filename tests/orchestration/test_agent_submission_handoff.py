@@ -408,10 +408,13 @@ class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
             await orchestrator.initialize_run(request)
         task = await self.storage.get_task("task-2")
         assert task is not None
-        self.assertEqual(str(task.status), "running")
+        self.assertEqual(str(task.status), "accepted")
         self.assertIsNone(await self.repository.get_run_for_task("task-2"))
         created = await orchestrator.initialize_run(request)
         self.assertEqual(created.run.run_id, "agent-run:task-2")
+        self.assertEqual(
+            str((await self.storage.get_task("task-2")).status), "running"
+        )
 
         user_item_fault = _FailOnceRepository(
             self.repository,

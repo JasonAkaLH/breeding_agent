@@ -1816,8 +1816,10 @@ impl RuntimeSidecarKernel {
             .tasks
             .get(&record.task_id)
             .ok_or_else(|| write_failed("submission Task is missing"))?;
+        let running_preparation = task.status == "running"
+            && submission_running_preparation(&record.task_id, self.task_nodes.values());
         if record.handoff_state == SubmissionHandoffState::HandedOff
-            || task.status != "accepted"
+            || (task.status != "accepted" && !running_preparation)
             || self.agent_task_runs.contains_key(&record.task_id)
         {
             return Ok((record, false));
@@ -4898,6 +4900,23 @@ pub(crate) fn submission_failure_timestamp(now_ms: i64) -> Result<String, Runtim
 pub(crate) fn submission_preparation_node(task_id: &str, node_id: &str) -> bool {
     node_id == format!("{task_id}:file_selection")
         || node_id == format!("{task_id}:sheet_selection")
+}
+
+pub(crate) fn submission_running_preparation<'a>(
+    task_id: &str,
+    nodes: impl Iterator<Item = &'a TaskNodeRecord>,
+) -> bool {
+    // Waiting/ready nodes and other active work must keep their recovery path.
+    let mut found = false;
+    for node in
+        nodes.filter(|node| node.task_id == task_id && !node_status_is_terminal(&node.status))
+    {
+        if !submission_preparation_node(task_id, &node.node_id) || node.status != "running" {
+            return false;
+        }
+        found = true;
+    }
+    found
 }
 
 pub(crate) fn validate_task_node_record(node: &TaskNodeRecord) -> Result<(), RuntimeSidecarError> {
