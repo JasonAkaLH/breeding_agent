@@ -4,9 +4,9 @@ use crate::{
     AgentStateResponse, ArtifactRecord, ArtifactResponse, BundleRevisionResponse,
     ClaimPendingSubmissionRequest, ClaimPendingSubmissionResponse,
     CloseConversationAdmissionRequest, CloseConversationAdmissionResponse,
-    ConversationAdmissionCloseDisposition, EventCursor, GetSubmissionPreparationRequest,
-    GetSubmissionPreparationResponse, HealthState, Idempotency, LeaseResponse,
-    ListArtifactsForTaskResponse, MessageIdentityDisposition, MessageIdentityKind,
+    ConversationAdmissionCloseDisposition, EventCursor, FailSubmissionRequest,
+    GetSubmissionPreparationRequest, GetSubmissionPreparationResponse, HealthState, Idempotency,
+    LeaseResponse, ListArtifactsForTaskResponse, MessageIdentityDisposition, MessageIdentityKind,
     MessageIdentityRecord, PrepareSubmissionHandoffRequest, ReadinessState,
     RenewSubmissionClaimRequest, ReserveMessageIdentityRequest, ReserveMessageIdentityResponse,
     RuntimeSidecarError, RuntimeSidecarVersion, SubmissionAdmissionDisposition,
@@ -688,6 +688,18 @@ pub(super) fn handoff_ack_request_from_pb(
         expected_state: submission_handoff_state_from_pb(request.expected_state)?,
         now_ms: request.now_ms,
     })
+}
+
+pub(super) fn failure_request_from_pb(
+    request: runtime_pb::FailSubmissionRequest,
+) -> FailSubmissionRequest {
+    FailSubmissionRequest {
+        message_id: request.message_id,
+        workflow_owner: request.workflow_owner,
+        claim_token: request.claim_token,
+        reason_code: request.reason_code,
+        now_ms: request.now_ms,
+    }
 }
 
 pub(super) fn close_request_from_pb(

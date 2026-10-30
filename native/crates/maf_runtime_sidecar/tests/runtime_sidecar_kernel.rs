@@ -3,7 +3,7 @@ use maf_runtime_sidecar::{
     AdmitSubmissionRequest, AgentItemRecord, AgentRunRecord, AppendEventRequest,
     BundleRevisionResult, COMPONENT_ID, ClaimPendingSubmissionRequest,
     CloseConversationAdmissionRequest, CommitAgentStateRequest, CompatibilityCheck,
-    CompatibilityCheckRequest, ConversationAdmissionCloseDisposition,
+    CompatibilityCheckRequest, ConversationAdmissionCloseDisposition, FailSubmissionRequest,
     GetSubmissionPreparationRequest, HealthState, Idempotency, MessageIdentityDisposition,
     MessageIdentityKind, MessageIdentityRecord, PROTOCOL_VERSION, PrepareSubmissionHandoffRequest,
     ReadinessState, RenewSubmissionClaimRequest, ReplayEventsRequest,
@@ -652,6 +652,74 @@ fn submission_resource_boundaries_and_unfinalized_authority_fail_closed() {
 
 fn canonical(value: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&value).expect("canonical JSON")
+}
+
+#[test]
+fn failed_submission_is_fenced_and_releases_only_its_conversation_task() {
+    let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+    let created = kernel
+        .admit_submission(admission_request(
+            "failed-message",
+            "failed-task",
+            "failed-conversation",
+        ))
+        .unwrap();
+    let claim = created.claim.unwrap();
+    let request = FailSubmissionRequest {
+        message_id: "failed-message".to_owned(),
+        workflow_owner: claim.owner.clone(),
+        claim_token: claim.token.clone(),
+        reason_code: "submission_preparation_failed".to_owned(),
+        now_ms: 11,
+    };
+    let mut stale = request.clone();
+    stale.claim_token = "stale-token".to_owned();
+    assert!(kernel.fail_submission(stale).is_err());
+    let mut expired = request.clone();
+    expired.now_ms = claim.expires_at_ms;
+    assert!(kernel.fail_submission(expired).is_err());
+    assert_eq!(kernel.get_task("failed-task").unwrap().status, "accepted");
+    let failed = kernel.fail_submission(request).unwrap().0;
+    assert!(failed.closed);
+    assert_eq!(kernel.get_task("failed-task").unwrap().status, "failed");
+    let mut run = agent_run(0);
+    run.task_id = "failed-task".to_owned();
+    run.conversation_id = "failed-conversation".to_owned();
+    let late_run = CommitAgentStateRequest {
+        operation: "create_run".to_owned(),
+        run: Some(run),
+        items: Vec::new(),
+        expected_revision: 0,
+        expected_claim_token: None,
+        idempotency: Some(Idempotency {
+            key: "late-run".to_owned(),
+            owner: "test".to_owned(),
+            deadline_ms: 0,
+        }),
+        task_nodes: Vec::new(),
+        artifacts: Vec::new(),
+        final_projection_json: None,
+        task: None,
+    };
+    assert!(kernel.commit_agent_state(late_run).is_err());
+    let replay = kernel
+        .admit_submission(admission_request(
+            "failed-message",
+            "other-task",
+            "failed-conversation",
+        ))
+        .unwrap();
+    assert!(replay.admission.unwrap().closed);
+    assert!(replay.claim.is_none());
+    let next = kernel
+        .admit_submission(admission_request(
+            "next-message",
+            "next-task",
+            "failed-conversation",
+        ))
+        .unwrap();
+    assert_eq!(next.disposition, SubmissionAdmissionDisposition::Created);
+    assert_eq!(kernel.get_task("failed-task").unwrap().status, "failed");
 }
 
 fn admission_request(

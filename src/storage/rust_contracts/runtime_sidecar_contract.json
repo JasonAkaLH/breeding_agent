@@ -143,6 +143,13 @@
       "idempotency_required": true
     },
     {
+      "name": "submission_fail",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
       "name": "conversation_admission_close",
       "kind": "write",
       "enforce_failure": "fail_closed",

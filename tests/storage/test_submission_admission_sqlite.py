@@ -19,6 +19,8 @@ from src.core.models import (
     SubmissionAdmissionRequest,
     SubmissionAdmissionState,
     SubmissionClaimRequest,
+    SubmissionClaimRenewalRequest,
+    SubmissionFailureRequest,
     SubmissionHandoffState,
     SubmissionHandoffAcknowledgementRequest,
     SubmissionPreparationLookup,
@@ -29,7 +31,7 @@ from src.core.models import (
     SubmissionRecoveryRecord,
     Task,
 )
-from src.storage.sqlalchemy_models import ConversationRow, MessageRow, TaskRow
+from src.storage.sqlalchemy_models import ConversationRow, EventRecordRow, MessageRow, TaskRow
 from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
 
@@ -79,6 +81,227 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
         self.storage = SQLiteStorage(
             self.session_factory,
             mcp_task_authority_mode="off",
+        )
+
+    def test_failure_is_atomic_and_terminal_replay_has_no_claim(self) -> None:
+        request = _request()
+        admitted = asyncio.run(self.storage.admit_submission(request))
+        with self.session_factory() as session:
+            frozen = dict(
+                session.get(MessageRow, request.message_id).message_metadata[
+                    "__maf_private_submission_state_v1"
+                ]
+            )
+        public = asyncio.run(self.storage.get_message(request.message_id))
+        asyncio.run(self.storage.save_message(public))
+        with self.session_factory() as session:
+            self.assertEqual(
+                session.get(MessageRow, request.message_id).message_metadata[
+                    "__maf_private_submission_state_v1"
+                ],
+                frozen,
+            )
+        self.assertEqual(public.metadata, {"visible": "yes"})
+        failed = asyncio.run(
+            self.storage.fail_submission(
+                SubmissionFailureRequest(
+                    handle=admitted.handle,
+                    failed_at=request.message_created_at + timedelta(seconds=1),
+                )
+            )
+        )
+        self.assertTrue(failed.failed)
+        self.assertEqual(failed.phase.admission_state, SubmissionAdmissionState.CLOSED)
+        self.assertEqual(
+            asyncio.run(self.storage.get_task(request.task.task_id)).status,
+            TaskStatus.FAILED,
+        )
+        self.assertIsNone(
+            asyncio.run(
+                self.storage.get_conversation(request.conversation_id)
+            ).current_task_id
+        )
+        replay = asyncio.run(self.storage.admit_submission(request))
+        self.assertEqual(replay.task_id, request.task.task_id)
+        self.assertIsNone(replay.handle)
+        self.assertEqual(
+            len(asyncio.run(self.storage.list_events_for_task(request.task.task_id))), 1
+        )
+
+    def test_failure_event_write_error_rolls_back_task_guard_and_claim(self) -> None:
+        request = _request()
+        admitted = asyncio.run(self.storage.admit_submission(request))
+        original = Session.flush
+
+        def fail_event(session, *args, **kwargs):
+            if any(isinstance(row, EventRecordRow) for row in session.new):
+                raise RuntimeError("failure-event-write-fault")
+            return original(session, *args, **kwargs)
+
+        with patch.object(Session, "flush", fail_event):
+            with self.assertRaisesRegex(RuntimeError, "failure-event-write-fault"):
+                asyncio.run(
+                    self.storage.fail_submission(
+                        SubmissionFailureRequest(
+                            handle=admitted.handle,
+                            failed_at=request.message_created_at,
+                        )
+                    )
+                )
+        self.assertEqual(
+            asyncio.run(self.storage.get_task(request.task.task_id)).status,
+            TaskStatus.ACCEPTED,
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.storage.get_conversation(request.conversation_id)
+            ).current_task_id,
+            request.task.task_id,
+        )
+        self.assertEqual(
+            asyncio.run(self.storage.list_events_for_task(request.task.task_id)), []
+        )
+        self.assertTrue(
+            asyncio.run(
+                self.storage.fail_submission(
+                    SubmissionFailureRequest(
+                        handle=admitted.handle,
+                        failed_at=request.message_created_at,
+                    )
+                )
+            ).failed
+        )
+
+    def test_failure_does_not_close_a_running_interrupt_handoff(self) -> None:
+        request = _request()
+        admitted = asyncio.run(self.storage.admit_submission(request))
+        asyncio.run(
+            self.storage.save_task(replace(request.task, status=TaskStatus.RUNNING))
+        )
+        failed = asyncio.run(
+            self.storage.fail_submission(
+                SubmissionFailureRequest(
+                    handle=admitted.handle,
+                    failed_at=request.message_created_at,
+                )
+            )
+        )
+        self.assertFalse(failed.failed)
+        self.assertEqual(
+            asyncio.run(self.storage.get_task(request.task.task_id)).status,
+            TaskStatus.RUNNING,
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.storage.get_conversation(request.conversation_id)
+            ).current_task_id,
+            request.task.task_id,
+        )
+
+    def test_expired_worker_cannot_fail_or_renew_reclaimed_submission(self) -> None:
+        request = _request()
+        admitted = asyncio.run(self.storage.admit_submission(request))
+        other = SQLiteStorage(self.session_factory, mcp_task_authority_mode="off")
+        later = request.claim_expires_at + timedelta(seconds=1)
+        claimed = asyncio.run(
+            other.claim_pending_submission(
+                SubmissionClaimRequest(
+                    claim_owner="other-worker",
+                    now=later,
+                    claim_expires_at=later + timedelta(seconds=30),
+                )
+            )
+        )
+        self.assertTrue(claimed.found)
+        self.assertEqual(claimed.record.message_projection, request.message_projection)
+        with self.assertRaisesRegex(RuntimeError, "submission_claim_invalid"):
+            asyncio.run(
+                self.storage.fail_submission(
+                    SubmissionFailureRequest(handle=admitted.handle, failed_at=later)
+                )
+            )
+        with self.assertRaisesRegex(RuntimeError, "submission_claim_invalid"):
+            asyncio.run(
+                self.storage.renew_submission_claim(
+                    SubmissionClaimRenewalRequest(
+                        handle=admitted.handle,
+                        now=later,
+                        claim_expires_at=later + timedelta(seconds=30),
+                    )
+                )
+            )
+        self.assertEqual(
+            asyncio.run(self.storage.get_task(request.task.task_id)).status,
+            TaskStatus.ACCEPTED,
+        )
+        self.assertTrue(
+            asyncio.run(
+                other.fail_submission(
+                    SubmissionFailureRequest(handle=claimed.handle, failed_at=later)
+                )
+            ).failed
+        )
+
+    def test_recovery_waits_for_head_lease_and_does_not_skip_to_later_task(
+        self,
+    ) -> None:
+        first = _request()
+        asyncio.run(self.storage.admit_submission(first))
+        second = _request(
+            conversation_id="conversation-2",
+            message_id="message-2",
+            task_id="task-2",
+            now=first.message_created_at + timedelta(seconds=1),
+        )
+        asyncio.run(self.storage.admit_submission(second))
+        with self.session_factory() as session:
+            row = session.get(MessageRow, second.message_id)
+            metadata = dict(row.message_metadata)
+            state = dict(metadata["__maf_private_submission_state_v1"])
+            state["claim_expires_at"] = first.message_created_at.isoformat()
+            row.message_metadata = {
+                **metadata,
+                "__maf_private_submission_state_v1": state,
+            }
+            session.commit()
+        claim = asyncio.run(
+            self.storage.claim_pending_submission(
+                SubmissionClaimRequest(
+                    claim_owner="startup-worker",
+                    now=second.message_created_at,
+                    claim_expires_at=second.message_created_at + timedelta(seconds=30),
+                )
+            )
+        )
+        self.assertFalse(claim.found)
+        self.assertEqual(claim.pending_count, 2)
+        self.assertEqual(
+            claim.earliest_claim_expires_at, first.claim_expires_at.replace(tzinfo=None)
+        )
+
+    def test_recovery_does_not_claim_legacy_records_without_frozen_state(self) -> None:
+        request = _request()
+        asyncio.run(self.storage.admit_submission(request))
+        with self.session_factory() as session:
+            row = session.get(MessageRow, request.message_id)
+            metadata = dict(row.message_metadata)
+            del metadata["__maf_private_submission_state_v1"]
+            row.message_metadata = metadata
+            session.commit()
+        claim = asyncio.run(
+            self.storage.claim_pending_submission(
+                SubmissionClaimRequest(
+                    claim_owner="startup-worker",
+                    now=request.claim_expires_at,
+                    claim_expires_at=request.claim_expires_at + timedelta(seconds=30),
+                )
+            )
+        )
+        self.assertFalse(claim.found)
+        self.assertEqual(claim.pending_count, 0)
+        self.assertEqual(
+            asyncio.run(self.storage.get_task(request.task.task_id)).status,
+            TaskStatus.ACCEPTED,
         )
 
     def test_off_admission_is_atomic_and_exact_replay_returns_first_ids(self) -> None:

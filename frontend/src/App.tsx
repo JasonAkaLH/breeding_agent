@@ -3,7 +3,7 @@ import { CopyOutlined, ExclamationCircleFilled, FileTextOutlined, ReloadOutlined
 import { Alert, Button, Card, ConfigProvider, Drawer, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
-import { createApiClient, type ApiClient } from './api/client';
+import { ApiError, createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
 import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
@@ -298,6 +298,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [mcpServerMenuActiveIndex, setMCPServerMenuActiveIndex] = useState(0);
   const [selectedMCPServerCommand, setSelectedMCPServerCommand] = useState<MCPServerCommand | null>(null);
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
+  const retrySubmissionRef = useRef<{
+    conversationId: string; username: string; retry: () => Promise<void>;
+  } | null>(null);
+  useEffect(() => { retrySubmissionRef.current = null; }, [authUser?.username]);
   const [pendingUploads, setPendingUploads] = useState<UploadFileResponse[]>([]);
   const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -1084,6 +1088,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   function resetConversationWorkspace(nextConversationId: string) {
+    retrySubmissionRef.current = null;
     beginRestoreGeneration();
     subscriptionRef.current?.close();
     subscriptionRef.current = null;
@@ -1216,7 +1221,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const savedFileCount = pendingUploads.length;
   const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && draftAttachments.length > 0;
   const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
-  const canSubmitComposer = selectedModelReasoningConfigValid && !slashInputBlocked && !mcpServerInputBlocked && (
+  const canRetrySubmission = retrySubmissionRef.current?.conversationId === conversationId;
+  const canSubmitComposer = canRetrySubmission || selectedModelReasoningConfigValid && !slashInputBlocked && !mcpServerInputBlocked && (
     (Boolean(input.trim()) && !isMCPServerInput(input))
     || selectedSkillCommand !== null
     || directSlashParse.kind === 'matched'
@@ -1356,6 +1362,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleSubmit() {
+    const pending = retrySubmissionRef.current;
+    if (pending && pending.conversationId === conversationId && pending.username === authUser?.username) {
+      if (!active) await pending.retry();
+      return;
+    }
     const mcpIntent = mcpServerSubmitIntent(input, mcpServerCommands, selectedMCPServerCommand);
     if (mcpIntent.kind === 'blocked') {
       setMCPServerMenuOpen(true);
@@ -1449,57 +1460,85 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setInput('');
     setTaskState(createSubmittingTaskState());
 
-    try {
-      const accepted = await api.submitMessage({
-        conversationId: targetConversationId,
-        content,
-        mode,
-        routingMode,
-        modelEdition: modelEdition ?? undefined,
-        deepThinking: effectiveDeepThinking,
-        reasoningEffort: effectiveReasoningEffort,
-        capabilityId,
-        metadata: {
-          ...(uploadedDrafts.length > 0 ? { upload_ids: uploadedDrafts.map((item) => item.upload.upload_id) } : {}),
-          ...commandMetadata,
-        },
-      });
-      if (commandKind === 'mcp') {
-        setSelectedMCPServerCommand(null);
-        setMCPServerMenuOpen(false);
-      }
-      setSelectedSkillCommand(null);
-      setSlashMenuOpen(false);
-      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-      taskPresentationModesRef.current.set(accepted.task_id, mode);
-      updateAssistantMessage(assistantMessage.id, { taskId: accepted.task_id });
-      updateCurrentTaskId(accepted.task_id);
-      markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
-      subscribeToTask(accepted.task_id, assistantMessage.id, generation, targetConversationId);
-    } catch (error) {
-      localTaskRuntimeActiveRef.current = false;
-      const message = friendlyError(error);
-      const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
-      resetDraftAttachmentStatus(draftSnapshot);
-      if (selectedCommand) {
+    const submitAttempt = async () => {
+      localTaskRuntimeActiveRef.current = true;
+      setTaskState(createSubmittingTaskState());
+      clearTransientNotice();
+      try {
+        const accepted = await api.submitMessage({
+          clientMessageId: userMessage.id,
+          conversationId: targetConversationId,
+          content,
+          mode,
+          routingMode,
+          modelEdition: modelEdition ?? undefined,
+          deepThinking: effectiveDeepThinking,
+          reasoningEffort: effectiveReasoningEffort,
+          capabilityId,
+          metadata: {
+            ...(uploadedDrafts.length > 0 ? { upload_ids: uploadedDrafts.map((item) => item.upload.upload_id) } : {}),
+            ...commandMetadata,
+          },
+        });
         if (commandKind === 'mcp') {
           setSelectedMCPServerCommand(null);
           setMCPServerMenuOpen(false);
-          void refreshMCPServerCommands();
-        } else {
-          setSelectedSkillCommand(null);
-          setSlashMenuOpen(false);
-          void api.listCapabilities()
-            .then((result) => setSkillCommands(deriveSlashCommands(result.capabilities)))
-            .catch(() => undefined);
         }
+        setSelectedSkillCommand(null);
+        setSlashMenuOpen(false);
+        if (retrySubmissionRef.current?.retry === submitAttempt) retrySubmissionRef.current = null;
+        if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+        taskPresentationModesRef.current.set(accepted.task_id, mode);
+        updateAssistantMessage(assistantMessage.id, { taskId: accepted.task_id });
+        updateCurrentTaskId(accepted.task_id);
+        markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
+        if (accepted.status === 'failed') {
+          localTaskRuntimeActiveRef.current = false;
+          const message = '任务准备失败，已上传文件已保留，可以重新发送。';
+          setTaskState((state) => markTaskFailed(state, message));
+          updateAssistantMessage(assistantMessage.id, { content: message });
+          showTransientNotice(message);
+          return;
+        }
+        subscribeToTask(accepted.task_id, assistantMessage.id, generation, targetConversationId);
+      } catch (error) {
+        localTaskRuntimeActiveRef.current = false;
+        if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+        const message = friendlyError(error);
+        const outcomeUnknown = !(error instanceof ApiError) || error.status === 0 || error.status >= 500;
+        if (!outcomeUnknown && retrySubmissionRef.current?.retry === submitAttempt) {
+          retrySubmissionRef.current = null;
+          setInput(content);
+        }
+        markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
+        if (selectedCommand) {
+          if (commandKind === 'mcp') {
+            setSelectedMCPServerCommand(null);
+            setMCPServerMenuOpen(false);
+            void refreshMCPServerCommands();
+          } else {
+            setSelectedSkillCommand(null);
+            setSlashMenuOpen(false);
+            void api.listCapabilities()
+              .then((result) => setSkillCommands(deriveSlashCommands(result.capabilities)))
+              .catch(() => undefined);
+          }
+        }
+        setTaskState((state) => markTaskFailed(state, message));
+        const attachmentMessage = uploadedDrafts.length > 0 ? ' 已上传文件已保留。' : '';
+        if (outcomeUnknown) {
+          showTransientNotice(`提交结果暂未确认。${attachmentMessage}请点击重试提交确认结果。`);
+          return;
+        }
+        showTransientNotice(selectedCommand
+          ? `${message}${attachmentMessage} ${commandKind === 'mcp' ? 'MCP Server' : 'Skill'}列表可能已更新，请重新选择。`
+          : `${message}${attachmentMessage}`);
       }
-      setTaskState((state) => markTaskFailed(state, message));
-      const rollbackMessage = rollbackFailed ? ' 部分文件已保存到当前对话，可在文件面板删除。' : '';
-      showTransientNotice(selectedCommand
-        ? `${message}${rollbackMessage} ${commandKind === 'mcp' ? 'MCP Server' : 'Skill'}列表可能已更新，请重新选择。`
-        : `${message}${rollbackMessage}`);
-    }
+    };
+    retrySubmissionRef.current = {
+      conversationId: targetConversationId, username: authUser.username, retry: submitAttempt,
+    };
+    await submitAttempt();
   }
 
   function isComposerImeConfirming(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
@@ -1771,10 +1810,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch (error) {
       localTaskRuntimeActiveRef.current = false;
       const message = friendlyError(error);
-      const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
-      resetDraftAttachmentStatus(draftSnapshot);
+      markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
       setTaskState((state) => markTaskFailed(state, message));
-      showTransientNotice(rollbackFailed ? `${message} 部分文件已保存到当前对话，可在文件面板删除。` : message);
+      showTransientNotice(uploadedDrafts.length > 0 ? `${message} 已上传文件已保留。` : message);
     }
   }
 
@@ -2631,7 +2669,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                         <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="发送">
                           <Button
                             type="primary"
-                            aria-label="发送"
+                            aria-label={canRetrySubmission ? '重试提交' : '发送'}
                             className="composer-send-button composer-image-button"
                             onClick={handleSubmit}
                             disabled={!canSubmitComposer || uploadingFile}

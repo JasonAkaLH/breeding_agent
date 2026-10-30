@@ -531,6 +531,67 @@ async fn submission_admission_rpc_maps_all_closed_dispositions() {
 }
 
 #[tokio::test]
+async fn failure_rpc_closes_task_and_exact_replay_for_both_authorities() {
+    let db_path = temp_db_path("grpc-submission-failure");
+    let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).unwrap();
+    let (digest, subject, receipt) = sqlite_empty_finalization(2);
+    adapter
+        .finalize_empty_submission_authority(&digest, &subject, &receipt, 2)
+        .unwrap();
+    let services = [
+        RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64)),
+        RuntimeSidecarGrpcService::with_sqlite_adapter(adapter),
+    ];
+    for service in services {
+        let request = pb_admit_request("failure-rpc", "hello");
+        let created = service
+            .admit_submission(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        let claim = created.claim.unwrap();
+        let message_id = created.admission.unwrap().message_id;
+        let mut failure = runtime_pb::FailSubmissionRequest {
+            message_id,
+            workflow_owner: claim.owner,
+            claim_token: "stale".to_owned(),
+            reason_code: "submission_preparation_failed".to_owned(),
+            now_ms: 2,
+        };
+        let stale = service
+            .fail_submission(Request::new(failure.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(stale.error.is_some());
+        failure.claim_token = claim.token;
+        let failed = service
+            .fail_submission(Request::new(failure))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(failed.error.is_none());
+        assert!(failed.admission.unwrap().closed);
+        let task = service
+            .get_task(Request::new(runtime_pb::GetTaskRequest {
+                task_id: "failure-rpc-task".to_owned(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(task.task.unwrap().status, "failed");
+        let replay = service
+            .admit_submission(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(replay.admission.unwrap().closed);
+        assert!(replay.claim.is_none());
+    }
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn claim_pending_submission_rpc_exposes_pending_count_and_head_expiry() {
     let service =
         RuntimeSidecarGrpcService::new_with_finalized_submission_authority("f".repeat(64));

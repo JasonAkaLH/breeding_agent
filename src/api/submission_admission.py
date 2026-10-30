@@ -24,6 +24,7 @@ from src.core.models import (
     SubmissionClaimRequest,
     SubmissionHandoffAcknowledgementRequest,
     SubmissionHandoffState,
+    SubmissionFailureRequest,
     SubmissionPreparationLookup,
     SubmissionPreparationReceipt,
     SubmissionPreparationReceiptComponent,
@@ -681,6 +682,10 @@ def _build_prepared_agent_recovery_context(
 class SubmissionPreparationCallbacks(Protocol):
     """Narrow injected seams; compute methods must not mutate durable state."""
 
+    async def materialize_submission_failure(
+        self, record: SubmissionRecoveryRecord
+    ) -> None: ...
+
     async def settle_route_decision_exact(
         self,
         record: SubmissionRecoveryRecord,
@@ -890,6 +895,16 @@ class SubmissionAdmissionCoordinator:
             raise SubmissionRecoveryError("submission_admission_result_invalid")
         if (
             record is not None
+            and record.phase.admission_state is SubmissionAdmissionState.CLOSED
+        ):
+            await self._callbacks.materialize_submission_failure(record)
+            return SubmissionRecoveryBatchResult(
+                status=SubmissionRecoveryStatus.COMPLETED,
+                recovered_count=0,
+                pending_count=0,
+            )
+        if (
+            record is not None
             and record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF
         ):
             await self._retry_handed_off_wakeup(record)
@@ -906,6 +921,18 @@ class SubmissionAdmissionCoordinator:
             while result.handle is None:
                 await self._wait_until(self._now() + self._claim_ttl)
                 result = await reclaim_exact(record)
+                if (
+                    result.record is None
+                    and result.disposition
+                    is SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY
+                    and result.message_id == record.message_id
+                    and result.task_id == record.task_id
+                ):
+                    return SubmissionRecoveryBatchResult(
+                        status=SubmissionRecoveryStatus.COMPLETED,
+                        recovered_count=0,
+                        pending_count=0,
+                    )
                 self._validate_exact_reclaim(record, result)
                 assert result.record is not None
                 record = result.record
@@ -966,7 +993,7 @@ class SubmissionAdmissionCoordinator:
                     "submission_projection_ack_phase_invalid"
                 )
             projected_record = replace(record, phase=projected_phase)
-            await self._recover_handoff(projected_record, keeper)
+            await self._recover_or_fail_handoff(projected_record, keeper)
             return SubmissionRecoveryBatchResult(
                 status=SubmissionRecoveryStatus.COMPLETED,
                 recovered_count=1,
@@ -1153,7 +1180,7 @@ class SubmissionAdmissionCoordinator:
         claimed = self._pending_batch
         try:
             for record, keeper in claimed:
-                await self._recover_handoff(record, keeper)
+                await self._recover_or_fail_handoff(record, keeper)
             return SubmissionRecoveryBatchResult(
                 status=SubmissionRecoveryStatus.COMPLETED,
                 recovered_count=len(claimed),
@@ -1184,6 +1211,25 @@ class SubmissionAdmissionCoordinator:
         async with self._operation_lock:
             await self._project_pending()
             return await self._recover_projected_handoffs()
+
+    async def _recover_or_fail_handoff(
+        self, record: SubmissionRecoveryRecord, keeper: "_ClaimLeaseKeeper"
+    ) -> None:
+        try:
+            await self._recover_handoff(record, keeper)
+        except Exception as original_error:
+            try:
+                failed = await keeper.call(
+                    lambda handle: self._admission.fail_submission(
+                        SubmissionFailureRequest(handle=handle, failed_at=self._now())
+                    )
+                )
+            except Exception as failure_error:
+                # A missing/expired claim or an unavailable authority cannot prove failure.
+                raise original_error from failure_error
+            if not failed.failed:
+                raise
+            await self._callbacks.materialize_submission_failure(record)
 
     async def _recover_handoff(
         self,

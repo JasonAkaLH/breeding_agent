@@ -39,6 +39,7 @@ EXPECTED_METHODS = (
     "prepare_submission_handoff",
     "get_submission_preparation",
     "acknowledge_submission_handoff",
+    "fail_submission",
     "close_conversation_admission",
     "reserve_message_identity",
 )

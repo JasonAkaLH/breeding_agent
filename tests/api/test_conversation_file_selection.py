@@ -4,6 +4,7 @@ import json
 import textwrap
 from datetime import datetime, timedelta
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from openpyxl import Workbook
@@ -23,6 +24,7 @@ from src.api.file_selection_runtime import ConversationFileSelectionRuntimeMixin
 from src.api.runtime import ApiRuntime
 from src.core.enums import EventVisibility, MessageRole
 from src.core.models import Task, TaskInputAttachment
+from src.storage.sqlalchemy_models import MessageRow
 
 from tests.api.support import APITestCase
 
@@ -299,22 +301,35 @@ class ConversationFileSelectionAPITest(APITestCase):
     async def test_initial_message_ordinal_reference_binds_file_selector_attachment(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce_narrow"
         conversation_id = "conv-file-ordinal"
-        selected_id = await self._upload_xlsx(conversation_id, "对角线增广列数20材料清单.xlsx")
-        await self._upload_xlsx(conversation_id, "间比法双组材料清单.xlsx")
+        with patch(
+            "src.api.upload_store.uuid4",
+            side_effect=[SimpleNamespace(hex="f" * 32), SimpleNamespace(hex="0" * 32)],
+        ):
+            first = await self._upload_xlsx(
+                conversation_id, "对角线增广列数20材料清单.xlsx"
+            )
+            second = await self._upload_xlsx(conversation_id, "间比法双组材料清单.xlsx")
+        self.assertGreater(first, second)
 
-        response = await self.submit_message(
-            conversation_id=conversation_id,
-            capability_id=None,
-            content="那你用第一份文件帮我做一个对角线增广试验吧。",
-        )
+        for ordinal, selected_id in (("一", first), ("二", second)):
+            with self.subTest(ordinal=ordinal):
+                response = await self.submit_message(
+                    conversation_id=conversation_id,
+                    capability_id=None,
+                    content=f"请用第{ordinal}份文件做一个摘要。",
+                )
 
-        self.assertEqual(response.status_code, 202, response.text)
-        task_id = response.json()["task_id"]
-        await self.runtime._await_existing_execution(task_id)
-        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
-        self.assertEqual(len(attachments), 1)
-        self.assertEqual(attachments[0].source_kind, "file_selector")
-        self.assertEqual(attachments[0].source_upload_id, selected_id)
+                self.assertEqual(response.status_code, 202, response.text)
+                task_id = response.json()["task_id"]
+                await self.runtime._await_existing_execution(task_id)
+                attachments = (
+                    await self.runtime.storage.list_task_input_attachments_for_task(
+                        task_id
+                    )
+                )
+                self.assertEqual(len(attachments), 1)
+                self.assertEqual(attachments[0].source_kind, "file_selector")
+                self.assertEqual(attachments[0].source_upload_id, selected_id)
 
     async def test_shadow_records_audit_but_does_not_bind_or_interrupt(self) -> None:
         self.runtime._conversation_file_selector_mode = "shadow"
@@ -860,6 +875,161 @@ class ConversationFileSelectionAPITest(APITestCase):
         await self.runtime._await_existing_execution(task_id)
         event_types = [event.event_type for event in await self.runtime.storage.list_events_for_task(task_id)]
         self.assertNotIn("conversation_file.file_selector_invoked", event_types)
+
+    async def test_explicit_unsorted_uploads_start_agent_and_keep_input_order(
+        self,
+    ) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-explicit-unsorted"
+        with patch(
+            "src.api.upload_store.uuid4",
+            side_effect=[SimpleNamespace(hex="f" * 32), SimpleNamespace(hex="0" * 32)],
+        ):
+            first = await self._upload_csv(conversation_id, "pedigree.csv")
+            second = await self._upload_csv(conversation_id, "genotype.csv")
+        upload_ids = [first, second]
+        self.assertNotEqual(upload_ids, sorted(upload_ids))
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="帮我做GS分析",
+            metadata={"upload_ids": upload_ids},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        payload = response.json()
+        await self.runtime._await_existing_execution(payload["task_id"])
+        run = await self.runtime.agent_run_repository.get_run_for_task(
+            payload["task_id"]
+        )
+        self.assertEqual(run.status, "completed")
+        with self.runtime.storage._session_factory() as session:
+            metadata = session.get(MessageRow, payload["message_id"]).message_metadata
+        self.assertEqual(
+            metadata["__maf_private_submission_input_v1"]["explicit_upload_ids"],
+            upload_ids,
+        )
+        resources = await self.runtime.storage.list_conversation_file_resources(
+            conversation_id, "acc-1"
+        )
+        self.assertEqual([resource.file_id for resource in resources], upload_ids)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(
+            payload["task_id"]
+        )
+        self.assertEqual(
+            {item.source_upload_id for item in attachments}, set(upload_ids)
+        )
+        receipt = await self.runtime.storage.get_submission_preparation_receipt(
+            username="acc-1",
+            conversation_id=conversation_id,
+            task_id=payload["task_id"],
+        )
+        self.assertIsNotNone(receipt.receipt_sha256)
+        self.assertEqual(
+            json.loads(receipt.selector_decision)["upload_ids"], sorted(upload_ids)
+        )
+
+    async def test_saved_unsorted_projection_resumes_partial_preparation(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-saved-unsorted"
+        with patch(
+            "src.api.upload_store.uuid4",
+            side_effect=[SimpleNamespace(hex="f" * 32), SimpleNamespace(hex="0" * 32)],
+        ):
+            first = await self._upload_csv(conversation_id, "pedigree.csv")
+            second = await self._upload_csv(conversation_id, "genotype.csv")
+        upload_ids = [first, second]
+        message_id = "client-file-saved-unsorted"
+        coordinator = self.runtime._submission_admission_coordinator
+        continue_admitted = coordinator.continue_admitted
+        saved = []
+
+        async def capture_admission(admitted, **kwargs):
+            saved.append(admitted)
+            return await continue_admitted(admitted, **kwargs)
+
+        with (
+            patch.object(
+                coordinator, "continue_admitted", side_effect=capture_admission
+            ),
+            patch.object(
+                self.runtime.storage,
+                "fail_submission",
+                new=AsyncMock(side_effect=RuntimeError("authority unavailable")),
+            ),
+            patch.object(
+                self.runtime,
+                "compute_selector_decision",
+                new=AsyncMock(
+                    side_effect=RuntimeError(
+                        "submission_selector_private_input_invalid"
+                    )
+                ),
+            ),
+        ):
+            failed = await self.submit_message(
+                conversation_id=conversation_id,
+                capability_id=None,
+                content="帮我做GS分析",
+                client_message_id=message_id,
+                metadata={"upload_ids": upload_ids},
+            )
+        self.assertEqual(failed.status_code, 503, failed.text)
+        original = await self.runtime.storage.get_message(message_id)
+        with self.runtime.storage._session_factory() as session:
+            original_metadata = session.get(MessageRow, message_id).message_metadata
+        self.assertEqual(
+            original_metadata["__maf_private_submission_input_v1"][
+                "explicit_upload_ids"
+            ],
+            upload_ids,
+        )
+        original_projection = saved[0].record.message_projection
+        original_continuation = saved[0].record.continuation
+        receipt = await self.runtime.storage.get_submission_preparation_receipt(
+            username="acc-1", conversation_id=conversation_id, task_id=original.task_id
+        )
+        self.assertIsNotNone(receipt.memory_context)
+        self.assertIsNone(receipt.selector_decision)
+        self.assertIsNone(
+            await self.runtime.agent_run_repository.get_run_for_task(original.task_id)
+        )
+
+        with patch.object(
+            self.runtime,
+            "compute_memory_context",
+            new=AsyncMock(side_effect=AssertionError("saved memory was recomputed")),
+        ):
+            recovered = await self.submit_message(
+                conversation_id=conversation_id,
+                capability_id=None,
+                content=original.content,
+                client_message_id=message_id,
+                metadata={"upload_ids": sorted(upload_ids)},
+            )
+
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(recovered.json()["task_id"], original.task_id)
+        await self.runtime._await_existing_execution(original.task_id)
+        stored = await self.runtime.storage.get_message(message_id)
+        with self.runtime.storage._session_factory() as session:
+            stored_metadata = session.get(MessageRow, message_id).message_metadata
+        self.assertEqual(
+            stored_metadata["__maf_private_submission_input_v1"],
+            original_metadata["__maf_private_submission_input_v1"],
+        )
+        self.assertEqual(
+            stored_metadata["__maf_private_submission_admission_v1"],
+            original_metadata["__maf_private_submission_admission_v1"],
+        )
+        self.assertEqual(saved[0].record.message_projection, original_projection)
+        self.assertEqual(saved[0].record.continuation, original_continuation)
+        self.assertEqual(stored.created_at, original.created_at)
+        run = await self.runtime.agent_run_repository.get_run_for_task(original.task_id)
+        self.assertEqual(run.status, "completed")
+        tasks = await self.runtime.storage.list_tasks_for_conversation(conversation_id)
+        self.assertEqual([task.task_id for task in tasks], [original.task_id])
 
     async def test_required_file_with_no_active_files_opens_missing_file_clarification(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce_narrow"

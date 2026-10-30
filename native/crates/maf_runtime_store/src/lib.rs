@@ -375,6 +375,7 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
         "submission_projection_acknowledge",
         "submission_handoff_prepare",
         "submission_handoff_acknowledge",
+        "submission_fail",
         "conversation_admission_close",
         "message_identity_reserve",
     ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -10,25 +11,35 @@ from uuid import uuid4
 from sqlalchemy import delete, select
 
 from src.api.runtime import ApiRuntime
-from src.core.enums import ConversationStatus
+from src.core.enums import ConversationStatus, TaskStatus
 from src.core.models import (
     Conversation,
     SubmissionAdmissionDisposition,
+    SubmissionClaimRequest,
+    SubmissionFailureRequest,
     SubmissionProjectionAcknowledgementRequest,
 )
 from src.storage.postgres import (
+    PostgreSQLAgentRepository,
     bootstrap_postgres_database,
     create_postgres_engine,
     create_postgres_session_factory,
 )
 from src.storage.postgres.repositories import PostgreSQLStorage
 from src.storage.sqlalchemy_models import (
+    AgentRunRow,
     ConversationRow,
     EventRecordRow,
     MessageRow,
     TaskRow,
 )
 from src.storage.sqlite.repositories import SQLiteStateRepository
+from src.orchestration.agent_loop.models import (
+    AgentModelBinding,
+    AgentRun,
+    AgentRunStatus,
+    AgentStorageConflict,
+)
 from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 from tests.storage.test_submission_admission_sqlite import (
     _FakeSubmissionSidecar,
@@ -64,10 +75,106 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
             mcp_task_authority_mode="off",
         )
 
+    async def test_expired_claim_has_one_winner_across_independent_workers(
+        self,
+    ) -> None:
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        admitted = await self.storage.admit_submission(request)
+        other = PostgreSQLStorage(self.session_factory, mcp_task_authority_mode="off")
+        later = request.claim_expires_at + timedelta(seconds=1)
+        claims = await asyncio.gather(
+            *(
+                storage.claim_pending_submission(
+                    SubmissionClaimRequest(
+                        claim_owner=owner,
+                        now=later,
+                        claim_expires_at=later + timedelta(seconds=30),
+                    )
+                )
+                for storage, owner in (
+                    (self.storage, "recovery-a"),
+                    (other, "recovery-b"),
+                )
+            )
+        )
+        self.assertEqual(sum(claim.found for claim in claims), 1)
+        with self.assertRaisesRegex(RuntimeError, "submission_claim_invalid"):
+            await self.storage.fail_submission(
+                SubmissionFailureRequest(handle=admitted.handle, failed_at=later)
+            )
+        winner = next(i for i, claim in enumerate(claims) if claim.found)
+        storage = (self.storage, other)[winner]
+        self.assertTrue(
+            (
+                await storage.fail_submission(
+                    SubmissionFailureRequest(
+                        handle=claims[winner].handle, failed_at=later
+                    )
+                )
+            ).failed
+        )
+        self.assertEqual(
+            (await self.storage.get_task(self.task_id)).status, TaskStatus.FAILED
+        )
+        self.assertIsNone(
+            (await self.storage.get_conversation(self.conversation_id)).current_task_id
+        )
+        replay = await other.admit_submission(
+            _request(
+                conversation_id=self.conversation_id,
+                message_id=self.message_id,
+                task_id=f"{self.task_id}-retry",
+            )
+        )
+        self.assertEqual(replay.task_id, self.task_id)
+        self.assertIsNone(replay.handle)
+        self.assertEqual(len(await self.storage.list_events_for_task(self.task_id)), 1)
+
+    async def test_failure_frees_guard_before_new_submission_and_keeps_original_snapshot(
+        self,
+    ) -> None:
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        admitted = await self.storage.admit_submission(request)
+        await self.storage.fail_submission(
+            SubmissionFailureRequest(
+                handle=admitted.handle, failed_at=request.message_created_at
+            )
+        )
+        second = _request(
+            conversation_id=self.conversation_id,
+            message_id=f"{self.message_id}-next",
+            task_id=f"{self.task_id}-next",
+        )
+        accepted = await self.storage.admit_submission(second)
+        self.assertEqual(accepted.disposition, SubmissionAdmissionDisposition.CREATED)
+        self.assertEqual(
+            (await self.storage.get_conversation(self.conversation_id)).current_task_id,
+            second.task.task_id,
+        )
+        replay = await self.storage.admit_submission(request)
+        self.assertEqual(replay.task_id, request.task.task_id)
+        self.assertEqual(
+            (await self.storage.get_conversation(self.conversation_id)).current_task_id,
+            second.task.task_id,
+        )
+
     async def asyncTearDown(self) -> None:
         with self.session_factory() as session:
             session.execute(
-                delete(EventRecordRow).where(EventRecordRow.task_id.like(f"{self.task_id}%"))
+                delete(AgentRunRow).where(AgentRunRow.task_id.like(f"{self.task_id}%"))
+            )
+            session.execute(
+                delete(EventRecordRow).where(
+                    EventRecordRow.task_id.like(f"{self.task_id}%")
+                )
             )
             session.execute(
                 delete(TaskRow).where(TaskRow.task_id.like(f"{self.task_id}%"))
@@ -79,12 +186,53 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
             )
             session.execute(
                 delete(ConversationRow).where(
-                    ConversationRow.conversation_id.like(
-                        f"{self.conversation_id}%"
-                    )
+                    ConversationRow.conversation_id.like(f"{self.conversation_id}%")
                 )
             )
             session.commit()
+
+    async def test_run_creation_and_failure_cannot_commit_conflicting_outcomes(
+        self,
+    ) -> None:
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        admitted = await self.storage.admit_submission(request)
+        repository = PostgreSQLAgentRepository(self.session_factory)
+        run = AgentRun(
+            run_id=f"agent-run:{self.task_id}",
+            task_id=self.task_id,
+            conversation_id=self.conversation_id,
+            status=AgentRunStatus.RUNNING,
+            binding=AgentModelBinding(model_edition="test"),
+        )
+        created, failed = await asyncio.gather(
+            repository.create_run(run),
+            self.storage.fail_submission(
+                SubmissionFailureRequest(
+                    handle=admitted.handle,
+                    failed_at=request.message_created_at,
+                )
+            ),
+            return_exceptions=True,
+        )
+        self.assertNotIsInstance(failed, BaseException)
+        actual_run = await repository.get_run_for_task(self.task_id)
+        task = await self.storage.get_task(self.task_id)
+        if failed.failed:
+            self.assertIsInstance(created, AgentStorageConflict)
+            self.assertIsNone(actual_run)
+            self.assertEqual(task.status, TaskStatus.FAILED)
+            with self.assertRaisesRegex(
+                AgentStorageConflict, "agent_run_task_terminal"
+            ):
+                await repository.create_run(run)
+        else:
+            self.assertIsInstance(created, AgentRun)
+            self.assertIsNotNone(actual_run)
+            self.assertEqual(task.status, TaskStatus.ACCEPTED)
 
     async def test_route_materialization_uses_naive_postgres_task_time(self) -> None:
         request = _request(

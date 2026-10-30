@@ -1488,6 +1488,19 @@ class SubmissionHandoffAcknowledgementRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class SubmissionFailureRequest:
+    handle: SubmissionAdmissionHandle = field(repr=False)
+    failed_at: datetime
+    reason_code: str = "submission_preparation_failed"
+
+
+@dataclass(slots=True, frozen=True)
+class SubmissionFailureResult:
+    failed: bool
+    phase: SubmissionAdmissionPhase
+
+
+@dataclass(slots=True, frozen=True)
 class ConversationAdmissionCloseRequest:
     username: str
     conversation_id: str

@@ -32,7 +32,7 @@ from src.storage.runtime_sidecar_grpc_client import (
 
 
 class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
-    def test_submission_admission_methods_use_the_nine_approved_rpc_shapes(self) -> None:
+    def test_submission_admission_methods_use_the_ten_approved_rpc_shapes(self) -> None:
         task = _submission_task_record()
         conversation, message, continuation = _submission_projection_bytes()
         projection_sha = hashlib.sha256(
@@ -111,11 +111,20 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
             "PrepareSubmissionHandoff": _field_bytes(1, prepared_admission),
             "GetSubmissionPreparation": _field_varint(1, 1)
             + _field_bytes(2, prepared_admission),
-            "AcknowledgeSubmissionHandoff": _field_bytes(
-                1, handed_off_admission
+            "AcknowledgeSubmissionHandoff": _field_bytes(1, handed_off_admission),
+            "FailSubmission": _field_bytes(
+                1,
+                _submission_admission_wire(
+                    task={**task, "status": "failed"},
+                    conversation=conversation,
+                    message=message,
+                    continuation=continuation,
+                    projection_sha=projection_sha,
+                    continuation_sha=continuation_sha,
+                    closed=True,
+                ),
             ),
-            "CloseConversationAdmission": _field_varint(1, 1)
-            + _field_varint(2, 2),
+            "CloseConversationAdmission": _field_varint(1, 1) + _field_varint(2, 2),
             "ReserveMessageIdentity": _field_varint(1, 1)
             + _field_bytes(2, _message_identity_wire()),
         }
@@ -185,6 +194,13 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
             handoff_identity="agent-run:task",
             now_ms=1_000,
         )
+        failed = client.fail_submission(
+            message_id="message",
+            workflow_owner="worker",
+            claim_token="secret",
+            reason_code="submission_preparation_failed",
+            now_ms=1_000,
+        )
         closed = client.close_conversation_admission(
             username="owner",
             conversation_id="conversation",
@@ -215,10 +231,22 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
         self.assertEqual(prepared["admission"]["task_id"], "task")
         self.assertTrue(fetched["found"])
         self.assertEqual(handed_off["admission"]["conversation_id"], "conversation")
+        self.assertTrue(failed["admission"]["closed"])
+        self.assertEqual(failed["admission"]["task"]["status"], "failed")
         self.assertEqual(closed["disposition"], "closed")
         self.assertEqual(reserved["identity"]["message_id"], "server-message")
         self.assertEqual([method for method, _ in calls], list(responses))
         self.assertEqual(_decode_message(calls[0][1])[16], [b"submission:message"])
+        self.assertEqual(
+            _decode_message(calls[-3][1]),
+            {
+                1: [b"message"],
+                2: [b"worker"],
+                3: [b"secret"],
+                4: [b"submission_preparation_failed"],
+                5: [1_000],
+            },
+        )
         self.assertEqual(
             _decode_message(_decode_message(calls[-1][1])[1][0]),
             _decode_message(_message_identity_wire()),
@@ -1449,6 +1477,7 @@ def _submission_admission_wire(
     handoff_state: int = 1,
     handoff_kind: str | None = None,
     handoff_identity: str | None = None,
+    closed: bool = False,
 ) -> bytes:
     payload = b"".join(
         [
@@ -1467,7 +1496,7 @@ def _submission_admission_wire(
             _field_varint(15, handoff_state),
             _field_varint(18, 1_000),
             _field_varint(19, 1_000),
-            _field_varint(20, 0),
+            _field_varint(20, int(closed)),
             _field_bytes(21, _task_record(task)),
             _field_string(22, "submission:message"),
         ]

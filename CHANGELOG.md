@@ -2,6 +2,10 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-10-30：修复提交准备异常后任务停留accepted、前端回滚已上传附件及响应丢失后重复提交的问题。SQL新准入在独立private Message状态中冻结恢复输入并持久化租约；准备失败仅在有效claim且尚无durable handoff时，原子结束任务、释放匹配会话占用并写唯一失败事件，SQL/Sidecar均阻止准备失败的已关闭提交再建立执行Run，保留既有历史终态Run收敛入口；已建立Run或running handoff沿原任务恢复。新增FailSubmission RPC并对齐Rust内存/SQLite实现；前端按稳定client_message_id重试原请求，POST失败保留附件，上传批次在提交前失败仍按原规则回滚。覆盖失败写入回滚、过期claim、进程重启、并发及丢失响应回归；后端相关356项通过，失败事件实时推送改动另复验87项；本机隔离PostgreSQL 10项、前端全量354项、Rust全量201项、Clippy/格式、Ruff、typecheck/build通过。无数据库schema迁移、未部署或修改服务器旧数据，“只用第二份”不在本次范围。License Requirement：无新增依赖或许可变化。
+
+- 2026-10-30：修复多文件提交因上传ID未按字典序排列而返回`submission_admission_unavailable`：读取frozen Message时保留原顺序，兼容历史未排序记录，不改写projection、continuation或已有摘要；请求指纹、冻结引用集合和selector receipt继续沿用canonical规则，序号选文件与缺失引用校验保持。新增4项回归并强化1项序号用例，明确第一份/第二份均按上传顺序选择且不受ID字典序影响，提交/准备/恢复/文件选择相关189项测试及Ruff通过。兼容范围为顺序读取，缺失冻结引用或已回滚删除的附件不自动恢复；未部署或修改服务器数据。License Requirement：无新增依赖或许可变化。
+
 - 2026-10-28：DeepSeek Flash 模型标识统一更新为 `deepseek-v4-1-flash-261017`，同步测试与文档中的版本引用；模型能力、推理强度和上下文预算保持原配置。本次标识更新不代表对新版本完成真实服务 smoke。License Requirement：无新增依赖或许可变化。
 
 - 2026-10-28：按用户决定撤销内嵌文献知识库全部开发，业务源码恢复到开发前 `c61b6ee`；移除原生 Capability、管理/选库 UI、API、知识库 schema 声明、PDF 依赖声明及配套测试和评测脚本，同时清理该专题 PRD、设计/实施计划、验收证据、metrics 和 runbook 的当前文件及索引。保留 Git 历史、无关部署评估、既有 MCP 功能及本地上传资料/数据库；停止本次验收的旧本地服务，不修改生产或远端数据。后续知识库改走 MCP，本次不新增 MCP 实现或部署。验证：相关后端138项、前端24文件/353项、API文档15项、typecheck与build通过，构建保留既有大chunk提示；重建产物无知识库入口。License Requirement：撤销本专题依赖声明，无新增依赖或许可变化。

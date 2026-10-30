@@ -737,6 +737,35 @@ class RuntimeSidecarGrpcClient:
             )
         return response
 
+    def fail_submission(
+        self,
+        *,
+        message_id: str,
+        workflow_owner: str,
+        claim_token: str,
+        reason_code: str,
+        now_ms: int,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        request = b"".join(
+            [
+                _field_string(1, message_id),
+                _field_string(2, workflow_owner),
+                _field_string(3, claim_token),
+                _field_string(4, reason_code),
+                _field_varint(5, now_ms),
+            ]
+        )
+        response = self._submission_admission_write(
+            "FailSubmission",
+            "submission_fail",
+            request,
+            timeout_seconds=timeout_seconds,
+        )
+        if response["admission"]["message_id"] != message_id:
+            _raise_task_identity_invalid("submission failure differs from request")
+        return response
+
     def close_conversation_admission(
         self,
         *,

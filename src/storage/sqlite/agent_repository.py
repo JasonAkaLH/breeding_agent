@@ -246,8 +246,25 @@ class SQLiteAgentRepository:
         )
 
     def _create_run(self, session: Session, run: AgentRun) -> AgentRun:
-        if session.get(TaskRow, run.task_id) is None:
+        task = session.scalar(
+            select(TaskRow).where(TaskRow.task_id == run.task_id).with_for_update()
+        )
+        if task is None:
             raise AgentStorageConflict("agent_run_task_missing")
+        if task.status == "failed":
+            message = session.get(MessageRow, task.root_message_id)
+            state = (
+                (message.message_metadata or {}).get(
+                    "__maf_private_submission_state_v1", {}
+                )
+                if message is not None
+                else {}
+            )
+            if (
+                state.get("closed")
+                and state.get("failure_reason_code") == "submission_preparation_failed"
+            ):
+                raise AgentStorageConflict("agent_run_task_terminal")
         now = self._now()
         row = AgentRunRow(
             run_id=run.run_id,
