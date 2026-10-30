@@ -13,7 +13,7 @@ use crate::{
     TaskRecord, TaskRouteAssignment, idempotency_conflict, idempotency_key,
     initial_no_server_task_transition_shape, message_identity_is_exact_replay, migration_blocked,
     new_submission_claim, require_idempotency_key, submission_failure_timestamp,
-    submission_preparation_node, validate_admit_submission_request,
+    submission_preparation_node, submission_running_preparation, validate_admit_submission_request,
     validate_agent_final_commit_shape, validate_agent_final_projection, validate_agent_item_record,
     validate_agent_item_relationships, validate_agent_item_update, validate_agent_run_record,
     validate_expected_status, validate_message_identity, validate_task_node_record,
@@ -766,18 +766,7 @@ impl RuntimeSidecarSqliteAdapter {
         task_id: &str,
     ) -> Result<Vec<TaskNodeRecord>, RuntimeSidecarError> {
         let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare("SELECT node_json FROM task_nodes WHERE task_id = ?1 ORDER BY node_id")
-            .map_err(|error| sqlite_error("prepare TaskNodeRecord list failed", error))?;
-        let rows = statement
-            .query_map(rusqlite::params![task_id], |row| row.get::<_, String>(0))
-            .map_err(|error| sqlite_error("query TaskNodeRecord list failed", error))?;
-        rows.map(|row| {
-            decode_task_node_json(
-                &row.map_err(|error| sqlite_error("read TaskNodeRecord list failed", error))?,
-            )
-        })
-        .collect()
+        task_nodes_for_task(&connection, task_id)
     }
 
     pub fn save_artifact(
@@ -2256,7 +2245,12 @@ impl RuntimeSidecarSqliteAdapter {
                     "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE task_id=?1)",
                     rusqlite::params![&record.task_id], |row| row.get::<_, bool>(0),
                 ).map_err(|error| sqlite_error("check submission Agent Run failed", error))?;
-                if record.handoff_state == SubmissionHandoffState::HandedOff || task.status != "accepted" || has_run {
+                let running_preparation = task.status == "running"
+                    && submission_running_preparation(
+                        &record.task_id,
+                        task_nodes_for_task(transaction, &record.task_id)?.iter(),
+                    );
+                if record.handoff_state == SubmissionHandoffState::HandedOff || (task.status != "accepted" && !running_preparation) || has_run {
                     return Ok(false);
                 }
                 let mut failed = task.clone();
@@ -4848,6 +4842,24 @@ fn node_transition_for_idempotency(
             ))
         })
         .transpose()
+}
+
+fn task_nodes_for_task(
+    connection: &Connection,
+    task_id: &str,
+) -> Result<Vec<TaskNodeRecord>, RuntimeSidecarError> {
+    let mut statement = connection
+        .prepare("SELECT node_json FROM task_nodes WHERE task_id = ?1 ORDER BY node_id")
+        .map_err(|error| sqlite_error("prepare TaskNodeRecord list failed", error))?;
+    let rows = statement
+        .query_map(rusqlite::params![task_id], |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("query TaskNodeRecord list failed", error))?;
+    rows.map(|row| {
+        decode_task_node_json(
+            &row.map_err(|error| sqlite_error("read TaskNodeRecord list failed", error))?,
+        )
+    })
+    .collect()
 }
 
 fn task_node_by_id(

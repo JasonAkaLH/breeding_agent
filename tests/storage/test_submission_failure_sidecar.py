@@ -99,6 +99,147 @@ class SubmissionFailureSidecarIntegrationTest(SQLiteStorageTestCase):
         )
         return admitted
 
+    def _mark_task_running(self, request):
+        wire = self.client.get_task(task_id=request.task.task_id)["task"]
+        self.client.submit_task(
+            task_id=request.task.task_id,
+            conversation_id=request.conversation_id,
+            idempotency_key=f"start:{request.task.task_id}",
+            expected_from_status="accepted",
+            task={**wire, "status": "running"},
+        )
+
+    def test_running_preparation_closes_only_before_waiting_for_input(self) -> None:
+        async def scenario():
+            storage = self._storage()
+            for status in (
+                "running",
+                "waiting_for_input",
+                "ready_to_resume",
+                "completed",
+            ):
+                with self.subTest(status=status):
+                    request = _request(
+                        message_id=f"message-{status}",
+                        task_id=f"task-{status}",
+                        conversation_id=f"conversation-{status}",
+                    )
+                    admitted = await self._admit(storage, request)
+                    await storage.save_task_node(
+                        TaskNode(
+                            node_id=f"{request.task.task_id}:sheet_selection",
+                            task_id=request.task.task_id,
+                            capability_id="agent.sheet_selection",
+                            status=status,
+                        )
+                    )
+                    self._mark_task_running(request)
+                    failed = await storage.fail_submission(
+                        SubmissionFailureRequest(
+                            handle=admitted.handle,
+                            failed_at=request.message_created_at,
+                        )
+                    )
+                    self.assertEqual(failed.failed, status == "running")
+                    task = await storage.get_task(request.task.task_id)
+                    self.assertEqual(
+                        str(task.status), "failed" if failed.failed else "running"
+                    )
+                    if failed.failed:
+                        await self._runtime()._recover_submission_failure_projections()
+                        self.assertEqual(
+                            len(await storage.list_events_for_task(task.task_id)), 1
+                        )
+
+        asyncio.run(scenario())
+
+    def test_existing_run_blocks_failure_of_a_running_preparation(self):
+        async def scenario():
+            storage = self._storage()
+            request = _request()
+            admitted = await self._admit(storage, request)
+            await storage.save_task_node(
+                TaskNode(
+                    node_id=f"{request.task.task_id}:file_selection",
+                    task_id=request.task.task_id,
+                    capability_id="agent.file_selection",
+                    status="running",
+                )
+            )
+            self._mark_task_running(request)
+            task = await storage.get_task(request.task.task_id)
+            runtime = self._runtime()
+            run = await runtime.agent_run_repository.create_run(
+                AgentRun(
+                    run_id=f"agent-run:{task.task_id}",
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    status=AgentRunStatus.RUNNING,
+                    binding=AgentModelBinding("test"),
+                )
+            )
+            failed = await storage.fail_submission(
+                SubmissionFailureRequest(
+                    handle=admitted.handle,
+                    failed_at=request.message_created_at,
+                )
+            )
+            self.assertFalse(failed.failed)
+            self.assertEqual(await storage.get_task(task.task_id), task)
+            self.assertEqual(
+                await runtime.agent_run_repository.get_run(run.run_id), run
+            )
+            self.assertEqual(
+                await storage.list_pending_submission_failure_projections(), []
+            )
+            self.assertEqual(await storage.list_events_for_task(task.task_id), [])
+
+        asyncio.run(scenario())
+
+    def test_unknown_running_preparation_close_keeps_its_recovery_marker(self):
+        async def scenario():
+            storage = self._storage()
+            request = _request()
+            admitted = await self._admit(storage, request)
+            await storage.save_task_node(
+                TaskNode(
+                    node_id=f"{request.task.task_id}:file_selection",
+                    task_id=request.task.task_id,
+                    capability_id="agent.file_selection",
+                    status="running",
+                )
+            )
+            self._mark_task_running(request)
+            original = self.client.fail_submission
+            pending = {}
+
+            def delay_close(**kwargs):
+                pending.update(kwargs)
+                raise TimeoutError("authority close is still in flight")
+
+            with patch.object(self.client, "fail_submission", side_effect=delay_close):
+                with self.assertRaises(TimeoutError):
+                    await storage.fail_submission(
+                        SubmissionFailureRequest(
+                            handle=admitted.handle,
+                            failed_at=request.message_created_at,
+                        )
+                    )
+            runtime = self._runtime()
+            await runtime._recover_submission_failure_projections()
+            self.assertEqual(
+                len(await storage.list_pending_submission_failure_projections()), 1
+            )
+            original(**pending)
+            await runtime._recover_submission_failure_projections()
+            self.assertEqual(
+                await storage.list_pending_submission_failure_projections(), []
+            )
+            events = await storage.list_events_for_task(request.task.task_id)
+            self.assertEqual([event.event_type for event in events], ["task.failed"])
+
+        asyncio.run(scenario())
+
     def test_failed_close_is_readable_and_recovers_after_callback_crash(self) -> None:
         async def scenario():
             storage = self._storage()

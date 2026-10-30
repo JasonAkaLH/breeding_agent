@@ -656,6 +656,60 @@ fn canonical(value: serde_json::Value) -> Vec<u8> {
 }
 
 #[test]
+fn running_submission_preparation_does_not_close_an_input_handoff() {
+    for status in [
+        "running",
+        "waiting_for_input",
+        "ready_to_resume",
+        "completed",
+    ] {
+        let mut kernel =
+            RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
+        let created = kernel
+            .admit_submission(admission_request("message", "task", "conversation"))
+            .unwrap();
+        let mut task = kernel.get_task("task").unwrap();
+        task.status = "running".to_owned();
+        kernel
+            .submit_task_record(task, "task-running", Some("accepted"))
+            .unwrap();
+        let node = TaskNodeRecord {
+            node_id: "task:file_selection".to_owned(),
+            task_id: "task".to_owned(),
+            capability_id: "agent.file_selection".to_owned(),
+            assigned_instance_id: None,
+            status: status.to_owned(),
+            input_refs: Vec::new(),
+            output_refs: Vec::new(),
+            started_at: None,
+            finished_at: None,
+        };
+        kernel
+            .transition_node("task", node.node_id.clone(), status, "", "node", Some(node))
+            .unwrap();
+        let claim = created.claim.unwrap();
+        let result = kernel
+            .fail_submission(FailSubmissionRequest {
+                message_id: "message".to_owned(),
+                workflow_owner: claim.owner,
+                claim_token: claim.token,
+                reason_code: "submission_preparation_failed".to_owned(),
+                now_ms: 11,
+            })
+            .unwrap();
+        assert_eq!(result.0.closed, status == "running");
+        assert_eq!(
+            kernel.get_task("task").unwrap().status,
+            if status == "running" {
+                "failed"
+            } else {
+                "running"
+            }
+        );
+    }
+}
+
+#[test]
 fn failed_submission_is_fenced_and_releases_only_its_conversation_task() {
     let mut kernel = RuntimeSidecarKernel::new_with_finalized_submission_authority("f".repeat(64));
     let created = kernel

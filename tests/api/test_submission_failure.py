@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from src.api.dto import SubmitMessageRequest
 from src.storage.sqlalchemy_models import MessageRow
 from src.core.models import TaskNode
 from tests.api.support import APITestCase
@@ -74,6 +75,376 @@ class SubmissionFailureAPITest(APITestCase):
                     status="running",
                 )
             )
+
+    async def test_failure_before_interrupt_open_closes_running_preparation(self):
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        with patch.object(
+            self.runtime.interrupt_service,
+            "open_interrupt",
+            new=AsyncMock(side_effect=RuntimeError("interrupt not opened")),
+        ):
+            failed = await self.submit_message(
+                conversation_id="conv-interrupt-not-opened",
+                capability_id=None,
+                client_message_id="interrupt-not-opened",
+                content="请分析材料文件。",
+                metadata={"file_requirement_profile": {"required": True}},
+            )
+        self.assertEqual(failed.status_code, 202, failed.text)
+        task_id = failed.json()["task_id"]
+        self.assertEqual(failed.json()["status"], "failed")
+        self.assertEqual(
+            str((await self.runtime.storage.get_task(task_id)).status), "failed"
+        )
+        self.assertIsNone(
+            (
+                await self.runtime.storage.get_conversation("conv-interrupt-not-opened")
+            ).current_task_id
+        )
+        self.assertEqual(
+            await self.runtime.storage.list_interrupts_for_task(task_id), []
+        )
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        self.assertEqual([str(node.status) for node in nodes], ["failed"])
+
+    async def test_failure_before_run_commit_ends_task_and_is_terminal_after_restart(
+        self,
+    ):
+        with patch.object(
+            self.runtime.agent_run_repository,
+            "create_run",
+            new=AsyncMock(side_effect=RuntimeError("Run not committed")),
+        ):
+            failed = await self._submit()
+        self.assertEqual(failed.status_code, 202, failed.text)
+        self.assertEqual(failed.json()["status"], "failed")
+        task_id = failed.json()["task_id"]
+        self.assertIsNone(
+            await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        )
+        await self.reconfigure_runtime(
+            main_agent_stream_generator=lambda _: ["不应执行。"]
+        )
+        with patch.object(
+            self.runtime.agent_run_repository,
+            "create_run",
+            new=AsyncMock(side_effect=AssertionError("failed task executed")),
+        ):
+            await self.runtime.start()
+            replay = await self._submit()
+        self.assertEqual(replay.json(), failed.json())
+        uploads = await self.runtime.storage.list_conversation_file_resources(
+            self.conversation_id, "acc-1"
+        )
+        self.assertEqual(
+            [(file.file_id, file.status) for file in uploads],
+            [(self.upload_id, "active")],
+        )
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(
+            task_id
+        )
+        self.assertEqual(
+            [item.source_upload_id for item in attachments], [self.upload_id]
+        )
+
+    async def test_restart_initializes_run_created_before_task_transition(self):
+        original = self.runtime.agent_run_repository.create_run
+
+        async def commit_run_then_exit(run):
+            await original(run)
+            raise asyncio.CancelledError
+
+        with patch.object(
+            self.runtime.agent_run_repository,
+            "create_run",
+            side_effect=commit_run_then_exit,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await self._submit()
+        message = await self.runtime.storage.get_message("submission-failure-message")
+        task = await self.runtime.storage.get_task(message.task_id)
+        run = await self.runtime.agent_run_repository.get_run_for_task(task.task_id)
+        self.assertEqual(str(task.status), "accepted")
+        self.assertEqual(
+            await self.runtime.agent_run_repository.list_items(run.run_id), ()
+        )
+        with self.runtime.storage._session_factory() as session:
+            row = session.get(MessageRow, message.message_id)
+            metadata = dict(row.message_metadata)
+            state = dict(metadata["__maf_private_submission_state_v1"])
+            state["claim_expires_at"] = (
+                datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+            ).isoformat()
+            row.message_metadata = {
+                **metadata,
+                "__maf_private_submission_state_v1": state,
+            }
+            session.commit()
+        samples = []
+
+        def generator(_prompt):
+            samples.append(True)
+            return ["完成。"]
+
+        await self.reconfigure_runtime(main_agent_stream_generator=generator)
+        await self.runtime.start()
+        await self.runtime._await_existing_execution(task.task_id)
+        self.assertEqual(samples, [True])
+        self.assertEqual(
+            str((await self.runtime.storage.get_task(task.task_id)).status), "completed"
+        )
+        items = await self.runtime.agent_run_repository.list_items(run.run_id)
+        self.assertEqual(sum(str(item.kind) == "user_message" for item in items), 1)
+        replay = await self._submit()
+        self.assertEqual(replay.json()["task_id"], task.task_id)
+        self.assertEqual(samples, [True])
+
+    async def test_other_worker_recovers_handoff_committed_before_owner_exit(self):
+        samples = []
+
+        def generator(_prompt):
+            samples.append(True)
+            return ["完成。"]
+
+        await self.reconfigure_runtime(main_agent_stream_generator=generator)
+        other = self.build_runtime(main_agent_stream_generator=generator)
+        other._agent_run_recovery_fatal_exit = Mock()
+        original_ack = self.runtime.storage.acknowledge_submission_handoff
+
+        async def commit_then_exit(request):
+            await original_ack(request)
+            raise asyncio.CancelledError
+
+        try:
+            with patch.object(
+                self.runtime.storage,
+                "acknowledge_submission_handoff",
+                side_effect=commit_then_exit,
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await self._submit()
+            request = SubmitMessageRequest(
+                conversation_id=self.conversation_id,
+                content="分析文件",
+                client_message_id="submission-failure-message",
+                metadata={"upload_ids": [self.upload_id]},
+            )
+            replay = await other.submit_chat_message(
+                self.conversation_id, request, authenticated_username="acc-1"
+            )
+            run_id = f"agent-run:{replay['task_id']}"
+            recovery = other._agent_run_lease_retry_tasks.get(run_id)
+            self.assertIsNotNone(recovery)
+            await asyncio.wait_for(asyncio.shield(recovery), timeout=5)
+            self.assertEqual(samples, [True])
+            task = await self.runtime.storage.get_task(replay["task_id"])
+            self.assertEqual(str(task.status), "completed")
+            items = await other.agent_run_repository.list_items(run_id)
+            self.assertEqual(sum(str(item.kind) == "user_message" for item in items), 1)
+            await other.submit_chat_message(
+                self.conversation_id, request, authenticated_username="acc-1"
+            )
+            self.assertEqual(samples, [True])
+            other._agent_run_recovery_fatal_exit.assert_not_called()
+        finally:
+            await other.shutdown()
+
+    async def test_other_worker_retry_preserves_the_live_execution_lease(self):
+        entered = asyncio.Event()
+        finish_model = asyncio.Event()
+        observing_lease = asyncio.Event()
+        recheck_lease = asyncio.Event()
+        samples = []
+
+        async def generator(_prompt):
+            samples.append(True)
+            entered.set()
+            await finish_model.wait()
+            return ["完成。"]
+
+        async def observe_until_owner_finishes(_delay):
+            observing_lease.set()
+            await recheck_lease.wait()
+
+        await self.reconfigure_runtime(main_agent_stream_generator=generator)
+        other = self.build_runtime(main_agent_stream_generator=generator)
+        other._agent_run_recovery_fatal_exit = Mock()
+        other._agent_run_lease_retry_sleep = observe_until_owner_finishes
+        try:
+            accepted = await self._submit()
+            await asyncio.wait_for(entered.wait(), 5)
+            task_id = accepted.json()["task_id"]
+            run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+            request = SubmitMessageRequest(
+                conversation_id=self.conversation_id,
+                content="分析文件",
+                client_message_id="submission-failure-message",
+                metadata={"upload_ids": [self.upload_id]},
+            )
+            replay = await other.submit_chat_message(
+                self.conversation_id, request, authenticated_username="acc-1"
+            )
+            recovery = other._agent_run_lease_retry_tasks[run.run_id]
+            await asyncio.wait_for(observing_lease.wait(), 5)
+            self.assertEqual(replay["task_id"], task_id)
+            self.assertEqual(samples, [True])
+            latest = await other.agent_run_repository.get_run(run.run_id)
+            self.assertEqual(latest.claim_token, run.claim_token)
+            self.assertEqual(str(latest.status), "running")
+            finish_model.set()
+            await self.runtime._await_existing_execution(task_id)
+            recheck_lease.set()
+            await asyncio.wait_for(asyncio.shield(recovery), 5)
+            self.assertEqual(samples, [True])
+            self.assertEqual(
+                str((await other.storage.get_task(task_id)).status), "completed"
+            )
+            other._agent_run_recovery_fatal_exit.assert_not_called()
+        finally:
+            finish_model.set()
+            recheck_lease.set()
+            await other.shutdown()
+
+    async def test_partial_interrupt_write_is_recoverable_without_failing_the_task(
+        self,
+    ):
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        original = self.runtime.storage.save_interrupt
+
+        for committed in (False, True):
+            with self.subTest(committed=committed):
+                conversation_id = f"partial-interrupt-{committed}"
+                request = SubmitMessageRequest(
+                    conversation_id=conversation_id,
+                    content="请分析材料文件。",
+                    client_message_id=conversation_id,
+                    metadata={"file_requirement_profile": {"required": True}},
+                )
+
+                async def fail_interrupt(interrupt):
+                    if committed:
+                        await original(interrupt)
+                    raise TimeoutError("interrupt write outcome unavailable")
+
+                with patch.object(
+                    self.runtime.storage, "save_interrupt", side_effect=fail_interrupt
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "submission_admission_unavailable"
+                    ):
+                        await self.runtime.submit_chat_message(
+                            conversation_id, request, authenticated_username="acc-1"
+                        )
+                message = await self.runtime.storage.get_message(conversation_id)
+                task = await self.runtime.storage.get_task(message.task_id)
+                self.assertEqual(str(task.status), "running")
+                replay = await self.runtime.submit_chat_message(
+                    conversation_id, request, authenticated_username="acc-1"
+                )
+                self.assertEqual(replay["task_id"], task.task_id)
+                interrupts = await self.runtime.storage.list_interrupts_for_task(
+                    task.task_id
+                )
+                self.assertEqual([str(item.status) for item in interrupts], ["open"])
+                nodes = await self.runtime.storage.list_task_nodes_for_task(
+                    task.task_id
+                )
+                self.assertEqual(
+                    [str(item.status) for item in nodes], ["waiting_for_input"]
+                )
+                events = await self.runtime.storage.list_events_for_task(task.task_id)
+                self.assertNotIn("task.failed", [event.event_type for event in events])
+
+    async def test_creator_waits_when_other_worker_claims_first(self):
+        other = self.build_runtime(main_agent_stream_generator=lambda _: ["完成。"])
+        created = asyncio.Event()
+        creator_may_claim = asyncio.Event()
+        creator_waiting = asyncio.Event()
+        replay_claimed = asyncio.Event()
+        replay_may_continue = asyncio.Event()
+        replay_finished = asyncio.Event()
+        original_create = self.runtime.storage._run_submission_admission
+        original_replay = other.storage.admit_submission
+
+        async def pause_creator(request):
+            result = await original_create(request)
+            created.set()
+            await creator_may_claim.wait()
+            return result
+
+        async def pause_replay(request):
+            result = await original_replay(request)
+            self.assertIsNotNone(result.handle)
+            replay_claimed.set()
+            await replay_may_continue.wait()
+            return result
+
+        async def wait_for_replay(_deadline):
+            creator_waiting.set()
+            await replay_finished.wait()
+
+        request = SubmitMessageRequest(
+            conversation_id=self.conversation_id,
+            content="分析文件",
+            client_message_id="creator-claim-race",
+            metadata={"upload_ids": [self.upload_id]},
+        )
+        pending = []
+        try:
+            with (
+                patch.object(
+                    self.runtime.storage,
+                    "_run_submission_admission",
+                    side_effect=pause_creator,
+                ),
+                patch.object(
+                    other.storage, "admit_submission", side_effect=pause_replay
+                ),
+                patch.object(
+                    self.runtime._submission_admission_coordinator,
+                    "_wait_until",
+                    side_effect=wait_for_replay,
+                ),
+            ):
+                first = asyncio.create_task(
+                    self.runtime.submit_chat_message(
+                        self.conversation_id, request, authenticated_username="acc-1"
+                    )
+                )
+                pending.append(first)
+                await asyncio.wait_for(created.wait(), 5)
+                second = asyncio.create_task(
+                    other.submit_chat_message(
+                        self.conversation_id, request, authenticated_username="acc-1"
+                    )
+                )
+                pending.append(second)
+                await asyncio.wait_for(replay_claimed.wait(), 5)
+                creator_may_claim.set()
+                await asyncio.wait_for(creator_waiting.wait(), 5)
+                replay_may_continue.set()
+                second_result = await asyncio.wait_for(second, 5)
+                replay_finished.set()
+                first_result = await asyncio.wait_for(first, 5)
+            self.assertEqual(first_result["task_id"], second_result["task_id"])
+            await other._await_existing_execution(second_result["task_id"])
+            self.assertEqual(
+                len(
+                    await other.storage.list_tasks_for_conversation(
+                        self.conversation_id
+                    )
+                ),
+                1,
+            )
+        finally:
+            creator_may_claim.set()
+            replay_may_continue.set()
+            replay_finished.set()
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            await other.shutdown()
 
     async def test_preparation_failure_ends_task_preserves_upload_and_releases_conversation(
         self,

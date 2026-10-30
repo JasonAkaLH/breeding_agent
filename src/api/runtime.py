@@ -75,6 +75,7 @@ from src.core.models import (
     SlotEvent,
     SubmissionAdmissionDisposition,
     SubmissionHandoffState,
+    SubmissionPreparationLookup,
     SubmissionPreparationReceipt,
     SubmissionRecoveryRecord,
     SubmissionFailureProjection,
@@ -1819,8 +1820,6 @@ class ApiRuntime(
             or admitted.task_id != record.task_id
             or admitted.conversation_id != record.conversation_id
             or admitted.phase != record.phase
-            or admitted.disposition is SubmissionAdmissionDisposition.CREATED
-            and admitted.handle is None
         ):
             raise SubmissionAdmissionUnavailableError()
         coordinator = self._submission_admission_coordinator
@@ -3816,11 +3815,36 @@ class ApiRuntime(
                     and await self.storage.submission_failure_is_closed(projection)
                 ):
                     await self.materialize_submission_failure(projection)
-                elif task.status != TaskStatus.ACCEPTED or run is not None:
+                elif (
+                    task.status not in {TaskStatus.ACCEPTED, TaskStatus.RUNNING}
+                    or run is not None
+                ):
                     # An unknown close did not commit; the original handoff progressed instead.
                     await self.storage.complete_submission_failure_projection(
                         projection
                     )
+                elif task.status == TaskStatus.RUNNING:
+                    preparation = await self.storage.get_submission_preparation(
+                        SubmissionPreparationLookup(
+                            username=projection.username,
+                            conversation_id=projection.conversation_id,
+                            task_id=projection.task_id,
+                        )
+                    )
+                    if preparation is not None and (
+                        preparation.task_id != projection.task_id
+                        or preparation.conversation_id != projection.conversation_id
+                        or preparation.message_id != projection.message_id
+                    ):
+                        raise RuntimeError("submission_terminal_task_identity_mismatch")
+                    if (
+                        preparation is not None
+                        and preparation.handoff_state
+                        is SubmissionHandoffState.HANDED_OFF
+                    ):
+                        await self.storage.complete_submission_failure_projection(
+                            projection
+                        )
             if len(projections) < 128:
                 return
             cursor = projections[-1].message_id
@@ -4395,6 +4419,7 @@ class ApiRuntime(
                         or run.conversation_id != record.conversation_id
                     ):
                         raise RuntimeError("submission_initialized_agent_missing")
+                    self._schedule_agent_run_lease_retry(run.run_id)
                     self._submission_woken_agent_ids.add(handoff_identity)
                     return
                 flight = asyncio.get_running_loop().create_future()
