@@ -672,6 +672,7 @@ pub(super) fn get_preparation_request_from_pb(
         username: request.username,
         conversation_id: request.conversation_id,
         task_id: request.task_id,
+        include_closed: request.include_closed,
     }
 }
 

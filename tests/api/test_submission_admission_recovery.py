@@ -7,6 +7,8 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from src.api.submission_admission import (
     DurableSubmissionHandoff,
@@ -50,6 +52,46 @@ from src.orchestration.conversation_memory import (
 class SubmissionAdmissionRecoveryTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.clock = _Clock(datetime(2026, 8, 26, tzinfo=timezone.utc))
+
+    async def test_foreign_claim_closed_during_retry_returns_terminal_result(
+        self,
+    ) -> None:
+        record = _record("1")
+        closed = replace(
+            record,
+            phase=replace(
+                record.phase, admission_state=SubmissionAdmissionState.CLOSED
+            ),
+        )
+        original = SubmissionAdmissionResult(
+            disposition=SubmissionAdmissionDisposition.IDEMPOTENT_REPLAY,
+            conversation_id=record.conversation_id,
+            message_id=record.message_id,
+            task_id=record.task_id,
+            message_created_at=record.created_at,
+            phase=record.phase,
+            record=record,
+        )
+        final = replace(original, phase=closed.phase, record=closed)
+        wait_until = AsyncMock(
+            side_effect=[None, AssertionError("closed retry waited twice")]
+        )
+        materialize = AsyncMock()
+        coordinator = SubmissionAdmissionCoordinator(
+            admission=SimpleNamespace(),
+            receipts=SimpleNamespace(),
+            callbacks=SimpleNamespace(materialize_submission_failure=materialize),
+            claim_owner="retry-worker",
+            now=self.clock.now,
+            wait_until=wait_until,
+            expected_finalization_receipt_sha256=None,
+        )
+        result = await coordinator.continue_admitted(
+            original, reclaim_exact=AsyncMock(return_value=final)
+        )
+        self.assertEqual(result.status, SubmissionRecoveryStatus.COMPLETED)
+        materialize.assert_awaited_once_with(closed)
+        self.assertEqual(wait_until.await_count, 1)
 
     async def test_projection_backlog_closes_before_any_pure_computation(self) -> None:
         admission = _FakeAdmission([_record("1"), _record("2")], self.clock)

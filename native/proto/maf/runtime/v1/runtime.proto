@@ -314,6 +314,7 @@ message GetSubmissionPreparationRequest {
   string username = 1;
   string conversation_id = 2;
   string task_id = 3;
+  bool include_closed = 4;
 }
 
 message GetSubmissionPreparationResponse {

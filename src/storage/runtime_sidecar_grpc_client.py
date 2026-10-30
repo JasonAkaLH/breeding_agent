@@ -658,6 +658,7 @@ class RuntimeSidecarGrpcClient:
         username: str,
         conversation_id: str,
         task_id: str,
+        include_closed: bool = False,
         timeout_seconds: float = 5,
     ) -> dict[str, Any]:
         self._ensure_compatible(timeout_seconds=timeout_seconds)
@@ -666,6 +667,8 @@ class RuntimeSidecarGrpcClient:
             + _field_string(2, conversation_id)
             + _field_string(3, task_id)
         )
+        if include_closed:
+            request += _field_varint(4, 1)
         fields = _decode_closed_message(
             self._unary(
                 "GetSubmissionPreparation", request, timeout_seconds=timeout_seconds
@@ -686,7 +689,7 @@ class RuntimeSidecarGrpcClient:
             admission["username"] != username
             or admission["conversation_id"] != conversation_id
             or admission["task_id"] != task_id
-            or admission["preparation_state"] != "prepared"
+            or (admission["preparation_state"] != "prepared" and not (include_closed and admission["closed"]))
         ):
             _raise_task_identity_invalid(
                 "submission preparation lookup differs from request"

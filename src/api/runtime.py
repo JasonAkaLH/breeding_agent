@@ -77,6 +77,7 @@ from src.core.models import (
     SubmissionHandoffState,
     SubmissionPreparationReceipt,
     SubmissionRecoveryRecord,
+    SubmissionFailureProjection,
     Task,
     TaskInputAttachment,
     TaskNode,
@@ -3752,7 +3753,7 @@ class ApiRuntime(
         return self._skill_recovery_error_code(revision)
 
     async def materialize_submission_failure(
-        self, record: SubmissionRecoveryRecord
+        self, record: SubmissionRecoveryRecord | SubmissionFailureProjection
     ) -> None:
         task = await self.storage.get_task(record.task_id)
         if task is None or task.status != TaskStatus.FAILED:
@@ -3762,6 +3763,9 @@ class ApiRuntime(
             or task.root_message_id != record.message_id
         ):
             raise RuntimeError("submission_terminal_task_identity_mismatch")
+        failure_at = task.updated_at
+        if failure_at.tzinfo is not None:
+            failure_at = failure_at.astimezone(timezone.utc).replace(tzinfo=None)
         saved, _duplicate = await self.storage.append_event_exact(
             EventRecord(
                 event_id=f"evt-submission-failed:{record.task_id}",
@@ -3773,13 +3777,53 @@ class ApiRuntime(
                     "status": "failed",
                     "error": {"code": "submission_preparation_failed"},
                 },
-                created_at=task.updated_at,
+                created_at=failure_at,
             )
         )
         # SQL closes the task and writes this event atomically before this callback.
         # Publish the same durable ID so existing SSE subscribers see the failure.
         await self.event_broker.publish(saved)
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
+        await self.storage.complete_submission_failure_projection(
+            SubmissionFailureProjection(
+                record.username,
+                record.conversation_id,
+                record.message_id,
+                record.task_id,
+            )
+        )
+
+    async def _recover_submission_failure_projections(self) -> None:
+        cursor = None
+        while True:
+            projections = (
+                await self.storage.list_pending_submission_failure_projections(
+                    after_message_id=cursor
+                )
+            )
+            for projection in projections:
+                task = await self.storage.get_task(projection.task_id)
+                if (
+                    task is None
+                    or task.conversation_id != projection.conversation_id
+                    or task.root_message_id != projection.message_id
+                ):
+                    raise RuntimeError("submission_terminal_task_identity_mismatch")
+                run = await self.agent_run_repository.get_run_for_task(task.task_id)
+                if (
+                    task.status == TaskStatus.FAILED
+                    and run is None
+                    and await self.storage.submission_failure_is_closed(projection)
+                ):
+                    await self.materialize_submission_failure(projection)
+                elif task.status != TaskStatus.ACCEPTED or run is not None:
+                    # An unknown close did not commit; the original handoff progressed instead.
+                    await self.storage.complete_submission_failure_projection(
+                        projection
+                    )
+            if len(projections) < 128:
+                return
+            cursor = projections[-1].message_id
 
     async def materialize_terminal_handoff(
         self,
@@ -10584,6 +10628,7 @@ class ApiRuntime(
             raise
         await self._verify_submission_authority_binding()
         await self.recover_deleting_conversations()
+        await self._recover_submission_failure_projections()
         submission_projection_pending = False
         coordinator = getattr(self, "_submission_admission_coordinator", None)
         if coordinator is not None:
@@ -10627,6 +10672,7 @@ class ApiRuntime(
             if coordinator is not None:
                 await coordinator.recover_projected_handoffs()
                 submission_projection_pending = False
+            await self._recover_submission_failure_projections()
         except BaseException:
             if submission_projection_pending and coordinator is not None:
                 await coordinator.abort_pending()

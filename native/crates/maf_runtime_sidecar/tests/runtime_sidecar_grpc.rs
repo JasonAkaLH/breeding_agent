@@ -413,6 +413,7 @@ async fn sqlite_submission_rpc_sequence_persists_all_admission_phases() {
             username: "owner".to_owned(),
             conversation_id: "sqlite-flow-conversation".to_owned(),
             task_id: "sqlite-flow-task".to_owned(),
+            include_closed: false,
         }))
         .await
         .unwrap()

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from src.storage.sqlalchemy_models import MessageRow
+from src.core.models import TaskNode
 from tests.api.support import APITestCase
 
 
@@ -31,6 +32,48 @@ class SubmissionFailureAPITest(APITestCase):
             client_message_id=message_id,
             metadata={"upload_ids": [self.upload_id]},
         )
+
+    async def test_partial_interrupt_failure_closes_the_preparation_node(self):
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        original = self.runtime.storage.save_task
+
+        async def fail_running_task(task, *args, **kwargs):
+            if str(task.status) == "running":
+                raise RuntimeError("fault after preparation node creation")
+            return await original(task, *args, **kwargs)
+
+        with patch.object(
+            self.runtime.storage, "save_task", side_effect=fail_running_task
+        ):
+            response = await self.submit_message(
+                conversation_id="conv-partial-interrupt-failure",
+                capability_id=None,
+                client_message_id="partial-interrupt-failure",
+                content="请分析材料文件。",
+                metadata={
+                    "file_requirement_profile": {
+                        "required": True,
+                        "expected_content": ["材料表"],
+                    }
+                },
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["status"], "failed")
+        nodes = await self.runtime.storage.list_task_nodes_for_task(
+            response.json()["task_id"]
+        )
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(str(nodes[0].status), "failed")
+        self.assertIsNotNone(nodes[0].finished_at)
+        with self.assertRaisesRegex(RuntimeError, "submission_preparation_closed"):
+            await self.runtime.storage.save_task_node(
+                TaskNode(
+                    node_id=f"{response.json()['task_id']}:sheet_selection",
+                    task_id=response.json()["task_id"],
+                    capability_id="agent.sheet_selection",
+                    status="running",
+                )
+            )
 
     async def test_preparation_failure_ends_task_preserves_upload_and_releases_conversation(
         self,

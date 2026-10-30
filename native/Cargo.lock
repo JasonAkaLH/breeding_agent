@@ -1036,6 +1036,7 @@ dependencies = [
 name = "maf_runtime_sidecar"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hyper-util",
  "maf_event_log",
  "maf_runtime_store",

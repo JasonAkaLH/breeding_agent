@@ -12,7 +12,8 @@ use crate::{
     SubmissionHandoffState, SubmissionPreparationState, SubmissionProjectionState, TaskNodeRecord,
     TaskRecord, TaskRouteAssignment, idempotency_conflict, idempotency_key,
     initial_no_server_task_transition_shape, message_identity_is_exact_replay, migration_blocked,
-    new_submission_claim, require_idempotency_key, validate_admit_submission_request,
+    new_submission_claim, require_idempotency_key, submission_failure_timestamp,
+    submission_preparation_node, validate_admit_submission_request,
     validate_agent_final_commit_shape, validate_agent_final_projection, validate_agent_item_record,
     validate_agent_item_relationships, validate_agent_item_update, validate_agent_run_record,
     validate_expected_status, validate_message_identity, validate_task_node_record,
@@ -661,6 +662,14 @@ impl RuntimeSidecarSqliteAdapter {
                 .commit()
                 .map_err(|error| sqlite_error("commit idempotent node transition failed", error))?;
             return Ok(result);
+        }
+        if submission_preparation_node(task_id, node_id)
+            && !crate::node_status_is_terminal(to_status)
+            && task_record_by_id(&transaction, task_id)?.is_some_and(|task| task.status == "failed")
+            && transaction.query_row("SELECT EXISTS(SELECT 1 FROM submission_admissions WHERE task_id=?1 AND admission_state='closed')", rusqlite::params![task_id], |row| row.get::<_, bool>(0))
+                .map_err(|error| sqlite_error("check closed preparation node failed", error))?
+        {
+            return Err(write_failed("cannot reopen failed submission preparation node"));
         }
         let existing_node = task_node_by_id(&transaction, node_id)?;
         validate_expected_status(
@@ -2166,8 +2175,8 @@ impl RuntimeSidecarSqliteAdapter {
         require_finalized_submission_authority(&connection)?;
         let row = connection
             .query_row(
-                "SELECT message_id FROM submission_admissions WHERE username=?1 AND conversation_id=?2 AND task_id=?3 AND preparation_state='prepared'",
-                rusqlite::params![&request.username, &request.conversation_id, &request.task_id],
+                "SELECT message_id FROM submission_admissions WHERE username=?1 AND conversation_id=?2 AND task_id=?3 AND (preparation_state='prepared' OR (?4 AND admission_state='closed'))",
+                rusqlite::params![&request.username, &request.conversation_id, &request.task_id, request.include_closed],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -2252,9 +2261,26 @@ impl RuntimeSidecarSqliteAdapter {
                 }
                 let mut failed = task.clone();
                 failed.status = "failed".to_owned();
-                failed.updated_at = Some(request.now_ms.to_string());
+                let failed_at = submission_failure_timestamp(request.now_ms)?;
+                failed.updated_at = Some(failed_at.clone());
                 validate_task_update(&task, &failed)?;
                 upsert_task_record(transaction, &failed)?;
+                for node_id in [format!("{}:file_selection", record.task_id), format!("{}:sheet_selection", record.task_id)] {
+                    if let Some(mut node) = task_node_by_id(transaction, &node_id)? {
+                        if node.task_id != record.task_id {
+                            return Err(write_failed("submission preparation node belongs to another Task"));
+                        }
+                        if !crate::node_status_is_terminal(&node.status) {
+                            node.status = "failed".to_owned();
+                            node.finished_at = Some(failed_at.clone());
+                            let json = serde_json::to_string(&node).map_err(|_| write_failed("encode failed preparation node failed"))?;
+                            transaction.execute("UPDATE task_nodes SET node_json=?2 WHERE node_id=?1", rusqlite::params![&node_id, json])
+                                .map_err(|error| sqlite_error("close failed preparation node failed", error))?;
+                            transaction.execute("INSERT INTO node_statuses(task_id,node_id,status) VALUES(?1,?2,'failed') ON CONFLICT(task_id,node_id) DO UPDATE SET status='failed'", rusqlite::params![&record.task_id, &node_id])
+                                .map_err(|error| sqlite_error("close failed preparation node status failed", error))?;
+                        }
+                    }
+                }
                 transaction.execute(
                     "UPDATE submission_admissions SET admission_state='closed', claim_owner=NULL, claim_token=NULL, claim_expires_at_ms=NULL, updated_at_ms=?2 WHERE message_id=?1",
                     rusqlite::params![&request.message_id, request.now_ms],

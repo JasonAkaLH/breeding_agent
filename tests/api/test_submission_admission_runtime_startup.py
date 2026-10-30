@@ -137,6 +137,7 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         runtime.recover_deleting_conversations = lambda: record(
             "deleting-conversations-recovered"
         )
+        runtime._recover_submission_failure_projections = lambda: record("failure-projections")
         runtime._reconcile_skill_recovery_eligibility = lambda: record(
             "skill-recovery-eligibility"
         )
@@ -300,6 +301,14 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(events.index("mcp-reconciled"), events.index("submission-handoff"))
         self.assertLess(events.index("submission-handoff"), events.index("agent-recovery"))
+        self.assertEqual(events.count("failure-projections"), 2)
+        failure_positions = [
+            index
+            for index, event in enumerate(events)
+            if event == "failure-projections"
+        ]
+        self.assertLess(failure_positions[0], events.index("submission-projected"))
+        self.assertGreater(failure_positions[1], events.index("submission-handoff"))
         self.assertNotIn("submission-abort", events)
 
     async def test_startup_waits_for_delete_recovery_before_pending_projection(self) -> None:

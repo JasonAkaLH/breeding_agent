@@ -23,6 +23,7 @@ protoc-bin-vendored.workspace = true
 tonic-prost-build.workspace = true
 
 [dependencies]
+chrono.workspace = true
 maf_event_log = { path = "../maf_event_log" }
 maf_runtime_store = { path = "../maf_runtime_store" }
 maf_task_dispatcher = { path = "../maf_task_dispatcher" }
