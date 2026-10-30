@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-10-30：补齐提交失败修复审查发现的六项边界：SQL投影确认在同事务校验租约，exact投影不回拨会话指针；重试观察到CLOSED立即返回；PostgreSQL恢复扫描遇到并发关闭会重新枚举；Sidecar失败时间改为ISO；关闭前持久化私有收尾标记，启动经include_closed权威核验后补齐事件与会话投影，已有Run或其他失败终态不误杀、不误标；SQL及Rust失败事务同时结束准备节点并禁止迟到重开。新增真实Sidecar故障注入、PostgreSQL双连接、节点并发与元数据隔离回归；相关后端411项、隔离PostgreSQL 13项、Rust全量201项、Clippy/格式、Ruff及前端typecheck/build通过。cargo-deny的licenses/bans/sources通过，advisories因8项原有RustSec公告未通过；锁定包版本未变，本次不扩展升级范围。无数据库schema迁移，未部署或修改服务器旧数据，“只用第二份”仍不在范围。License Requirement：Sidecar直接复用锁文件已有Chrono 0.4.44（MIT/Apache-2.0），无新增版本或许可种类。
+
 - 2026-10-30：修复提交准备异常后任务停留accepted、前端回滚已上传附件及响应丢失后重复提交的问题。SQL新准入在独立private Message状态中冻结恢复输入并持久化租约；准备失败仅在有效claim且尚无durable handoff时，原子结束任务、释放匹配会话占用并写唯一失败事件，SQL/Sidecar均阻止准备失败的已关闭提交再建立执行Run，保留既有历史终态Run收敛入口；已建立Run或running handoff沿原任务恢复。新增FailSubmission RPC并对齐Rust内存/SQLite实现；前端按稳定client_message_id重试原请求，POST失败保留附件，上传批次在提交前失败仍按原规则回滚。覆盖失败写入回滚、过期claim、进程重启、并发及丢失响应回归；后端相关356项通过，失败事件实时推送改动另复验87项；本机隔离PostgreSQL 10项、前端全量354项、Rust全量201项、Clippy/格式、Ruff、typecheck/build通过。无数据库schema迁移、未部署或修改服务器旧数据，“只用第二份”不在本次范围。License Requirement：无新增依赖或许可变化。
 
 - 2026-10-30：修复多文件提交因上传ID未按字典序排列而返回`submission_admission_unavailable`：读取frozen Message时保留原顺序，兼容历史未排序记录，不改写projection、continuation或已有摘要；请求指纹、冻结引用集合和selector receipt继续沿用canonical规则，序号选文件与缺失引用校验保持。新增4项回归并强化1项序号用例，明确第一份/第二份均按上传顺序选择且不受ID字典序影响，提交/准备/恢复/文件选择相关189项测试及Ruff通过。兼容范围为顺序读取，缺失冻结引用或已回滚删除的附件不自动恢复；未部署或修改服务器数据。License Requirement：无新增依赖或许可变化。

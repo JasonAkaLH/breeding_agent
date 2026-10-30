@@ -936,6 +936,13 @@ class SubmissionAdmissionCoordinator:
                 self._validate_exact_reclaim(record, result)
                 assert result.record is not None
                 record = result.record
+                if record.phase.admission_state is SubmissionAdmissionState.CLOSED:
+                    await self._callbacks.materialize_submission_failure(record)
+                    return SubmissionRecoveryBatchResult(
+                        status=SubmissionRecoveryStatus.COMPLETED,
+                        recovered_count=0,
+                        pending_count=0,
+                    )
                 if record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF:
                     await self._retry_handed_off_wakeup(record)
                     return SubmissionRecoveryBatchResult(

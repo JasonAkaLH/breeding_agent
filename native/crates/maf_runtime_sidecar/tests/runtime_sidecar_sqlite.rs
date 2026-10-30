@@ -915,6 +915,27 @@ fn sqlite_submission_failure_survives_reopen_and_rejects_stale_claims() {
             "failed-conversation",
         ))
         .unwrap();
+    let preparation_node = TaskNodeRecord {
+        node_id: "failed-task:file_selection".to_owned(),
+        task_id: "failed-task".to_owned(),
+        capability_id: "agent.file_selection".to_owned(),
+        assigned_instance_id: None,
+        status: "running".to_owned(),
+        input_refs: Vec::new(),
+        output_refs: Vec::new(),
+        started_at: None,
+        finished_at: None,
+    };
+    adapter
+        .transition_node(
+            "failed-task",
+            "failed-task:file_selection",
+            "running",
+            "",
+            "prepare-node",
+            Some(preparation_node),
+        )
+        .unwrap();
     let claim = created.claim.unwrap();
     let request = FailSubmissionRequest {
         message_id: "failed-message".to_owned(),
@@ -953,6 +974,36 @@ fn sqlite_submission_failure_survives_reopen_and_rejects_stale_claims() {
         task: None,
     };
     assert!(reopened.commit_agent_state(late_run).is_err());
+    assert_eq!(
+        reopened
+            .get_task("failed-task")
+            .unwrap()
+            .unwrap()
+            .updated_at
+            .as_deref(),
+        Some("1970-01-01T00:00:00.011Z")
+    );
+    let node = reopened
+        .get_task_node("failed-task:file_selection")
+        .unwrap()
+        .unwrap();
+    assert_eq!(node.status, "failed");
+    assert_eq!(
+        node.finished_at.as_deref(),
+        Some("1970-01-01T00:00:00.011Z")
+    );
+    assert!(
+        reopened
+            .transition_node(
+                "failed-task",
+                "failed-task:sheet_selection",
+                "running",
+                "",
+                "late-preparation",
+                None
+            )
+            .is_err()
+    );
     let replay = reopened
         .admit_submission(sqlite_admission_request(
             "failed-message",
@@ -1521,6 +1572,7 @@ fn sqlite_submission_claim_prepare_get_and_handoff_are_durable_and_cas_closed() 
             username: "owner".to_owned(),
             conversation_id: "flow-conversation".to_owned(),
             task_id: "flow-task".to_owned(),
+            include_closed: false,
         })
         .unwrap()
         .expect("prepared snapshot survives restart");

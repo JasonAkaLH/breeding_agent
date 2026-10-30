@@ -320,6 +320,7 @@ fn submission_claim_projection_preparation_and_handoff_are_cas_closed() {
                 username: "owner".to_owned(),
                 conversation_id: "conv-flow".to_owned(),
                 task_id: "task-flow".to_owned(),
+                include_closed: false,
             })
             .is_some()
     );
@@ -664,6 +665,27 @@ fn failed_submission_is_fenced_and_releases_only_its_conversation_task() {
             "failed-conversation",
         ))
         .unwrap();
+    let preparation_node = TaskNodeRecord {
+        node_id: "failed-task:file_selection".to_owned(),
+        task_id: "failed-task".to_owned(),
+        capability_id: "agent.file_selection".to_owned(),
+        assigned_instance_id: None,
+        status: "running".to_owned(),
+        input_refs: Vec::new(),
+        output_refs: Vec::new(),
+        started_at: None,
+        finished_at: None,
+    };
+    kernel
+        .transition_node(
+            "failed-task",
+            "failed-task:file_selection",
+            "running",
+            "",
+            "prepare-node",
+            Some(preparation_node),
+        )
+        .unwrap();
     let claim = created.claim.unwrap();
     let request = FailSubmissionRequest {
         message_id: "failed-message".to_owned(),
@@ -682,6 +704,27 @@ fn failed_submission_is_fenced_and_releases_only_its_conversation_task() {
     let failed = kernel.fail_submission(request).unwrap().0;
     assert!(failed.closed);
     assert_eq!(kernel.get_task("failed-task").unwrap().status, "failed");
+    assert!(
+        kernel
+            .get_submission_preparation(&GetSubmissionPreparationRequest {
+                username: "owner".to_owned(),
+                conversation_id: "failed-conversation".to_owned(),
+                task_id: "failed-task".to_owned(),
+                include_closed: false,
+            })
+            .is_none()
+    );
+    assert!(
+        kernel
+            .get_submission_preparation(&GetSubmissionPreparationRequest {
+                username: "owner".to_owned(),
+                conversation_id: "failed-conversation".to_owned(),
+                task_id: "failed-task".to_owned(),
+                include_closed: true,
+            })
+            .unwrap()
+            .closed
+    );
     let mut run = agent_run(0);
     run.task_id = "failed-task".to_owned();
     run.conversation_id = "failed-conversation".to_owned();
@@ -702,6 +745,32 @@ fn failed_submission_is_fenced_and_releases_only_its_conversation_task() {
         task: None,
     };
     assert!(kernel.commit_agent_state(late_run).is_err());
+    assert_eq!(
+        kernel
+            .get_task("failed-task")
+            .unwrap()
+            .updated_at
+            .as_deref(),
+        Some("1970-01-01T00:00:00.011Z")
+    );
+    let node = kernel.get_task_node("failed-task:file_selection").unwrap();
+    assert_eq!(node.status, "failed");
+    assert_eq!(
+        node.finished_at.as_deref(),
+        Some("1970-01-01T00:00:00.011Z")
+    );
+    assert!(
+        kernel
+            .transition_node(
+                "failed-task",
+                "failed-task:sheet_selection",
+                "running",
+                "",
+                "late-preparation",
+                None
+            )
+            .is_err()
+    );
     let replay = kernel
         .admit_submission(admission_request(
             "failed-message",

@@ -1501,6 +1501,14 @@ class SubmissionFailureResult:
 
 
 @dataclass(slots=True, frozen=True)
+class SubmissionFailureProjection:
+    username: str
+    conversation_id: str
+    message_id: str
+    task_id: str
+
+
+@dataclass(slots=True, frozen=True)
 class ConversationAdmissionCloseRequest:
     username: str
     conversation_id: str

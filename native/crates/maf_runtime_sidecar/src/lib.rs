@@ -405,6 +405,8 @@ pub struct GetSubmissionPreparationRequest {
     pub username: String,
     pub conversation_id: String,
     pub task_id: String,
+    #[serde(default)]
+    pub include_closed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1729,7 +1731,8 @@ impl RuntimeSidecarKernel {
             (entry.record.username == request.username
                 && entry.record.conversation_id == request.conversation_id
                 && entry.record.task_id == request.task_id
-                && entry.record.preparation_state == SubmissionPreparationState::Prepared)
+                && (entry.record.preparation_state == SubmissionPreparationState::Prepared
+                    || (request.include_closed && entry.record.closed)))
                 .then(|| entry.record.clone())
         })
     }
@@ -1821,9 +1824,23 @@ impl RuntimeSidecarKernel {
         }
         let mut failed = task.clone();
         failed.status = "failed".to_owned();
-        failed.updated_at = Some(request.now_ms.to_string());
+        let failed_at = submission_failure_timestamp(request.now_ms)?;
+        failed.updated_at = Some(failed_at.clone());
         validate_task_update(task, &failed)?;
         self.tasks.insert(record.task_id.clone(), failed);
+        for node in self.task_nodes.values_mut() {
+            if node.task_id == record.task_id
+                && submission_preparation_node(&record.task_id, &node.node_id)
+                && !node_status_is_terminal(&node.status)
+            {
+                node.status = "failed".to_owned();
+                node.finished_at = Some(failed_at.clone());
+                self.node_statuses.insert(
+                    (node.task_id.clone(), node.node_id.clone()),
+                    node.status.clone(),
+                );
+            }
+        }
         if let Some(guard) = self
             .submission_conversations
             .get_mut(&record.conversation_id)
@@ -2492,6 +2509,21 @@ impl RuntimeSidecarKernel {
                 ));
             }
             return Ok(receipt.result.clone());
+        }
+        if submission_preparation_node(&task_id, &node_id)
+            && !node_status_is_terminal(&to_status)
+            && self
+                .tasks
+                .get(&task_id)
+                .is_some_and(|task| task.status == "failed")
+            && self
+                .submission_admissions
+                .values()
+                .any(|entry| entry.record.task_id == task_id && entry.record.closed)
+        {
+            return Err(write_failed(
+                "cannot reopen failed submission preparation node",
+            ));
         }
         validate_expected_status(
             Some(&expected_from_status),
@@ -4855,6 +4887,17 @@ fn require_idempotency_key(
         ));
     }
     Ok(idempotency_key)
+}
+
+pub(crate) fn submission_failure_timestamp(now_ms: i64) -> Result<String, RuntimeSidecarError> {
+    chrono::DateTime::from_timestamp_millis(now_ms)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .ok_or_else(|| write_failed("submission failure timestamp is outside supported range"))
+}
+
+pub(crate) fn submission_preparation_node(task_id: &str, node_id: &str) -> bool {
+    node_id == format!("{task_id}:file_selection")
+        || node_id == format!("{task_id}:sheet_selection")
 }
 
 pub(crate) fn validate_task_node_record(node: &TaskNodeRecord) -> Result<(), RuntimeSidecarError> {

@@ -132,6 +132,7 @@ from src.core.models import (
     SubmissionHandoffAcknowledgementRequest,
     SubmissionFailureRequest,
     SubmissionFailureResult,
+    SubmissionFailureProjection,
     SubmissionHandoffState,
     SubmissionPreparationLookup,
     SubmissionPreparationReceipt,
@@ -1150,6 +1151,8 @@ _SUBMISSION_ADMISSION_RECEIPT_SCHEMA = "maf.sql_submission_admission_receipt.v1"
 _SUBMISSION_INPUT_METADATA_KEY = "__maf_private_submission_input_v1"
 _SUBMISSION_HANDOFF_METADATA_KEY = "__maf_private_submission_handoff_v1"
 _SUBMISSION_STATE_METADATA_KEY = "__maf_private_submission_state_v1"
+_SUBMISSION_FAILURE_METADATA_KEY = "__maf_private_submission_failure_v1"
+_SUBMISSION_FAILURE_METADATA_SCHEMA = "maf.submission.failure_projection.v1"
 _SUBMISSION_HANDOFF_METADATA_SCHEMA = "maf.sql_submission_handoff.v1"
 _SUBMISSION_PROJECTION_DOMAIN = b"maf.submission.projection.v1\0"
 _SUBMISSION_CONTINUATION_DOMAIN = b"maf.submission.continuation.v1\0"
@@ -1160,6 +1163,7 @@ def _projection_message_metadata(value: object) -> dict[str, Any]:
     metadata.pop(_SUBMISSION_ADMISSION_RECEIPT_KEY, None)
     metadata.pop(_SUBMISSION_HANDOFF_METADATA_KEY, None)
     metadata.pop(_SUBMISSION_STATE_METADATA_KEY, None)
+    metadata.pop(_SUBMISSION_FAILURE_METADATA_KEY, None)
     return metadata
 
 
@@ -4427,6 +4431,7 @@ class SQLiteStateRepository:
             or _SUBMISSION_INPUT_METADATA_KEY in incoming_metadata
             or _SUBMISSION_HANDOFF_METADATA_KEY in incoming_metadata
             or _SUBMISSION_STATE_METADATA_KEY in incoming_metadata
+            or _SUBMISSION_FAILURE_METADATA_KEY in incoming_metadata
         ):
             raise ValueError("message_private_metadata_reserved")
         existing = self._session.scalar(
@@ -4482,6 +4487,7 @@ class SQLiteStateRepository:
                     _SUBMISSION_INPUT_METADATA_KEY,
                     _SUBMISSION_HANDOFF_METADATA_KEY,
                     _SUBMISSION_STATE_METADATA_KEY,
+                    _SUBMISSION_FAILURE_METADATA_KEY,
                 }
             }
             existing.content = message.content
@@ -4574,6 +4580,7 @@ class SQLiteStateRepository:
             _SUBMISSION_ADMISSION_RECEIPT_KEY in metadata
             or _SUBMISSION_HANDOFF_METADATA_KEY in metadata
             or _SUBMISSION_STATE_METADATA_KEY in metadata
+            or _SUBMISSION_FAILURE_METADATA_KEY in metadata
         ):
             raise ValueError("submission_message_private_metadata_invalid")
         metadata[_SUBMISSION_ADMISSION_RECEIPT_KEY] = _submission_private_receipt(
@@ -4630,7 +4637,18 @@ class SQLiteStateRepository:
     def project_submission_admission(
         self,
         record: SubmissionRecoveryRecord,
+        *,
+        claim_owner: str | None = None,
+        claim_token: str | None = None,
+        now: datetime | None = None,
     ) -> None:
+        if now is not None:
+            self._require_submission_claim_sql(record, claim_owner, claim_token, now)
+        existing = self._session.scalar(
+            select(MessageRow)
+            .where(MessageRow.message_id == record.message_id)
+            .with_for_update()
+        )
         conversation_projection = _canonical_json_object(
             record.conversation_projection,
             context="submission_conversation_projection",
@@ -4674,23 +4692,19 @@ class SQLiteStateRepository:
             )
         ):
             raise RuntimeError("submission_projection_conflict")
-        else:
+        elif existing is None:
             conversation.current_task_id = record.task_id
             conversation.updated_at = _submission_datetime(
                 conversation_projection.get("updated_at"),
                 context="submission_conversation_updated_at",
             )
 
-        existing = self._session.scalar(
-            select(MessageRow)
-            .where(MessageRow.message_id == record.message_id)
-            .with_for_update()
-        )
         expected_metadata = _message_metadata_object(message_projection.get("metadata"))
         if (
             _SUBMISSION_ADMISSION_RECEIPT_KEY in expected_metadata
             or _SUBMISSION_HANDOFF_METADATA_KEY in expected_metadata
             or _SUBMISSION_STATE_METADATA_KEY in expected_metadata
+            or _SUBMISSION_FAILURE_METADATA_KEY in expected_metadata
         ):
             raise RuntimeError("submission_projection_conflict")
         if existing is None:
@@ -4898,16 +4912,22 @@ class SQLiteStateRepository:
                     ),
                 )
             )
-        pending_count = self._session.scalar(
-            select(func.count()).select_from(pending_query.subquery())
-        )
-        row = self._session.scalar(
-            pending_query.order_by(MessageRow.created_at, MessageRow.message_id).limit(
-                1
+        while True:
+            pending_count = self._session.scalar(
+                select(func.count()).select_from(pending_query.subquery())
             )
-        )
-        earliest = None
-        if row is not None:
+            row = self._session.scalar(
+                pending_query.order_by(
+                    MessageRow.created_at, MessageRow.message_id
+                ).limit(1)
+            )
+            if row is None:
+                return SubmissionClaimResult(
+                    found=False,
+                    authority_state=SubmissionAuthorityState.FINALIZED,
+                    finalization_receipt_sha256=None,
+                    pending_count=0,
+                ), None
             record, token = self.claim_submission_sql(
                 message_id=row.message_id,
                 claim_owner=request.claim_owner,
@@ -4922,19 +4942,31 @@ class SQLiteStateRepository:
                     pending_count=pending_count,
                     record=record,
                 ), token
+            # Under PostgreSQL READ COMMITTED the candidate may close after scanning.
+            # Re-scan its current state instead of reporting a foreign lease without expiry.
+            status = self._session.scalar(
+                select(TaskRow.status).where(TaskRow.task_id == row.task_id)
+            )
+            if (
+                record is None
+                or status in _TERMINAL_TASK_STATUSES
+                or record.phase.admission_state is SubmissionAdmissionState.CLOSED
+                or record.phase.handoff_state is SubmissionHandoffState.HANDED_OFF
+            ):
+                continue
             state = _message_metadata_object(row.message_metadata)[
                 _SUBMISSION_STATE_METADATA_KEY
             ]
-            if state.get("claim_expires_at"):
-                expiry = datetime.fromisoformat(state["claim_expires_at"])
-                earliest = expiry
-        return SubmissionClaimResult(
-            found=False,
-            authority_state=SubmissionAuthorityState.FINALIZED,
-            finalization_receipt_sha256=None,
-            pending_count=pending_count,
-            earliest_claim_expires_at=earliest,
-        ), None
+            expiry = state.get("claim_expires_at")
+            return SubmissionClaimResult(
+                found=False,
+                authority_state=SubmissionAuthorityState.FINALIZED,
+                finalization_receipt_sha256=None,
+                pending_count=pending_count,
+                earliest_claim_expires_at=(
+                    datetime.fromisoformat(expiry) if expiry else None
+                ),
+            ), None
 
     def _require_submission_claim_sql(self, record, owner, token, now):
         now = (
@@ -4991,6 +5023,90 @@ class SQLiteStateRepository:
         self._session.flush()
         return renewed
 
+    def begin_submission_failure_projection(
+        self, record: SubmissionRecoveryRecord
+    ) -> None:
+        projection = SubmissionFailureProjection(
+            record.username, record.conversation_id, record.message_id, record.task_id
+        )
+        message = self._failure_projection_message(projection)
+        if message is None:
+            raise RuntimeError("submission_failure_projection_missing")
+        metadata = _message_metadata_object(message.message_metadata)
+        message.message_metadata = {
+            **metadata,
+            _SUBMISSION_FAILURE_METADATA_KEY: {
+                "schema": _SUBMISSION_FAILURE_METADATA_SCHEMA
+            },
+        }
+        self._session.flush()
+
+    def _failure_projection_message(
+        self, projection: SubmissionFailureProjection
+    ) -> MessageRow | None:
+        message = self._session.scalar(
+            select(MessageRow)
+            .where(
+                MessageRow.message_id == projection.message_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if message is None:
+            return None
+        owner = self._session.scalar(
+            select(ConversationRow.username).where(
+                ConversationRow.conversation_id == projection.conversation_id,
+            )
+        )
+        if (
+            message.task_id != projection.task_id
+            or message.conversation_id != projection.conversation_id
+            or str(message.role) != str(MessageRole.USER)
+            or owner != projection.username
+        ):
+            raise RuntimeError("submission_failure_projection_identity_mismatch")
+        return message
+
+    def list_pending_submission_failure_projections(
+        self, *, after_message_id: str | None, limit: int
+    ) -> list[SubmissionFailureProjection]:
+        if not 0 < limit <= 1000:
+            raise ValueError("submission_failure_projection_limit_invalid")
+        metadata = type_coerce(MessageRow.message_metadata, JSON)
+        query = (
+            select(MessageRow, ConversationRow.username)
+            .join(
+                ConversationRow,
+                ConversationRow.conversation_id == MessageRow.conversation_id,
+            )
+            .where(
+                metadata[_SUBMISSION_FAILURE_METADATA_KEY]["schema"].as_string()
+                == _SUBMISSION_FAILURE_METADATA_SCHEMA
+            )
+        )
+        if after_message_id is not None:
+            query = query.where(MessageRow.message_id > after_message_id)
+        return [
+            SubmissionFailureProjection(
+                owner, row.conversation_id, row.message_id, row.task_id
+            )
+            for row, owner in self._session.execute(
+                query.order_by(MessageRow.message_id).limit(limit)
+            )
+        ]
+
+    def complete_submission_failure_projection(
+        self, projection: SubmissionFailureProjection
+    ) -> None:
+        message = self._failure_projection_message(projection)
+        if message is None:
+            return
+        metadata = _message_metadata_object(message.message_metadata)
+        metadata.pop(_SUBMISSION_FAILURE_METADATA_KEY, None)
+        message.message_metadata = metadata
+        self._session.flush()
+
     def fail_submission_sql(self, *, record, owner, token, failed_at, reason_code):
         failed_at = (
             failed_at.astimezone(timezone.utc).replace(tzinfo=None)
@@ -5037,6 +5153,20 @@ class SQLiteStateRepository:
             raise ValueError("submission_failure_reason_invalid")
         task.status = "failed"
         task.updated_at = failed_at
+        self._session.execute(
+            update(TaskNodeRow)
+            .where(
+                TaskNodeRow.task_id == record.task_id,
+                TaskNodeRow.node_id.in_(
+                    [
+                        f"{record.task_id}:file_selection",
+                        f"{record.task_id}:sheet_selection",
+                    ]
+                ),
+                TaskNodeRow.status.not_in(_TERMINAL_NODE_STATUSES),
+            )
+            .values(status="failed", finished_at=failed_at)
+        )
         if state is not None:
             message.message_metadata = {
                 **metadata,
@@ -5642,6 +5772,7 @@ class SQLiteStateRepository:
             "node_state_transition",
             task_authority_mode=self._task_authority_mode,
         )
+        self._require_open_submission_node(node)
         existing = self._session.get(TaskNodeRow, node.node_id)
         if existing is not None:
             if existing.task_id != node.task_id or existing.capability_id != node.capability_id:
@@ -5674,6 +5805,7 @@ class SQLiteStateRepository:
     def compare_and_set_task_node(
         self, node: TaskNode, *, expected_from_status: NodeStatus
     ) -> TaskNode | None:
+        self._require_open_submission_node(node)
         existing = self._session.get(TaskNodeRow, node.node_id)
         if existing is None or existing.status != expected_from_status:
             return None
@@ -5701,6 +5833,31 @@ class SQLiteStateRepository:
             return None
         self._session.flush()
         return self.get_task_node(node.node_id)
+
+    def _require_open_submission_node(self, node: TaskNode) -> None:
+        if (
+            node.node_id
+            not in {f"{node.task_id}:file_selection", f"{node.task_id}:sheet_selection"}
+            or str(node.status) in _TERMINAL_NODE_STATUSES
+        ):
+            return
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == node.task_id).with_for_update()
+        )
+        if task is not None and task.status == "failed":
+            message = self._session.get(MessageRow, task.root_message_id)
+            state = (
+                _message_metadata_object(message.message_metadata).get(
+                    _SUBMISSION_STATE_METADATA_KEY, {}
+                )
+                if message
+                else {}
+            )
+            if (
+                state.get("closed")
+                and state.get("failure_reason_code") == "submission_preparation_failed"
+            ):
+                raise RuntimeError("submission_preparation_closed")
 
     def list_task_nodes_for_task(self, task_id: str) -> list[TaskNode]:
         rows = self._session.scalars(
@@ -18806,14 +18963,22 @@ class SQLiteStorage(StoragePort):
         record = binding["record"]
         if record.projection_sha256 != request.projection_sha256:
             raise RuntimeError("submission_projection_conflict")
-        await self._run_submission_projection(record)
         if binding["mode"] == "sql":
+            await self._run(
+                lambda state, collab: state.project_submission_admission(
+                    record,
+                    claim_owner=binding["owner"],
+                    claim_token=binding["token"],
+                    now=request.acknowledged_at,
+                )
+            )
             phase = replace(
                 record.phase,
                 projection_state=SubmissionProjectionState.PROJECTED,
             )
             binding["record"] = replace(record, phase=phase)
             return phase
+        await self._run_submission_projection(record)
         client = self._submission_sidecar_client(
             "submission_projection_acknowledge"
         )
@@ -18941,6 +19106,7 @@ class SQLiteStorage(StoragePort):
                 )
             )
         else:
+            await self._run(lambda state, collab: state.begin_submission_failure_projection(record))
             response = await _resolve_runtime_sidecar_call(
                 self._submission_sidecar_client("submission_fail").fail_submission(
                     message_id=binding["message_id"],
@@ -18955,9 +19121,73 @@ class SQLiteStorage(StoragePort):
                 updated.phase.admission_state is SubmissionAdmissionState.CLOSED,
                 updated.phase,
             )
+            if not result.failed:
+                await self.complete_submission_failure_projection(
+                    SubmissionFailureProjection(
+                        record.username,
+                        record.conversation_id,
+                        record.message_id,
+                        record.task_id,
+                    )
+                )
         if result.failed:
             del self._submission_claims[request.handle]
         return result
+
+    async def list_pending_submission_failure_projections(
+        self, *, after_message_id: str | None = None, limit: int = 128
+    ) -> list[SubmissionFailureProjection]:
+        return await self._run(
+            lambda state, collab: state.list_pending_submission_failure_projections(
+                after_message_id=after_message_id, limit=limit
+            )
+        )
+
+    async def submission_failure_is_closed(
+        self, projection: SubmissionFailureProjection
+    ) -> bool:
+        if self._task_authority_mode() != "enforce":
+
+            def read(state, collab):
+                message = state._failure_projection_message(projection)
+                metadata = (
+                    _message_metadata_object(message.message_metadata)
+                    if message is not None
+                    else {}
+                )
+                saved = metadata.get(_SUBMISSION_STATE_METADATA_KEY, {})
+                return bool(
+                    saved.get("closed")
+                    and saved.get("failure_reason_code")
+                    == "submission_preparation_failed"
+                )
+
+            return await self._run(read)
+        response = await _resolve_runtime_sidecar_call(
+            self._submission_sidecar_client(
+                "submission_preparation_get"
+            ).get_submission_preparation(
+                username=projection.username,
+                conversation_id=projection.conversation_id,
+                task_id=projection.task_id,
+                include_closed=True,
+            )
+        )
+        admission = response["admission"]
+        if admission is None:
+            return False
+        if admission["message_id"] != projection.message_id:
+            raise RuntimeError("submission_failure_projection_identity_mismatch")
+        return bool(admission["closed"])
+
+    async def complete_submission_failure_projection(
+        self, projection: SubmissionFailureProjection
+    ) -> None:
+        await self._run(
+            lambda state, collab: state.complete_submission_failure_projection(
+                projection
+            )
+        )
 
     async def close_conversation_admission(
         self, request: ConversationAdmissionCloseRequest

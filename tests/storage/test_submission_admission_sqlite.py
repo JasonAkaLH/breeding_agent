@@ -83,6 +83,50 @@ class SubmissionAdmissionSQLiteTest(SQLiteStorageTestCase):
             mcp_task_authority_mode="off",
         )
 
+    def test_stale_projection_cannot_replace_a_new_conversation_task(self) -> None:
+        async def scenario() -> None:
+            first = _request()
+            old = await self.storage.admit_submission(first)
+            recovery = SQLiteStorage(
+                self.session_factory, mcp_task_authority_mode="off"
+            )
+            later = first.claim_expires_at + timedelta(seconds=1)
+            reclaimed = await recovery.claim_pending_submission(
+                SubmissionClaimRequest(
+                    claim_owner="recovery-worker",
+                    now=later,
+                    claim_expires_at=later + timedelta(seconds=30),
+                )
+            )
+            await recovery.fail_submission(
+                SubmissionFailureRequest(handle=reclaimed.handle, failed_at=later)
+            )
+            await recovery.admit_submission(
+                _request(message_id="message-2", task_id="task-2")
+            )
+            with self.assertRaisesRegex(RuntimeError, "submission_claim_invalid"):
+                await self.storage.acknowledge_submission_projection(
+                    SubmissionProjectionAcknowledgementRequest(
+                        handle=old.handle,
+                        projection_sha256=old.record.projection_sha256,
+                        acknowledged_at=later,
+                    )
+                )
+            self.assertEqual(
+                (
+                    await recovery.get_conversation(first.conversation_id)
+                ).current_task_id,
+                "task-2",
+            )
+            third = await recovery.admit_submission(
+                _request(message_id="message-3", task_id="task-3")
+            )
+            self.assertEqual(
+                third.disposition, SubmissionAdmissionDisposition.CONVERSATION_BUSY
+            )
+
+        asyncio.run(scenario())
+
     def test_failure_is_atomic_and_terminal_replay_has_no_claim(self) -> None:
         request = _request()
         admitted = asyncio.run(self.storage.admit_submission(request))

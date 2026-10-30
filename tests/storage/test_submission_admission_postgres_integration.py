@@ -4,6 +4,7 @@ import asyncio
 import threading
 import unittest
 from datetime import timedelta
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -11,6 +12,7 @@ from uuid import uuid4
 from sqlalchemy import delete, select
 
 from src.api.runtime import ApiRuntime
+from src.api.submission_admission import SubmissionAdmissionCoordinator
 from src.core.enums import ConversationStatus, TaskStatus
 from src.core.models import (
     Conversation,
@@ -18,6 +20,7 @@ from src.core.models import (
     SubmissionClaimRequest,
     SubmissionFailureRequest,
     SubmissionProjectionAcknowledgementRequest,
+    TaskNode,
 )
 from src.storage.postgres import (
     PostgreSQLAgentRepository,
@@ -32,6 +35,7 @@ from src.storage.sqlalchemy_models import (
     EventRecordRow,
     MessageRow,
     TaskRow,
+    TaskNodeRow,
 )
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from src.orchestration.agent_loop.models import (
@@ -168,6 +172,7 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
 
     async def asyncTearDown(self) -> None:
         with self.session_factory() as session:
+            session.execute(delete(TaskNodeRow).where(TaskNodeRow.task_id.like(f"{self.task_id}%")))
             session.execute(
                 delete(AgentRunRow).where(AgentRunRow.task_id.like(f"{self.task_id}%"))
             )
@@ -190,6 +195,137 @@ class SubmissionAdmissionPostgresIntegrationTest(unittest.IsolatedAsyncioTestCas
                 )
             )
             session.commit()
+
+    async def test_startup_rescans_when_candidate_closes_before_claim_lock(
+        self,
+    ) -> None:
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        admitted = await self.storage.admit_submission(request)
+        recovery = PostgreSQLStorage(
+            self.session_factory, mcp_task_authority_mode="off"
+        )
+        now = request.message_created_at + timedelta(seconds=1)
+        selected = threading.Event()
+        proceed = threading.Event()
+        claim = SQLiteStateRepository.claim_submission_sql
+
+        def pause_after_selection(repo, **kwargs):
+            if kwargs["claim_owner"] == "startup-worker" and not selected.is_set():
+                selected.set()
+                if not proceed.wait(5):
+                    raise AssertionError("claim interleaving timed out")
+            return claim(repo, **kwargs)
+
+        coordinator = SubmissionAdmissionCoordinator(
+            admission=recovery,
+            receipts=SimpleNamespace(),
+            callbacks=SimpleNamespace(),
+            claim_owner="startup-worker",
+            now=lambda: now,
+            wait_until=AsyncMock(),
+            expected_finalization_receipt_sha256=None,
+        )
+        with patch.object(
+            SQLiteStateRepository, "claim_submission_sql", pause_after_selection
+        ):
+            startup = asyncio.create_task(coordinator.project_pending())
+            try:
+                self.assertTrue(await asyncio.to_thread(selected.wait, 5))
+                self.assertTrue(
+                    (
+                        await self.storage.fail_submission(
+                            SubmissionFailureRequest(
+                                handle=admitted.handle, failed_at=now
+                            )
+                        )
+                    ).failed
+                )
+            finally:
+                proceed.set()
+            result = await startup
+        self.assertEqual(result.pending_count, 0)
+        self.assertEqual(result.recovered_count, 0)
+        await coordinator.abort_pending()
+
+    async def test_failure_and_preparation_node_creation_leave_no_running_node(
+        self,
+    ) -> None:
+        request = _request(
+            conversation_id=self.conversation_id,
+            message_id=self.message_id,
+            task_id=self.task_id,
+        )
+        admitted = await self.storage.admit_submission(request)
+        node = TaskNode(
+            node_id=f"{self.task_id}:file_selection",
+            task_id=self.task_id,
+            capability_id="agent.file_selection",
+            status="running",
+        )
+        created, failed = await asyncio.gather(
+            self.storage.save_task_node(node),
+            self.storage.fail_submission(
+                SubmissionFailureRequest(
+                    handle=admitted.handle,
+                    failed_at=request.message_created_at,
+                )
+            ),
+            return_exceptions=True,
+        )
+        self.assertNotIsInstance(failed, BaseException)
+        self.assertTrue(failed.failed)
+        if isinstance(created, BaseException):
+            self.assertIn("submission_preparation_closed", str(created))
+        nodes = await self.storage.list_task_nodes_for_task(self.task_id)
+        self.assertTrue(
+            all(
+                str(item.status) == "failed" and item.finished_at is not None
+                for item in nodes
+            )
+        )
+
+    async def test_failure_projection_markers_are_private_paged_and_owner_bound(
+        self,
+    ) -> None:
+        for suffix in ("", "-next"):
+            request = _request(
+                conversation_id=f"{self.conversation_id}{suffix}",
+                message_id=f"{self.message_id}{suffix}",
+                task_id=f"{self.task_id}{suffix}",
+            )
+            admitted = await self.storage.admit_submission(request)
+            await self.storage._run(
+                lambda state, collab: state.begin_submission_failure_projection(
+                    admitted.record
+                )
+            )
+            message = await self.storage.get_message(request.message_id)
+            self.assertEqual(message.metadata, {"visible": "yes"})
+            await self.storage.save_message(message)
+        first = await self.storage.list_pending_submission_failure_projections(limit=1)
+        self.assertEqual([item.message_id for item in first], [self.message_id])
+        second = await self.storage.list_pending_submission_failure_projections(
+            after_message_id=first[0].message_id, limit=1
+        )
+        self.assertEqual(
+            [item.message_id for item in second], [f"{self.message_id}-next"]
+        )
+        with self.assertRaisesRegex(RuntimeError, "identity_mismatch"):
+            await self.storage.complete_submission_failure_projection(
+                replace(first[0], username="another-owner")
+            )
+        await self.storage.complete_submission_failure_projection(first[0])
+        self.assertEqual(
+            await self.storage.list_pending_submission_failure_projections(), second
+        )
+        await self.storage.complete_submission_failure_projection(second[0])
+        self.assertEqual(
+            await self.storage.list_pending_submission_failure_projections(), []
+        )
 
     async def test_run_creation_and_failure_cannot_commit_conflicting_outcomes(
         self,

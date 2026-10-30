@@ -84,6 +84,7 @@ from .models import (
     SubmissionHandoffAcknowledgementRequest,
     SubmissionFailureRequest,
     SubmissionFailureResult,
+    SubmissionFailureProjection,
     SubmissionPreparationLookup,
     SubmissionPreparationReceipt,
     SubmissionPreparationReceiptComponent,
@@ -1339,6 +1340,21 @@ class ConversationTaskAdmissionPort(Protocol):
 
 
 @runtime_checkable
+class SubmissionFailureProjectionStoragePort(Protocol):
+    async def submission_failure_is_closed(
+        self, projection: SubmissionFailureProjection
+    ) -> bool: ...
+
+    async def list_pending_submission_failure_projections(
+        self, *, after_message_id: str | None = None, limit: int = 128
+    ) -> list[SubmissionFailureProjection]: ...
+
+    async def complete_submission_failure_projection(
+        self, projection: SubmissionFailureProjection
+    ) -> None: ...
+
+
+@runtime_checkable
 class SubmissionPreparationReceiptStoragePort(Protocol):
     async def materialize_submission_pending_skill_transition_exact(
         self,
@@ -1828,6 +1844,7 @@ class StoragePort(
     AuthStoragePort,
     ConversationTaskAdmissionPort,
     SubmissionPreparationReceiptStoragePort,
+    SubmissionFailureProjectionStoragePort,
     ConversationStoragePort,
     PendingSkillContextStoragePort,
     MessageStoragePort,
