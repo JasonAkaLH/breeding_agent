@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import socket
+import ssl
 import sqlite3
 import subprocess
 import tempfile
@@ -1094,6 +1095,9 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             certs = _generate_mtls_certs(root)
+            untrusted_root = root / "untrusted"
+            untrusted_root.mkdir()
+            untrusted_certs = _generate_mtls_certs(untrusted_root)
             db_path = root / "runtime-sidecar.sqlite"
             last_startup_error: Exception | None = None
             for _ in range(5):
@@ -1144,6 +1148,27 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                         owner="python-runtime",
                     )
                     self.assertEqual(cursor["sequence"], 1)
+                    for label, identity in (
+                        ("untrusted issuer", untrusted_certs),
+                        ("server-only certificate", {
+                            "client_cert": certs["server_cert"],
+                            "client_key": certs["server_key"],
+                        }),
+                    ):
+                        with self.subTest(client_identity=label):
+                            rejected_client = RuntimeSidecarGrpcClient(
+                                endpoint,
+                                mtls_enabled=True,
+                                tls_ca_path=str(certs["ca_cert"]),
+                                tls_cert_path=str(identity["client_cert"]),
+                                tls_key_path=str(identity["client_key"]),
+                                tls_server_name="localhost",
+                            )
+                            with self.assertRaises(ssl.SSLError):
+                                rejected_client.version(timeout_seconds=2)
+                            self.assertEqual(
+                                client.version()["component"], "maf_runtime_sidecar"
+                            )
                     return
                 finally:
                     _terminate_process(process)
