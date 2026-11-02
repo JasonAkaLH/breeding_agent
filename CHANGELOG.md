@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-02：补充将两个锁文件中的quinn-proto升级至最小修复版本0.11.18，清除完整锁文件审计发现的既有HTTP/3可选依赖漏洞；该功能仍未启用。主锁原0.11.15必须随上游切换至Rand 0.10依赖链，新增/替换的随机数依赖仅限该链，Rust最低版本要求1.85低于workspace固定的1.95；fuzz锁原0.11.17仅更新quinn-proto版本/校验和。两个完整锁文件cargo-audit（拒绝unsound告警）均为零漏洞/零unsound，cargo-deny四类检查、Rust全量203项、Clippy/格式及fuzz锁定编译再次通过。复审确认原8条与补充quinn告警均已清除，无安全公告豁免、功能开关或业务代码变更；fuzz既有chacha20 0.10.1 yanked非阻断提示仍保留。未部署或修改compat。License Requirement：quinn-proto及新增随机数传递依赖均为MIT/Apache-2.0，沿用既有许可允许集合。
+
 - 2026-11-02：最小范围修复8条既有RustSec依赖告警：主workspace与独立fuzz锁文件仅升级rustls至0.23.46、rustls-webpki至0.103.16、webpki-root-certs至1.0.10、Tokio至1.53.3、pulldown-cmark至0.13.5，不新增包或改变其他依赖边。真实mTLS回归补齐不可信签发者、serverAuth用途证书作为客户端时的拒绝，并验证拒绝后合法客户端继续可用。Rust全量203项、相关Python集成/契约120项及质量门禁19项通过，格式、Clippy、cargo-deny四类检查、fuzz锁定编译和provenance self-test通过。完整锁文件cargo-audit另发现未启用HTTP/3可选依赖quinn-proto的既有告警（主锁5项、fuzz锁3项），本项未屏蔽或升级该库；fuzz锁另有既有chacha20 0.10.1 yanked警告。业务代码、前端、API、部署及compat未改。License Requirement：五个库无新增许可种类；webpki-root-certs 1.0.10的LICENSE与已审查1.0.7逐字节一致，仅更新既有CDLA-Permissive-2.0例外的精确版本，不扩大允许范围。
 
 - 2026-11-02：以`prod@eb5373f`为基线，按顺序回移提交修复`e2c56a3 → 6ae5ef8`、`67f4bab → 8c5afbb`、`00b4def → ca380b8`，保留来源与生产分支原有差异；未合入其他main功能。隔离候选的后端383项、真实Sidecar/gRPC 27项、三个隔离PostgreSQL库25项（合计435项）、前端全量354项/24文件、typecheck/build、Rust全量203项、Clippy/格式、Ruff及部署文件保护检查通过。初次Python失败为隔离环境词表首次下载被沙箱拦截，预热官方tiktoken临时缓存后重跑通过。cargo-deny的bans/licenses/sources通过，advisories仍因8项既有RustSec公告未通过；对比原prod的289个锁定包版本无变化，不扩展依赖升级范围。三个本地部署命令文件内容、0600权限及ignored/untracked状态保持；未构建镜像、部署或操作服务器数据库，compat未改动。License Requirement：无新增锁定包版本或许可种类，Sidecar沿用已有Chrono 0.4.44许可。
