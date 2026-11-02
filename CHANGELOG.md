@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-02：最小范围修复8条既有RustSec依赖告警：主workspace与独立fuzz锁文件仅升级rustls至0.23.46、rustls-webpki至0.103.16、webpki-root-certs至1.0.10、Tokio至1.53.3、pulldown-cmark至0.13.5，不新增包或改变其他依赖边。真实mTLS回归补齐不可信签发者、serverAuth用途证书作为客户端时的拒绝，并验证拒绝后合法客户端继续可用。Rust全量203项、相关Python集成/契约120项及质量门禁19项通过，格式、Clippy、cargo-deny四类检查、fuzz锁定编译和provenance self-test通过。完整锁文件cargo-audit另发现未启用HTTP/3可选依赖quinn-proto的既有告警（主锁5项、fuzz锁3项），本项未屏蔽或升级该库；fuzz锁另有既有chacha20 0.10.1 yanked警告。业务代码、前端、API、部署及compat未改。License Requirement：五个库无新增许可种类；webpki-root-certs 1.0.10的LICENSE与已审查1.0.7逐字节一致，仅更新既有CDLA-Permissive-2.0例外的精确版本，不扩大允许范围。
+
 - 2026-11-02：以`prod@eb5373f`为基线，按顺序回移提交修复`e2c56a3 → 6ae5ef8`、`67f4bab → 8c5afbb`、`00b4def → ca380b8`，保留来源与生产分支原有差异；未合入其他main功能。隔离候选的后端383项、真实Sidecar/gRPC 27项、三个隔离PostgreSQL库25项（合计435项）、前端全量354项/24文件、typecheck/build、Rust全量203项、Clippy/格式、Ruff及部署文件保护检查通过。初次Python失败为隔离环境词表首次下载被沙箱拦截，预热官方tiktoken临时缓存后重跑通过。cargo-deny的bans/licenses/sources通过，advisories仍因8项既有RustSec公告未通过；对比原prod的289个锁定包版本无变化，不扩展依赖升级范围。三个本地部署命令文件内容、0600权限及ignored/untracked状态保持；未构建镜像、部署或操作服务器数据库，compat未改动。License Requirement：无新增锁定包版本或许可种类，Sidecar沿用已有Chrono 0.4.44许可。
 
 - 2026-10-30：继续加固提交失败与重试：Agent先持久化Run再切换Task为running，Run建立前的异常可原子关闭；仅含运行中file/sheet准备节点的running任务可失败收尾，已有Run和waiting/ready交接继续保留，SQL与Rust两种authority语义一致。其他worker对已交接Run通过既有执行租约观察恢复唤醒；首次CREATED准入丢失首次claim时等待原任务，不再误报503。复审另补齐running准备任务的未知关闭标记保留，只有权威关闭或已交接证明才能完成补偿。新增故障注入、活跃租约、进程退出、真实Sidecar与PostgreSQL双连接回归；相关Python 376项、真实Sidecar 9项、隔离PostgreSQL 14项、Rust全量203项及Clippy/格式、Ruff通过，三轮修复复审后未再发现本次范围内的阻断问题。未部署或修改服务器旧数据，“只用第二份”仍不在范围；无schema或依赖变化。License Requirement：无新增依赖或许可变化。
