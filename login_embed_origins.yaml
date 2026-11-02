@@ -1,0 +1,7 @@
+# 允许通过 iframe 嵌入登录入口的父页面来源，每行一个。
+# 只填写协议、域名及端口，不带页面路径、通配符、账号或密码。
+# 保存后下一次调用登录接口即生效；设置 allowed_origins: [] 可禁止所有嵌入。
+# 当前保留本地联调页面；正式接入时替换为对方门户的实际来源。
+allowed_origins:
+  - "http://localhost:18581"
+  - "http://breeding-dashboard-qa.biobin.com.cn/"

@@ -64,6 +64,12 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ./login_embed_origins.yaml
+        target: /app/login_embed_origins.yaml
+        read_only: true
+        bind:
+          create_host_path: false
       - /data/peihai/vibe-breeding-dev/skills:/app/skill:ro
     ports:
       - "51888:8000"

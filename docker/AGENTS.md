@@ -9,7 +9,7 @@
 ## 相关根目录文件
 
 - `Dockerfile`：backend / frontend / runtime-sidecar 镜像构建入口；backend 仅额外交付 MCP 首次初始化 CLI 和两份指定 PostgreSQL SQL，不打包整个 scripts 目录。
-- `docker-compose.yml`：本地 compose 编排。
+- `docker-compose.yml`：本地 compose 编排；将独立非敏感 `login_embed_origins.yaml` 只读挂载到 backend 同名路径，禁止自动创建缺失源；Dockerfile 同时包含该文件供单独镜像使用。
 - `.dockerignore`：Docker build context 排除规则。
 - `docker_cmd/docker_cmd_dev.md`、`docker_cmd/docker_cmd_prod.md`：Git-ignored 的本地开发 / 生产部署命令记录，整个目录不进入 Docker build context。
 - `docker_cmd/docker_cmd_prod_db_check.md`：首次生产数据库迁移后的独立只读检查；在新版容器启动前执行，保持本地、Git-ignored。

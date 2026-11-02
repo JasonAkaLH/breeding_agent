@@ -8,6 +8,26 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-11-02 增量：第三方用户名登录并打开对话页
+
+新增 `GET /api/v1/auth/login-redirect?username=alice`。第三方在图标点击事件中设置 `iframe.src`，或以链接、
+`window.open`、`location.assign` 打开对话页同源地址；SeedPilot 部署使用
+`/seedpilot/api/v1/auth/login-redirect`，不要直连另一个后端 origin/端口。
+
+成功返回 `200 text/html`：复用现有用户名登录签发 Token，中转页写入既有 localStorage key，
+再以 `location.replace` 在当前窗口进入对应同源应用根路径，iframe 不跳出父页面。它不是 HTTP 302/303，也不供 fetch/Ajax 使用；需开启 JavaScript 与浏览器存储。响应禁止缓存，不新增 Cookie，Token 不进入 URL。
+缺少 username 返回 422；不合法用户名返回 400；存储失败时显示错误且不跳转。
+
+iframe 接入改由独立 `login_embed_origins.yaml` 的 `allowed_origins` 字符串列表维护，每行一个父页面的
+完整 HTTP(S) origin；当前包含本地测试来源 `http://localhost:18581` 和 QA 联调来源，按实际环境维护。保存后下一次登录生效，
+空列表拒绝全部嵌入。文件缺失、格式错误、非字符串项或非法来源返回 503 且不轮换 Token。
+原 `MAF_LOGIN_EMBED_ALLOWED_ORIGINS` 不再使用；Compose 只读挂载文件到 `/app/login_embed_origins.yaml`。
+sandbox 至少允许 `allow-scripts allow-same-origin`；浏览器存储须可用，代理额外的 X-Frame-Options/CSP
+与父页面 frame-src 必须允许该嵌入。跨站 iframe 存储可能按父站点隔离，不假设它与新窗口共享 token。
+
+该入口沿用用户名即身份的内部信任模型，不验证第三方账号或签名；同名重新登录仍替换旧 Token。
+原 `POST /api/v1/auth/login` JSON 契约、Bearer 校验、历史会话恢复及部署配置不变。
+
 ## 2026-09-04 增量：Tool Result统一50,000-token预算与Frontend完整展示
 
 每个新MCP或Skill Tool Result完整返回并完成Backend解析、校验和脱敏后，按发起Call的Agent Run绑定

@@ -127,6 +127,18 @@ Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sid
 
 若通过远端域名对浏览器开放该 Compose 栈，应在反向代理 / LB 层提供 HTTPS；当前认证只通过 `Authorization: Bearer <access-token>` 传递，前端将登录返回的 token 保存在浏览器 localStorage 中并为 REST、multipart upload 与 SSE fetch-stream 注入 Authorization。
 
+iframe 登录入口的父页面白名单独立维护在根目录 `login_embed_origins.yaml`：
+
+```yaml
+allowed_origins:
+  - "https://portal.example"
+```
+
+文件中当前包含本地测试来源 `http://localhost:18581` 和 QA 联调来源；按实际接入环境维护该列表。
+每次登录读取该文件，保存后下一次登录生效；`allowed_origins: []` 禁止全部嵌入。
+文件缺失、格式或来源非法返回 503，且不签发新 token。旧 `MAF_LOGIN_EMBED_ALLOWED_ORIGINS` 环境变量不再使用。
+Compose 将该非敏感文件只读挂载到 `/app/login_embed_origins.yaml`；单独运行镜像时可将宿主机维护文件只读挂载到同一路径。
+
 运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、Skill runtime 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 仍可通过显式 `config` dict 注入覆盖，不应在业务节点执行阶段重复读取 `config.yaml`。
 MySQL 只读连接配置也放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
 认证相关部署配置不得写入 tracked 文件：跨站 REST API 只通过 `MAF_API_CORS_ALLOWED_ORIGINS` 配置逗号分隔的显式 origin allowlist，不允许 `*`；登录 token 的持久 HMAC key 由 `/run/secrets/maf-master.key` 的 Auth token 领域子密钥派生，不再接受独立文本 pepper，正常 token refresh 不改变根密钥，也不影响 MCP credential。不要把 token 放入 URL query 或业务请求体。

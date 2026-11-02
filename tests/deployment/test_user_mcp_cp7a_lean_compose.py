@@ -142,6 +142,19 @@ class UserMCPCP7ALeanComposeTest(unittest.TestCase):
         self.assertIn("/config.yaml", dockerignore)
         self.assertNotIn("COPY config.yaml", dockerfile)
 
+    def test_login_embed_yaml_is_shipped_and_mounted_read_only(self) -> None:
+        dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+        self.assertIn("COPY login_embed_origins.yaml ./login_embed_origins.yaml", dockerfile)
+        compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+        mount = next(
+            volume for volume in compose["services"]["backend"]["volumes"]
+            if isinstance(volume, dict) and volume.get("target") == "/app/login_embed_origins.yaml"
+        )
+        self.assertEqual(mount["source"], "./login_embed_origins.yaml")
+        self.assertEqual(mount["type"], "bind")
+        self.assertIs(mount["read_only"], True)
+        self.assertIs(mount["bind"]["create_host_path"], False)
+
     def test_runtime_sidecar_target_is_minimal_and_semantically_probed(self) -> None:
         dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
         self.assertIn("FROM rust:1.95-bookworm AS runtime-sidecar-build", dockerfile)

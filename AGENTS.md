@@ -7,6 +7,7 @@
 ## 项目结构速览
 
 常用入口按大致模块定位：
+- `login_embed_origins.yaml`：iframe 登录入口的独立父页面来源白名单；仅含非敏感 HTTP(S) origin，修改后下一次登录生效，空列表禁止嵌入。
 - `src/api/`：FastAPI 应用、API 路由、DTO、SSE 与运行时装配。
 - `src/core/`：共享 contract、基础模型、枚举与通用错误。
 - `src/auth/`、`src/state/`、`src/storage/`：鉴权、运行状态与持久化存储。

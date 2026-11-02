@@ -8,7 +8,7 @@
 </style></head>
 <body><a class="skip" href="#quickstart">跳到接入指南</a><header class="topbar"><a class="brand" href="#overview">SeedPilot <span>API DOCUMENTATION</span></a><div class="toplinks"><a href="#reference">接口参考</a><a data-doc-link="openapi.json" href="openapi.json">OpenAPI ↗</a><span class="muted">main · /api/v1</span></div></header>
 <div class="layout"><aside class="sidebar" aria-label="文档目录"><details class="mobile-nav"><summary>阅读目录</summary><a href="#quickstart">快速开始</a><a href="#conventions">认证与通用约定</a><a href="#chat">聊天与任务</a><a href="#streaming">SSE 与断线恢复</a><a href="#interrupts">补充输入与审批</a><a href="#files">文件与产物</a><a href="#mcp">MCP 接入</a><a href="#checklist">联调检查</a><a href="#reference">完整接口参考</a><a href="#schemas">数据结构</a><a href="#maintenance">来源与更新</a></details><div class="desktop-nav"><p class="nav-title">接入指南</p><a href="#quickstart">快速开始</a><a href="#conventions">认证与通用约定</a><a href="#chat">聊天与任务</a><a href="#streaming">SSE 与断线恢复</a><a href="#interrupts">补充输入与审批</a><a href="#files">文件与产物</a><a href="#mcp">MCP 接入</a><a href="#checklist">联调检查</a><a href="#reference">完整接口参考</a><a href="#schemas">数据结构</a><a href="#maintenance">来源与更新</a><p class="nav-title">按资源查接口</p><div id="endpoint-nav"></div></div></aside><main>
-<header class="hero" id="overview"><p class="eyebrow">FOR FRONTEND DEVELOPERS</p><h1>育种助手 API 文档</h1><p class="lead">从第一段对话到完整应用。按接入顺序连接认证、任务、流式事件、文件与工具，把每一步的请求和界面状态对应起来。</p><div class="hero-actions"><a class="primary" href="#quickstart">开始接入 →</a><a href="#reference">查找接口</a><a href="#streaming">理解事件流</a></div><p class="meta">33 个 HTTP 操作 · TypeScript / fetch 示例 · 核对日期 2026-09-24</p></header>
+<header class="hero" id="overview"><p class="eyebrow">FOR FRONTEND DEVELOPERS</p><h1>育种助手 API 文档</h1><p class="lead">从第一段对话到完整应用。按接入顺序连接认证、任务、流式事件、文件与工具，把每一步的请求和界面状态对应起来。</p><div class="hero-actions"><a class="primary" href="#quickstart">开始接入 →</a><a href="#reference">查找接口</a><a href="#streaming">理解事件流</a></div><p class="meta">34 个 HTTP 操作 · TypeScript / fetch 示例 · 核对日期 2026-11-02</p></header>
 <noscript><p class="noscript">请启用 JavaScript 使用接口检索和结构参考。下方接入指南及完整 TypeScript 示例仍可阅读；也可直接查看服务端 openapi.json。</p></noscript>
 <section class="guide" id="quickstart"><p class="eyebrow">01 / START HERE</p><h2>先跑通一段完整对话</h2>
 <p class="lead">准备一个测试用户名和后端地址。先完成下面四步，再接入附件、Skill 和 MCP。</p>
@@ -210,6 +210,21 @@ export async function firstConversation(
 <h3>认证与隔离</h3><p><code>POST /auth/login</code> 只提交 username；公开能力接口无需认证，其他业务接口都要求 <code>Authorization: Bearer &lt;access_token&gt;</code>。这里的短路径均省略了 <code>/api/v1</code>。登录名为 3–64 位字母、数字、下划线、点或短横线。</p>
 <ul><li>身份由 Token 决定，业务请求的 body、metadata、URL 中不要传 username、token、owner 等身份字段。</li><li>同一用户名登录或刷新 Token 会替换旧 Token。收到 HTTP 401 或 SSE <code>auth.invalidated</code> 时清理登录态并重新登录。</li><li>Token 生命周期以服务端当前性校验为准；接口没有独立 refresh_token，也不返回 expires_in，不要自行推算过期时间。</li><li>所有业务 ID 按不透明字符串处理；URL 参数用 <code>encodeURIComponent</code>。不要从 task_id、node_id 或 artifact_id 推导业务含义。</li></ul>
 <h3>浏览器访问与 CORS</h3><p>优先通过同源 <code>/seedpilot/api/…</code> 代理接入。跨域直连时，服务端需在 <code>MAF_API_CORS_ALLOWED_ORIGINS</code> 配置准确的前端 origin（含协议和端口）；默认不开放跨域，不支持 <code>*</code>，不依赖 Cookie。允许头为 Authorization、Content-Type、Accept。</p>
+<h3>第三方页面打开已登录对话界面</h3>
+<p>点击第三方对话图标时，以浏览器导航打开 <code>GET /api/v1/auth/login-redirect?username=alice</code>。部署在 SeedPilot 子路径下，使用对话页同源的 <code>/seedpilot/api/v1/auth/login-redirect</code>，不要使用后端直连端口。该入口只接收用户名，沿用现有内部用户名登录规则，不验证第三方账号或签名；同名登录会使旧 Token 失效。</p>
+<div class="codebox"><div class="codebar"><span>第三方图标的点击处理函数</span></div><pre><code>const loginUrl = new URL('/seedpilot/api/v1/auth/login-redirect', 'https://YOUR_SEEDPILOT_HOST');
+loginUrl.searchParams.set('username', username);
+document.querySelector&lt;HTMLIFrameElement&gt;('#seedpilot-frame')!.src = loginUrl.href;
+// 页面提供：&lt;iframe id="seedpilot-frame" title="育种助手"
+//   sandbox="allow-scripts allow-same-origin allow-forms allow-downloads"&gt;&lt;/iframe&gt;
+// 需要新窗口时也可使用 window.open(loginUrl.href, '_blank', 'noopener,noreferrer')。</code></pre></div>
+<p>成功响应为 <code>200 text/html</code> 登录中转页：写入同源浏览器登录状态后，通过 <code>location.replace</code> 跳转到对话页；不是 HTTP 302/303。可设置 iframe.src 或通过浏览器直接打开；不使用 fetch/Ajax 调用，不把 Token 放入 URL。跳转只发生在当前窗口，iframe 不会跳出父页面。浏览器需启用 JavaScript 和本地存储；存储失败时中转页显示错误并停止跳转。不接受自定义跳转目标；根路径开发环境回到 <code>/</code>，SeedPilot 部署回到 <code>/seedpilot/</code>。</p>
+<p>内嵌接入时，维护后端根目录的独立文件 <code>login_embed_origins.yaml</code>，在 <code>allowed_origins</code> 列表中每行填写一个父页面来源，必须包含协议、域名及非默认端口，不能带路径、通配符或账号密码。当前文件包含本地测试来源 <code>http://localhost:18581</code> 和 QA 联调来源；按实际接入环境维护该列表。保存后下一次登录生效，无需重启；设置 <code>allowed_origins: []</code> 禁止全部嵌入。文件缺失、YAML/结构错误或非法来源返回 503，且不签发/轮换 Token。原 <code>MAF_LOGIN_EMBED_ALLOWED_ORIGINS</code> 环境变量不再使用。此配置仅控制登录中转页的 <code>frame-ancestors</code>；若网关对登录入口或前端页面另加了 <code>X-Frame-Options</code> / CSP，也须与允许的来源一致，不能继续使用 DENY/SAMEORIGIN。父页面的 <code>frame-src</code> 也需允许平台来源。</p>
+<div class="codebox"><div class="codebar"><span>login_embed_origins.yaml</span></div><pre><code>allowed_origins:
+  - "https://portal.example"
+  - "https://portal.example:8443"</code></pre></div>
+<p>容器内路径为 <code>/app/login_embed_origins.yaml</code>。Compose 已只读挂载仓库中的同名文件；单独 docker run 时也应将维护文件只读挂载到该路径，避免更新白名单需要重新构建镜像。</p>
+<p>若 iframe 设置 sandbox，至少保留 <code>allow-scripts allow-same-origin</code>；下载文件另需 <code>allow-downloads</code>。需允许内嵌页面使用浏览器存储；跨站存储可能按父站点分区，不假设新窗口与 iframe 共享登录状态。本机 Chrome 已验证跨站内嵌登录、真实多轮对话和 iframe 内刷新；其他浏览器及客户端 WebView 仍需按实际容器策略联调。</p>
 <h3>统一处理三种错误 detail</h3><p>HTTP 错误可能返回字符串、带 code 的对象或字段校验数组。先读取 HTTP status，再解析 detail；代理错误还可能是纯文本/HTML。</p><div class="codebox"><div class="codebar"><span>JSON · 三种独立响应形态</span><button type="button" data-copy="error-shapes">复制</button></div><pre><code id="error-shapes">[
   {
     &quot;detail&quot;: &quot;Authentication required&quot;
@@ -320,7 +335,7 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
 <h3>MCP 事件与控件</h3><div class="table-wrap"><table><thead><tr><th>事件</th><th>UI 行为</th></tr></thead><tbody><tr><td>mcp.server_routed</td><td>显示选中的服务。</td></tr><tr><td>mcp.discovery_started / completed / failed</td><td>发现中 / 成功 / 失败状态。</td></tr><tr><td>mcp.queue_entered / queue_left</td><td>排队提示；离队后继续观察调用。</td></tr><tr><td>mcp.tool_approval_required / decided</td><td>按 interrupt_id 展示/关闭对应 Tool 授权；决定可能早于 POST 响应。</td></tr><tr><td>mcp.tool_call_started / still_running / completed / failed / cancelled</td><td>按 safe_call_ref 维护调用状态；still_running 可提供继续等待或取消该调用。</td></tr><tr><td>mcp.input_required / input_submitted</td><td>展示并提交服务端定义的输入表单。</td></tr><tr><td>mcp.remote_task_status_changed</td><td>更新远端 Task 状态；不把远端子任务完成等同于本地完整对话结束。</td></tr><tr><td>mcp.runtime_unavailable</td><td>提示没有可用服务，按任务结果收尾。</td></tr><tr><td>mcp.result_artifact_projection</td><td>更新结果保存提示；不会延长已终止 SSE 的生命周期。</td></tr><tr><td>mcp.execution_status_unknown</td><td>副作用结果未知：保持失败/需人工确认，不自动重放。</td></tr><tr><td>mcp.execution_status_resolution / mcp.late_terminal_result_recovered</td><td>恢复到迟到的结果也不把历史失败 Task 复活；遵守 no_replay、task_remains_failed。</td></tr></tbody></table></div>
 <h3>MCP 事件里读取哪些字段</h3><p>以下字段按事件类型和执行阶段返回，缺失时保留已有状态或显示占位。引用字段只用于关联/控制，不应拆解成业务信息。</p><div class="table-wrap"><table><thead><tr><th>事件组</th><th>payload 中的展示/关联字段</th></tr></thead><tbody><tr><td>发现工具</td><td>server_display_name；available_tool_count / tool_count；retried / will_retry；error_code / code。</td></tr><tr><td>排队</td><td>server_display_name；position / queue_position。</td></tr><tr><td>Tool 审批</td><td>interrupt_id、safe_call_ref、server_display_name、tool_display_name（或 tool_name）；decided 事件还含 decision。</td></tr><tr><td>Tool 调用进度</td><td>safe_call_ref（旧事件可为 call_ref）、server_display_name、tool_display_name、elapsed_seconds、next_prompt_after_seconds、error_code。</td></tr><tr><td>输入请求</td><td>interrupt_id、safe_call_ref、question、field_names；完整输入约束从 interrupts 的 required_fields 获取。</td></tr><tr><td>远端 Task</td><td>safe_task_ref（旧事件可为 remote_task_ref）、status、server_display_name、tool_display_name。</td></tr><tr><td>产物保存状态</td><td>schema=maf.user_mcp.result_artifact_projection.v1、safe_call_ref、status、reason_code、artifact_count；对应数据结构见 MCPResultArtifactProjectionResponse。</td></tr></tbody></table></div><p>复杂 MCP 终态按事件 payload 的版本与因果引用校验；参考仓库 <code>frontend/src/domain/taskEvents.ts</code> 的既有 reducer。失配时重新同步，不把缺失记录“补猜”为成功。首版 UI 可以先显示安全状态和错误提示，再接入完整调用可视化。</p>
 </section><section class="guide" id="checklist"><p class="eyebrow">08 / READY TO INTEGRATE</p><h2>交付前跑一遍这些场景</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>应看到的结果</th></tr></thead><tbody><tr><td>首次普通对话</td><td>登录、202、SSE、最终历史消息闭环完成。</td></tr><tr><td>页面刷新 / SSE 断网</td><td>恢复同一 task；历史重放不生成重复气泡，思考内容允许不完整。</td></tr><tr><td>另一个窗口重新登录</td><td>旧 Token 请求 401 或旧流收到 auth.invalidated，UI 返回登录。</td></tr><tr><td>发送期间重复点击</td><td>同一逻辑消息只用一个 client_message_id，未生成重复任务。</td></tr><tr><td>Skill 缺参 / Excel 选择</td><td>正确显示 open interrupt，回答后继续同一 task，澄清时保留等待。</td></tr><tr><td>连续 MCP 审批</td><td>每次 Tool 授权按 interrupt_id 区分，旧响应不覆盖新审批。</td></tr><tr><td>停止任务 / 单独停止订阅</td><td>前者跟进任务取消终态；后者只断开浏览器连接。</td></tr><tr><td>删除、下载与 204</td><td>没有对空 body 解析 JSON；文件使用 Bearer 下载。</td></tr><tr><td>根路径 / seedpilot 子路径</td><td>示例地址与 OpenAPI/更新日志链接均指向正确入口。</td></tr><tr><td>服务不可用 / 5xx</td><td>保留草稿和已获得的 task_id，不静默重复写请求。</td></tr></tbody></table></div></section><section class="guide" id="reference"><p class="eyebrow">09 / REFERENCE</p><h2>完整接口参考</h2>
-<p>所有 33 个 HTTP 操作都在这里。请求/响应结构来自本页随代码导出的 OpenAPI 快照；鉴权、状态码差异和业务错误由路由实现补充。参数标记“可省略”与“可为 null”是两回事。示例数据均为演示值，资源 ID 和模型/能力选项需替换为实际返回。</p>
+<p>所有 34 个 HTTP 操作都在这里。请求/响应结构来自本页随代码导出的 OpenAPI 快照；鉴权、状态码差异和业务错误由路由实现补充。参数标记“可省略”与“可为 null”是两回事。示例数据均为演示值，资源 ID 和模型/能力选项需替换为实际返回。</p>
 <div class="reference-tools"><label class="search-label" for="endpoint-search">查找接口<input id="endpoint-search" type="search" placeholder="搜索路径、用途或参数，如 upload、SSE、routing_mode"></label><label for="group-filter">分类<select id="group-filter"><option value="all">全部接口</option><option value="auth">认证</option><option value="config">配置与能力</option><option value="conversations">会话与消息</option><option value="tasks">任务与事件</option><option value="files">文件与产物</option><option value="mcp">MCP</option></select></label><label for="code-language">请求示例<select id="code-language"><option value="fetch">TypeScript / fetch</option><option value="curl">curl</option></select></label><button id="collapse-all" type="button">收起全部</button></div><p id="result-count" role="status" class="muted"></p><div id="endpoints"></div><p id="empty-results" hidden>没有匹配的接口。试试路径、字段名或切换“全部接口”。</p>
 </section><section class="guide" id="schemas"><p class="eyebrow">10 / DATA SHAPES</p><h2>字段结构与嵌套对象</h2><p>点击接口中的类型链接可跳到对应结构。请求对象的 extra=forbid 会拒绝未声明字段；metadata 等映射仍受业务校验约束。可选字段可能省略或返回 null，请依据类型处理。</p><label for="schema-search">查找数据结构<input id="schema-search" type="search" placeholder="例如 Message、Artifact、MCP"></label><div id="schema-list"></div></section><section class="guide" id="maintenance"><p class="eyebrow">SOURCE & UPDATES</p><h2>版本、来源与维护</h2>
 <p>本版依据 2026-09-24 的 main 源码重写，面向当前 Agent Loop 接口。部署环境可能落后于源码；联调前核对服务端 OpenAPI 与本文说明。文档不保存真实 Token、数据库配置或部署密钥。</p><div class="link-row"><a data-doc-link="openapi.json" href="openapi.json">打开服务端 OpenAPI</a><a data-doc-link="api-doc/API更新日志.md" href="api-doc/API更新日志.md">API 更新日志</a><a data-doc-link="docs" href="docs">Swagger 调试页</a></div>
@@ -355,6 +370,46 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuthTokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login-redirect": {
+      "get": {
+        "summary": "Login Redirect",
+        "description": "Open through the frontend origin to log in and navigate to its chat page.",
+        "operationId": "login_redirect_api_v1_auth_login_redirect_get",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -4182,6 +4237,26 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
   },
   {
     "method": "GET",
+    "path": "/api/v1/auth/login-redirect",
+    "title": "用户名登录并打开对话页",
+    "group": "auth",
+    "when": "第三方页面的对话图标需要直接打开育种助手时。",
+    "response": null,
+    "body": null,
+    "notes": "通过 iframe.src、链接或 window.open 打开对话页同源入口；iframe 需在 login_embed_origins.yaml 的 allowed_origins 列表中允许父页面来源。200 HTML 中转页写入本地登录状态后在当前窗口自动跳转，不是 HTTP 302/303；不能用 fetch/Ajax。用户名规则及同名 Token 替换规则与 POST 登录一致。只认用户名，不校验第三方身份。",
+    "errors": "400：用户名格式不合法；422：缺少 username；503：白名单文件缺失、格式或来源非法。未允许的父页面被浏览器拒绝嵌入；浏览器存储不可用时显示错误并停止跳转。",
+    "next": "浏览器自动进入同源 /seedpilot/（根路径开发环境为 /），前端校验登录态并加载用户会话。",
+    "success": [
+      "200"
+    ],
+    "public": true,
+    "query": {
+      "username": "frontend_demo"
+    },
+    "id": "op-get-api-v1-auth-login-redirect"
+  },
+  {
+    "method": "GET",
     "path": "/api/v1/auth/me",
     "title": "校验登录态",
     "group": "auth",
@@ -5304,7 +5379,7 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
     el.innerHTML=`<summary><span class="method ${doc.method}">${doc.method}</span><span class="endpoint-title">${escape(doc.title)}<span class="endpoint-path">${escape(doc.path)}</span></span><span class="auth-tag">${doc.public?'公开':'Bearer'} · ${status}</span></summary><div class="endpoint-body"><h3>何时调用</h3><p>${escape(doc.when)} ${escape(doc.notes)}</p><h3>请求参数</h3><p class="muted">${doc.public?'无需认证。':'Header：Authorization: Bearer &lt;access_token&gt;。'} ${mime?escape(mime):'无请求体。'}</p>${fieldTable(mime?body[mime].schema:{},op.parameters)}<h3>请求与返回示例</h3><div class="request-grid">${codebox('request-'+doc.id,'TypeScript / fetch')}${codebox('response-'+doc.id,'成功响应 · '+status)}</div><h3>返回结构</h3><p>${response?type(response):doc.path.endsWith('/events')?'SSE 事件流，见 <a href="#streaming">事件格式与恢复</a>。':doc.path.endsWith('/download')?'二进制文件流。':'无 JSON 响应体。'}</p><h3>失败时怎么处理</h3><p>${doc.public?'':'401：登录已失效。 '}${escape(doc.errors || '参数校验及通用错误见“通用约定”。')}</p>${doc.next?'<h3>下一步</h3><p>'+escape(doc.next)+'</p>':''}<p><a href="#reference">返回接口检索 ↑</a></p></div>`;
     endpointRoot.append(el);
     holders.set(doc.id,el);
-    const responseText=doc.response===null?(doc.path.endsWith('/events')?'Content-Type: text/event-stream\n\n见 SSE 章节的完整事件格式。':doc.path.endsWith('/download')?'Content-Type: <artifact.mime_type>\nContent-Disposition: attachment; filename="…"\n\n<binary>':'HTTP 204 No Content\n（无响应体）'):json(doc.response);
+    const responseText=doc.path.endsWith('/login-redirect')?'HTTP 200 OK\nContent-Type: text/html; charset=utf-8\n\n保存浏览器登录状态后自动跳转到同源对话页。':doc.response===null?(doc.path.endsWith('/events')?'Content-Type: text/event-stream\n\n见 SSE 章节的完整事件格式。':doc.path.endsWith('/download')?'Content-Type: <artifact.mime_type>\nContent-Disposition: attachment; filename="…"\n\n<binary>':'HTTP 204 No Content\n（无响应体）'):json(doc.response);
     document.querySelector('#response-'+doc.id).textContent=responseText;
     doc.parameters=[...(op.parameters||[]).map(p=>p.name),...Object.keys(resolve(mime?body[mime].schema:{}).properties||{})].join(' ').toLowerCase();
     doc.search=(doc.title+' '+doc.method+' '+doc.path+' '+doc.when+' '+doc.notes+' '+json(op)+' '+json(doc.body)+' '+el.textContent).toLowerCase();
@@ -5346,6 +5421,7 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
       if(binary) lines.push("  -o 'result.csv'");
       return lines.join(' \\\n');
     }
+    if(doc.path.endsWith('/login-redirect')) return `// 在图标点击处理函数中设置 iframe.src；后端需允许父页面来源。\ndocument.querySelector<HTMLIFrameElement>('#seedpilot-frame')!.src = ${JSON.stringify(url)};`;
     if(stream) return `// createApi / terminalEvents 来自完整 TypeScript 示例。\nconst api = createApi(${JSON.stringify(base)});\napi.setToken('YOUR_ACCESS_TOKEN');\nconst controller = new AbortController();\n// events 支持 UTF-8 / 分帧 / auth.invalidated。\nfor await (const event of api.events('task_example', controller.signal)) {\n  // 按 event_id 去重，再处理等待、reasoning 和终态。\n  console.log(event);\n  if (terminalEvents.has(event.event_type)) break;\n}`;
     const headers={};if(!doc.public)headers.Authorization='Bearer YOUR_ACCESS_TOKEN';if(doc.body!==null)headers['Content-Type']='application/json';
     let lines=[];

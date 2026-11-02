@@ -6,7 +6,7 @@
 
 - `CentOS容器部署适配评估报告.md`：CentOS 版本待定、使用容器的部署适配评估；区分 Stream 9/10 + Docker 的 3–5 人日基线、Podman/旧系统等条件性增量、验收要求与未实测边界，仅文档。
 - `CentOS容器部署适配评估报告.pdf`：上述报告的 PDF 导出版，含页码、跨页表头、网页链接与仓库文件引用附录；正文以 Markdown 源文为准。
-- `api/`：前端接入手册 `api-doc.html`、可复制/下载的 `frontend-example.ts` 和 API 更新日志；HTML 内嵌当前 OpenAPI 快照，由 `scripts/update_api_doc_contract.py` 同步，接口语义以路由/DTO/runtime 为准。
+- `api/`：前端接入手册 `api-doc.html`、可复制/下载的 `frontend-example.ts` 和 API 更新日志；HTML 内嵌当前 OpenAPI 快照，由 `scripts/update_api_doc_contract.py` 同步，接口语义以路由/DTO/runtime 为准；包含第三方用户名登录跳转入口的同源浏览器接入示例。
 - `prd/`：产品 / 架构 PRD，按 backend、frontend、rust、MCP 等主题组织。
 - `runbooks/`：运维与部署运行手册。
 - `runbooks/mcp-first-production-enablement.md`：新用户 MCP 功能的一次性管理员 check/apply、显式约束/角色前置条件、精确重试与常驻凭据边界。

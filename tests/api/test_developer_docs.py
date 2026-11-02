@@ -90,7 +90,7 @@ class DeveloperDocsContractTest(unittest.TestCase):
 
     def test_authentication_is_explicit_despite_missing_openapi_security_metadata(self):
         public = {(item['method'], item['path']) for item in self.entries if item['public']}
-        self.assertEqual(public, {('POST', '/api/v1/auth/login'), ('GET', '/api/v1/capabilities')})
+        self.assertEqual(public, {('POST', '/api/v1/auth/login'), ('GET', '/api/v1/auth/login-redirect'), ('GET', '/api/v1/capabilities')})
         self.assertIn('Authorization: Bearer', self.source)
 
     def test_static_anchors_and_frontend_guide_sections_are_complete(self):

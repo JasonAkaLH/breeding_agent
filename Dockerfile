@@ -93,6 +93,7 @@ COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY src ./src
+COPY login_embed_origins.yaml ./login_embed_origins.yaml
 COPY docs/api ./docs/api
 COPY scripts/initialize_mcp_first_production.py ./scripts/initialize_mcp_first_production.py
 COPY scripts/postgres/user_mcp_first_enablement_constraints.sql \
