@@ -23,8 +23,11 @@ class AuthLoginRedirectAPITest(APITestCase):
         config_path.start()
         self.addCleanup(config_path.stop)
 
-    def write_embed_origins(self, origins: object) -> None:
-        self.embed_config_path.write_text(yaml.safe_dump({"allowed_origins": origins}), encoding="utf-8")
+    def write_embed_origins(self, origins: object, *, enabled: bool | None = None) -> None:
+        config = {"allowed_origins": origins}
+        if enabled is not None:
+            config["enabled"] = enabled
+        self.embed_config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
     async def test_browser_login_issues_a_current_token_and_disables_caching(self) -> None:
         response = await self.client.get("/api/v1/auth/login-redirect", params={"username": " alice "})
@@ -75,6 +78,41 @@ class AuthLoginRedirectAPITest(APITestCase):
         )
         self.assertEqual(me.status_code, 200)
 
+    async def test_disabled_allowlist_preserves_login_handoff_and_other_response_protections(self) -> None:
+        for origins in ([], ["https://portal.example"]):
+            with self.subTest(origins=origins):
+                self.write_embed_origins(origins, enabled=False)
+                response = await self.client.get("/api/v1/auth/login-redirect", params={"username": "alice"})
+                self.assertEqual(response.status_code, 200, response.text)
+                policy = response.headers["content-security-policy"]
+                nonce = re.search(r'<script nonce="([\w-]+)">', response.text)[1]
+                self.assertEqual(policy, f"default-src 'none'; script-src 'nonce-{nonce}'; base-uri 'none'")
+                self.assertNotIn("x-frame-options", response.headers)
+                self.assertEqual(response.headers["cache-control"], "no-store")
+                self.assertEqual(response.headers["referrer-policy"], "no-referrer")
+                token = re.search(r'"(maf_tok_[\w-]+)"', response.text)[1]
+                me = await self.client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+                self.assertEqual(me.status_code, 200)
+                self.assertEqual(me.json()["user"]["username"], "alice")
+                if shutil.which("node"):
+                    browser = self._execute_handoff(
+                        response.text, "https://chat.example/seedpilot/api/v1/auth/login-redirect?username=alice",
+                    )
+                    self.assertEqual(browser["redirect"], "https://chat.example/seedpilot/")
+                    self.assertEqual(browser["storage"], {"maf.frontend.access_token": token})
+
+    async def test_allowlist_can_be_disabled_and_restored_on_next_login(self) -> None:
+        for enabled, expected in ((True, "https://portal.example"), (False, None), (True, "https://portal.example")):
+            with self.subTest(enabled=enabled):
+                self.write_embed_origins(["https://portal.example"], enabled=enabled)
+                response = await self.client.get("/api/v1/auth/login-redirect", params={"username": "alice"})
+                self.assertEqual(response.status_code, 200, response.text)
+                policy = response.headers["content-security-policy"]
+                if expected is None:
+                    self.assertNotIn("frame-ancestors", policy)
+                else:
+                    self.assertTrue(policy.endswith(f"frame-ancestors {expected}"))
+
     async def test_yaml_edits_apply_on_next_login_and_override_the_removed_env_setting(self) -> None:
         with patch.dict("os.environ", {"MAF_LOGIN_EMBED_ALLOWED_ORIGINS": "https://old-env.example"}):
             for origins, expected in (
@@ -95,6 +133,10 @@ class AuthLoginRedirectAPITest(APITestCase):
             "{}", "[]", "allowed_origins: null", "allowed_origins: https://portal.example",
             "allowed_origins: [123]", "allowed_origins: [true]", "allowed_origins: ['']",
             "allowed_origins: []\nunknown: true",
+            "allowed_origins: []\nenabled: 'false'", "allowed_origins: []\nenabled: null",
+            "allowed_origins: []\nenabled: 0", "allowed_origins: []\nenabled: []",
+            "enabled: false", "enabled: false\nallowed_origins: ['*']",
+            "enabled: false\nallowed_origins: null",
         )
         for document in invalid_documents:
             with self.subTest(document=document):

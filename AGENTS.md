@@ -7,7 +7,8 @@
 ## 项目结构速览
 
 常用入口按大致模块定位：
-- `login_embed_origins.yaml`：iframe 登录入口的独立父页面来源白名单；仅含非敏感 HTTP(S) origin，修改后下一次登录生效，空列表禁止嵌入。
+- `平台内嵌登录接口文档.md`：面向 BAISeeds开发者的简明调用说明，仅含登录地址、用户名规则、iframe 示例及使用注意事项。
+- `login_embed_origins.yaml`：iframe 登录入口的独立父页面来源白名单；`enabled: false` 临时关闭来源限制，`true`（省略时默认）恢复白名单；启用时空列表禁止嵌入，修改后下一次登录生效。
 - `src/api/`：FastAPI 应用、API 路由、DTO、SSE 与运行时装配。
 - `src/core/`：共享 contract、基础模型、枚举与通用错误。
 - `src/auth/`、`src/state/`、`src/storage/`：鉴权、运行状态与持久化存储。

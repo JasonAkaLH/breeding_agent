@@ -20,11 +20,18 @@ router = APIRouter()
 _LOGIN_EMBED_ORIGINS_PATH = Path(__file__).resolve().parents[3] / "login_embed_origins.yaml"
 
 
-def _login_frame_ancestors() -> str:
+def _login_frame_ancestors() -> str | None:
     try:
         config = yaml.safe_load(_LOGIN_EMBED_ORIGINS_PATH.read_text(encoding="utf-8"))
-        if not isinstance(config, dict) or set(config) != {"allowed_origins"}:
+        if (
+            not isinstance(config, dict)
+            or "allowed_origins" not in config
+            or set(config) - {"allowed_origins", "enabled"}
+        ):
             raise ValueError("Expected an allowed_origins mapping")
+        enabled = config.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError("Expected a boolean enabled flag")
         if not isinstance(config["allowed_origins"], list):
             raise ValueError("Expected an origin list")
         origins: list[str] = []
@@ -47,6 +54,8 @@ def _login_frame_ancestors() -> str:
             if not valid:
                 raise ValueError("Invalid origin")
             origins.append(f"{parsed.scheme}://{parsed.netloc}")
+        if not enabled:
+            return None
         return " ".join(dict.fromkeys(origins)) or "'none'"
     except (OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
         raise HTTPException(
@@ -74,6 +83,9 @@ async def login_redirect(username: str, request: Request) -> HTMLResponse:
     result = await login(LoginRequest(username=username), request)
     nonce = secrets.token_urlsafe(16)
     token_json = json.dumps(result.access_token).replace("<", "\\u003c")
+    policy = f"default-src 'none'; script-src 'nonce-{nonce}'; base-uri 'none'"
+    if frame_ancestors is not None:
+        policy += f"; frame-ancestors {frame_ancestors}"
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="zh-CN">
@@ -97,10 +109,7 @@ try {{
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": (
-                f"default-src 'none'; script-src 'nonce-{nonce}'; "
-                f"base-uri 'none'; frame-ancestors {frame_ancestors}"
-            ),
+            "Content-Security-Policy": policy,
         },
     )
 

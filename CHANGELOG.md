@@ -2,6 +2,14 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-03：按指定路径将开发部署命令中的 `LOGIN_EMBED_ORIGINS_FILE` 固定为宿主机 `/data/peihai/login_embed_origins_dev.yaml`，继续只读挂载至后端 `/app/login_embed_origins.yaml`；首次初始化和已有文件不覆盖逻辑保持。受保护部署文件已作仓库外0600备份，确认仅修改开发文件一处赋值、Shell语法通过，生产文件未变且三份文件仍为0600/ignored/untracked。仅更新本地部署命令，未操作服务器或发布新镜像。License Requirement：无新增依赖或许可变化。
+
+- 2026-11-03：为 iframe 联调新增 `login_embed_origins.yaml` 布尔开关 `enabled`，当前设为 `false`，临时取消登录页父来源限制；改回 `true` 或省略字段恢复原有白名单，原域名列表保留。关闭时仅省略 frame-ancestors，其余 CSP、Token 和跳转逻辑保持；每次登录重新读取配置，错误配置仍在签发前返回503。补充开关切换、旧配置兼容及非法类型回归，同步维护文档与目录索引。登录相关36项、文档契约7项及文档UI 16项通过，Ruff和diff检查通过；本地Chrome从未列入白名单的父来源127.0.0.1:18581成功登录并在iframe内完成真实模型对话。尚未构建新镜像或部署，已发布的0.1.40不支持此字段。License Requirement：无新增依赖或许可变化。
+
+- 2026-11-02：新增根目录 `第三方平台内嵌登录接口文档.md`，供 BAISeeds开发者调用 iframe 用户名登录接口。按 humanizer 简化为登录地址、用户名规则、前端调用示例及必要注意事项，移除平台维护、部署和后台排障内容；保留已验证的 HTML/JavaScript 示例，实际平台地址使用明确占位。License Requirement：仅文档，无新增依赖或许可变化。
+
+- 2026-11-02：基于 `main@422a077` 构建并发布开发后端 `backend-dev:0.1.40`（linux/amd64）；OCI index digest 为 `sha256:3e7f77ecefe5f5e5cdbe02ccd4ef45110f0005e0d54a68e459b50be35c4d8550`，amd64 manifest 为 `sha256:ea405fd49e678d5ad181222a7bf6cbef66d9fbc2820be0586cb06dcf2c5c64b9`，保留构建 attestation。镜像内 293 个交付文件与源码哈希一致，不含本地 config.yaml、docker_cmd 或 tests；隔离 SQLite 容器 healthy，API 文档、用户名跳转登录、Bearer 校验、非法用户名及退出失效通过，按远端摘要回拉后文件复验一致。开发部署文件先作仓库外0600备份，再更新5处后端版本并补齐独立白名单首次初始化、容器校验与只读挂载；隔离实测确认已有白名单不覆盖，Shell语法及三个受保护文件0600/ignored/untracked检查通过。发布完成、服务器未部署；Frontend和Runtime Sidecar版本及生产部署文件不变。License Requirement：复用既有镜像构建与依赖，无新增依赖或许可变化。
+
 - 2026-11-02：iframe 父来源白名单改为根目录独立 `login_embed_origins.yaml` 的 `allowed_origins` 字符串列表，每次登录读取、修改后下次登录生效；空列表禁止嵌入，缺失/损坏/结构错误或非法来源在签发前返回503，停止消费旧 `MAF_LOGIN_EMBED_ALLOWED_ORIGINS`。当前配置本地及 QA 联调来源，来源由维护文件指定；backend 镜像包含文件，Compose 只读挂载同名文件以支持独立维护。同步文档、目录索引和文件修改/错误隔离/打包回归。未部署。License Requirement：复用既有 PyYAML，无新增依赖或许可变化。
 
 - 2026-11-02：补齐第三方 iframe 内嵌登录：新增 `MAF_LOGIN_EMBED_ALLOWED_ORIGINS` 精确父来源配置，修复原登录中转页 `frame-ancestors none` 导致的拒绝嵌入；默认仍禁止嵌入，非法来源配置在签发前返回503，保留 nonce CSP、无Cookie及token不入URL合同。更新 iframe 接入示例和来源/脚本回归；浏览器验证使用独立本地跨站页面和真实模型。未部署。License Requirement：无新增依赖或许可变化。

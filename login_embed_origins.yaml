@@ -1,7 +1,10 @@
-# 允许通过 iframe 嵌入登录入口的父页面来源，每行一个。
+# 联调期间设为 false，允许任意父页面嵌入；改为 true 恢复下方白名单。
+# 不填写 enabled 时默认启用白名单。保存后下一次调用登录接口即生效。
+enabled: false
+
+# 启用白名单时，允许通过 iframe 嵌入登录入口的父页面来源，每行一个。
 # 只填写协议、域名及端口，不带页面路径、通配符、账号或密码。
-# 保存后下一次调用登录接口即生效；设置 allowed_origins: [] 可禁止所有嵌入。
-# 当前保留本地联调页面；正式接入时替换为对方门户的实际来源。
+# enabled: true 且 allowed_origins: [] 时禁止所有嵌入。
 allowed_origins:
   - "http://localhost:18581"
   - "http://breeding-dashboard-qa.biobin.com.cn/"

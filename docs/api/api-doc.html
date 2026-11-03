@@ -219,8 +219,9 @@ document.querySelector&lt;HTMLIFrameElement&gt;('#seedpilot-frame')!.src = login
 //   sandbox="allow-scripts allow-same-origin allow-forms allow-downloads"&gt;&lt;/iframe&gt;
 // 需要新窗口时也可使用 window.open(loginUrl.href, '_blank', 'noopener,noreferrer')。</code></pre></div>
 <p>成功响应为 <code>200 text/html</code> 登录中转页：写入同源浏览器登录状态后，通过 <code>location.replace</code> 跳转到对话页；不是 HTTP 302/303。可设置 iframe.src 或通过浏览器直接打开；不使用 fetch/Ajax 调用，不把 Token 放入 URL。跳转只发生在当前窗口，iframe 不会跳出父页面。浏览器需启用 JavaScript 和本地存储；存储失败时中转页显示错误并停止跳转。不接受自定义跳转目标；根路径开发环境回到 <code>/</code>，SeedPilot 部署回到 <code>/seedpilot/</code>。</p>
-<p>内嵌接入时，维护后端根目录的独立文件 <code>login_embed_origins.yaml</code>，在 <code>allowed_origins</code> 列表中每行填写一个父页面来源，必须包含协议、域名及非默认端口，不能带路径、通配符或账号密码。当前文件包含本地测试来源 <code>http://localhost:18581</code> 和 QA 联调来源；按实际接入环境维护该列表。保存后下一次登录生效，无需重启；设置 <code>allowed_origins: []</code> 禁止全部嵌入。文件缺失、YAML/结构错误或非法来源返回 503，且不签发/轮换 Token。原 <code>MAF_LOGIN_EMBED_ALLOWED_ORIGINS</code> 环境变量不再使用。此配置仅控制登录中转页的 <code>frame-ancestors</code>；若网关对登录入口或前端页面另加了 <code>X-Frame-Options</code> / CSP，也须与允许的来源一致，不能继续使用 DENY/SAMEORIGIN。父页面的 <code>frame-src</code> 也需允许平台来源。</p>
-<div class="codebox"><div class="codebar"><span>login_embed_origins.yaml</span></div><pre><code>allowed_origins:
+<p>内嵌接入时，维护后端根目录的独立文件 <code>login_embed_origins.yaml</code>，在 <code>allowed_origins</code> 列表中每行填写一个父页面来源，必须包含协议、域名及非默认端口，不能带路径、通配符或账号密码。当前联调配置为 <code>enabled: false</code>，不限制父页面来源，保留本地及 QA 来源列表；改为 <code>true</code> 恢复白名单，省略该字段也默认启用。保存后下一次登录生效，无需重启；启用时设置 <code>allowed_origins: []</code> 禁止全部嵌入。<code>enabled</code> 必须是布尔值；无论开关状态，文件缺失、YAML/结构错误或非法来源均返回 503，且不签发/轮换 Token。原 <code>MAF_LOGIN_EMBED_ALLOWED_ORIGINS</code> 环境变量不再使用。此配置仅控制登录中转页的 <code>frame-ancestors</code>；若网关对登录入口或前端页面另加了 <code>X-Frame-Options</code> / CSP，也须与允许的来源一致，不能继续使用 DENY/SAMEORIGIN。父页面的 <code>frame-src</code> 也需允许平台来源。</p>
+<div class="codebox"><div class="codebar"><span>login_embed_origins.yaml</span></div><pre><code>enabled: false # 联调期间关闭，改为 true 恢复白名单
+allowed_origins:
   - "https://portal.example"
   - "https://portal.example:8443"</code></pre></div>
 <p>容器内路径为 <code>/app/login_embed_origins.yaml</code>。Compose 已只读挂载仓库中的同名文件；单独 docker run 时也应将维护文件只读挂载到该路径，避免更新白名单需要重新构建镜像。</p>
@@ -4243,8 +4244,8 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
     "when": "第三方页面的对话图标需要直接打开育种助手时。",
     "response": null,
     "body": null,
-    "notes": "通过 iframe.src、链接或 window.open 打开对话页同源入口；iframe 需在 login_embed_origins.yaml 的 allowed_origins 列表中允许父页面来源。200 HTML 中转页写入本地登录状态后在当前窗口自动跳转，不是 HTTP 302/303；不能用 fetch/Ajax。用户名规则及同名 Token 替换规则与 POST 登录一致。只认用户名，不校验第三方身份。",
-    "errors": "400：用户名格式不合法；422：缺少 username；503：白名单文件缺失、格式或来源非法。未允许的父页面被浏览器拒绝嵌入；浏览器存储不可用时显示错误并停止跳转。",
+    "notes": "通过 iframe.src、链接或 window.open 打开对话页同源入口；login_embed_origins.yaml 的 enabled: false 可临时关闭 iframe 来源限制；启用白名单时父页面来源需在 allowed_origins 中。200 HTML 中转页写入本地登录状态后在当前窗口自动跳转，不是 HTTP 302/303；不能用 fetch/Ajax。用户名规则及同名 Token 替换规则与 POST 登录一致。只认用户名，不校验第三方身份。",
+    "errors": "400：用户名格式不合法；422：缺少 username；503：白名单文件缺失、格式或来源非法。启用白名单时，未允许的父页面被浏览器拒绝嵌入；浏览器存储不可用时显示错误并停止跳转。",
     "next": "浏览器自动进入同源 /seedpilot/（根路径开发环境为 /），前端校验登录态并加载用户会话。",
     "success": [
       "200"

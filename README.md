@@ -130,14 +130,16 @@ Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sid
 iframe 登录入口的父页面白名单独立维护在根目录 `login_embed_origins.yaml`：
 
 ```yaml
+enabled: false # 联调期间关闭来源限制；改为 true 恢复下方白名单
 allowed_origins:
   - "https://portal.example"
 ```
 
-文件中当前包含本地测试来源 `http://localhost:18581` 和 QA 联调来源；按实际接入环境维护该列表。
-每次登录读取该文件，保存后下一次登录生效；`allowed_origins: []` 禁止全部嵌入。
-文件缺失、格式或来源非法返回 503，且不签发新 token。旧 `MAF_LOGIN_EMBED_ALLOWED_ORIGINS` 环境变量不再使用。
+当前联调配置为 `enabled: false`，不限制嵌入登录页的父来源；列表中保留本地及 QA 来源。
+每次登录读取该文件，保存后下一次登录生效。`enabled: true` 恢复白名单，省略 `enabled` 也默认启用；启用时 `allowed_origins: []` 禁止全部嵌入。
+`enabled` 必须为布尔值。无论开关状态，文件缺失、格式或来源非法均返回 503，且不签发新 token。旧 `MAF_LOGIN_EMBED_ALLOWED_ORIGINS` 环境变量不再使用。
 Compose 将该非敏感文件只读挂载到 `/app/login_embed_origins.yaml`；单独运行镜像时可将宿主机维护文件只读挂载到同一路径。
+`enabled` 开关从 `backend-dev:0.1.41` 开始支持；`0.1.40` 不支持该字段，须先更新后端镜像。
 
 运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、Skill runtime 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 仍可通过显式 `config` dict 注入覆盖，不应在业务节点执行阶段重复读取 `config.yaml`。
 MySQL 只读连接配置也放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
