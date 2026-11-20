@@ -2,15 +2,59 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, Mock
 
 from src.api.runtime import ApiRuntime
 from src.core.enums import TaskStatus
 from src.core.models import Conversation, Task
-from src.orchestration.agent_loop.models import AgentStorageConflict
+from src.orchestration.agent_loop.models import AgentLeaseLost, AgentStorageConflict
+from src.orchestration.agent_loop.lease import AgentExecutionFailure
 from src.orchestration.agent_loop.orchestrator import AgentExecutionRequest
 
 
 class ExecutionSingleflightTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lost_execution_does_not_enter_task_failure_path(self):
+        runtime = self._runtime()
+        request = self._request()
+        runtime._locally_cancelled_task_ids = set()
+        runtime._agent_cancellation_token = lambda _: None
+        runtime._scrub_deleted_file_context_for_execution = AsyncMock(
+            side_effect=lambda value: value
+        )
+        runtime._attach_conversation_memory = AsyncMock(side_effect=lambda value: value)
+        runtime.agent_loop_orchestrator = Mock()
+        runtime.agent_loop_orchestrator.start_or_resume = AsyncMock(
+            side_effect=AgentLeaseLost("lost")
+        )
+        runtime._mark_task_failed = AsyncMock()
+        runtime._clear_conversation_current_task = AsyncMock()
+        runtime._release_task_skill_revision_if_terminal = AsyncMock()
+        runtime._release_task_mcp_revision_if_terminal = AsyncMock()
+        runtime.user_mcp_gateway = None
+        await runtime._run_execution(request, active_task_count=0)
+        runtime._mark_task_failed.assert_not_awaited()
+
+    async def test_unowned_failure_emits_no_task_failed_event(self):
+        runtime = self._runtime()
+        request = self._request()
+        runtime.storage = Mock()
+        runtime.storage.get_task = AsyncMock(
+            return_value=Task(
+                request.task_id,
+                request.conversation_id,
+                request.root_message_id,
+                TaskStatus.RUNNING,
+            )
+        )
+        runtime.agent_loop_orchestrator = Mock()
+        runtime.agent_loop_orchestrator.fail_owned = AsyncMock(return_value=None)
+        runtime._record_event = AsyncMock()
+        error = AgentExecutionFailure(Mock(), RuntimeError("old worker error"))
+        await runtime._mark_task_failed(request, error)
+        runtime._record_event.assert_not_awaited()
+        runtime.storage.save_task.assert_not_called()
+        runtime.agent_loop_orchestrator.fail.assert_not_called()
+
     def _runtime(self) -> ApiRuntime:
         runtime = object.__new__(ApiRuntime)
         runtime._lock = asyncio.Lock()

@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-20：按 V3 计划修复 MCP dispatch 续租范围：取得 claim 后持续覆盖发现、Selector、参数准备、Tool 和结果提交，保留 30/5/10 秒规则；claim 更新串行刷新 revision，失败/unknown 收尾原子绑定原 intent/outbox/owner/token/revision，旧执行者不能关闭接手后的任务。操作预算覆盖短锁、连接池与 SQL，PostgreSQL 事务内限制锁/语句时间，超时线程不得迟到提交；取消后不假定 Tool 回滚、不重放业务调用。Agent 异常携带实际续租 handle，Runtime 仅投影已提交的 owned failure，保留准备失败及启动权威收敛。补充模拟时间与隔离 PostgreSQL 并发回归，去重后的相关279项（含真实 PostgreSQL 10项）、Ruff和diff检查通过；全局接口快照另有3项既有失败，原因是快照缺少HEAD中已存在的5个方法，未扩展本次范围修复。无 schema、公开 API、前端、MCP Server 或依赖变更，未部署或修改远端旧数据。License Requirement：无新增依赖或许可变化。
+
 - 2026-11-03：按指定路径将开发部署命令中的 `LOGIN_EMBED_ORIGINS_FILE` 固定为宿主机 `/data/peihai/login_embed_origins_dev.yaml`，继续只读挂载至后端 `/app/login_embed_origins.yaml`；首次初始化和已有文件不覆盖逻辑保持。受保护部署文件已作仓库外0600备份，确认仅修改开发文件一处赋值、Shell语法通过，生产文件未变且三份文件仍为0600/ignored/untracked。仅更新本地部署命令，未操作服务器或发布新镜像。License Requirement：无新增依赖或许可变化。
 
 - 2026-11-03：为 iframe 联调新增 `login_embed_origins.yaml` 布尔开关 `enabled`，当前设为 `false`，临时取消登录页父来源限制；改回 `true` 或省略字段恢复原有白名单，原域名列表保留。关闭时仅省略 frame-ancestors，其余 CSP、Token 和跳转逻辑保持；每次登录重新读取配置，错误配置仍在签发前返回503。补充开关切换、旧配置兼容及非法类型回归，同步维护文档与目录索引。登录相关36项、文档契约7项及文档UI 16项通过，Ruff和diff检查通过；本地Chrome从未列入白名单的父来源127.0.0.1:18581成功登录并在iframe内完成真实模型对话。尚未构建新镜像或部署，已发布的0.1.40不支持此字段。License Requirement：无新增依赖或许可变化。

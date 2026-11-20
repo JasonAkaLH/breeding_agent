@@ -76,6 +76,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "converge_dispatched_mcp_calls_to_unknown": "(self, *, now: 'datetime', limit: 'int' = 1000) -> 'list[MCPCallRecord]'",
   "converge_inactive_mcp_dispatch": "(self, intent_id: 'str', outbox_id: 'str', node_id: 'str', occurred_at: 'datetime') -> 'MCPDispatchFinalizeResult'",
   "converge_legacy_runtime_retirement": "(self, task_id: 'str', inventory_id: 'str', inventory_sha256: 'str', idempotency_key: 'str', occurred_at: 'datetime') -> 'MCPLegacyRetirementConvergenceResult'",
+  "converge_claimed_mcp_unknown_no_replay": "(self, task_id: 'str', intent_id: 'str', outbox_id: 'str', claim_owner: 'str', claim_token: 'str', expected_revision: 'int', occurred_at: 'datetime') -> 'MCPNoServerConvergenceResult | None'",
   "converge_mcp_unknown_no_replay": "(self, task_id: 'str', occurred_at: 'datetime') -> 'MCPNoServerConvergenceResult'",
   "converge_user_mcp_no_server": "(self, task_id: 'str', occurred_at: 'datetime') -> 'MCPNoServerConvergenceResult'",
   "count_active_mcp_remote_task_bindings": "(self, *, rollout_config_version: 'str', protocol_version: 'str') -> 'int'",
@@ -330,7 +331,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 280)
+        self.assertEqual(len(actual), 281)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(

@@ -20,6 +20,12 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
 from src.auth.postgres_invalidation_bus import auth_generation_notify_sql
+from src.storage.mcp_operation_budget import (
+    capture_mcp_operation_budget,
+    install_mcp_operation_budget,
+    mcp_operation_budget_active,
+)
+
 from src.core.contracts import StoragePort
 from src.core.errors import MessageIdentityConflictError
 from src.core.enums import (
@@ -11547,6 +11553,40 @@ class SQLiteStateRepository:
         self._session.flush()
         return MCPDispatchFinalizeResult.FINALIZED
 
+    def converge_claimed_mcp_unknown_no_replay(
+        self,
+        task_id: str,
+        intent_id: str,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult | None:
+        candidate = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        if candidate is None:
+            return None
+        self._lock_mcp_owner_guard(candidate.owner_user_id, occurred_at)
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            row is None
+            or row.task_id != task_id
+            or row.intent_id != intent_id
+            or row.status not in {"claimed", "active"}
+            or row.claim_owner != claim_owner
+            or row.claim_token != claim_token
+            or row.revision != expected_revision
+        ):
+            return None
+        # Expiry alone does not transfer ownership. Preserve cleanup for the
+        # exact original claim, but never adopt a successor's current token.
+        return self.converge_user_mcp_no_server(task_id, occurred_at)
+
     def converge_mcp_unknown_no_replay(
         self, task_id: str, occurred_at: datetime
     ) -> MCPNoServerConvergenceResult:
@@ -15778,6 +15818,7 @@ class SQLiteStorage(StoragePort):
         if not isinstance(message_identity_authority_enabled, bool):
             raise ValueError("message_identity_authority_enabled must be a bool")
         self._session_factory = session_factory
+        install_mcp_operation_budget(session_factory.kw["bind"])
         self._runtime_sidecar_client = runtime_sidecar_client
         self._runtime_sidecar_shadow_sink = runtime_sidecar_shadow_sink
         self._mcp_task_authority_mode = mcp_task_authority_mode
@@ -16714,6 +16755,28 @@ class SQLiteStorage(StoragePort):
                 expected_outbox_revision,
                 claim_owner,
                 claim_token,
+                occurred_at,
+            )
+        )
+
+    async def converge_claimed_mcp_unknown_no_replay(
+        self,
+        task_id: str,
+        intent_id: str,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult | None:
+        return await self._run(
+            lambda state, collab: state.converge_claimed_mcp_unknown_no_replay(
+                task_id,
+                intent_id,
+                outbox_id,
+                claim_owner,
+                claim_token,
+                expected_revision,
                 occurred_at,
             )
         )
@@ -18161,10 +18224,22 @@ class SQLiteStorage(StoragePort):
                 session.commit()
                 return result
 
-        worker = asyncio.create_task(asyncio.to_thread(_sync))
+        with capture_mcp_operation_budget():
+            worker = asyncio.create_task(asyncio.to_thread(_sync))
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
+            if (
+                self._session_factory.kw["bind"].dialect.name == "postgresql"
+                and mcp_operation_budget_active()
+            ):
+                # A pool checkout may outlive the caller's claim window. Keep
+                # the thread alive; its copied deadline rejects late SQL/commit.
+                # Cancellation is not evidence of rollback or of a tool result.
+                worker.add_done_callback(
+                    lambda done: done.exception() if not done.cancelled() else None
+                )
+                raise
             await worker
             raise
 

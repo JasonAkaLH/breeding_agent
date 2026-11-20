@@ -26,7 +26,8 @@ from .models import (
 )
 from .repository import AgentAtomicWriter, AgentRunRepository
 from .runner import AgentLoopRunResult, AgentLoopRunner
-from .lease import AgentLeaseHandle
+from src.core.errors import ExecutionOwnershipLost
+from .lease import AgentExecutionFailure, AgentLeaseHandle
 from .tool_catalog import CapabilityVisibilityContext
 
 
@@ -310,7 +311,7 @@ class AgentLoopOrchestrator:
             visibility_context=visibility,
             cancellation=cancellation,
         )
-        return await self._finish(loop_result)
+        return await self._finish_owned(loop_result)
 
     async def _ensure_initialization_event(
         self,
@@ -407,7 +408,75 @@ class AgentLoopOrchestrator:
             visibility_context=visibility_context,
             cancellation=cancellation,
         )
-        return await self._finish(result)
+        return await self._finish_owned(result)
+
+    async def _finish_owned(
+        self, result: AgentLoopRunResult
+    ) -> AgentOrchestrationResult:
+        try:
+            return await self._finish(result)
+        except (ExecutionOwnershipLost, AgentExecutionFailure):
+            raise
+        except Exception as exc:
+            if result.lease_handle is None:
+                raise
+            raise AgentExecutionFailure(result.lease_handle, exc) from exc
+
+    async def fail_owned(
+        self,
+        task_id: str,
+        *,
+        handle: AgentLeaseHandle,
+        error_code: str,
+    ) -> AgentRun | None:
+        async def commit(lease):
+            run = await self._runs.get_run_for_task(task_id)
+            if (
+                run is None
+                or run.run_id != lease.run_id
+                or run.task_id != lease.task_id
+                or run.claim_owner != lease.owner_id
+                or run.claim_token != lease.token
+                or run.status
+                in {
+                    AgentRunStatus.COMPLETED,
+                    AgentRunStatus.FAILED,
+                    AgentRunStatus.CANCELLED,
+                }
+            ):
+                return None
+            try:
+                return await self._writer.fail_agent_run(
+                    run.run_id,
+                    expected_revision=run.revision,
+                    expected_claim_token=lease.token,
+                    safe_error_code=error_code,
+                )
+            except AgentStorageConflict:
+                latest = await self._runs.get_run(run.run_id)
+                if latest is not None and latest.claim_token != lease.token:
+                    return None
+                raise
+
+        failed = await handle.run_ownership_bound(commit)
+        if failed is not None:
+            self._contexts.release(failed.run_id)
+            await self._record_event(
+                self._make_event(
+                    task_id=failed.task_id,
+                    conversation_id=failed.conversation_id,
+                    event_type="agent.run.failed",
+                    payload={
+                        "code": error_code,
+                        "compaction_count": 0,
+                        "duration_seconds": 0,
+                        "outcome": "failed",
+                        "sample_count": 0,
+                        "tool_call_count": failed.next_batch_call_ordinal,
+                    },
+                )
+            )
+        return failed
 
     async def cancel(self, task_id: str, *, reason_code: str) -> AgentRun | None:
         run = await self._runs.get_run_for_task(task_id)
@@ -435,7 +504,13 @@ class AgentLoopOrchestrator:
         self._contexts.release(run.run_id)
         return cancelled
 
-    async def fail(self, task_id: str, *, error_code: str) -> AgentRun | None:
+    async def fail(
+        self,
+        task_id: str,
+        *,
+        error_code: str,
+        unclaimed_only: bool = False,
+    ) -> AgentRun | None:
         run = await self._runs.get_run_for_task(task_id)
         if run is None or run.status in {
             AgentRunStatus.COMPLETED,
@@ -443,12 +518,24 @@ class AgentLoopOrchestrator:
             AgentRunStatus.CANCELLED,
         }:
             return run
-        failed = await self._writer.fail_agent_run(
-            run.run_id,
-            expected_revision=run.revision,
-            expected_claim_token=run.claim_token,
-            safe_error_code=error_code,
-        )
+        if unclaimed_only and run.claim_token is not None:
+            raise ExecutionOwnershipLost("agent_failure_requires_execution_handle")
+        try:
+            failed = await self._writer.fail_agent_run(
+                run.run_id,
+                expected_revision=run.revision,
+                expected_claim_token=run.claim_token,
+                safe_error_code=error_code,
+            )
+        except AgentStorageConflict:
+            latest = await self._runs.get_run(run.run_id)
+            if (
+                unclaimed_only
+                and latest is not None
+                and latest.claim_token != run.claim_token
+            ):
+                raise ExecutionOwnershipLost("agent_failure_requires_execution_handle")
+            raise
         self._contexts.release(run.run_id)
         await self._record_event(
             self._make_event(

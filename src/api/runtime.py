@@ -49,7 +49,12 @@ from src.capabilities.mcp_tool import build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.contracts import MCPRemoteTaskStoragePort
-from src.core.errors import MessageIdentityConflictError, ModelUnavailableError
+from src.core.errors import (
+    ExecutionOwnershipLost,
+    MessageIdentityConflictError,
+    ModelUnavailableError,
+)
+from src.orchestration.agent_loop.lease import AgentExecutionFailure
 from src.core.models import (
     Conversation,
     ConversationAdmissionCloseDisposition,
@@ -4634,7 +4639,7 @@ class ApiRuntime(
             if restored_cancelled_task is not None:
                 return
         except Exception as exc:
-            if (
+            if isinstance(exc, ExecutionOwnershipLost) or (
                 isinstance(exc, AgentStorageConflict)
                 and str(exc) == "agent_task_lease_held"
             ):
@@ -4700,7 +4705,7 @@ class ApiRuntime(
         except Exception as exc:
             if durable_start is not None and not durable_start.done():
                 durable_start.set_exception(exc)
-            if (
+            if isinstance(exc, ExecutionOwnershipLost) or (
                 isinstance(exc, AgentStorageConflict)
                 and str(exc) == "agent_task_lease_held"
             ):
@@ -4911,18 +4916,36 @@ class ApiRuntime(
         task = await self.storage.get_task(request.task_id)
         if task is None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED} or task.cancel_requested_at is not None:
             return
+        execution_failure = exc if isinstance(exc, AgentExecutionFailure) else None
+        if execution_failure is not None:
+            exc = execution_failure.cause
         error_code = (
             ModelUnavailableError.code
             if isinstance(exc, ModelUnavailableError)
             else "execution_crash"
         )
-        failed_run = await self.agent_loop_orchestrator.fail(
-            request.task_id,
-            error_code=error_code,
-        )
+        if execution_failure is not None:
+            failed_run = await self.agent_loop_orchestrator.fail_owned(
+                request.task_id,
+                handle=execution_failure.handle,
+                error_code=error_code,
+            )
+            if failed_run is None:
+                return
+        else:
+            try:
+                failed_run = await self.agent_loop_orchestrator.fail(
+                    request.task_id,
+                    error_code=error_code,
+                    unclaimed_only=True,
+                )
+            except ExecutionOwnershipLost:
+                return
         if failed_run is None:
             failed = replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive())
             await self.storage.save_task(failed)
+        elif failed_run.status is not AgentRunStatus.FAILED:
+            return
         payload: dict[str, Any] = {
             "code": error_code,
             "message": (

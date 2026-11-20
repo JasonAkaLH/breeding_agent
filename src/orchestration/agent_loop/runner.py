@@ -13,7 +13,8 @@ from .context_preflight import (
 )
 from .compaction import AgentCompactionService
 from .invocation import deterministic_invocation_waves
-from .lease import AgentLeaseController, AgentLeaseHandle
+from src.core.errors import ExecutionOwnershipLost
+from .lease import AgentExecutionFailure, AgentLeaseController, AgentLeaseHandle
 from .model_port import AgentModelPort
 from .models import (
     AgentCallOutcomeCommit,
@@ -138,6 +139,32 @@ class AgentLoopRunner:
         )
 
     async def run_claimed(
+        self,
+        run_id: str,
+        *,
+        handle: AgentLeaseHandle,
+        initial_required_tool_name: str | None = None,
+        trusted_facts: tuple[str, ...] = (),
+        current_user_input: str | None = None,
+        visibility_context: CapabilityVisibilityContext | None = None,
+        cancellation: AgentCancellationToken | None = None,
+    ) -> AgentLoopRunResult:
+        try:
+            return await self._run_claimed(
+                run_id,
+                handle=handle,
+                initial_required_tool_name=initial_required_tool_name,
+                trusted_facts=trusted_facts,
+                current_user_input=current_user_input,
+                visibility_context=visibility_context,
+                cancellation=cancellation,
+            )
+        except (ExecutionOwnershipLost, AgentExecutionFailure):
+            raise
+        except Exception as exc:
+            raise AgentExecutionFailure(handle, exc) from exc
+
+    async def _run_claimed(
         self,
         run_id: str,
         *,

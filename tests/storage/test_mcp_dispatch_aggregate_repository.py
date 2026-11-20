@@ -417,6 +417,47 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(admitted)
         return await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
 
+    async def test_claim_bound_unknown_cleanup_rejects_replaced_owner(self):
+        original = await self._admit()
+        with self.sessions() as session:
+            row = session.get(MCPDispatchResumeOutboxRow, self.outbox_id)
+            row.claim_owner = "successor"
+            row.claim_token = "successor-token"
+            row.revision += 1
+            session.commit()
+        result = await self.storage.converge_claimed_mcp_unknown_no_replay(
+            self.task.task_id,
+            self.intent_id,
+            self.outbox_id,
+            "worker",
+            "token",
+            original.revision,
+            NOW + timedelta(seconds=31),
+        )
+        self.assertIsNone(result)
+        self.assertEqual(
+            (await self.storage.get_task(self.task.task_id)).status, TaskStatus.RUNNING
+        )
+        current = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        self.assertEqual(current.claim_token, "successor-token")
+        self.assertEqual(str(current.status), "active")
+
+    async def test_claim_bound_unknown_cleanup_allows_same_claim_after_expiry(self):
+        original = await self._admit()
+        result = await self.storage.converge_claimed_mcp_unknown_no_replay(
+            self.task.task_id,
+            self.intent_id,
+            self.outbox_id,
+            "worker",
+            "token",
+            original.revision,
+            NOW + timedelta(minutes=5),
+        )
+        self.assertEqual(str(result), "unknown_requires_no_replay")
+        self.assertEqual(
+            (await self.storage.get_task(self.task.task_id)).status, TaskStatus.FAILED
+        )
+
     def _approval_candidate(self):
         interrupt_id = "mcp-approval-action-1"
         action = MCPPendingToolAction(

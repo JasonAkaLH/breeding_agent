@@ -100,6 +100,7 @@ EXPECTED_METHODS_BY_PORT = {
         "release_mcp_durable_result_deletion",
     ),
     "MCPDispatchFinalizationStoragePort": (
+        "converge_claimed_mcp_unknown_no_replay",
         "finalize_mcp_dispatch",
         "converge_mcp_unknown_no_replay",
         "cancel_mcp_dispatch",
@@ -347,6 +348,12 @@ def _direct_async_methods(port: type) -> dict[str, object]:
 
 
 class PersistencePortContractsTest(unittest.TestCase):
+    def test_claim_bound_failure_has_an_explicit_internal_contract(self):
+        name = "converge_claimed_mcp_unknown_no_replay"
+        method = getattr(contracts.MCPDispatchFinalizationStoragePort, name)
+        self.assertTrue(inspect.iscoroutinefunction(method))
+        self.assertEqual(str(inspect.signature(method)), EXPECTED_STORAGE_METHOD_SIGNATURES[name])
+
     def test_narrow_ports_own_one_exact_disjoint_partition(self) -> None:
         actual_names: list[str] = []
         for port_name, expected_names in EXPECTED_METHODS_BY_PORT.items():
