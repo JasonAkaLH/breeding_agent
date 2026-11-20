@@ -10,6 +10,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
+from src.core.errors import ExecutionOwnershipLost
+
 from .context_budget import AgentContextBudget
 
 
@@ -494,7 +496,7 @@ class AgentTaskLease:
     expires_at: datetime
 
 
-class AgentLeaseLost(RuntimeError):
+class AgentLeaseLost(ExecutionOwnershipLost):
     """The current worker can no longer prove Task lease ownership."""
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from src.core.contracts import CapabilityExecutionResult
 from src.core.enums import NodeStatus, TaskStatus
+from src.core.errors import ModelUnavailableError
 from src.core.models import Task, TaskNode
 from src.orchestration.agent_loop.capability_invoker import AgentCapabilityInvoker
 from src.orchestration.agent_loop.context import AgentContextBuilder, AgentContextRules
@@ -16,7 +17,10 @@ from src.orchestration.agent_loop.context_budget import AgentContextBudget
 from src.orchestration.agent_loop.context_preflight import AgentContextCandidateBuilder
 from src.orchestration.agent_loop.compaction import AgentCompactionService
 from src.orchestration.agent_loop.invocation import InvocationResult
-from src.orchestration.agent_loop.lease import AgentLeaseController
+from src.orchestration.agent_loop.lease import (
+    AgentExecutionFailure,
+    AgentLeaseController,
+)
 from src.orchestration.agent_loop.models import (
     AgentCallOutcomeStatus,
     AgentFinishMetadata,
@@ -206,6 +210,37 @@ class _LogicalTraceRepository:
 
 
 class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_execution_error_carries_the_same_handle_after_token_rotation(self):
+        repository = self.repository
+        handle = await AgentLeaseController(repository, ttl_seconds=30).acquire(
+            "run-1",
+            owner_id="worker-1",
+        )
+        original_token = handle.current.token
+        cause = ModelUnavailableError("provider unavailable")
+
+        class FailingModel:
+            async def sample_agent(self, _request):
+                lease = handle.current
+                handle.current = await repository.renew_task_lease(
+                    lease.run_id,
+                    owner_id=lease.owner_id,
+                    token=lease.token,
+                    ttl_seconds=30,
+                )
+                raise cause
+
+        with self.assertRaises(AgentExecutionFailure) as raised:
+            await self._runner(FailingModel(), _RecordingInvoker()).run_claimed(
+                "run-1", handle=handle
+            )
+        self.assertIs(raised.exception.handle, handle)
+        self.assertIs(raised.exception.cause, cause)
+        self.assertNotEqual(handle.current.token, original_token)
+        stored = await repository.get_run("run-1")
+        self.assertEqual(stored.claim_token, handle.current.token)
+        self.assertEqual(stored.status, AgentRunStatus.RUNNING)
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         self.temp_dir = tempfile.TemporaryDirectory()

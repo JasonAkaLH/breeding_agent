@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.core.enums import EventVisibility, TaskStatus
+from src.core.errors import ExecutionOwnershipLost
+from src.orchestration.agent_loop.lease import AgentLeaseHandle
 from src.core.models import EventRecord
 from src.orchestration.agent_loop.capability_invoker import (
     AgentInvocationContextStore,
@@ -144,6 +146,65 @@ class _UnexpectedCreateConflictRepository:
 
 
 class AgentSubmissionHandoffTest(unittest.IsolatedAsyncioTestCase):
+    async def test_owned_failure_uses_renewed_handle_and_rejects_successor(self):
+        orchestrator, _ = self._orchestrator()
+        initialized = await orchestrator.initialize_run(self._request())
+        lease = await self.repository.acquire_task_lease(
+            initialized.run.run_id,
+            owner_id="worker-a",
+            ttl_seconds=30,
+        )
+        handle = AgentLeaseHandle(lease)
+        handle.current = await self.repository.renew_task_lease(
+            lease.run_id,
+            owner_id=lease.owner_id,
+            token=lease.token,
+            ttl_seconds=30,
+        )
+        failed = await orchestrator.fail_owned(
+            "task-1", handle=handle, error_code="execution_crash"
+        )
+        self.assertEqual(failed.status, AgentRunStatus.FAILED)
+        self.assertEqual(
+            sum(
+                e.event_type == "agent.run.failed" for e in self.events.events.values()
+            ),
+            1,
+        )
+
+        second = await orchestrator.initialize_run(
+            self._request(
+                task_id="task-2",
+                conversation_id="conversation-2",
+                root_message_id="message-2",
+            )
+        )
+        old = await self.repository.acquire_task_lease(
+            second.run.run_id, owner_id="old", ttl_seconds=30
+        )
+        self.agent_now += timedelta(seconds=31)
+        successor = await self.repository.acquire_task_lease(
+            second.run.run_id, owner_id="new", ttl_seconds=30
+        )
+        self.contexts.register(
+            second.run.run_id, metadata={"sentinel": "keep"}, current_user_input="hello"
+        )
+        self.assertIsNone(
+            await orchestrator.fail_owned(
+                "task-2",
+                handle=AgentLeaseHandle(old),
+                error_code="execution_crash",
+            )
+        )
+        latest = await self.repository.get_run(second.run.run_id)
+        self.assertEqual(latest.claim_token, successor.token)
+        self.assertEqual(latest.status, AgentRunStatus.RUNNING)
+        self.assertEqual(self.contexts.request_metadata(latest)["sentinel"], "keep")
+        with self.assertRaises(ExecutionOwnershipLost):
+            await orchestrator.fail(
+                "task-2", error_code="execution_crash", unclaimed_only=True
+            )
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         self._tmpdir = tempfile.TemporaryDirectory()

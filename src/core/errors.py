@@ -8,6 +8,10 @@ class CoreError(Exception):
     """Base exception for shared core-layer failures."""
 
 
+class ExecutionOwnershipLost(RuntimeError):
+    """Execution must stop; only durable recovery may resolve its outcome."""
+
+
 class ContractValidationError(CoreError):
     """Raised when a shared contract is malformed or inconsistent."""
 

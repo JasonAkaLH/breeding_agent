@@ -6,10 +6,10 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from pathlib import Path
 from uuid import uuid4
 
@@ -44,12 +44,14 @@ from src.core.contracts import (
     UserMCPConfigurationStoragePort,
 )
 from src.core.enums import EventVisibility, UserMCPHealthStatus, UserMCPTransport
-from src.core.errors import ModelUnavailableError
+from src.core.errors import ExecutionOwnershipLost, ModelUnavailableError
+from src.storage.mcp_operation_budget import mcp_operation_budget
 from src.core.models import (
     EventRecord,
     Interrupt,
     MCPBranchRecord,
     MCPCallRecord,
+    MCPDispatchResumeOutbox,
     MCPNoServerConvergenceResult,
     MCPPendingActionPayloadSnapshot,
     MCPPendingToolAction,
@@ -233,6 +235,15 @@ class _DispatchAuthority:
     claim_owner: str
     claim_token: str
     admitted: bool = False
+    deadline: float | None = None
+    renew_at: float | None = None
+    revision: int | None = None
+    active: bool = True
+    lost: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+
+ClaimResult = TypeVar("ClaimResult")
 
 
 NowFn = Callable[[], datetime]
@@ -444,6 +455,34 @@ class UserMCPDispatchCoordinator:
                 return self._error(
                     "mcp_runtime_unavailable", "MCP server is not available."
                 )
+        return await self._run_claimed_dispatch(
+            authority,
+            lambda: self._dispatch_active(
+                request,
+                server_id=server_id,
+                binding_mode=binding_mode,
+                owner_user_id=owner_user_id,
+                conversation_id=conversation_id,
+                root_message_id=root_message_id,
+                attachment_summaries=attachment_summaries,
+                selected_attachments=selected_attachments,
+                authority=authority,
+            ),
+        )
+
+    async def _dispatch_active(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        server_id: str,
+        binding_mode: MCPBindingMode,
+        owner_user_id: str,
+        conversation_id: str,
+        root_message_id: str,
+        attachment_summaries: tuple[MCPAttachmentSummary, ...],
+        selected_attachments: tuple[TaskInputAttachment, ...],
+        authority: _DispatchAuthority | None,
+    ) -> MCPDispatchOutcome:
         server = await self._available_server(owner_user_id, server_id)
         if server is None:
             return await self._finalize_no_call_outcome(
@@ -671,7 +710,7 @@ class UserMCPDispatchCoordinator:
                             self._pending_action_payload_store.open_validated(
                                 pending_action_payload_identity(pending_action),
                                 pending_action.arguments_payload_ref,
-                                on_gate_wait=lambda: self._renew_dispatch_claim(
+                                on_gate_wait=lambda: self._check_dispatch_claim(
                                     authority
                                 ),
                             )
@@ -758,7 +797,7 @@ class UserMCPDispatchCoordinator:
                             self._pending_action_payload_store.open_validated(
                                 pending_action_payload_identity(pending_action),
                                 pending_action.arguments_payload_ref,
-                                on_gate_wait=lambda: self._renew_dispatch_claim(
+                                on_gate_wait=lambda: self._check_dispatch_claim(
                                     authority
                                 ),
                             )
@@ -785,14 +824,17 @@ class UserMCPDispatchCoordinator:
                             raise _CallReservationError(
                                 "mcp_dispatch_authority_missing"
                             )
-                        consumed_step = (
-                            await self._storage.consume_mcp_dispatch_selector_step(
-                                authority.outbox_id,
-                                authority.claim_owner,
-                                authority.claim_token,
-                                outbox.revision,
-                                self._now(),
-                            )
+                        consumed_step = await self._claim_update(
+                            authority,
+                            lambda current: (
+                                self._storage.consume_mcp_dispatch_selector_step(
+                                    authority.outbox_id,
+                                    authority.claim_owner,
+                                    authority.claim_token,
+                                    current.revision,
+                                    self._now(),
+                                )
+                            ),
                         )
                         if consumed_step is None:
                             raise _CallReservationError(
@@ -1075,7 +1117,7 @@ class UserMCPDispatchCoordinator:
                             pending_action_payload_identity(pending_action),
                             pending_action.arguments_payload_ref,
                             expected_snapshot=payload_snapshot,
-                            on_gate_wait=lambda: self._renew_dispatch_claim(authority),
+                            on_gate_wait=lambda: self._check_dispatch_claim(authority),
                         ) as held_payload:
                             intent = await self._storage.get_mcp_no_server_intent(
                                 authority.intent_id
@@ -1087,17 +1129,20 @@ class UserMCPDispatchCoordinator:
                                 raise _CallReservationError(
                                     "mcp_dispatch_authority_missing"
                                 )
-                            suspended = await self._storage.suspend_mcp_for_approval(
-                                authority.intent_id,
-                                authority.outbox_id,
-                                intent.revision,
-                                outbox.revision,
-                                authority.claim_owner,
-                                authority.claim_token,
-                                pending_action,
-                                approval_interrupt,
-                                held_payload.snapshot,
-                                self._now(),
+                            suspended = await self._claim_update(
+                                authority,
+                                lambda current: self._storage.suspend_mcp_for_approval(
+                                    authority.intent_id,
+                                    authority.outbox_id,
+                                    intent.revision,
+                                    current.revision,
+                                    authority.claim_owner,
+                                    authority.claim_token,
+                                    pending_action,
+                                    approval_interrupt,
+                                    held_payload.snapshot,
+                                    self._now(),
+                                ),
                             )
                         if str(suspended) not in {
                             "suspended",
@@ -1154,7 +1199,7 @@ class UserMCPDispatchCoordinator:
                             pending_action_payload_identity(pending_action),
                             pending_action.arguments_payload_ref,
                             expected_snapshot=payload_snapshot,
-                            on_gate_wait=lambda: self._renew_dispatch_claim(authority),
+                            on_gate_wait=lambda: self._check_dispatch_claim(authority),
                         )
                     )
                     approved_payload = await approved_payload_manager.__aenter__()
@@ -1416,22 +1461,23 @@ class UserMCPDispatchCoordinator:
                                 "mcp_dispatch_authority_missing"
                             )
                         try:
-                            suspended = await self._storage.suspend_mcp_for_input(
-                                authority.intent_id,
-                                authority.outbox_id,
-                                call_ref,
-                                outcome.sealed_request_state_ref or "",
-                                intent.revision,
-                                outbox.revision,
-                                authority.claim_owner,
-                                authority.claim_token,
-                                mrtr_interrupt,
-                                self._now(),
+                            suspended = await self._claim_update(
+                                authority,
+                                lambda current: self._storage.suspend_mcp_for_input(
+                                    authority.intent_id,
+                                    authority.outbox_id,
+                                    call_ref,
+                                    outcome.sealed_request_state_ref or "",
+                                    intent.revision,
+                                    current.revision,
+                                    authority.claim_owner,
+                                    authority.claim_token,
+                                    mrtr_interrupt,
+                                    self._now(),
+                                ),
                             )
                         except BaseException as exc:
-                            await self._storage.converge_mcp_unknown_no_replay(
-                                request.task_id, self._now()
-                            )
+                            await self._converge_claimed_unknown(authority, request)
                             raise _CallReservationError(
                                 "mcp_input_suspend_failed"
                             ) from exc
@@ -1439,9 +1485,7 @@ class UserMCPDispatchCoordinator:
                             "suspended",
                             "already_suspended",
                         }:
-                            await self._storage.converge_mcp_unknown_no_replay(
-                                request.task_id, self._now()
-                            )
+                            await self._converge_claimed_unknown(authority, request)
                             raise _CallReservationError(
                                 "mcp_input_suspend_conflict"
                             )
@@ -1578,7 +1622,11 @@ class UserMCPDispatchCoordinator:
             finally:
                 if approved_payload_manager is not None and approved_payload_entered:
                     await approved_payload_manager.__aexit__(None, None, None)
-                if pending_action is not None and approved_payload is not None:
+                if (
+                    pending_action is not None
+                    and approved_payload is not None
+                    and (authority is None or not authority.lost)
+                ):
                     await self._delete_pending_action_payload_best_effort(
                         pending_action,
                         approved_payload.snapshot,
@@ -1606,6 +1654,8 @@ class UserMCPDispatchCoordinator:
         outcome: str,
         safe_error_code: str | None,
     ) -> MCPDispatchOutcome | None:
+        if authority is not None and authority.lost:
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
         if result is not None and "mcp_branch_id" not in result.output_payload:
             result, carrier_error_code = (
                 await self._attach_terminal_bundle_for_request(
@@ -1625,16 +1675,19 @@ class UserMCPDispatchCoordinator:
                 raise RuntimeError("mcp_dispatch_resume_outbox_missing")
             if str(outbox.status) in {"completed", "aborted"}:
                 return result
-            finalized = await self._storage.finalize_mcp_dispatch(
-                authority.intent_id,
-                authority.outbox_id,
-                request.node_id,
-                outcome,
-                safe_error_code,
-                outbox.revision,
-                authority.claim_owner,
-                authority.claim_token,
-                self._now(),
+            finalized = await self._claim_update(
+                authority,
+                lambda current: self._storage.finalize_mcp_dispatch(
+                    authority.intent_id,
+                    authority.outbox_id,
+                    request.node_id,
+                    outcome,
+                    safe_error_code,
+                    current.revision,
+                    authority.claim_owner,
+                    authority.claim_token,
+                    self._now(),
+                ),
             )
             if str(finalized) == "conflict":
                 raise RuntimeError("mcp_dispatch_finalize_conflict")
@@ -1710,25 +1763,189 @@ class UserMCPDispatchCoordinator:
         output.pop("text", None)
         return replace(result, output_payload=output), None
 
-    async def _renew_dispatch_claim(
-        self, authority: _DispatchAuthority
-    ) -> None:
-        outbox = await self._storage.get_mcp_dispatch_resume_outbox(
-            authority.outbox_id
-        )
-        if outbox is None:
-            raise _CallReservationError("mcp_dispatch_authority_missing")
-        now = self._now()
-        renewed = await self._storage.renew_mcp_dispatch_claim(
-            authority.outbox_id,
-            authority.claim_owner,
-            authority.claim_token,
-            outbox.revision,
-            now,
-            now + timedelta(seconds=30),
-        )
+    def _claim_deadline(self, outbox: MCPDispatchResumeOutbox) -> float:
+        if outbox.updated_at is None or outbox.lease_expires_at is None:
+            raise ExecutionOwnershipLost("mcp_dispatch_authority_missing")
+        end = min(outbox.lease_expires_at, outbox.updated_at + timedelta(seconds=10))
+        return monotonic() + max(0.0, (end - self._now()).total_seconds())
+
+    async def _check_dispatch_claim(self, authority: _DispatchAuthority) -> None:
+        if authority.lost or not authority.active:
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
+        if authority.deadline is not None and monotonic() >= authority.deadline:
+            authority.lost = True
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_deadline")
+
+    async def _claim_update(
+        self,
+        authority: _DispatchAuthority,
+        operation: Callable[[MCPDispatchResumeOutbox], Awaitable[ClaimResult]],
+        *,
+        renewal: bool = False,
+    ) -> ClaimResult | None:
+        if renewal and not authority.active and not authority.lost:
+            return None
+        await self._check_dispatch_claim(authority)
+        # The budget includes the local lock, pool checkout and SQL. A timed-out
+        # thread may still finish: do not dispatch again or infer rollback.
+        deadline = authority.deadline or (monotonic() + 10)
+        try:
+            with mcp_operation_budget(deadline):
+                async with asyncio.timeout_at(deadline):
+                    async with authority.lock:
+                        if renewal and not authority.active and not authority.lost:
+                            return None
+                        await self._check_dispatch_claim(authority)
+                        current = await self._storage.get_mcp_dispatch_resume_outbox(
+                            authority.outbox_id
+                        )
+                        if (
+                            current is None
+                            or str(current.status) not in {"claimed", "active"}
+                            or current.claim_owner != authority.claim_owner
+                            or current.claim_token != authority.claim_token
+                            or (
+                                authority.revision is not None
+                                and current.revision != authority.revision
+                            )
+                        ):
+                            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
+                        result = await operation(current)
+                        saved = await self._storage.get_mcp_dispatch_resume_outbox(
+                            authority.outbox_id
+                        )
+                        if saved is None:
+                            raise ExecutionOwnershipLost(
+                                "mcp_dispatch_authority_missing"
+                            )
+                        authority.revision = saved.revision
+                        if str(saved.status) in {"claimed", "active"}:
+                            if (
+                                saved.claim_owner != authority.claim_owner
+                                or saved.claim_token != authority.claim_token
+                            ):
+                                raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
+                            authority.deadline = self._claim_deadline(saved)
+                            authority.renew_at = monotonic() + max(
+                                0.0,
+                                (
+                                    saved.updated_at
+                                    + timedelta(seconds=5)
+                                    - self._now()
+                                ).total_seconds(),
+                            )
+                        else:
+                            authority.active = False
+                        return result
+        except (TimeoutError, ExecutionOwnershipLost) as exc:
+            authority.lost = True
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost") from exc
+
+    async def _converge_claimed_unknown(
+        self,
+        authority: _DispatchAuthority | None,
+        request: CapabilityExecutionRequest,
+    ) -> MCPNoServerConvergenceResult:
+        if authority is None:
+            return await self._storage.converge_mcp_unknown_no_replay(
+                request.task_id, self._now()
+            )
+        if authority.lost:
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
+        # Failure cleanup may run after expiry, but only against the last revision
+        # acknowledged by this executor. Never adopt a revision read from a successor.
+        deadline = monotonic() + 5
+        try:
+            with mcp_operation_budget(deadline):
+                async with asyncio.timeout_at(deadline):
+                    async with authority.lock:
+                        if authority.lost or authority.revision is None:
+                            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
+                        result = (
+                            await self._storage.converge_claimed_mcp_unknown_no_replay(
+                                request.task_id,
+                                authority.intent_id,
+                                authority.outbox_id,
+                                authority.claim_owner,
+                                authority.claim_token,
+                                authority.revision,
+                                self._now(),
+                            )
+                        )
+        except Exception as exc:
+            authority.lost = True
+            raise ExecutionOwnershipLost("mcp_dispatch_cleanup_unconfirmed") from exc
+        if result is None:
+            authority.lost = True
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
+        authority.active = False
+        return result
+
+    async def _run_claimed_dispatch(
+        self,
+        authority: _DispatchAuthority | None,
+        operation: Callable[[], Awaitable[ClaimResult]],
+    ) -> ClaimResult:
+        if authority is None:
+            return await operation()
+        await self._renew_dispatch_claim(authority)
+        stop = asyncio.Event()
+        # Each storage call captures the current persisted window before it
+        # queues work. A long model/tool wait itself has no execution deadline.
+        with mcp_operation_budget(lambda: authority.deadline if authority.active else None):
+            worker = asyncio.create_task(operation())
+            heartbeat = asyncio.create_task(
+                self._maintain_dispatch_claim(authority, stop, renew_immediately=False)
+            )
+        try:
+            done, _ = await asyncio.wait(
+                {worker, heartbeat}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if heartbeat in done and heartbeat.exception() is not None:
+                authority.lost = True
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+                raise ExecutionOwnershipLost(
+                    "mcp_dispatch_claim_lost"
+                ) from heartbeat.exception()
+            return await worker
+        finally:
+            stop.set()
+            if not worker.done():
+                authority.lost = True
+                worker.cancel()
+            await asyncio.gather(worker, heartbeat, return_exceptions=True)
+
+    async def _renew_dispatch_claim(self, authority: _DispatchAuthority) -> None:
+        async def renew(current: MCPDispatchResumeOutbox):
+            now = self._now()
+            return await self._storage.renew_mcp_dispatch_claim(
+                authority.outbox_id,
+                authority.claim_owner,
+                authority.claim_token,
+                current.revision,
+                now,
+                now + timedelta(seconds=30),
+            )
+
+        try:
+            renewed = await self._claim_update(authority, renew, renewal=True)
+        except Exception as exc:
+            authority.lost = True
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost") from exc
         if renewed is None:
-            raise _CallReservationError("mcp_dispatch_claim_lost")
+            if not authority.active and not authority.lost:
+                return
+            authority.lost = True
+            raise ExecutionOwnershipLost("mcp_dispatch_claim_lost")
+
+    async def _wait_claim_interval(
+        self, stop: asyncio.Event, *, delay: float = 5.0
+    ) -> None:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+        except TimeoutError:
+            pass
 
     async def _maintain_dispatch_claim(
         self,
@@ -1739,10 +1956,14 @@ class UserMCPDispatchCoordinator:
     ) -> None:
         if renew_immediately:
             await self._renew_dispatch_claim(authority)
-        while not stop.is_set():
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=5.0)
-            except TimeoutError:
+        while not stop.is_set() and authority.active:
+            await self._wait_claim_interval(
+                stop,
+                delay=max(0.0, authority.renew_at - monotonic())
+                if authority.renew_at is not None
+                else 5.0,
+            )
+            if not stop.is_set() and authority.active:
                 await self._renew_dispatch_claim(authority)
 
     async def _prepare_dispatch_authority(
@@ -1841,6 +2062,8 @@ class UserMCPDispatchCoordinator:
             outbox_id=outbox_id,
             claim_owner=claim_owner,
             claim_token=claim_token,
+            deadline=self._claim_deadline(outbox),
+            revision=outbox.revision,
         )
 
     async def _prefer_durable_dependency_projection(
@@ -2057,7 +2280,7 @@ class UserMCPDispatchCoordinator:
         snapshot = await self._pending_action_payload_store.seal(
             identity,
             arguments,
-            on_gate_wait=lambda: self._renew_dispatch_claim(authority),
+            on_gate_wait=lambda: self._check_dispatch_claim(authority),
         )
         now = self._now()
         interrupt_id = None if approved else f"mcp-approval-{action_id.removeprefix('mcp-action-')}"
@@ -2361,38 +2584,44 @@ class UserMCPDispatchCoordinator:
                 if intent is None or outbox is None:
                     raise _CallReservationError("mcp_dispatch_authority_missing")
                 if mrtr_continuation is None:
-                    reserved = await self._storage.admit_approved_mcp_action(
-                        authority.intent_id,
-                        authority.outbox_id,
-                        pending_action.action_id,
-                        intent.revision,
-                        outbox.revision,
-                        pending_action.revision,
-                        authority.claim_owner,
-                        authority.claim_token,
-                        pending_action_payload,
-                        record,
-                        now,
-                        action_candidate=pending_action,
-                        cp7_candidate_id=self._cp7_candidate_id,
-                        cp7_epoch_id=self._cp7_epoch_id,
+                    reserved = await self._claim_update(
+                        authority,
+                        lambda current: self._storage.admit_approved_mcp_action(
+                            authority.intent_id,
+                            authority.outbox_id,
+                            pending_action.action_id,
+                            intent.revision,
+                            current.revision,
+                            pending_action.revision,
+                            authority.claim_owner,
+                            authority.claim_token,
+                            pending_action_payload,
+                            record,
+                            now,
+                            action_candidate=pending_action,
+                            cp7_candidate_id=self._cp7_candidate_id,
+                            cp7_epoch_id=self._cp7_epoch_id,
+                        ),
                     )
                 else:
-                    reserved = await self._storage.admit_mrtr_continuation(
-                        authority.intent_id,
-                        authority.outbox_id,
-                        mrtr_continuation.original_call_ref,
-                        mrtr_continuation.sealed_request_state_ref,
-                        mrtr_continuation.answer_id,
-                        intent.revision,
-                        outbox.revision,
-                        authority.claim_owner,
-                        authority.claim_token,
-                        pending_action_payload,
-                        record,
-                        now,
-                        cp7_candidate_id=self._cp7_candidate_id,
-                        cp7_epoch_id=self._cp7_epoch_id,
+                    reserved = await self._claim_update(
+                        authority,
+                        lambda current: self._storage.admit_mrtr_continuation(
+                            authority.intent_id,
+                            authority.outbox_id,
+                            mrtr_continuation.original_call_ref,
+                            mrtr_continuation.sealed_request_state_ref,
+                            mrtr_continuation.answer_id,
+                            intent.revision,
+                            current.revision,
+                            authority.claim_owner,
+                            authority.claim_token,
+                            pending_action_payload,
+                            record,
+                            now,
+                            cp7_candidate_id=self._cp7_candidate_id,
+                            cp7_epoch_id=self._cp7_epoch_id,
+                        ),
                     )
             if not reserved:
                 active_calls = await self._storage.list_mcp_call_records(
@@ -2497,57 +2726,27 @@ class UserMCPDispatchCoordinator:
                 workflow_kind=workflow_kind,
             )
 
-        claim_stop: asyncio.Event | None = None
-        claim_task: asyncio.Task[None] | None = None
-        gateway_task: asyncio.Task[MCPCallOutcome] | None = None
         try:
-            if authority is None:
-                outcome = await invoke_gateway()
-            else:
-                await self._renew_dispatch_claim(authority)
-                claim_stop = asyncio.Event()
-                gateway_task = asyncio.create_task(invoke_gateway())
-                claim_task = asyncio.create_task(
-                    self._maintain_dispatch_claim(
-                        authority,
-                        claim_stop,
-                        renew_immediately=False,
-                    )
-                )
-                done, _pending = await asyncio.wait(
-                    {gateway_task, claim_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if claim_task in done and gateway_task not in done:
-                    claim_error = claim_task.exception()
-                    gateway_task.cancel()
-                    await asyncio.gather(gateway_task, return_exceptions=True)
-                    if claim_error is None:
-                        raise _CallReservationError("mcp_dispatch_claim_lost")
-                    raise claim_error
-                outcome = await gateway_task
-                claim_stop.set()
-                await claim_task
+            outcome = await invoke_gateway()
         except BaseException as exc:
-            if claim_stop is not None:
-                claim_stop.set()
-            if claim_task is not None and not claim_task.done():
-                await asyncio.gather(claim_task, return_exceptions=True)
             call_ref = call_ref_holder.get("value")
             if call_ref:
-                parsed_terminal_valid = (
-                    not isinstance(exc, MCPResultTerminalError)
-                    or _parsed_checkpoint_matches(
-                        exc.checkpoint,
-                        call_ref=call_ref,
-                        protocol_version=protocol_version,
-                        output_schema_sha256=output_schema_sha256,
-                        expected_source="tools_call",
-                    )
+                parsed_terminal_valid = not isinstance(
+                    exc, MCPResultTerminalError
+                ) or _parsed_checkpoint_matches(
+                    exc.checkpoint,
+                    call_ref=call_ref,
+                    protocol_version=protocol_version,
+                    output_schema_sha256=output_schema_sha256,
+                    expected_source="tools_call",
                 )
-                known_terminal_failure = isinstance(
-                    exc, (MCPRemoteError, MCPResultTooLargeError, MCPJobWorkflowError)
-                ) and parsed_terminal_valid
+                known_terminal_failure = (
+                    isinstance(
+                        exc,
+                        (MCPRemoteError, MCPResultTooLargeError, MCPJobWorkflowError),
+                    )
+                    and parsed_terminal_valid
+                )
                 terminal_status = "failed"
                 safe_error_code = (
                     "mcp_result_too_large"
@@ -2572,7 +2771,9 @@ class UserMCPDispatchCoordinator:
                             }
                         )
                         candidate = MCPValidatedTerminalResultCandidate(
-                            candidate_id=mcp_terminal_candidate_id(call_ref, payload_sha),
+                            candidate_id=mcp_terminal_candidate_id(
+                                call_ref, payload_sha
+                            ),
                             owner_user_id=branch.owner_user_id,
                             conversation_id=request.conversation_id,
                             task_id=request.task_id,
@@ -2617,11 +2818,10 @@ class UserMCPDispatchCoordinator:
                         sealed = await self._seal_terminal_candidate_or_converge(
                             request,
                             candidate,
+                            authority=authority,
                         )
                         if self._terminal_candidate_snapshot_authority is None:
-                            await self._storage.converge_mcp_unknown_no_replay(
-                                request.task_id, self._now()
-                            )
+                            await self._converge_claimed_unknown(authority, request)
                             raise _CallReservationError(
                                 "mcp_terminal_candidate_snapshot_unavailable"
                             ) from exc
@@ -2636,28 +2836,27 @@ class UserMCPDispatchCoordinator:
                                 "mcp_dispatch_authority_missing"
                             ) from exc
                         try:
-                            committed = await self._storage.commit_mcp_call_terminal(
-                                call_ref,
-                                candidate.candidate_id,
-                                authority.outbox_id,
-                                outbox.revision,
-                                authority.claim_owner,
-                                authority.claim_token,
-                                candidate_snapshot,
-                                None,
-                                self._now(),
+                            committed = await self._claim_update(
+                                authority,
+                                lambda current: self._storage.commit_mcp_call_terminal(
+                                    call_ref,
+                                    candidate.candidate_id,
+                                    authority.outbox_id,
+                                    current.revision,
+                                    authority.claim_owner,
+                                    authority.claim_token,
+                                    candidate_snapshot,
+                                    None,
+                                    self._now(),
+                                ),
                             )
                         except BaseException as commit_exc:
-                            await self._storage.converge_mcp_unknown_no_replay(
-                                request.task_id, self._now()
-                            )
+                            await self._converge_claimed_unknown(authority, request)
                             raise _CallReservationError(
                                 "mcp_terminal_result_commit_failed"
                             ) from commit_exc
                         if str(committed) == "conflict":
-                            await self._storage.converge_mcp_unknown_no_replay(
-                                request.task_id, self._now()
-                            )
+                            await self._converge_claimed_unknown(authority, request)
                             raise _CallReservationError(
                                 "mcp_terminal_result_commit_conflict"
                             ) from exc
@@ -2672,9 +2871,7 @@ class UserMCPDispatchCoordinator:
                             reason=MCPAggregateTransitionReason.ORDINARY_TERMINAL,
                         )
                     else:
-                        await self._storage.converge_mcp_unknown_no_replay(
-                            request.task_id, self._now()
-                        )
+                        await self._converge_claimed_unknown(authority, request)
                 else:
                     await self._storage.finish_mcp_call(
                         branch.owner_user_id,
@@ -2707,14 +2904,6 @@ class UserMCPDispatchCoordinator:
                     selector_step=selector_step,
                 )
             raise
-        finally:
-            if claim_stop is not None:
-                claim_stop.set()
-            if claim_task is not None and not claim_task.done():
-                await asyncio.gather(claim_task, return_exceptions=True)
-            if gateway_task is not None and not gateway_task.done():
-                gateway_task.cancel()
-                await asyncio.gather(gateway_task, return_exceptions=True)
 
         call_ref = call_ref_holder.get("value")
         if not call_ref:
@@ -2751,9 +2940,7 @@ class UserMCPDispatchCoordinator:
                 != outcome.result_content_sha256
             )
         ):
-            await self._storage.converge_mcp_unknown_no_replay(
-                request.task_id, self._now()
-            )
+            await self._converge_claimed_unknown(authority, request)
             raise _CallReservationError("mcp_result_checkpoint_authority_invalid")
         terminal_status = {
             MCPCallOutcomeKind.COMPLETED: "completed",
@@ -2782,9 +2969,7 @@ class UserMCPDispatchCoordinator:
                     store_kind=outcome.result_store_kind,
                 )
             except BaseException as exc:
-                convergence = await self._storage.converge_mcp_unknown_no_replay(
-                    request.task_id, self._now()
-                )
+                convergence = await self._converge_claimed_unknown(authority, request)
                 if convergence in {
                     MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY,
                     MCPNoServerConvergenceResult.ALREADY_CONVERGED,
@@ -2844,6 +3029,7 @@ class UserMCPDispatchCoordinator:
             sealed = await self._seal_terminal_candidate_or_converge(
                 request,
                 candidate,
+                authority=authority,
             )
             try:
                 candidate_snapshot = (
@@ -2866,21 +3052,22 @@ class UserMCPDispatchCoordinator:
                         raise _CallReservationError(
                             "mcp_dispatch_authority_missing"
                         )
-                    committed = await self._storage.commit_mcp_call_terminal(
-                        call_ref,
-                        candidate.candidate_id,
-                        authority.outbox_id,
-                        outbox.revision,
-                        authority.claim_owner,
-                        authority.claim_token,
-                        candidate_snapshot,
-                        result_snapshot,
-                        self._now(),
+                    committed = await self._claim_update(
+                        authority,
+                        lambda current: self._storage.commit_mcp_call_terminal(
+                            call_ref,
+                            candidate.candidate_id,
+                            authority.outbox_id,
+                            current.revision,
+                            authority.claim_owner,
+                            authority.claim_token,
+                            candidate_snapshot,
+                            result_snapshot,
+                            self._now(),
+                        ),
                     )
             except BaseException as exc:
-                convergence = await self._storage.converge_mcp_unknown_no_replay(
-                    request.task_id, self._now()
-                )
+                convergence = await self._converge_claimed_unknown(authority, request)
                 if convergence in {
                     MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY,
                     MCPNoServerConvergenceResult.ALREADY_CONVERGED,
@@ -2893,9 +3080,7 @@ class UserMCPDispatchCoordinator:
                     "mcp_terminal_result_commit_convergence_conflict"
                 ) from exc
             if str(committed) == "conflict":
-                convergence = await self._storage.converge_mcp_unknown_no_replay(
-                    request.task_id, self._now()
-                )
+                convergence = await self._converge_claimed_unknown(authority, request)
                 if convergence in {
                     MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY,
                     MCPNoServerConvergenceResult.ALREADY_CONVERGED,
@@ -2981,6 +3166,7 @@ class UserMCPDispatchCoordinator:
         self,
         request: CapabilityExecutionRequest,
         candidate: MCPValidatedTerminalResultCandidate,
+        authority: _DispatchAuthority | None = None,
     ) -> SealedTerminalResultCandidate:
         if self._terminal_result_root is None:
             raise _CallReservationError("mcp_terminal_result_store_unavailable")
@@ -2992,9 +3178,7 @@ class UserMCPDispatchCoordinator:
             )
             return outcome.sealed
         except BaseException as exc:
-            convergence = await self._storage.converge_mcp_unknown_no_replay(
-                request.task_id, self._now()
-            )
+            convergence = await self._converge_claimed_unknown(authority, request)
             if convergence in {
                 MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY,
                 MCPNoServerConvergenceResult.ALREADY_CONVERGED,
@@ -3381,33 +3565,28 @@ class UserMCPDispatchCoordinator:
                 authority.outbox_id
             )
             if intent is None or outbox is None or result_ref is None:
-                await self._storage.converge_mcp_unknown_no_replay(
-                    request.task_id, now
-                )
+                await self._converge_claimed_unknown(authority, request)
                 raise _CallReservationError("mcp_remote_task_authority_missing")
             try:
-                published = await self._storage.publish_mcp_remote_task(
-                    authority.intent_id,
-                    authority.outbox_id,
-                    call_ref,
-                    result_ref,
-                    intent.revision,
-                    outbox.revision,
-                    authority.claim_owner,
-                    authority.claim_token,
-                    now,
+                published = await self._claim_update(
+                    authority,
+                    lambda current: self._storage.publish_mcp_remote_task(
+                        authority.intent_id,
+                        authority.outbox_id,
+                        call_ref,
+                        result_ref,
+                        intent.revision,
+                        current.revision,
+                        authority.claim_owner,
+                        authority.claim_token,
+                        now,
+                    ),
                 )
             except BaseException as exc:
-                await self._storage.converge_mcp_unknown_no_replay(
-                    request.task_id, self._now()
-                )
-                raise _CallReservationError(
-                    "mcp_remote_task_publish_failed"
-                ) from exc
+                await self._converge_claimed_unknown(authority, request)
+                raise _CallReservationError("mcp_remote_task_publish_failed") from exc
             if published is None:
-                await self._storage.converge_mcp_unknown_no_replay(
-                    request.task_id, self._now()
-                )
+                await self._converge_claimed_unknown(authority, request)
                 raise _CallReservationError("mcp_remote_task_publish_conflict")
             saved = (
                 await self._storage.get_mcp_branch_record(

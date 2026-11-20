@@ -13,6 +13,15 @@ T = TypeVar("T")
 ACTIVE_LEASE_PHASES = frozenset({"model_sample", "compaction", "capability_wave", "final_publish"})
 
 
+class AgentExecutionFailure(RuntimeError):
+    """Carry this execution's live handle across the runtime error boundary."""
+
+    def __init__(self, handle: AgentLeaseHandle, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.handle = handle
+        self.cause = cause
+
+
 @dataclass(slots=True)
 class AgentLeaseHandle:
     current: AgentTaskLease

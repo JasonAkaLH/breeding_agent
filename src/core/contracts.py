@@ -668,6 +668,17 @@ class MCPResultLifecycleStoragePort(Protocol):
 
 @runtime_checkable
 class MCPDispatchFinalizationStoragePort(Protocol):
+    async def converge_claimed_mcp_unknown_no_replay(
+        self,
+        task_id: str,
+        intent_id: str,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult | None: ...
+
     async def finalize_mcp_dispatch(
         self,
         intent_id: str,
