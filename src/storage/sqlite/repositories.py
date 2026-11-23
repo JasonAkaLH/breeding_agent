@@ -2310,14 +2310,15 @@ def _resolve_event_replay_page_limit(requested_limit: int | None, event_limit: i
     return requested_limit
 
 
+def _event_payload_size(event: EventRecord) -> int:
+    return len(json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"))
+
+
 def _ensure_event_replay_page_within_rust_contract(events: list[EventRecord], event_limit: int, byte_limit: int) -> None:
     if len(events) > event_limit:
         error_code = runtime_error_policy("event_log_replay_page_exceeded")["code"]
         raise ValueError(f"{error_code}: event replay exceeds Rust runtime sidecar page limit")
-    payload_bytes = sum(
-        len(json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"))
-        for event in events
-    )
+    payload_bytes = sum(_event_payload_size(event) for event in events)
     if payload_bytes > byte_limit:
         error_code = runtime_error_policy("event_log_replay_page_exceeded")["code"]
         raise ValueError(f"{error_code}: event replay exceeds Rust runtime sidecar page limit")
@@ -15230,22 +15231,35 @@ class SQLiteCollaborationRepository:
             cursor = self._session.get(EventRecordRow, after_event_id)
             if cursor is None or cursor.task_id != task_id:
                 raise ValueError(f"Unknown event replay cursor: {after_event_id}")
+            # ASC puts NULL first in SQLite and last in PostgreSQL.
+            nulls_last = self._session.get_bind().dialect.name == "postgresql"
             if cursor.created_at is None:
-                query = query.where(
-                    or_(
-                        EventRecordRow.created_at.is_not(None),
-                        (EventRecordRow.created_at.is_(None)) & (EventRecordRow.event_id > after_event_id),
-                    )
+                after_cursor = EventRecordRow.created_at.is_(None) & (
+                    EventRecordRow.event_id > after_event_id
                 )
+                if not nulls_last:
+                    after_cursor = or_(after_cursor, EventRecordRow.created_at.is_not(None))
             else:
-                query = query.where(
-                    or_(
-                        EventRecordRow.created_at > cursor.created_at,
-                        (EventRecordRow.created_at == cursor.created_at) & (EventRecordRow.event_id > after_event_id),
-                    )
+                after_cursor = or_(
+                    EventRecordRow.created_at > cursor.created_at,
+                    (EventRecordRow.created_at == cursor.created_at) & (EventRecordRow.event_id > after_event_id),
                 )
-        events = [_row_to_event_record(row) for row in self._session.scalars(query).all()]
-        _ensure_event_replay_page_within_rust_contract(events, event_limit, byte_limit)
+                if nulls_last:
+                    after_cursor = or_(after_cursor, EventRecordRow.created_at.is_(None))
+            query = query.where(after_cursor)
+
+        events: list[EventRecord] = []
+        payload_bytes = 0
+        # Stop at the first event that would overflow without loading the whole row limit.
+        with self._session.scalars(query.execution_options(yield_per=16)) as rows:
+            for row in rows:
+                event = _row_to_event_record(row)
+                payload_bytes += _event_payload_size(event)
+                if payload_bytes > byte_limit:
+                    if not events:
+                        _ensure_event_replay_page_within_rust_contract([event], event_limit, byte_limit)
+                    break
+                events.append(event)
         return events
 
     def save_mailbox_message(self, message: MailboxMessage) -> MailboxMessage:

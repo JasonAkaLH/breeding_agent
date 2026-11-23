@@ -3848,8 +3848,11 @@ def _event(
     digest = hashlib.sha256(
         f"{request.node_id}:{event_type}:{ordinal}:{serialized}".encode("utf-8")
     ).hexdigest()[:16]
+    # Approval resumes can repeat the same node, selector ordinal and payload.
+    # New frontend occurrences need distinct IDs; replay retains the stored ID.
+    event_ref = uuid4().hex if visibility == EventVisibility.FRONTEND else digest
     return EventRecord(
-        event_id=f"{request.node_id}:{event_type}:{ordinal}:{digest}",
+        event_id=f"{request.node_id}:{event_type}:{ordinal}:{event_ref}",
         conversation_id=request.conversation_id,
         task_id=request.task_id,
         node_id=request.node_id,

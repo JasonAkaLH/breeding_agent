@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from src.api.dto import SubmitMessageRequest
+from src.api.sse import encode_sse_event
 from src.api.runtime import ApiRuntime, build_api_runtime as _build_api_runtime
 from src.capabilities.mcp_dispatch.models import (
     MCPSelectorAction,
@@ -20,6 +21,7 @@ from src.capabilities.mcp_dispatch.models import (
 from src.capabilities.mcp_dispatch.selector import MCPToolSelector
 from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import (
+    EventVisibility,
     InterruptStatus,
     MessageRole,
     NodeStatus,
@@ -88,6 +90,7 @@ from src.orchestration.agent_loop.models import (
     AgentRun,
     AgentRunStatus,
 )
+from src.storage.rust_contract import resource_limit
 from tests.api.support import InMemoryTaskRuntimeSidecar
 from tests.master_key_support import recovery_cipher
 
@@ -1170,6 +1173,16 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             await runtime.storage.save_task(task)
             await runtime.storage.save_task_node(node)
             await runtime.storage.create_user_mcp_server(server)
+            for index in range(resource_limit("replay_page_events")):
+                await runtime.storage.append_event(
+                    EventRecord(
+                        event_id=f"approval-history-{index:04d}",
+                        conversation_id=task.conversation_id,
+                        task_id=task.task_id,
+                        event_type="task.progress",
+                        created_at=now - timedelta(seconds=1),
+                    )
+                )
             selector = TwoStepSelector()
             gateway = DurableCompletedGateway(runtime.user_mcp_result_store)
             projector = AsyncMock(
@@ -1191,6 +1204,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 ),
                 result_artifact_projector=projector,
                 terminal_result_root=runtime._mcp_terminal_result_root,
+                live_event_recorder=runtime._record_event,
                 now_fn=lambda: now,
                 terminal_now_fn=lambda: now.replace(tzinfo=timezone.utc),
             )
@@ -1203,7 +1217,16 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 metadata={"user_message": "run the approved lookup"},
             )
 
-            waiting = await coordinator.dispatch(request, server_id=server.server_id)
+            subscription = runtime.event_broker.subscribe(task.task_id)
+            self.addCleanup(subscription.close)
+
+            async def dispatch_and_record():
+                outcome = await coordinator.dispatch(request, server_id=server.server_id)
+                for event in outcome.events:
+                    await runtime._record_event(event)
+                return outcome
+
+            waiting = await dispatch_and_record()
 
             self.assertEqual(waiting.output_payload["mcp_status"], "approval_required")
             self.assertEqual(selector.call_count, 1)
@@ -1224,9 +1247,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(str(accepted), "accepted")
 
-            waiting_second = await coordinator.dispatch(
-                request, server_id=server.server_id
-            )
+            waiting_second = await dispatch_and_record()
 
             self.assertEqual(
                 waiting_second.output_payload["mcp_status"], "approval_required"
@@ -1253,7 +1274,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(str(accepted_second), "accepted")
 
-            completed = await coordinator.dispatch(request, server_id=server.server_id)
+            completed = await dispatch_and_record()
 
             self.assertIsNone(completed.error)
             self.assertEqual(gateway.call_count, 2)
@@ -1300,7 +1321,26 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 str((await runtime.storage.get_task_node(node.node_id)).status),
                 "completed",
             )
+            replay = {
+                event.event_id: json.loads(encode_sse_event(event)["data"])
+                async for event in runtime._iter_event_replay_pages(task.task_id)
+            }
+            self.assertGreater(len(replay), resource_limit("replay_page_events"))
+            while not subscription.queue.empty():
+                event = subscription.queue.get_nowait()
+                if event.visibility == EventVisibility.FRONTEND:
+                    self.assertEqual(
+                        replay[event.event_id], json.loads(encode_sse_event(event)["data"])
+                    )
+            await runtime._validate_mcp_aggregate_invariants()
             await runtime.shutdown()
+            restarted = self._build_runtime(Path(directory))
+            try:
+                await restarted.start()
+                restored_calls = await restarted.storage.list_mcp_call_records("alice", task.task_id)
+                self.assertEqual(restored_calls, calls)
+            finally:
+                await restarted.shutdown()
 
     async def test_mrtr_answer_resumes_original_action_without_selector_or_reapproval(
         self,
