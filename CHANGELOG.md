@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-23：从 `main@d840e6b` 构建并发布持续续租修复开发后端 `backend-dev:0.1.45`（linux/amd64），OCI index digest 为 `sha256:bcbb890948f250433812f09500e3e15da2996354267a337e481c531a290b50c1`；来源/版本标签、provenance、294个交付文件哈希与远端摘要回拉均验证通过。旧0.1.44镜像复现长准备及连续短阶段续租缺口，新镜像318项去重回归及真实隔离PostgreSQL 7项全部通过；默认入口healthy、API 200且零重启，专用临时容器已清理。开发部署文件仅7处后端0.1.44→0.1.45，前端0.1.33、Sidecar0.1.28不变；三份受保护部署文件完成仓库外0600备份、ignored/untracked、精确替换、Shell语法和生产文件未变检查。未操作部署服务器或远端业务数据库，无需手动数据库迁移。License Requirement：无新增依赖或许可变化。
+
 - 2026-11-23：补齐 Agent 执行与恢复续租覆盖：同一 handle 持有唯一持续心跳，覆盖历史结果/continuation authority、上下文与 compaction 准备、连续短模型/Tool 阶段和最终发布，保留30秒TTL/10秒间隔。所有相关 fresh-read/CAS 与续租串行，退出等待在途续租更新 token，waiting/terminal 提交后停止心跳；实际失租继续取消执行并交回既有观察流程，不覆盖接手者或重放工具。异步本地 tokenizer 回退移至线程，避免阻塞心跳；续租拒绝新增不含token的任务ID、原因与存储时间日志。真实 SQLite/模拟时间覆盖65秒准备与恢复、13次短模型调用、125秒单次Tool、提交竞争、取消及完整历史任务启动完成；去重318项和隔离 PostgreSQL 7项通过，Ruff/diff检查通过。无 schema、公开 API、前端或依赖变更，未修改远端业务数据库或部署服务器。License Requirement：无新增依赖或许可变化。
 
 - 2026-11-23：从 `main@d5913f5` 构建并发布修复启动恢复失租故障的开发后端 `backend-dev:0.1.44`（linux/amd64），OCI index digest 为 `sha256:90799852844cb3f23b0ff42184ffedd3c4cf58cca348b3f436d32c0e240ea2ca`，来源/版本标签及 provenance、294个交付文件哈希核验通过。旧0.1.43镜像实测复现历史任务恢复中的 AgentLeaseLost 启动失败，新镜像相关137项回归通过；隔离 PostgreSQL 6项通过，默认启动命令实测 healthy、API 200、零重启，远端摘要回拉验证通过，临时测试容器已清理。开发部署文件仅7处后端0.1.43→0.1.44，前端0.1.33和Sidecar0.1.28不变；三份受保护文件0600仓库外备份、ignored/untracked、Shell语法和生产文件未变检查通过。未操作部署服务器或远端数据库，无需手动修改数据库。License Requirement：无新增依赖或许可变化。
