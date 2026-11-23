@@ -555,13 +555,12 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         storage.get_task_node.return_value = SimpleNamespace(
             status=NodeStatus.CANCELLED
         )
-        storage.list_events_for_task.return_value = [
-            SimpleNamespace(
-                event_id="mcp-dispatch-finalized:v1:intent-1:4",
-                event_type="mcp.dispatch_finalized",
-                payload={"completion_mode": "cancelled_no_call"},
-            )
-        ]
+        evidence = SimpleNamespace(
+            event_id="mcp-dispatch-finalized:v1:intent-1:4",
+            event_type="mcp.dispatch_finalized",
+            payload={"completion_mode": "cancelled_no_call"},
+        )
+        storage.list_event_page_for_task.side_effect = [[evidence], []]
         storage.get_mcp_dispatch_resume_outbox.return_value = SimpleNamespace(
             status="aborted",
             completion_mode="cancelled_no_call",
@@ -590,7 +589,7 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         storage.get_task_node.return_value = SimpleNamespace(
             status=NodeStatus.COMPLETED
         )
-        storage.list_events_for_task.return_value = []
+        storage.list_event_page_for_task.return_value = []
         storage.get_mcp_dispatch_resume_outbox.return_value = SimpleNamespace(
             status="completed",
             completion_mode="stopped_after_call",
@@ -652,13 +651,12 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         storage.get_task_node.return_value = SimpleNamespace(
             status=NodeStatus.COMPLETED
         )
-        storage.list_events_for_task.return_value = [
-            SimpleNamespace(
-                event_id=f"mcp-dispatch-finalized:v1:{intent_id}:1",
-                event_type="mcp.dispatch_finalized",
-                payload={"completion_mode": "completed"},
-            )
-        ]
+        evidence = SimpleNamespace(
+            event_id=f"mcp-dispatch-finalized:v1:{intent_id}:1",
+            event_type="mcp.dispatch_finalized",
+            payload={"completion_mode": "completed"},
+        )
+        progress = SimpleNamespace(event_id="progress-1", event_type="task.progress")
         storage.get_mcp_dispatch_resume_outbox.return_value = SimpleNamespace(
             status="completed",
             completion_mode="completed",
@@ -678,8 +676,20 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(sibling_call_count=len(sibling_calls)):
                 storage.list_mcp_call_records.return_value = sibling_calls
+                storage.list_event_page_for_task.side_effect = [[progress], [evidence], []]
                 await runtime._validate_terminal_cp7_mcp_authority([intent])
         storage.get_mcp_terminal_result_receipt_for_call.assert_not_awaited()
+
+        duplicate_evidence = SimpleNamespace(
+            event_id=f"mcp-dispatch-finalized:v1:{intent_id}:2",
+            event_type=evidence.event_type,
+            payload=evidence.payload,
+        )
+        for pages in ([[progress], []], [[evidence], [duplicate_evidence], []]):
+            with self.subTest(pages=pages):
+                storage.list_event_page_for_task.side_effect = pages
+                with self.assertRaisesRegex(RuntimeError, "mcp_resolved_no_call_authority_incomplete"):
+                    await runtime._validate_terminal_cp7_mcp_authority([intent])
 
 
 if __name__ == "__main__":

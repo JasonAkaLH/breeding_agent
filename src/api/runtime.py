@@ -2525,13 +2525,15 @@ class ApiRuntime(
         return result
 
     async def _task_accepted_llm_metadata(self, task_id: str) -> dict[str, object]:
-        events = await self.storage.list_events_for_task(task_id)
-        for event in events:
-            if event.event_type != "task.accepted":
-                continue
-            payload = event.payload if isinstance(event.payload, Mapping) else {}
-            return self._llm_request_metadata(payload, include_defaults=False)
-        return {}
+        events = await self.storage.list_events_for_task_filtered(
+            task_id, event_types={"task.accepted"}, limit=1
+        )
+        if not events:
+            return {}
+        payload = events[0].payload
+        return self._llm_request_metadata(
+            payload if isinstance(payload, Mapping) else {}, include_defaults=False
+        )
 
     async def mcp_terminal_projection_for_task(
         self, task: Task
@@ -12195,7 +12197,15 @@ class ApiRuntime(
                 raise RuntimeError("mcp_terminal_intent_authority_incomplete")
             events = {
                 event.event_id: event
-                for event in await self.storage.list_events_for_task(intent.task_id)
+                async for event in self._iter_event_replay_pages(intent.task_id)
+                if event.event_type in {
+                    "mcp.execution_status_unknown",
+                    "mcp.runtime_unavailable",
+                    "mcp.dispatch_no_call",
+                    "mcp.dispatch_finalized",
+                    "task.failed",
+                    "task.cancelled",
+                }
             }
             outbox = await self.storage.get_mcp_dispatch_resume_outbox(
                 mcp_dispatch_resume_outbox_id(intent.intent_id)

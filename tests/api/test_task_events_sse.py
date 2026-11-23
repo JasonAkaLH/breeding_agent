@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 from datetime import datetime, timedelta
 
 
 from src.api.routes.tasks import _iter_authorized_frontend_events
-from src.api.sse import InMemoryEventBroker
+from src.api.sse import InMemoryEventBroker, encode_sse_event
+from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Conversation, EventRecord, Message, Task
+from src.integrations.mcp.dispatch_coordinator import _event
 from src.storage.rust_contract import resource_limit
 from tests.api.support import APITestCase, blocking_mysql_adapter
 
@@ -20,6 +23,77 @@ class _FailingAuditSink:
 
 
 class TaskEventsSSEAPITest(APITestCase):
+    async def test_resume_model_metadata_reads_first_acceptance_in_long_history(self) -> None:
+        task_id = "task-model-resume"
+        created_at = datetime(2026, 11, 23, 12, 0, 0)
+        for index in range(resource_limit("replay_page_events") + 1):
+            await self.runtime.storage.append_event(
+                EventRecord(
+                    event_id=f"evt-progress-{index:04d}",
+                    conversation_id="conv-model-resume",
+                    task_id=task_id,
+                    event_type="task.progress",
+                    created_at=created_at,
+                )
+            )
+        self.assertEqual(await self.runtime._task_accepted_llm_metadata(task_id), {})
+
+        for event_id, thinking in (("accept-b", True), ("accept-a", False)):
+            await self.runtime.storage.append_event(
+                EventRecord(
+                    event_id=event_id,
+                    conversation_id="conv-model-resume",
+                    task_id=task_id,
+                    event_type="task.accepted",
+                    payload={"deep_thinking": thinking},
+                    created_at=created_at,
+                )
+            )
+        metadata = await self.runtime._task_accepted_llm_metadata(task_id)
+        self.assertIs(metadata["deep_thinking"], False)
+        self.assertIs(metadata["main_agent_thinking_enabled"], False)
+
+    async def test_repeated_mcp_discovery_preserves_live_events_in_approval_replay(self) -> None:
+        created_at = datetime(2026, 11, 23, 12, 0, 0)
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id="conv-mcp-replay", username="alice")
+        )
+        await self.runtime.storage.save_task(
+            Task(
+                task_id="task-mcp-replay",
+                conversation_id="conv-mcp-replay",
+                root_message_id="msg-mcp-replay",
+                status=TaskStatus.RUNNING,
+            )
+        )
+        request = CapabilityExecutionRequest(
+            capability_id="mcp.dispatch",
+            conversation_id="conv-mcp-replay",
+            task_id="task-mcp-replay",
+            node_id="node-mcp-replay",
+        )
+        subscription = self.runtime.event_broker.subscribe(request.task_id)
+        self.addCleanup(subscription.close)
+        live_events = []
+        # The same node restarts discovery at selector step 1 after approval.
+        for round_index in range(2):
+            for event_type in (
+                "mcp.server_routed", "mcp.discovery_started", "mcp.discovery_completed",
+            ):
+                event = _event(request, event_type, {"server_display_name": "CRM"}, 1)
+                await self.runtime._record_event(
+                    replace(event, created_at=created_at + timedelta(seconds=round_index))
+                )
+                live_events.append(await asyncio.wait_for(subscription.get(), timeout=1))
+
+        replay = {
+            event.event_id: encode_sse_event(event)
+            async for event in self.runtime._iter_event_replay_pages(request.task_id)
+        }
+        for event in live_events:
+            self.assertEqual(replay[event.event_id], encode_sse_event(event))
+        self.assertEqual(len(replay), len(live_events))
+
     async def test_task_events_replay_reads_history_by_rust_limited_pages(self) -> None:
         page_limit = resource_limit("replay_page_events")
         created_at = datetime(2026, 5, 15, 12, 0, 0)

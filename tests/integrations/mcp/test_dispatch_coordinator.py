@@ -1267,6 +1267,13 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.callback_order, ["reserved", "registered"])
         self.assertEqual(len(gateway.calls), 1)
         self.assertEqual(gateway.listed[-1:], ["server-a"])
+        # Resuming discovery emits new progress occurrences. Reusing an ID
+        # overwrites its timestamp and makes the next approval replay conflict.
+        self.assertTrue(
+            {event.event_id for event in pending.events}.isdisjoint(
+                event.event_id for event in outcome.events
+            )
+        )
 
     async def test_live_recorder_gets_started_after_reserve_and_heartbeat_only(self) -> None:
         storage = _FakeStorage()
