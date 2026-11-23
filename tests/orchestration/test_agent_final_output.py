@@ -3,9 +3,11 @@ from __future__ import annotations
 import inspect
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
+from tests.agent_lease_test_support import AgentLeaseTestClock
 
 from src.orchestration.agent_loop.final_output import AgentFinalOutputPublisher
 from src.orchestration.agent_loop.lease import AgentLeaseController
@@ -37,6 +39,34 @@ from src.storage.sqlite.models import (
 
 
 class AgentFinalOutputPublisherTest(unittest.IsolatedAsyncioTestCase):
+    async def test_final_validation_renews_and_terminal_commit_stops_heartbeat(self):
+        candidate = await self._candidate()
+        clock = AgentLeaseTestClock(
+            self.repository, self.handle.current.expires_at - timedelta(seconds=30)
+        )
+        self.leases._sleep = clock.sleep
+        original_items = self.repository.list_items
+
+        async def slow_items(run_id):
+            items = await original_items(run_id)
+            await clock.advance(65)
+            return items
+
+        self.repository.list_items = slow_items
+        publisher = AgentFinalOutputPublisher(
+            runs=self.repository, writer=self.repository, lease_controller=self.leases
+        )
+        result = await publisher.publish(
+            run_id="run-1",
+            candidate_item_id=candidate.assistant_item.item_id,
+            handle=self.handle,
+        )
+        self.assertEqual(result.run.status, AgentRunStatus.COMPLETED)
+        self.assertGreaterEqual(clock.renew_count, 6)
+        self.assertEqual(clock.max_sleepers, 1)
+        self.assertEqual(clock.sleepers, [])
+        self.assertIsNone(self.handle._heartbeat_task)
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.engine = create_sqlite_engine(Path(self.temp_dir.name) / "final.sqlite")

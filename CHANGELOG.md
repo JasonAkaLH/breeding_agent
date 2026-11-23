@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-23：补齐 Agent 执行与恢复续租覆盖：同一 handle 持有唯一持续心跳，覆盖历史结果/continuation authority、上下文与 compaction 准备、连续短模型/Tool 阶段和最终发布，保留30秒TTL/10秒间隔。所有相关 fresh-read/CAS 与续租串行，退出等待在途续租更新 token，waiting/terminal 提交后停止心跳；实际失租继续取消执行并交回既有观察流程，不覆盖接手者或重放工具。异步本地 tokenizer 回退移至线程，避免阻塞心跳；续租拒绝新增不含token的任务ID、原因与存储时间日志。真实 SQLite/模拟时间覆盖65秒准备与恢复、13次短模型调用、125秒单次Tool、提交竞争、取消及完整历史任务启动完成；去重318项和隔离 PostgreSQL 7项通过，Ruff/diff检查通过。无 schema、公开 API、前端或依赖变更，未修改远端业务数据库或部署服务器。License Requirement：无新增依赖或许可变化。
+
 - 2026-11-23：修复历史 AgentRun 恢复期间失租导致整个后端启动失败，以及后台恢复失租触发进程退出的问题；启动与后台统一将 ExecutionOwnershipLost 交回既有去重租约观察器，重读持久化 owner/到期状态后再恢复，不关闭任务、覆盖接手者或绕过写入栅栏，非租约错误继续阻断。补充真实 SQLite 历史任务重启、模型采样中租约过期并接管、旧操作取消、启动后 API 可用及后台等待回归；相关137项和隔离 PostgreSQL 6项通过，Ruff/diff检查通过。无数据库 schema、公开 API 或前端变更。License Requirement：无新增依赖或许可变化。
 
 - 2026-11-20：按 V3 计划修复 MCP dispatch 续租范围：取得 claim 后持续覆盖发现、Selector、参数准备、Tool 和结果提交，保留 30/5/10 秒规则；claim 更新串行刷新 revision，失败/unknown 收尾原子绑定原 intent/outbox/owner/token/revision，旧执行者不能关闭接手后的任务。操作预算覆盖短锁、连接池与 SQL，PostgreSQL 事务内限制锁/语句时间，超时线程不得迟到提交；取消后不假定 Tool 回滚、不重放业务调用。Agent 异常携带实际续租 handle，Runtime 仅投影已提交的 owned failure，保留准备失败及启动权威收敛。补充模拟时间与隔离 PostgreSQL 并发回归，去重后的相关279项（含真实 PostgreSQL 10项）、Ruff和diff检查通过；全局接口快照另有3项既有失败，原因是快照缺少HEAD中已存在的5个方法，未扩展本次范围修复。无 schema、公开 API、前端、MCP Server 或依赖变更，未部署或修改远端旧数据。License Requirement：无新增依赖或许可变化。

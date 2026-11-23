@@ -47,9 +47,59 @@ from src.storage.sqlite.models import (
 )
 from tests.postgres_test_support import isolated_postgres_test_dsn_or_skip_reason
 from tests.orchestration.support import make_agent_result_projector
+from src.orchestration.agent_loop.lease import AgentLeaseController
 
 
 class AgentStoragePostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_continuous_heartbeat_and_short_phase_commits_share_live_token(self):
+        run = await self.repository.create_run(
+            AgentRun(
+                self.run_id,
+                self.task_id,
+                self.conversation_id,
+                AgentRunStatus.RUNNING,
+                AgentModelBinding("edition"),
+            )
+        )
+        controller = AgentLeaseController(self.repository, ttl_seconds=3)
+        handle = await controller.acquire(run.run_id, owner_id="continuous-worker")
+        first_token = handle.current.token
+
+        async def execute(_handle):
+            for index in range(10):
+
+                async def sample(_handle):
+                    await asyncio.sleep(0.7)
+                    return AgentSample(
+                        f"sample-{index}",
+                        run.binding,
+                        "answer",
+                        (),
+                        AgentUsage(status="usage_unavailable"),
+                        AgentFinishMetadata("stop", 1),
+                    )
+
+                result = await controller.run_active_phase(
+                    "model_sample", handle, sample
+                )
+
+                async def commit(lease):
+                    latest = await self.repository.get_run(run.run_id)
+                    return await self.repository.commit_agent_sample(
+                        AgentSampleCommit(
+                            run.run_id, latest.revision, lease.token, result, {}
+                        )
+                    )
+
+                await handle.run_ownership_bound(commit)
+
+        await controller.run_owned(handle, execute)
+        stored = await self.repository.get_run(run.run_id)
+        self.assertEqual(stored.claim_token, handle.current.token)
+        self.assertNotEqual(stored.claim_token, first_token)
+        self.assertEqual(len(await self.repository.list_items(run.run_id)), 10)
+        self.assertIsNone(handle._heartbeat_task)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.dsn, skip_reason = isolated_postgres_test_dsn_or_skip_reason(

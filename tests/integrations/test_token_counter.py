@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +22,44 @@ from src.integrations.token_counter import (
 
 
 class TokenCounterTests(unittest.TestCase):
+    def test_async_fallback_runs_outside_event_loop_for_both_paths(self):
+        async def run(config):
+            event_loop_thread = threading.get_ident()
+
+            def fallback(*_args, **_kwargs):
+                self.assertNotEqual(threading.get_ident(), event_loop_thread)
+                return 9
+
+            with (
+                patch(
+                    "src.integrations.token_counter._fallback_num_tokens_from_messages",
+                    side_effect=fallback,
+                ),
+                patch(
+                    "src.integrations.token_counter._remote_token_counts_async",
+                    side_effect=httpx.TimeoutException("test provider timeout"),
+                ),
+            ):
+                self.assertEqual(
+                    await get_num_of_tokens_from_messages_async(
+                        ["hello"], config=config
+                    ),
+                    9,
+                )
+
+        for enabled in (False, True):
+            with self.subTest(provider_enabled=enabled):
+                asyncio.run(
+                    run(
+                        {
+                            "api_key": "test-key",
+                            "base_url": "https://example.test/v1",
+                            "model_edition": "test",
+                            "tokenization": {"enabled": enabled},
+                        }
+                    )
+                )
+
     def setUp(self) -> None:
         _TOKENIZATION_CACHE.clear()
 

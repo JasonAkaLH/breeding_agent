@@ -60,6 +60,7 @@ from src.storage.sqlite import (
 )
 from src.storage.sqlite.models import TaskRow
 from tests.orchestration.support import make_agent_result_projector
+from tests.agent_lease_test_support import AgentLeaseTestClock
 
 
 class _WaitingLeaseStore:
@@ -173,6 +174,35 @@ class _TracingResumer:
 
 
 class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_continuation_authority_renews_before_result_commit_and_resume(
+        self,
+    ):
+        locator, _, _ = await self._seed_waiting(
+            "slow-authority", AgentResumeKind.SKILL_INPUT
+        )
+        clock = AgentLeaseTestClock(self.repository, datetime(2026, 11, 23, 6, 0))
+        self.coordinator._leases._sleep = clock.sleep
+
+        async def resolve(_locator, _handle):
+            await clock.advance(65)
+            return AgentAuthorityResolution(
+                locator.authority_digest,
+                AgentCallOutcomeStatus.COMPLETED,
+                {"answer": "safe"},
+                {},
+            )
+
+        result = await self.coordinator.continue_waiting_call(
+            locator,
+            owner_scope="owner-1",
+            authority_digest=locator.authority_digest,
+            resolve_authority=resolve,
+        )
+        self.assertEqual(result.state, AgentRecoveryState.RESUMED)
+        self.assertEqual(len(self.resumer.run_ids), 1)
+        self.assertGreaterEqual(clock.renew_count, 6)
+        self.assertEqual(clock.sleepers, [])
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -357,6 +387,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             "authority.resolve",
             "repository.get_run",
             "repository.list_items",
+            "repository.get_run",
             "repository.commit_agent_call_outcome",
             "authority.ack",
             "repository.get_run",
@@ -768,6 +799,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 "repository.get_run",
                 "repository.list_items",
                 "repository.get_run",
+                "repository.get_run",
                 "repository.commit_agent_call_outcome",
                 "resumer.run_claimed",
             ],
@@ -852,7 +884,10 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             expected_stage_ref=projection.transient_stage_ref,
         )
 
-        def recover_stage(current_run, current_call, current_result):
+        clock = AgentLeaseTestClock(self.repository, datetime(2026, 11, 23, 6, 0))
+
+        async def recover_stage(current_run, current_call, current_result):
+            await clock.advance(65)
             recovered = store.recover_stage(
                 run=current_run,
                 call_item=current_call,
@@ -886,11 +921,14 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             owner_id="transient-recovery-worker",
             transient_result_recoverer=recover_stage,
         )
+        coordinator._leases._sleep = clock.sleep
 
         recovered = await coordinator.recover_crashed_run(run_id)
 
         self.assertEqual(recovered.state, AgentRecoveryState.RESUMED)
         self.assertEqual(resumer.run_ids, [run_id])
+        self.assertGreaterEqual(clock.renew_count, 6)
+        self.assertEqual(clock.sleepers, [])
         result = next(
             item
             for item in await self.repository.list_items(run_id)
@@ -1117,6 +1155,7 @@ class AgentRunRecoveryCoordinatorTest(unittest.IsolatedAsyncioTestCase):
                 "authority.resolve",
                 "repository.get_run",
                 "repository.list_items",
+                "repository.get_run",
                 "repository.commit_agent_call_outcome",
                 "authority.ack_lost",
                 "repository.get_run",

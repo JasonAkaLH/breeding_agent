@@ -150,14 +150,17 @@ class AgentLoopRunner:
         cancellation: AgentCancellationToken | None = None,
     ) -> AgentLoopRunResult:
         try:
-            return await self._run_claimed(
-                run_id,
-                handle=handle,
-                initial_required_tool_name=initial_required_tool_name,
-                trusted_facts=trusted_facts,
-                current_user_input=current_user_input,
-                visibility_context=visibility_context,
-                cancellation=cancellation,
+            return await self._leases.run_owned(
+                handle,
+                lambda _handle: self._run_claimed(
+                    run_id,
+                    handle=handle,
+                    initial_required_tool_name=initial_required_tool_name,
+                    trusted_facts=trusted_facts,
+                    current_user_input=current_user_input,
+                    visibility_context=visibility_context,
+                    cancellation=cancellation,
+                ),
             )
         except (ExecutionOwnershipLost, AgentExecutionFailure):
             raise
@@ -430,19 +433,23 @@ class AgentLoopRunner:
                 except AgentModelContextLengthError:
                     return await self._fail_context_run(run_id, handle)
             self._check_cancel(cancellation)
-            latest = await self._require_active_run(run_id)
-            committed = await self._writer.commit_agent_sample(
-                AgentSampleCommit(
-                    run_id=run_id,
-                    expected_revision=latest.revision,
-                    expected_claim_token=handle.current.token,
-                    sample=sample,
-                    capability_ids_by_tool_name={
-                        tool.provider_safe_name: tool.capability_id
-                        for tool in catalog.tools
-                    },
+
+            async def commit_sample(lease):
+                latest = await self._require_active_run(run_id)
+                return await self._writer.commit_agent_sample(
+                    AgentSampleCommit(
+                        run_id=run_id,
+                        expected_revision=latest.revision,
+                        expected_claim_token=lease.token,
+                        sample=sample,
+                        capability_ids_by_tool_name={
+                            tool.provider_safe_name: tool.capability_id
+                            for tool in catalog.tools
+                        },
+                    )
                 )
-            )
+
+            committed = await handle.run_ownership_bound(commit_sample)
             if not sample.tool_calls:
                 return AgentLoopRunResult(
                     run=committed.run,
@@ -459,13 +466,18 @@ class AgentLoopRunner:
         *,
         safe_error_code: str = "agent_context_required_segments_too_large",
     ) -> AgentLoopRunResult:
-        latest = await self._require_active_run(run_id)
-        failed = await self._writer.fail_agent_run(
-            run_id,
-            expected_revision=latest.revision,
-            expected_claim_token=handle.current.token,
-            safe_error_code=safe_error_code,
-        )
+        async def commit_failure(lease):
+            latest = await self._require_active_run(run_id)
+            failed = await self._writer.fail_agent_run(
+                run_id,
+                expected_revision=latest.revision,
+                expected_claim_token=lease.token,
+                safe_error_code=safe_error_code,
+            )
+            handle.stop_heartbeat()
+            return failed
+
+        failed = await handle.run_ownership_bound(commit_failure)
         return AgentLoopRunResult(
             run=failed,
             state="failed",
@@ -577,26 +589,25 @@ class AgentLoopRunner:
         outcome: AgentCallExecution,
         handle: AgentLeaseHandle,
     ) -> AgentItem:
-        latest = await self._require_active_run(run.run_id)
-        commit = AgentCallOutcomeCommit(
-            run_id=run.run_id,
-            expected_revision=latest.revision,
-            expected_claim_token=handle.current.token,
-            call_item_id=call_item.item_id,
-            safe_result_payload=outcome.safe_result_payload,
-            status=outcome.status,
-            staged_artifacts=outcome.staged_artifacts,
-            safe_error_code=outcome.safe_error_code,
-            skill_activation_item=outcome.skill_activation_item,
-        )
-        try:
-            committed_result = await self._writer.commit_agent_call_outcome(
-                commit
+        async def commit_outcome(lease):
+            latest = await self._require_active_run(run.run_id)
+            commit = AgentCallOutcomeCommit(
+                run_id=run.run_id,
+                expected_revision=latest.revision,
+                expected_claim_token=lease.token,
+                call_item_id=call_item.item_id,
+                safe_result_payload=outcome.safe_result_payload,
+                status=outcome.status,
+                staged_artifacts=outcome.staged_artifacts,
+                safe_error_code=outcome.safe_error_code,
+                skill_activation_item=outcome.skill_activation_item,
             )
-        except Exception:
-            committed_result = await self._writer.commit_agent_call_outcome(
-                commit
-            )
+            try:
+                return await self._writer.commit_agent_call_outcome(commit)
+            except Exception:
+                return await self._writer.commit_agent_call_outcome(commit)
+
+        committed_result = await handle.run_ownership_bound(commit_outcome)
         if outcome.status not in {
             AgentCallOutcomeStatus.WAITING_FOR_INPUT,
             AgentCallOutcomeStatus.WAITING_FOR_DEPENDENCY,
