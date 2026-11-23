@@ -1596,7 +1596,28 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                     "alice", task.task_id, "mcp-request-state:mrtr-resume"
                 )
             )
+            self.assertIsNone(
+                await runtime.storage.get_mcp_terminal_result_receipt_for_call(calls[0].call_ref)
+            )
+            intent = await runtime.storage.get_mcp_no_server_intent(
+                mcp_no_server_intent_id(task.task_id, node_id=node.node_id)
+            )
+            for invalid_continuation in (
+                replace(calls[1], continuation_of_call_ref=None),
+                replace(calls[1], arguments_sha256="sha256:mismatched"),
+            ):
+                with patch.object(runtime.storage, "list_mcp_call_records", return_value=[calls[0], invalid_continuation]):
+                    with self.assertRaisesRegex(RuntimeError, "mcp_resolved_authority_incomplete"):
+                        await runtime._validate_terminal_cp7_mcp_authority([intent])
             await runtime.shutdown()
+            restarted = self._build_runtime(Path(directory))
+            try:
+                await restarted.start()
+                self.assertEqual(
+                    await restarted.storage.list_mcp_call_records("alice", task.task_id), calls
+                )
+            finally:
+                await restarted.shutdown()
 
     async def test_remote_task_response_is_adopted_before_dispatch_returns(self) -> None:
         class Selector:
