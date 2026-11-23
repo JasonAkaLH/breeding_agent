@@ -5,9 +5,10 @@ import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { ApiError, createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, ConversationModelSelection, MCPResultArtifactProjection, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { mergeUploadsById, uploadAnswerDisplayText, type DraftAttachment, type UploadedDraftAttachment } from './domain/attachments';
+import { ConversationModelSettingsStore, type ModelSettingsState } from './domain/conversationModelSettings';
 import { pickComposerPlaceholder } from './domain/composerPlaceholders';
 import { withoutSetValue } from './domain/collections';
 import { deriveMCPServerCommands, isMCPServerInput, mcpServerMenuCandidates, mcpServerSubmitIntent, parseDirectMCPServerCommand, type MCPServerCommand } from './domain/mcpServerCommands';
@@ -268,6 +269,19 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }), [eventSourceFactory]);
   const [conversationId, setConversationId] = useState('');
   const mode: ChatMode = 'chat';
+  const [modelCatalogOwner, setModelCatalogOwner] = useState<string | null>(null);
+  const [modelSettingsState, setModelSettingsState] = useState<ModelSettingsState | null>(null);
+  const [modelSettingsInvalid, setModelSettingsInvalid] = useState(false);
+  const [preparingSubmission, setPreparingSubmission] = useState(false);
+  const preparingSubmissionRef = useRef(false);
+  const uploadedDraftCacheRef = useRef(new Map<string, UploadedDraftAttachment>());
+  const modelSettingsStore = useMemo(() => new ConversationModelSettingsStore(api, (id, state) => {
+    if (conversationIdRef.current === id) setModelSettingsState(state);
+  }), [api, authUser?.username]);
+  useEffect(() => {
+    modelSettingsStore.activate();
+    return () => modelSettingsStore.dispose();
+  }, [modelSettingsStore]);
   const [modelEditionOptions, setModelEditionOptions] = useState<ModelEditionOption[]>([]);
   const [defaultModelEdition, setDefaultModelEdition] = useState<ModelEdition | null>(null);
   const [modelEdition, setModelEdition] = useState<ModelEdition | null>(null);
@@ -468,6 +482,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }, [refreshMCPServerCommands]);
 
   useEffect(() => {
+    setModelCatalogOwner(null);
     if (!authUser) {
       setModelEditionOptions([]);
       setDefaultModelEdition(null);
@@ -480,12 +495,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         if (!mounted) return;
         setModelEditionOptions(result.options);
         setDefaultModelEdition(result.default_model_edition);
-        setModelEdition((current) => {
-          if (current && result.options.some((option) => option.value === current)) {
-            return current;
-          }
-          return result.default_model_edition ?? result.options[0]?.value ?? null;
-        });
+        setModelCatalogOwner(authUser.username);
       })
       .catch(() => {
         if (!mounted) return;
@@ -498,17 +508,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mounted = false;
     };
   }, [api, authUser]);
-
-  useEffect(() => {
-    if (!selectedModelEdition || !validReasoningConfig(selectedModelEdition)) return;
-    if (selectedModelForcesThinking && !deepThinking) {
-      setDeepThinking(true);
-      return;
-    }
-    if (effectiveReasoningEffort !== reasoningEffort) {
-      setReasoningEffort(effectiveReasoningEffort);
-    }
-  }, [deepThinking, effectiveReasoningEffort, reasoningEffort, selectedModelEdition, selectedModelForcesThinking]);
 
   useEffect(() => {
     if (!transientNotice) return undefined;
@@ -577,11 +576,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }, [composerAutoFocusEnabled, composerAutofocusKey, pendingInterrupt]);
 
   useEffect(() => {
-    if (!authUser || !conversationId || active || localTaskRuntimeActiveRef.current) return;
+    if (!authUser || modelCatalogOwner !== authUser.username || !conversationId || active || localTaskRuntimeActiveRef.current) return;
     if (initializedWorkspaceConversationIdRef.current === conversationId) return;
     const generation = beginRestoreGeneration();
     void initializeConversationWorkspace(conversationId, generation);
-  }, [authUser, conversationId, active]);
+  }, [authUser, conversationId, active, modelCatalogOwner]);
 
   const refreshConversationUploads = useCallback(async (targetConversationId = conversationId) => {
     if (!authUser || !targetConversationId) return;
@@ -721,8 +720,16 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const conversations = await refreshConversationHistory();
     if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
     if (conversations === null) return;
-    initializedWorkspaceConversationIdRef.current = targetConversationId;
     const summary = conversations.find((item) => item.conversation_id === targetConversationId);
+    try {
+      const selection = await modelSettingsStore.restore(targetConversationId, Boolean(summary), defaultModelSelection());
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      applyModelSelection(selection);
+      initializedWorkspaceConversationIdRef.current = targetConversationId;
+    } catch {
+      if (isCurrentRestoreGeneration(generation, targetConversationId)) showTransientNotice('会话模型配置加载失败，请重新选择会话重试。');
+      return;
+    }
     if (!summary) {
       clearCurrentTaskRuntime({ closeSubscription: true });
       setMessages([]);
@@ -740,6 +747,54 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       showTransientNotice('历史消息加载失败，请稍后重试。');
       clearCurrentTaskRuntime({ closeSubscription: true });
+    }
+  }
+
+  function defaultModelSelection(): ConversationModelSelection {
+    const option = modelEditionOptions.find((item) => item.value === defaultModelEdition) ?? modelEditionOptions[0] ?? null;
+    const thinking = forceDeepThinking(option);
+    return {
+      model_edition: option?.value ?? '',
+      deep_thinking: thinking,
+      reasoning_effort: resolveEffectiveReasoningEffort(option, 'high', thinking),
+    };
+  }
+
+  function applyModelSelection(selection: ConversationModelSelection) {
+    const option = modelEditionOptions.find((item) => item.value === selection.model_edition) ?? null;
+    const valid = validReasoningConfig(option) && (!forceDeepThinking(option) || selection.deep_thinking)
+      && supportedReasoningEfforts(option, selection.deep_thinking).some((item) => item.value === selection.reasoning_effort);
+    setModelEdition(selection.model_edition);
+    setDeepThinking(selection.deep_thinking);
+    setReasoningEffort(selection.reasoning_effort);
+    setModelSettingsInvalid(!valid);
+  }
+
+  function changeModelSelection(patch: Partial<ConversationModelSelection>) {
+    const edition = patch.model_edition ?? modelEdition;
+    const option = modelEditionOptions.find((item) => item.value === edition) ?? null;
+    if (!option || !validReasoningConfig(option)) return;
+    const thinking = forceDeepThinking(option) || (patch.deep_thinking ?? deepThinking);
+    const selection: ConversationModelSelection = {
+      model_edition: option.value,
+      deep_thinking: thinking,
+      reasoning_effort: resolveEffectiveReasoningEffort(option, patch.reasoning_effort ?? reasoningEffort, thinking),
+    };
+    applyModelSelection(selection);
+    modelSettingsStore.select(conversationIdRef.current, selection);
+  }
+
+  async function reloadModelSettings() {
+    const target = conversationIdRef.current;
+    const generation = restoreGenerationRef.current;
+    setRestoredWorkspaceConversationId(null);
+    try {
+      const selection = await modelSettingsStore.restore(target, true, defaultModelSelection(), true);
+      if (isCurrentRestoreGeneration(generation, target)) applyModelSelection(selection);
+    } catch (error) {
+      if (isCurrentRestoreGeneration(generation, target)) showTransientNotice(friendlyError(error));
+    } finally {
+      if (isCurrentRestoreGeneration(generation, target)) setRestoredWorkspaceConversationId(target);
     }
   }
 
@@ -963,6 +1018,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setActiveConversationId(nextConversationId);
     setModelEdition(defaultModelEdition);
     setMessages([]);
+    uploadedDraftCacheRef.current.clear();
     setDraftAttachments([]);
     setPendingUploads([]);
     setSelectedMCPServerCommand(null);
@@ -981,6 +1037,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setActiveConversationId('');
     setMessages([]);
     setConversationHistory([]);
+    uploadedDraftCacheRef.current.clear();
     setDraftAttachments([]);
     setPendingUploads([]);
     setMCPServerCommands([]);
@@ -1102,6 +1159,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setSelectedMCPServerCommand(null);
     setMCPServerMenuOpen(false);
     setModelEdition(defaultModelEdition);
+    setDeepThinking(false);
+    setReasoningEffort('high');
+    setModelSettingsState(null);
+    setModelSettingsInvalid(false);
+    uploadedDraftCacheRef.current.clear();
     setDraftAttachments([]);
     setPendingUploads([]);
     updateCurrentTaskId(null);
@@ -1125,9 +1187,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     saveConversationId(authUser.username, nextConversationId);
     const generation = beginRestoreGeneration();
     setRestoredWorkspaceConversationId(null);
+    setModelSettingsState(null);
     clearCurrentTaskRuntime({ closeSubscription: true });
     if (nextConversationId !== conversationId) {
       initializedWorkspaceConversationIdRef.current = null;
+      uploadedDraftCacheRef.current.clear();
       setDraftAttachments([]);
       setPendingUploads([]);
       setActiveConversationId(nextConversationId);
@@ -1222,13 +1286,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && draftAttachments.length > 0;
   const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
   const canRetrySubmission = retrySubmissionRef.current?.conversationId === conversationId;
-  const canSubmitComposer = canRetrySubmission || selectedModelReasoningConfigValid && !slashInputBlocked && !mcpServerInputBlocked && (
+  const canSubmitComposer = !preparingSubmission && composerWorkspaceReady && (canRetrySubmission || !modelSettingsInvalid && selectedModelReasoningConfigValid && !slashInputBlocked && !mcpServerInputBlocked && (
     (Boolean(input.trim()) && !isMCPServerInput(input))
     || selectedSkillCommand !== null
     || directSlashParse.kind === 'matched'
     || (mcpServerReady && (mcpServerHasTaskText || draftAttachments.length > 0))
     || canSubmitUploadOnlyInterruptAnswer
-  );
+  ));
   const slashMenuEmptyMessage = skillCommands.length === 0 ? '暂无可用 Skill' : '未找到 Skill';
 
   function handleComposerInputChange(value: string) {
@@ -1362,6 +1426,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleSubmit() {
+    if (preparingSubmissionRef.current) return;
+    preparingSubmissionRef.current = true;
+    setPreparingSubmission(true);
+    try { await submitComposer(); }
+    finally { preparingSubmissionRef.current = false; setPreparingSubmission(false); }
+  }
+
+  async function submitComposer() {
     const pending = retrySubmissionRef.current;
     if (pending && pending.conversationId === conversationId && pending.username === authUser?.username) {
       if (!active) await pending.retry();
@@ -1391,7 +1463,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const routingMode = activeIntent.kind === 'ready' ? activeIntent.routingMode : 'auto';
     const commandMetadata = mcpIntent.kind === 'ready' ? mcpIntent.metadata : {};
     const targetConversationId = authUser ? (conversationId || loadOrCreateConversationId(authUser.username)) : '';
-    if (!authUser || !targetConversationId || active) return;
+    if (!authUser || !targetConversationId || active || !composerWorkspaceReady || modelSettingsInvalid) return;
     if (!conversationId) {
       setActiveConversationId(targetConversationId);
     }
@@ -1401,6 +1473,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
     if (!content && activeIntent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
     clearTransientNotice();
+    try { await modelSettingsStore.requireConfirmed(targetConversationId); }
+    catch (error) { showTransientNotice(friendlyError(error)); return; }
+    if (conversationIdRef.current !== targetConversationId) return;
     if (pendingInterrupt && activeIntent.kind === 'ready') {
       if (commandKind === 'mcp') setMCPServerMenuOpen(true);
       else setSlashMenuOpen(true);
@@ -1422,6 +1497,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       return;
     }
+    try { await modelSettingsStore.requireConfirmed(targetConversationId); }
+    catch (error) {
+      resetDraftAttachmentStatus(draftSnapshot);
+      setPendingUploads((current) => mergeUploadsById(current, uploadedDrafts.map((item) => item.upload)));
+      showTransientNotice(friendlyError(error));
+      return;
+    }
+    if (conversationIdRef.current !== targetConversationId) return;
     const refreshedMessages = uploadedDrafts.length > 0
       ? await loadConversationMessages(targetConversationId).catch(() => null)
       : null;
@@ -1479,6 +1562,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             ...(uploadedDrafts.length > 0 ? { upload_ids: uploadedDrafts.map((item) => item.upload.upload_id) } : {}),
             ...commandMetadata,
           },
+        });
+        void modelSettingsStore.materializedByMessage(targetConversationId, {
+          model_edition: modelEdition ?? '',
+          reasoning_effort: effectiveReasoningEffort,
+          deep_thinking: effectiveDeepThinking,
         });
         if (commandKind === 'mcp') {
           setSelectedMCPServerCommand(null);
@@ -1568,6 +1656,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   function handleDeleteDraftAttachment(attachment: DraftAttachment) {
+    uploadedDraftCacheRef.current.delete(attachment.localId);
     setDraftAttachments((current) => current.filter((item) => item.localId !== attachment.localId));
   }
 
@@ -1604,6 +1693,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   function markDraftAttachmentsSent(attachments: DraftAttachment[], uploadedDrafts: UploadedDraftAttachment[]) {
     if (attachments.length === 0) return;
+    for (const attachment of attachments) uploadedDraftCacheRef.current.delete(attachment.localId);
     const sentDraftIds = new Set(attachments.map((attachment) => attachment.localId));
     setDraftAttachments((current) => current.filter((attachment) => !sentDraftIds.has(attachment.localId)));
     setPendingUploads((current) => mergeUploadsById(current, uploadedDrafts.map((item) => item.upload)));
@@ -1622,8 +1712,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       for (const attachment of attachments) {
         try {
-          const upload = await api.uploadConversationFile(targetConversationId, attachment.file);
-          uploadedDrafts.push({ draft: attachment, upload });
+          const cached = uploadedDraftCacheRef.current.get(attachment.localId);
+          const uploaded = cached ?? { draft: attachment, upload: await api.uploadConversationFile(targetConversationId, attachment.file) };
+          uploadedDraftCacheRef.current.set(attachment.localId, uploaded);
+          uploadedDrafts.push(uploaded);
+          modelSettingsStore.materializedByUpload(targetConversationId);
         } catch (error) {
           const message = friendlyError(error);
           setDraftAttachments((current) => current.map((item) => {
@@ -1633,6 +1726,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             return attachmentIds.has(item.localId) ? { ...item, status: 'draft' } : item;
           }));
           const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
+          for (const item of uploadedDrafts) uploadedDraftCacheRef.current.delete(item.draft.localId);
           showTransientNotice(rollbackFailed
             ? `${message} 部分文件已保存到当前对话，可在文件面板删除。`
             : message);
@@ -1650,6 +1744,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setDeletingUploadIds((current) => new Set(current).add(upload.upload_id));
     try {
       await api.deleteConversationUpload(conversationId, upload.upload_id);
+      for (const [id, item] of uploadedDraftCacheRef.current) {
+        if (item.upload.upload_id === upload.upload_id) uploadedDraftCacheRef.current.delete(id);
+      }
       setPendingUploads((current) => current.filter((item) => item.upload_id !== upload.upload_id));
       const loadedMessages = await loadConversationMessages(conversationId).catch(() => null);
       if (loadedMessages) setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
@@ -1713,9 +1810,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     let uploadedDrafts: UploadedDraftAttachment[] = [];
     try {
       uploadedDrafts = await uploadDraftAttachments(targetConversationId, draftSnapshot);
-    } catch {
+    } catch { return; }
+    try { await modelSettingsStore.requireConfirmed(targetConversationId); }
+    catch (error) {
+      resetDraftAttachmentStatus(draftSnapshot);
+      showTransientNotice(friendlyError(error));
       return;
     }
+    if (conversationIdRef.current !== targetConversationId) return;
     const refreshedMessages = uploadedDrafts.length > 0
       ? await loadConversationMessages(targetConversationId).catch(() => null)
       : null;
@@ -2361,7 +2463,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     return { ...message, ...patch };
   }
 
-  const interactionLocked = active || Boolean(pendingInterrupt);
+  const interactionLocked = active || Boolean(pendingInterrupt) || uploadingFile || preparingSubmission;
+  const modelControlsLocked = interactionLocked || !composerWorkspaceReady;
   const inputPlaceholder = pendingInterrupt ? interruptAnswerPlaceholder(pendingInterrupt) : composerPlaceholder;
   const composerMenuContent = (
     <Space direction="vertical" size="middle" className="composer-menu">
@@ -2380,8 +2483,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           aria-label="模型版本"
           value={modelEdition ?? undefined}
           options={modelEditionOptions}
-          onChange={(value) => setModelEdition(value)}
-          disabled={interactionLocked || modelEditionOptions.length === 0}
+          onChange={(value) => changeModelSelection({ model_edition: value })}
+          disabled={modelControlsLocked || modelEditionOptions.length === 0}
           size="small"
           style={{ width: 176 }}
         />
@@ -2399,8 +2502,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           aria-label="思考强度"
           value={effectiveReasoningEffort}
           options={reasoningEffortOptions}
-          onChange={setReasoningEffort}
-          disabled={interactionLocked || !selectedModelReasoningConfigValid || reasoningEffortOptions.length === 0}
+          onChange={(value) => changeModelSelection({ reasoning_effort: value })}
+          disabled={modelControlsLocked || !selectedModelReasoningConfigValid || reasoningEffortOptions.length === 0}
           size="small"
           style={{ width: 104 }}
         />
@@ -2413,16 +2516,21 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           <Switch
             aria-label="深度思考"
             checked={effectiveDeepThinking}
-            onChange={(checked) => {
-              setDeepThinking(checked);
-              setReasoningEffort(resolveEffectiveReasoningEffort(selectedModelEdition, reasoningEffort, checked));
-            }}
+            onChange={(checked) => changeModelSelection({ deep_thinking: checked })}
             checkedChildren="开"
             unCheckedChildren="关"
-            disabled={interactionLocked || !selectedModelReasoningConfigValid}
+            disabled={modelControlsLocked || !selectedModelReasoningConfigValid}
           />
         )}
       </Space>
+      {modelSettingsInvalid ? <Alert type="error" showIcon message="已保存的模型配置当前不可用，请重新选择模型和思考配置。" /> : null}
+      {modelSettingsState ? <Typography.Text role="status" type="secondary">{
+        { draft: '将在首次发送或上传后保存', saved: '模型配置已保存', saving: '正在保存模型配置…', unconfirmed: '模型配置保存尚未确认', conflict: '模型配置与其他页面冲突，本地选择已保留' }[modelSettingsState.status]
+      }</Typography.Text> : null}
+      {modelSettingsState?.status === 'unconfirmed' ? <Button disabled={!composerWorkspaceReady} onClick={() => {
+        void modelSettingsStore.retry(conversationId).catch((error) => showTransientNotice(friendlyError(error)));
+      }}>重试保存</Button> : null}
+      {modelSettingsState?.status === 'conflict' || modelSettingsState?.status === 'unconfirmed' ? <Button disabled={!composerWorkspaceReady} onClick={() => { void reloadModelSettings(); }}>重新加载已保存配置</Button> : null}
       {active && currentTaskId ? (
         <Button
           danger

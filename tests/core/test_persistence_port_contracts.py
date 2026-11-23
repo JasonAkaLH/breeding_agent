@@ -228,6 +228,8 @@ EXPECTED_METHODS_BY_PORT = {
         "get_submission_preparation_receipt",
     ),
     "ConversationStoragePort": (
+        "get_conversation_model_settings",
+        "put_conversation_model_settings",
         "save_conversation",
         "compare_and_set_conversation",
         "get_conversation",

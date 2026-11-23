@@ -593,3 +593,17 @@ describe('createApiClient', () => {
   });
 
 });
+
+it('reads and saves an authenticated conversation model tuple with its expected revision', async () => {
+  const response = { conversation_id: 'conv/one', settings: null };
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(response), { status: 200 }));
+  const api = createApiClient({ fetcher, baseUrl: '/seedpilot', accessToken: 'test-token' });
+  await api.getConversationModelSettings('conv/one');
+  const selection = { model_edition: 'model-test', reasoning_effort: 'max', deep_thinking: true, revision: 999 };
+  await api.putConversationModelSettings('conv/one', selection, 4);
+  expect(fetcher.mock.calls[0][0]).toBe('/seedpilot/api/v1/conversations/conv%2Fone/model-settings');
+  const init = fetcher.mock.calls[1][1] as RequestInit;
+  expect(init.method).toBe('PUT');
+  expect(init.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer test-token' }));
+  expect(JSON.parse(init.body as string)).toEqual({ model_edition: 'model-test', reasoning_effort: 'max', deep_thinking: true, expected_revision: 4 });
+});

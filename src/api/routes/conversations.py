@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request, status
 
 from src.core.enums import ConversationStatus, MessageRole
 from src.core.errors import MessageIdentityConflictError
-from src.core.models import Artifact, Conversation, Message
+from src.core.models import Artifact, Conversation, ConversationModelSettings, Message
 from src.lifecycle.errors import ConversationBusyError
 from src.api.mcp_binding import (
     MCPBindingFeatureUnavailableError,
@@ -28,6 +29,9 @@ from ..dto import (
     ConversationListResponse,
     ConversationMessagesResponse,
     ConversationSummaryResponse,
+    ConversationModelSettingsEnvelope,
+    ConversationModelSettingsResponse,
+    PutConversationModelSettingsRequest,
     DeleteConversationRequest,
     DeleteConversationResponse,
     ArtifactResponse,
@@ -44,6 +48,54 @@ from ..runtime import (
 from ..runtime_access import runtime_from_request as _runtime
 
 router = APIRouter()
+
+
+def _settings_response(conversation_id: str, settings: ConversationModelSettings | None) -> ConversationModelSettingsEnvelope:
+    values = asdict(settings) if settings is not None else None
+    if values is not None:
+        values.pop("conversation_id")
+    return ConversationModelSettingsEnvelope(
+        conversation_id=conversation_id,
+        settings=ConversationModelSettingsResponse(**values) if values is not None else None,
+    )
+
+
+@router.get("/api/v1/conversations/{conversation_id}/model-settings", response_model=ConversationModelSettingsEnvelope)
+async def get_model_settings(conversation_id: str, request: Request) -> ConversationModelSettingsEnvelope:
+    runtime = _runtime(request)
+    user = await require_authenticated_user(request)
+    try:
+        settings = await runtime.storage.get_conversation_model_settings(conversation_id, username=user.username)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown conversation: {conversation_id}") from exc
+    return _settings_response(conversation_id, settings)
+
+
+@router.put("/api/v1/conversations/{conversation_id}/model-settings", response_model=ConversationModelSettingsEnvelope)
+async def put_model_settings(conversation_id: str, body: PutConversationModelSettingsRequest, request: Request) -> ConversationModelSettingsEnvelope:
+    runtime = _runtime(request)
+    user = await require_authenticated_user(request)
+    try:
+        runtime.validate_conversation_model_settings(body.model_edition, body.reasoning_effort, body.deep_thinking)
+        settings = await runtime.storage.put_conversation_model_settings(
+            ConversationModelSettings(
+                conversation_id=conversation_id,
+                model_edition=body.model_edition,
+                reasoning_effort=body.reasoning_effort,
+                deep_thinking=body.deep_thinking,
+                revision=body.expected_revision + 1,
+                updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            ),
+            username=user.username,
+            expected_revision=body.expected_revision,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown conversation: {conversation_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if settings is None:
+        raise HTTPException(status_code=409, detail={"code": "model_settings_revision_conflict"})
+    return _settings_response(conversation_id, settings)
 
 
 def _conversation_summary_response(conversation: Conversation) -> ConversationSummaryResponse:

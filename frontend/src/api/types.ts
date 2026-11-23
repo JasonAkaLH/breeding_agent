@@ -3,6 +3,22 @@ export type RoutingMode = 'auto' | 'hint' | 'force_capability';
 export type ReasoningEffort = string;
 export type ModelEdition = string;
 
+export interface ConversationModelSelection {
+  model_edition: string;
+  reasoning_effort: string;
+  deep_thinking: boolean;
+}
+
+export interface ConversationModelSettings extends ConversationModelSelection {
+  revision: number;
+  updated_at: string;
+}
+
+export interface ConversationModelSettingsEnvelope {
+  conversation_id: string;
+  settings: ConversationModelSettings | null;
+}
+
 export interface UserResponse {
   username: string;
 }

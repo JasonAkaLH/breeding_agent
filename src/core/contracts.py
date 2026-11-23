@@ -10,6 +10,7 @@ from .models import (
     AuthUserToken,
     Checkpoint,
     Conversation,
+    ConversationModelSettings,
     ConversationMemorySummary,
     ConversationFileResource,
     ConversationFileIndexRepairMarker,
@@ -1449,6 +1450,14 @@ class SubmissionPreparationReceiptStoragePort(Protocol):
 
 @runtime_checkable
 class ConversationStoragePort(Protocol):
+    async def get_conversation_model_settings(
+        self, conversation_id: str, *, username: str,
+    ) -> ConversationModelSettings | None: ...
+
+    async def put_conversation_model_settings(
+        self, settings: ConversationModelSettings, *, username: str, expected_revision: int,
+    ) -> ConversationModelSettings | None: ...
+
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
 
     async def compare_and_set_conversation(

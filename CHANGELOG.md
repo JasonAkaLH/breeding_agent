@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-23：按 V2 实现会话级模型版本、思考强度与深度思考配置持久化：新增独立 conversation_model_settings 表及 GET/PUT API，三项组合校验、版本 CAS、owner/ACTIVE 校验与写入同事务，保存与删除统一先锁会话，物理删除和失败上传补偿均清理配置。首次文本由 SQL admission/Sidecar 投影按 frozen continuation 初始化，exact replay 不覆盖，旧会话不回填；前端等待模型目录与配置恢复，主动编辑立即串行保存，发送等待确认，响应丢失/冲突先回读，失效组合提示重选，新会话恢复默认值。首次上传后保存配置，未确认时保留文件并在重试中复用；任务模型绑定保持冻结。后端相关200项、隔离 PostgreSQL 28项、前端375项全量及39项最终重点回归、文档UI16项及类型检查/构建/Ruff/diff检查通过。全局接口快照另有3项既有失败，已在修改前 HEAD 的独立源码归档复现（旧快照漏记5个原有方法），本次只补新增2个方法的预期。未部署、未连接远端业务数据库，无新增依赖。License Requirement：无新增依赖或许可变化。
+
 - 2026-11-23：将续租修复 `main@dc74723` 推送至 GitHub/Gitee，并从该提交的独立源码归档构建、发布开发后端 `backend-dev:0.1.42`（linux/amd64）；OCI index digest 为 `sha256:8739b83f0afe25a41b7dbc655baf639b342b1d75a1380018c3e1e903dd76f2dd`，保留 provenance attestation 及 version/revision 标签。镜像内294个交付文件与源码哈希一致，未包含本地配置或部署文件，25项续租/失败边界回归通过；使用非敏感配置、全新SQLite和既有Sidecar 0.1.28进行无外网隔离启动，后端与Sidecar均healthy、重启次数0，`/api-doc`返回200。远端摘要回拉与交付文件复验通过。开发部署文件7处后端引用从0.1.41更新至0.1.42，保留外部只读YAML挂载；三份受保护文件完成仓库外0600备份，权限/ignored/untracked、Shell语法及生产文件未变检查通过，部署文件继续不进入Git和Docker上下文。未重建前端/Sidecar镜像，未部署服务器或修改业务数据库。License Requirement：未新增仓库依赖。
 
 - 2026-11-20：按 V3 计划修复 MCP dispatch 续租范围：取得 claim 后持续覆盖发现、Selector、参数准备、Tool 和结果提交，保留 30/5/10 秒规则；claim 更新串行刷新 revision，失败/unknown 收尾原子绑定原 intent/outbox/owner/token/revision，旧执行者不能关闭接手后的任务。操作预算覆盖短锁、连接池与 SQL，PostgreSQL 事务内限制锁/语句时间，超时线程不得迟到提交；取消后不假定 Tool 回滚、不重放业务调用。Agent 异常携带实际续租 handle，Runtime 仅投影已提交的 owned failure，保留准备失败及启动权威收敛。补充模拟时间与隔离 PostgreSQL 并发回归，去重后的相关279项（含真实 PostgreSQL 10项）、Ruff和diff检查通过；全局接口快照另有3项既有失败，原因是快照缺少HEAD中已存在的5个方法，未扩展本次范围修复。无 schema、公开 API、前端、MCP Server 或依赖变更，未部署或修改远端旧数据。License Requirement：无新增依赖或许可变化。

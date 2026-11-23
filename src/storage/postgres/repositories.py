@@ -2817,6 +2817,7 @@ class PostgreSQLStorage(SQLiteStorage):
 
     def _delete_conversation_physical_sync(self, conversation_id: str) -> dict[str, int]:
         deleted_counts: dict[str, int] = {
+            "conversation_model_settings": 0,
             "submission_preparation_receipts": 0,
             "conversation_file_resource": 0,
             "conversation_memory_summary": 0,
@@ -2852,6 +2853,10 @@ class PostgreSQLStorage(SQLiteStorage):
             return int(rowcount if rowcount is not None and rowcount > 0 else 0)
 
         statements: tuple[tuple[str, str], ...] = (
+            (
+                "conversation_model_settings",
+                "DELETE FROM conversation_model_settings WHERE conversation_id = :conversation_id",
+            ),
             (
                 "submission_preparation_receipts",
                 "DELETE FROM submission_preparation_receipts WHERE conversation_id = :conversation_id",

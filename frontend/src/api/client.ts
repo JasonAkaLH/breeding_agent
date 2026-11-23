@@ -5,6 +5,8 @@ import type {
   CapabilityListResponse,
   ChatMode,
   ConversationListResponse,
+  ConversationModelSettingsEnvelope,
+  ConversationModelSelection,
   ConversationMessagesResponse,
   ConversationSummaryResponse,
   DeleteConversationResponse,
@@ -52,6 +54,8 @@ export interface SubmitMessageInput {
 }
 
 export interface ApiClient {
+  getConversationModelSettings(conversationId: string): Promise<ConversationModelSettingsEnvelope>;
+  putConversationModelSettings(conversationId: string, settings: ConversationModelSelection, expectedRevision: number): Promise<ConversationModelSettingsEnvelope>;
   uiModes: UiModeOption[];
   login(input: { username: string }): Promise<AuthTokenResponse>;
   logout(): Promise<LogoutResponse>;
@@ -144,6 +148,16 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
   }
 
   return {
+    getConversationModelSettings: (conversationId) => request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/model-settings`),
+    putConversationModelSettings: (conversationId, settings, expectedRevision) => request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/model-settings`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        model_edition: settings.model_edition,
+        reasoning_effort: settings.reasoning_effort,
+        deep_thinking: settings.deep_thinking,
+        expected_revision: expectedRevision,
+      }),
+    }),
     uiModes: UI_MODES,
     login: (input) => request<AuthTokenResponse>('/api/v1/auth/login', {
       method: 'POST',

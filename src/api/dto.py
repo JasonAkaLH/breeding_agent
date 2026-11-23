@@ -18,6 +18,26 @@ class StrictRequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PutConversationModelSettingsRequest(StrictRequestModel):
+    model_edition: str = Field(min_length=1, max_length=256, strict=True)
+    reasoning_effort: str = Field(min_length=1, max_length=64, strict=True)
+    deep_thinking: bool = Field(strict=True)
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class ConversationModelSettingsResponse(BaseModel):
+    model_edition: str
+    reasoning_effort: str
+    deep_thinking: bool
+    revision: int
+    updated_at: datetime
+
+
+class ConversationModelSettingsEnvelope(BaseModel):
+    conversation_id: str
+    settings: ConversationModelSettingsResponse | None
+
+
 _CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _KEY_SEPARATOR = re.compile(r"[^a-z0-9]+")
 _RESERVED_IDENTITY_KEY_SEGMENTS = frozenset({

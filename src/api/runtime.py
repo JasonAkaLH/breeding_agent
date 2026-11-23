@@ -1103,6 +1103,16 @@ class ApiRuntime(
     def _validate_requested_model_edition(self, model_edition: str | None) -> str | None:
         return validate_agent_model_edition(model_edition, config=self._model_edition_config)
 
+    def validate_conversation_model_settings(self, model_edition: str, reasoning_effort: str, deep_thinking: bool) -> None:
+        validated = self._validate_requested_model_edition(model_edition)
+        if validated != model_edition or reasoning_effort != reasoning_effort.strip():
+            raise ValueError("Invalid conversation model settings")
+        self._resolve_llm_request_options({
+            "model_edition": model_edition,
+            "main_agent_reasoning_effort": reasoning_effort,
+            "deep_thinking": deep_thinking,
+        })
+
     def _resolve_llm_request_options(
         self,
         metadata: Mapping[str, Any] | None,

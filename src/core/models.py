@@ -1205,6 +1205,16 @@ class Conversation:
 
 
 @dataclass(slots=True, frozen=True)
+class ConversationModelSettings:
+    conversation_id: str
+    model_edition: str
+    reasoning_effort: str
+    deep_thinking: bool
+    revision: int
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
 class ConversationMemorySummary:
     summary_id: str
     conversation_id: str

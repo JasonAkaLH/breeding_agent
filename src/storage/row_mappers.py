@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 from src.core.models import (
     Conversation,
+    ConversationModelSettings,
     MCPRemoteTaskBinding,
     MCPRolloutBlockResolution,
     MCPRolloutDeploymentActivation,
@@ -20,6 +21,7 @@ from src.integrations.mcp.cp7_artifacts import canonical_sha256
 
 from .sqlalchemy_models import (
     ConversationRow,
+    ConversationModelSettingsRow,
     MCPRemoteTaskBindingRow,
     MCPRolloutBlockResolutionRow,
     MCPRolloutDeploymentActivationRow,
@@ -33,6 +35,17 @@ from .sqlalchemy_models import (
     MCPShadowAuditSampleRow,
     UserMCPServerRow,
 )
+
+
+def _row_to_conversation_model_settings(row: ConversationModelSettingsRow) -> ConversationModelSettings:
+    return ConversationModelSettings(
+        conversation_id=row.conversation_id,
+        model_edition=row.model_edition,
+        reasoning_effort=row.reasoning_effort,
+        deep_thinking=row.deep_thinking,
+        revision=row.revision,
+        updated_at=row.updated_at,
+    )
 
 
 def _row_to_mcp_remote_task(row: MCPRemoteTaskBindingRow) -> MCPRemoteTaskBinding:

@@ -253,6 +253,7 @@ allowed_origins:
 <h3>会话不需要单独创建</h3><p>客户端先生成 conversation_id。第一次发消息（或为新会话上传文件）时由后端建立关联；后续消息沿用同一个 ID。会话列表、消息列表、任务摘要分别负责不同层面的恢复。</p>
 <h3>三种提交方式</h3><div class="table-wrap"><table><thead><tr><th>用户意图</th><th>routing_mode</th><th>capability_id</th><th>metadata</th></tr></thead><tbody><tr><td>普通聊天，让系统选工具</td><td>auto</td><td>null</td><td>可选 deep_thinking、upload_ids 等。</td></tr><tr><td>从 Skill 列表或 /命令选中 Skill</td><td>hint</td><td>真实 skill.* ID</td><td>按需提交附件；无需旧 soft binding 对象。</td></tr><tr><td>明确选择 $MCP 服务</td><td>force_capability</td><td>mcp.dispatch</td><td>必须含 mcp_server_binding: {server_id}。</td></tr></tbody></table></div>
 <p>auto 携带非空 capability_id、hint/force_capability 缺少 capability_id，或错误的 MCP binding 组合都会被拒绝。Skill hint 表达使用意图，实际行为由主代理结合上下文决定；不可用时处理 <code>409 skill_hint_unavailable</code> 并刷新能力列表。</p>
+<h3>会话模型配置保存与恢复</h3><p>对话级模型版本、思考强度、深度思考开关作为完整组合保存到服务端。已有会话通过 GET/PUT <code>/conversations/{conversation_id}/model-settings</code> 恢复和自动保存；保存时带上 <code>expected_revision</code>，发送前等待确认。纯空白新对话只保留页面草稿，首次消息由建档事务初始化；首次上传成功后调用 PUT 保存。刷新未建档草稿或新建对话时使用当前系统默认配置，旧会话没有记录时也使用默认值。恢复不可用的组合时提示用户重选，不回写默认值。加载模型目录和会话配置期间暂不允许编辑或发送。</p>
 <h3>模型与思考开关</h3><p>先请求 <code>/config/model-editions</code>。使用 options[].value 作为 model_edition；根据 <code>metadata.deep_thinking</code> 选择 <code>reasoning_efforts.thinking.enabled</code> 或 <code>thinking.disabled</code> 中的 supported/default，把选中的值放到 <code>metadata.main_agent_reasoning_effort</code>。非法组合会返回 validation error，不能假设后端自动降级。未指定选项时采用后端默认配置。</p>
 <h3>提交结果如何处理</h3><div class="table-wrap"><table><thead><tr><th>action / 结果</th><th>界面处理</th></tr></thead><tbody><tr><td>task_accepted</td><td>保存 task_id；开始 SSE。status=accepted 不代表有最终回答。</td></tr><tr><td>interrupt_resumed</td><td>继续原 task_id；刷新等待项并确保原任务 SSE 已订阅。</td></tr><tr><td>interrupt_clarification_answer</td><td>展示 assistant_message；保持补充输入状态。</td></tr><tr><td>interrupt_mixed_processed / interrupt_schema_switched</td><td>同时检查 answer_payload.will_resume 和 requires_confirmation；重新读取 open interrupts。</td></tr><tr><td>will_resume=false / requires_confirmation=true</td><td>等待仍未结束。不要把输入框切回普通新任务模式。</td></tr></tbody></table></div>
 <h3>刷新恢复与取消</h3><ol><li>登录态校验通过后，加载会话列表，选择一个会话。</li><li>同时加载 messages 和 tasks?scope=unfinished。先展示历史消息，再按 task_id 恢复活动任务。</li><li>对活动任务查询摘要、读取当前 interrupts、订阅 SSE；按 message_id / event_id 合并，防止重复气泡。</li><li>Task status 是 accepted、planning、running、cancelling、completed、failed、cancelled。等待输入属于 UI 状态，由事件和 open interrupt 驱动；没有独立 waiting Task status。</li><li>用户停止任务时 POST /tasks/cancel。保持“正在取消”直到观察到终态。仅 AbortController.abort() 会关闭本地订阅，不会停止后台任务。</li></ol>
@@ -475,6 +476,92 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuthTokenResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_id}/model-settings": {
+      "get": {
+        "summary": "Get Model Settings",
+        "operationId": "get_model_settings_api_v1_conversations__conversation_id__model_settings_get",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationModelSettingsEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Model Settings",
+        "operationId": "put_model_settings_api_v1_conversations__conversation_id__model_settings_put",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutConversationModelSettingsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationModelSettingsEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1941,6 +2028,64 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
         ],
         "title": "ConversationMessagesResponse"
       },
+      "ConversationModelSettingsEnvelope": {
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "title": "Conversation Id"
+          },
+          "settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConversationModelSettingsResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "conversation_id",
+          "settings"
+        ],
+        "title": "ConversationModelSettingsEnvelope"
+      },
+      "ConversationModelSettingsResponse": {
+        "properties": {
+          "model_edition": {
+            "type": "string",
+            "title": "Model Edition"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "title": "Reasoning Effort"
+          },
+          "deep_thinking": {
+            "type": "boolean",
+            "title": "Deep Thinking"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_edition",
+          "reasoning_effort",
+          "deep_thinking",
+          "revision",
+          "updated_at"
+        ],
+        "title": "ConversationModelSettingsResponse"
+      },
       "ConversationSummaryResponse": {
         "properties": {
           "conversation_id": {
@@ -3105,6 +3250,40 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
         "additionalProperties": false,
         "type": "object",
         "title": "PatchUserMCPServerRequest"
+      },
+      "PutConversationModelSettingsRequest": {
+        "properties": {
+          "model_edition": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Model Edition"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Reasoning Effort"
+          },
+          "deep_thinking": {
+            "type": "boolean",
+            "title": "Deep Thinking"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Expected Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "model_edition",
+          "reasoning_effort",
+          "deep_thinking",
+          "expected_revision"
+        ],
+        "title": "PutConversationModelSettingsRequest"
       },
       "ReasoningEffortConfigResponse": {
         "properties": {
@@ -5226,6 +5405,65 @@ await api.request(&#x27;/api/v1/conversations/chat-messages&#x27;, {
     "public": false,
     "query": {},
     "id": "op-post-api-v1-tasks-task-id-mcp-calls-call-ref-cancel"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/conversations/{conversation_id}/model-settings",
+    "title": "读取会话模型配置",
+    "group": "conversations",
+    "when": "恢复已有对话时读取。",
+    "response": {
+      "conversation_id": "conv-example",
+      "settings": {
+        "model_edition": "MODEL_FROM_CONFIG",
+        "reasoning_effort": "high",
+        "deep_thinking": true,
+        "revision": 1,
+        "updated_at": "2026-11-23T00:00:00"
+      }
+    },
+    "body": null,
+    "notes": "settings 为 null 表示此会话尚无配置，使用系统默认值。expected_revision=0 仅能首次创建配置，后续保存使用已确认版本。三项配置原子更新，不改变正在运行任务的模型。",
+    "errors": "401 未登录；404 会话不存在、不属于当前用户或已开始删除；PUT 400 组合非法、409 版本冲突、422 请求格式错误。",
+    "next": "保存冲突或响应丢失时 GET 回读；相同配置确认保存，原版本未推进可重试原请求，版本已推进且配置不同则保留本地选择并提示冲突。",
+    "success": [
+      "200"
+    ],
+    "public": false,
+    "query": {},
+    "id": "op-get-api-v1-conversations-conversation-id-model-settings"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/conversations/{conversation_id}/model-settings",
+    "title": "保存会话模型配置",
+    "group": "conversations",
+    "when": "已有会话中每次主动调整三项配置后立即保存，发送前等待确认。",
+    "response": {
+      "conversation_id": "conv-example",
+      "settings": {
+        "model_edition": "MODEL_FROM_CONFIG",
+        "reasoning_effort": "high",
+        "deep_thinking": true,
+        "revision": 1,
+        "updated_at": "2026-11-23T00:00:00"
+      }
+    },
+    "body": {
+      "model_edition": "MODEL_FROM_CONFIG",
+      "reasoning_effort": "high",
+      "deep_thinking": true,
+      "expected_revision": 0
+    },
+    "notes": "settings 为 null 表示此会话尚无配置，使用系统默认值。expected_revision=0 仅能首次创建配置，后续保存使用已确认版本。三项配置原子更新，不改变正在运行任务的模型。",
+    "errors": "401 未登录；404 会话不存在、不属于当前用户或已开始删除；PUT 400 组合非法、409 版本冲突、422 请求格式错误。",
+    "next": "保存冲突或响应丢失时 GET 回读；相同配置确认保存，原版本未推进可重试原请求，版本已推进且配置不同则保留本地选择并提示冲突。",
+    "success": [
+      "200"
+    ],
+    "public": false,
+    "query": {},
+    "id": "op-put-api-v1-conversations-conversation-id-model-settings"
   }
 ]</script>
 <script type="application/json" id="field-help">{

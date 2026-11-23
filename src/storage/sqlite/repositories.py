@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
 from src.auth.postgres_invalidation_bus import auth_generation_notify_sql
+from src.storage.row_mappers import _row_to_conversation_model_settings
 from src.storage.mcp_operation_budget import (
     capture_mcp_operation_budget,
     install_mcp_operation_budget,
@@ -47,6 +48,7 @@ from src.core.models import (
     AuthUserToken,
     Checkpoint,
     Conversation,
+    ConversationModelSettings,
     ConversationMemorySummary,
     ConversationFileIndexRepairMarker,
     ConversationFileResource,
@@ -239,6 +241,7 @@ from src.storage.sqlalchemy_models import (
     AuthUserTokenRow,
     CheckpointRow,
     ConversationRow,
+    ConversationModelSettingsRow,
     SubmissionPreparationReceiptRow,
     ConversationMemorySummaryRow,
     ConversationFileIndexRepairMarkerRow,
@@ -2886,6 +2889,50 @@ class SQLiteStateRepository:
                 f"Conversation is not available: {conversation_id}"
             )
 
+    def get_conversation_model_settings(
+        self, conversation_id: str, *, username: str,
+    ) -> ConversationModelSettings | None:
+        self._require_active_conversation_identity(conversation_id, username=username)
+        row = self._session.get(ConversationModelSettingsRow, conversation_id)
+        return None if row is None else _row_to_conversation_model_settings(row)
+
+    def put_conversation_model_settings(
+        self, settings: ConversationModelSettings, *, username: str, expected_revision: int,
+    ) -> ConversationModelSettings | None:
+        # Every writer, including deletion, locks the parent before the settings.
+        self._require_active_conversation_identity(settings.conversation_id, username=username)
+        row = self._session.get(ConversationModelSettingsRow, settings.conversation_id)
+        if expected_revision < 0 or (0 if row is None else row.revision) != expected_revision:
+            return None
+        if row is None:
+            row = ConversationModelSettingsRow(conversation_id=settings.conversation_id)
+            self._session.add(row)
+        row.model_edition = settings.model_edition
+        row.reasoning_effort = settings.reasoning_effort
+        row.deep_thinking = settings.deep_thinking
+        row.revision = expected_revision + 1
+        row.updated_at = settings.updated_at
+        self._session.flush()
+        return _row_to_conversation_model_settings(row)
+
+    def _initialize_conversation_model_settings(
+        self, conversation_id: str, continuation: bytes, updated_at: datetime,
+    ) -> None:
+        # Only the transaction creating the parent calls this. Existing conversations
+        # and exact admission replays never backfill or overwrite preferences.
+        options = _canonical_json_object(continuation, context="submission_continuation")["model_options"]
+        if not isinstance(options["model_edition"], str) or not isinstance(options["reasoning_effort"], str):
+            return  # Legacy frozen admissions can have no selected edition.
+        if self._session.get(ConversationModelSettingsRow, conversation_id) is None:
+            self._session.add(ConversationModelSettingsRow(
+                conversation_id=conversation_id,
+                model_edition=options["model_edition"],
+                reasoning_effort=options["reasoning_effort"],
+                deep_thinking=options["thinking_enabled"],
+                revision=1,
+                updated_at=updated_at,
+            ))
+
     def list_conversations_for_username(self, username: str) -> list[Conversation]:
         rows = self._session.scalars(
             select(ConversationRow)
@@ -3811,6 +3858,9 @@ class SQLiteStateRepository:
         return _row_to_submission_preparation_receipt(row)
 
     def delete_conversation(self, conversation_id: str) -> dict[str, int]:
+        self._session.scalar(select(ConversationRow).where(
+            ConversationRow.conversation_id == conversation_id
+        ).with_for_update())
         task_ids = list(
             self._session.scalars(select(TaskRow.task_id).where(TaskRow.conversation_id == conversation_id)).all()
         )
@@ -3967,6 +4017,9 @@ class SQLiteStateRepository:
         )
         _delete("message", delete(MessageRow).where(or_(*message_conditions)))
         _delete("task", delete(TaskRow).where(TaskRow.conversation_id == conversation_id))
+        _delete("conversation_model_settings", delete(ConversationModelSettingsRow).where(
+            ConversationModelSettingsRow.conversation_id == conversation_id
+        ))
         _delete("conversation", delete(ConversationRow).where(ConversationRow.conversation_id == conversation_id))
         self._session.flush()
         return deleted_counts
@@ -4527,6 +4580,7 @@ class SQLiteStateRepository:
             .where(ConversationRow.conversation_id == request.conversation_id)
             .with_for_update()
         )
+        created_conversation = conversation is None
         if conversation is None:
             if conversation_projection.get("create_if_missing") is not True:
                 return _submission_disposition(
@@ -4631,6 +4685,12 @@ class SQLiteStateRepository:
             context="submission_conversation_updated_at",
         )
         saved_task = self.save_task(request.task)
+        if created_conversation:
+            self._initialize_conversation_model_settings(
+                conversation.conversation_id,
+                request.continuation,
+                conversation.updated_at,
+            )
         self._session.flush()
         return _sql_submission_result(
             disposition=SubmissionAdmissionDisposition.CREATED,
@@ -4688,6 +4748,12 @@ class SQLiteStateRepository:
                 ),
             )
             self._session.add(conversation)
+            self._session.flush()
+            self._initialize_conversation_model_settings(
+                conversation.conversation_id,
+                record.continuation,
+                conversation.updated_at,
+            )
         elif (
             conversation.username != record.username
             or conversation.status != str(ConversationStatus.ACTIVE)
@@ -18498,6 +18564,20 @@ class SQLiteStorage(StoragePort):
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None:
         return await self._run(lambda state, collab: state.get_conversation(conversation_id))
+
+    async def get_conversation_model_settings(
+        self, conversation_id: str, *, username: str,
+    ) -> ConversationModelSettings | None:
+        return await self._run(lambda state, collab: state.get_conversation_model_settings(
+            conversation_id, username=username,
+        ))
+
+    async def put_conversation_model_settings(
+        self, settings: ConversationModelSettings, *, username: str, expected_revision: int,
+    ) -> ConversationModelSettings | None:
+        return await self._run(lambda state, collab: state.put_conversation_model_settings(
+            settings, username=username, expected_revision=expected_revision,
+        ))
 
     async def list_conversations_for_username(self, username: str) -> list[Conversation]:
         return await self._run(lambda state, collab: state.list_conversations_for_username(username))

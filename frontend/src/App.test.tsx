@@ -65,7 +65,14 @@ const forceThinkingReasoningEfforts = {
 };
 
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
+  const settings = new Map<string, import('./api/types').ConversationModelSettings>();
   return {
+    getConversationModelSettings: vi.fn(async (conversationId) => ({ conversation_id: conversationId, settings: settings.get(conversationId) ?? null })),
+    putConversationModelSettings: vi.fn(async (conversationId, selection, revision) => {
+      const saved = { ...selection, revision: revision + 1, updated_at: '2026-11-23T00:00:00' };
+      settings.set(conversationId, saved);
+      return { conversation_id: conversationId, settings: saved };
+    }),
     uiModes: [
       { key: 'chat', label: '普通对话', capabilityId: null },
     ],
@@ -145,8 +152,10 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 async function renderAuthed(ui: ReactElement) {
-  render(ui);
+  const view = render(ui);
   await screen.findByText('育种助手');
+  await act(async () => { await Promise.resolve(); });
+  return view;
 }
 
 async function openConversationFilesDrawer(expectedFileCount?: number) {
@@ -2629,11 +2638,13 @@ describe('App', () => {
     })));
   });
 
-  it('keeps current thinking and effort when starting a new conversation', async () => {
+  it('resets model thinking and effort to defaults when starting a new conversation', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.mouseDown(screen.getAllByLabelText('模型版本')[0].closest('.ant-select')!.querySelector('.ant-select-selector')!);
+    fireEvent.click(await screen.findByText('DeepSeek V4 Pro'));
     fireEvent.click(await screen.findByLabelText('深度思考'));
     const effortSelect = screen.getAllByLabelText('思考强度')[0];
     fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
@@ -2645,13 +2656,15 @@ describe('App', () => {
     await waitFor(() => expect(localStorage.getItem('maf.frontend.conversation_id.alice')).not.toBe(previousConversationId));
     const nextConversationId = localStorage.getItem('maf.frontend.conversation_id.alice');
 
-    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '继承当前设置' } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '使用新对话默认设置' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       conversationId: nextConversationId,
-      deepThinking: true,
-      reasoningEffort: 'max',
+      modelEdition: 'deepseek-v4-1-flash-261017',
+      deepThinking: false,
+      reasoningEffort: 'high',
     })));
   });
 
@@ -5376,6 +5389,181 @@ describe('App', () => {
 
     expect(await screen.findByText('$OCR服务')).toBeInTheDocument();
     expect(screen.getByText('识别材料')).toBeInTheDocument();
+  });
+  it('restores all three server settings after remount without auto-saving them', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-a');
+    const selection = { model_edition: 'deepseek-v4-pro-260425', reasoning_effort: 'max', deep_thinking: true, revision: 7, updated_at: '2026-11-23' };
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'prefs-a', username: 'alice', status: 'active', current_task_id: null, title: '配置会话', created_at: null, updated_at: null }] })),
+      getConversationModelSettings: vi.fn(async (id) => ({ conversation_id: id, settings: selection })),
+    });
+    const first = await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect((await screen.findAllByLabelText('模型版本'))[0].closest('.ant-select')).toHaveTextContent('DeepSeek V4 Pro');
+    expect(screen.getAllByLabelText('思考强度')[0].closest('.ant-select')).toHaveTextContent('最高');
+    expect(screen.getByRole('switch', { name: '深度思考' })).toBeChecked();
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+    first.unmount();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '恢复后的消息' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: selection.model_edition, reasoningEffort: 'max', deepThinking: true })));
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+  });
+
+  it('immediately saves the whole tuple on a deliberate edit and waits for confirmation before sending', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-a');
+    const ack = deferred<Awaited<ReturnType<ApiClient['putConversationModelSettings']>>>();
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'prefs-a', username: 'alice', status: 'active', current_task_id: null, title: '配置会话', created_at: null, updated_at: null }] })),
+      putConversationModelSettings: vi.fn(() => ack.promise),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByRole('switch', { name: '深度思考' }));
+    const selection = { model_edition: 'deepseek-v4-1-flash-261017', reasoning_effort: 'high', deep_thinking: true };
+    expect(api.putConversationModelSettings).toHaveBeenCalledWith('prefs-a', selection, 0);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等保存再发送' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    ack.resolve({ conversation_id: 'prefs-a', settings: { ...selection, revision: 1, updated_at: '2026-11-23' } });
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(1));
+  });
+
+  it('blocks editing and sending until existing conversation model settings load', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-a');
+    const loading = deferred<Awaited<ReturnType<ApiClient['getConversationModelSettings']>>>();
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'prefs-a', username: 'alice', status: 'active', current_task_id: null, title: '加载会话', created_at: null, updated_at: null }] })),
+      getConversationModelSettings: vi.fn(() => loading.promise),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '不能抢跑' } });
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect((await screen.findAllByLabelText('模型版本'))[0].closest('.ant-select')).toHaveClass('ant-select-disabled');
+    loading.resolve({ conversation_id: 'prefs-a', settings: null });
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled());
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+  });
+
+  it('does not treat failed settings loading as a new draft', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-a');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'prefs-a', username: 'alice', status: 'active', current_task_id: null, title: '加载失败会话', created_at: null, updated_at: null }] })),
+      getConversationModelSettings: vi.fn(async () => { throw new Error('offline'); }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    expect(await screen.findByText('会话模型配置加载失败，请重新选择会话重试。')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '不能使用默认配置抢跑' } });
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+  });
+
+  it('shows an unavailable saved model and requires explicit reselection without overwriting defaults', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-a');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'prefs-a', username: 'alice', status: 'active', current_task_id: null, title: '旧模型会话', created_at: null, updated_at: null }] })),
+      getConversationModelSettings: vi.fn(async (id) => ({ conversation_id: id, settings: { model_edition: 'removed-model', reasoning_effort: 'removed-effort', deep_thinking: false, revision: 3, updated_at: '2026-11-23' } })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect(await screen.findByText('已保存的模型配置当前不可用，请重新选择模型和思考配置。')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '请重选' } });
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+    const select = screen.getAllByLabelText('模型版本')[0].closest('.ant-select')!;
+    fireEvent.mouseDown(select.querySelector('.ant-select-selector')!);
+    fireEvent.click(await screen.findByText('DeepSeek V4 Pro'));
+    await waitFor(() => expect(api.putConversationModelSettings).toHaveBeenCalledWith('prefs-a', expect.objectContaining({ model_edition: 'deepseek-v4-pro-260425' }), 3));
+  });
+
+  it('saves a new chat only after first upload and waits before posting its message', async () => {
+    const ack = deferred<Awaited<ReturnType<ApiClient['putConversationModelSettings']>>>();
+    const api = makeApi({ putConversationModelSettings: vi.fn(() => ack.promise) });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [new File(['a\n1'], 'prefs.csv', { type: 'text/csv' })] } });
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析附件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.putConversationModelSettings).toHaveBeenCalledTimes(1));
+    expect(api.uploadConversationFile).toHaveBeenCalledTimes(1);
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    const [id, selection] = vi.mocked(api.putConversationModelSettings).mock.calls[0];
+    ack.resolve({ conversation_id: id, settings: { ...selection, revision: 1, updated_at: '2026-11-23' } });
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(1));
+    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: id, metadata: expect.objectContaining({ upload_ids: ['upl-1'] }) }));
+  });
+
+  it('never saves settings when the first upload fails', async () => {
+    const api = makeApi({ uploadConversationFile: vi.fn(async () => { throw new Error('upload failed'); }) });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [new File(['a'], 'prefs.txt', { type: 'text/plain' })] } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析附件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledTimes(1));
+    await act(async () => { await Promise.resolve(); });
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+    expect(api.submitMessage).not.toHaveBeenCalled();
+  });
+  it('reuses the first uploaded file when model-save confirmation fails and the user retries', async () => {
+    const api = makeApi();
+    vi.mocked(api.putConversationModelSettings).mockRejectedValueOnce(new Error('offline')).mockRejectedValueOnce(new Error('offline'));
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [new File(['a'], 'prefs.txt', { type: 'text/plain' })] } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '保留文件后重试' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(await screen.findByText('模型配置保存尚未确认，请重试保存后再发送。')).toBeInTheDocument();
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(1));
+    expect(api.uploadConversationFile).toHaveBeenCalledTimes(1);
+    expect(api.deleteConversationUpload).not.toHaveBeenCalled();
+    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ upload_ids: ['upl-1'] }) }));
+  });
+
+  it('keeps a pending preference save bound to its conversation when switching chats', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-a');
+    const ack = deferred<Awaited<ReturnType<ApiClient['putConversationModelSettings']>>>();
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: ['a', 'b'].map((suffix) => ({ conversation_id: `prefs-${suffix}`, username: 'alice', status: 'active', current_task_id: null, title: `配置会话 ${suffix}`, created_at: null, updated_at: null })) })),
+      getConversationModelSettings: vi.fn(async (id) => ({ conversation_id: id, settings: id === 'prefs-a' ? null : { model_edition: 'deepseek-v4-pro-260425', reasoning_effort: 'low', deep_thinking: true, revision: 7, updated_at: '2026-11-23' } })),
+      putConversationModelSettings: vi.fn(() => ack.promise),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByRole('switch', { name: '深度思考' }));
+    expect(api.putConversationModelSettings).toHaveBeenCalledWith('prefs-a', expect.objectContaining({ deep_thinking: true }), 0);
+    fireEvent.click(screen.getByRole('button', { name: '配置会话 b' }));
+    await waitFor(() => expect(screen.getAllByLabelText('模型版本')[0].closest('.ant-select')).toHaveTextContent('DeepSeek V4 Pro'));
+    ack.resolve({ conversation_id: 'prefs-a', settings: { model_edition: 'deepseek-v4-1-flash-261017', reasoning_effort: 'high', deep_thinking: true, revision: 1, updated_at: '2026-11-23' } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '使用会话 b 的模型配置' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'prefs-b', modelEdition: 'deepseek-v4-pro-260425', reasoningEffort: 'low', deepThinking: true })));
+    expect(api.putConversationModelSettings).toHaveBeenCalledTimes(1);
+  });
+  it('blocks edits while explicitly reloading server model settings after an unconfirmed save', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-a');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'prefs-a', username: 'alice', status: 'active', current_task_id: null, title: '重新加载配置', created_at: null, updated_at: null }] })),
+      putConversationModelSettings: vi.fn(async () => { throw new Error('offline'); }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByRole('switch', { name: '深度思考' }));
+    await screen.findByRole('button', { name: '重试保存' });
+    const loading = deferred<Awaited<ReturnType<ApiClient['getConversationModelSettings']>>>();
+    vi.mocked(api.getConversationModelSettings).mockReturnValueOnce(loading.promise);
+    fireEvent.click(screen.getByRole('button', { name: '重新加载已保存配置' }));
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等待重新加载' } });
+    expect(screen.getAllByLabelText('模型版本')[0].closest('.ant-select')).toHaveClass('ant-select-disabled');
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    loading.resolve({ conversation_id: 'prefs-a', settings: { model_edition: 'deepseek-v4-pro-260425', reasoning_effort: 'max', deep_thinking: true, revision: 5, updated_at: '2026-11-23' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled());
+    expect(screen.getAllByLabelText('模型版本')[0].closest('.ant-select')).toHaveTextContent('DeepSeek V4 Pro');
+    expect(api.putConversationModelSettings).toHaveBeenCalledTimes(1);
   });
 
 });

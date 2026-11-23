@@ -2,6 +2,8 @@
 
 ## Structure
 
+- `src/domain/conversationModelSettings.ts`: per-conversation model/effort/thinking save queues, revision CAS and readback reconciliation; App owns catalog-aware restore and first-message/upload transitions. Drafts stay local until materialization; unresolved writes block subsequent sends.
+
 - `src/App.tsx`: authenticated chat shell and the sole owner of conversation/message state, SSE lifecycle, attachment upload/delete/rollback effects, and interrupt answer submission. A logical chat submission carries a stable client message ID; an ambiguous response retains the original request for explicit retry. POST submission/answer failures preserve uploaded resources; only pre-submission partial upload batches roll back.
 - `src/domain/collections.ts`: pure immutable collection updates shared by React state setters.
 - `src/domain/attachments.ts`, `src/components/AttachmentCards.tsx`: attachment types, pure labels/summary/merge helpers, and stateless draft/saved-file cards; API effects and attachment state remain in `App.tsx`.

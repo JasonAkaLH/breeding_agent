@@ -12,6 +12,9 @@ from src.storage.interfaces import StoragePort as StorageInterfacesStoragePort
 
 
 EXPECTED_STORAGE_METHOD_SIGNATURES = {
+  "get_conversation_model_settings": "(self, conversation_id: 'str', *, username: 'str') -> 'ConversationModelSettings | None'",
+  "put_conversation_model_settings": "(self, settings: 'ConversationModelSettings', *, username: 'str', expected_revision: 'int') -> 'ConversationModelSettings | None'",
+
   "acknowledge_submission_handoff": "(self, request: 'SubmissionHandoffAcknowledgementRequest') -> 'SubmissionAdmissionPhase'",
   "acknowledge_submission_projection": "(self, request: 'SubmissionProjectionAcknowledgementRequest') -> 'SubmissionAdmissionPhase'",
   "abandon_expired_mcp_remote_task_continuations": "(self, *, now: 'datetime', limit: 'int' = 100) -> 'list[MCPRemoteTaskOutbox]'",
@@ -331,7 +334,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 281)
+        self.assertEqual(len(actual), 283)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(

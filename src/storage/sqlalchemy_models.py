@@ -965,6 +965,20 @@ class ConversationRow(SQLiteBase):
     delete_phase: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ConversationModelSettingsRow(SQLiteBase):
+    __tablename__ = "conversation_model_settings"
+    __table_args__ = (
+        CheckConstraint("revision > 0", name="conversation_model_settings_revision"),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    model_edition: Mapped[str] = mapped_column(Text, nullable=False)
+    reasoning_effort: Mapped[str] = mapped_column(Text, nullable=False)
+    deep_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
 class SubmissionPreparationReceiptRow(SQLiteBase):
     __tablename__ = "submission_preparation_receipts"
     __table_args__ = (
