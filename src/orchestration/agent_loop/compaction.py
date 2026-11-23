@@ -82,12 +82,15 @@ class AgentCompactionService:
         force: bool = False,
     ) -> AgentCompactionOutcome:
         try:
-            outcome = await self._compact_until_fit(
-                run_id=run_id,
-                handle=handle,
-                candidate=candidate,
-                repreflight=repreflight,
-                force=force,
+            outcome = await self._leases.run_owned(
+                handle,
+                lambda _handle: self._compact_until_fit(
+                    run_id=run_id,
+                    handle=handle,
+                    candidate=candidate,
+                    repreflight=repreflight,
+                    force=force,
+                ),
             )
         except Exception as exc:
             error_code = str(exc)
@@ -146,18 +149,22 @@ class AgentCompactionService:
             )
             if sample.binding != run.binding or sample.tool_calls or not sample.visible_text.strip():
                 raise RuntimeError("agent_compaction_model_output_invalid")
-            latest = await self._require_run(run_id)
-            committed = await self._writer.commit_agent_compaction(
-                AgentCompactionCommit(
-                    run_id=run_id,
-                    expected_revision=latest.revision,
-                    expected_claim_token=handle.current.token,
-                    covered_start_sequence=covered_range[0],
-                    covered_end_sequence=covered_range[1],
-                    source_digest=digest,
-                    summary=sample.visible_text,
+
+            async def commit_summary(lease):
+                latest = await self._require_run(run_id)
+                return await self._writer.commit_agent_compaction(
+                    AgentCompactionCommit(
+                        run_id=run_id,
+                        expected_revision=latest.revision,
+                        expected_claim_token=lease.token,
+                        covered_start_sequence=covered_range[0],
+                        covered_end_sequence=covered_range[1],
+                        source_digest=digest,
+                        summary=sample.visible_text,
+                    )
                 )
-            )
+
+            committed = await handle.run_ownership_bound(commit_summary)
             if self._transient_result_cleaner is not None:
                 try:
                     self._transient_result_cleaner.cleanup_covered(

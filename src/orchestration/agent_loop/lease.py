@@ -25,6 +25,9 @@ class AgentExecutionFailure(RuntimeError):
 @dataclass(slots=True)
 class AgentLeaseHandle:
     current: AgentTaskLease
+    _heartbeat_task: asyncio.Task[None] | None = field(
+        default=None, init=False, repr=False
+    )
     _ownership_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
         init=False,
@@ -36,7 +39,14 @@ class AgentLeaseHandle:
         operation: Callable[[AgentTaskLease], Awaitable[T]],
     ) -> T:
         async with self._ownership_lock:
+            heartbeat = self._heartbeat_task
+            if heartbeat is not None and heartbeat.done() and not heartbeat.cancelled():
+                await heartbeat
             return await operation(self.current)
+
+    def stop_heartbeat(self) -> None:
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
 
 
 class AgentLeaseController(Generic[T]):
@@ -70,43 +80,49 @@ class AgentLeaseController(Generic[T]):
     ) -> T:
         if phase not in ACTIVE_LEASE_PHASES:
             raise ValueError(f"unsupported Agent lease phase: {phase}")
+        return await self.run_owned(handle, operation)
+
+    async def run_owned(
+        self,
+        handle: AgentLeaseHandle,
+        operation: Callable[[AgentLeaseHandle], Awaitable[T]],
+    ) -> T:
+        if handle._heartbeat_task is not None:
+            if handle._heartbeat_task.done() and not handle._heartbeat_task.cancelled():
+                await handle._heartbeat_task
+            return await operation(handle)
         operation_task = asyncio.create_task(operation(handle))
         heartbeat_task = asyncio.create_task(self._heartbeat(handle))
+        handle._heartbeat_task = heartbeat_task
         try:
             done, _ = await asyncio.wait(
                 {operation_task, heartbeat_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-        except asyncio.CancelledError:
-            operation_task.cancel()
-            heartbeat_task.cancel()
-            await asyncio.gather(
-                operation_task,
-                heartbeat_task,
-                return_exceptions=True,
-            )
-            raise
-        if operation_task in done:
-            heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if heartbeat_task in done and not heartbeat_task.cancelled():
+                operation_task.cancel()
+                await asyncio.gather(operation_task, return_exceptions=True)
+                await heartbeat_task
+                raise AgentLeaseLost("agent_task_lease_heartbeat_stopped")
             return await operation_task
-        operation_task.cancel()
-        await asyncio.gather(operation_task, return_exceptions=True)
-        try:
-            await heartbeat_task
-        except AgentLeaseLost:
-            raise
-        except Exception as exc:
-            raise AgentLeaseLost("agent_task_lease_heartbeat_failed") from exc
-        raise AgentLeaseLost("agent_task_lease_heartbeat_stopped")
+        finally:
+            operation_task.cancel()
+            await asyncio.gather(operation_task, return_exceptions=True)
+            # Finish a started renewal so its rotated token reaches the handle.
+            async with handle._ownership_lock:
+                heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            handle._heartbeat_task = None
 
     async def release_waiting(self, run_id: str, *, handle: AgentLeaseHandle) -> AgentRun:
         async def release(lease: AgentTaskLease) -> AgentRun:
-            return await self._store.release_waiting_task_lease(
+            run = await self._store.release_waiting_task_lease(
                 run_id,
                 owner_id=lease.owner_id,
                 token=lease.token,
             )
+            handle.stop_heartbeat()
+            return run
 
         return await handle.run_ownership_bound(release)
 

@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.core.contracts import CapabilityExecutionResult
@@ -54,6 +55,7 @@ from src.storage.sqlite import (
 )
 from src.storage.sqlite.models import TaskNodeRow, TaskRow
 from tests.orchestration.support import make_agent_result_projector
+from tests.agent_lease_test_support import AgentLeaseTestClock
 
 
 def _policy(*, parallel_safe: bool) -> CapabilityInvocationPolicy:
@@ -210,6 +212,134 @@ class _LogicalTraceRepository:
 
 
 class AgentLoopRunnerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_long_tool_keeps_renewing_without_reinvocation(self):
+        clock = AgentLeaseTestClock(self.repository, datetime(2026, 11, 23, 6, 0))
+        call = AgentToolCall("long-tool", self.names["skill.safe_one"], "{}", 0)
+        model = _QueuedModel(self.binding, [("", (call,)), ("finished", ())])
+        invoker = _RecordingInvoker()
+        original_invoke = invoker.invoke
+
+        async def invoke(**kwargs):
+            await clock.advance(125)
+            return await original_invoke(**kwargs)
+
+        invoker.invoke = invoke
+        runner = self._runner(model, invoker)
+        runner._leases._sleep = clock.sleep
+        result = await runner.run("run-1")
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(len(invoker.lease_handles), 1)
+        self.assertEqual(len(model.requests), 2)
+        self.assertGreaterEqual(clock.renew_count, 12)
+        self.assertEqual(clock.max_sleepers, 1)
+        self.assertEqual(clock.sleepers, [])
+
+    async def test_model_commit_serializes_with_heartbeat_token_rotation(self):
+        clock = AgentLeaseTestClock(self.repository, datetime(2026, 11, 23, 6, 0))
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_commit = self.repository.commit_agent_sample
+
+        async def commit(value):
+            entered.set()
+            await release.wait()
+            return await original_commit(value)
+
+        self.repository.commit_agent_sample = commit
+        runner = self._runner(
+            _QueuedModel(self.binding, [("finished", ())]), _RecordingInvoker()
+        )
+        runner._leases._sleep = clock.sleep
+        task = asyncio.create_task(runner.run("run-1"))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            tick = asyncio.create_task(clock.advance(10))
+            target = clock.now + timedelta(seconds=10)
+            while clock.now < target:
+                await asyncio.sleep(0)
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertEqual(clock.renew_count, 0)
+            release.set()
+            result = await asyncio.wait_for(task, timeout=2)
+            await tick
+            self.assertEqual(result.state, "final_candidate")
+            self.assertEqual(
+                (await self.repository.get_run("run-1")).claim_token,
+                result.lease_handle.current.token,
+            )
+            self.assertEqual(clock.sleepers, [])
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_short_model_tool_cycles_keep_one_continuous_heartbeat(self):
+        await self._initialize_budgeted_run(1_000_000)
+        clock = AgentLeaseTestClock(self.repository, datetime(2026, 11, 23, 6, 0))
+        calls = [
+            (
+                "",
+                (
+                    AgentToolCall(
+                        f"call-{index}",
+                        self.names["skill.safe_one"],
+                        "{}",
+                        0,
+                    ),
+                ),
+            )
+            for index in range(12)
+        ]
+        model = _QueuedModel(self.binding, [*calls, ("finished", ())])
+        original_sample = model.sample_agent
+
+        async def sample(request):
+            await clock.advance(7)
+            return await original_sample(request)
+
+        model.sample_agent = sample
+        invoker = _RecordingInvoker()
+        runner = self._runner(
+            model, invoker, enable_preflight=True, token_counter=lambda *_args: 1
+        )
+        runner._leases._sleep = clock.sleep
+        result = await runner.run("run-1")
+
+        self.assertEqual(result.state, "final_candidate")
+        self.assertEqual(len(model.requests), 13)
+        self.assertEqual(len(invoker.lease_handles), 12)
+        self.assertGreaterEqual(clock.renew_count, 8)
+        self.assertEqual(clock.max_sleepers, 1)
+        stored = await self.repository.get_run("run-1")
+        self.assertGreater(stored.lease_expires_at, clock.now)
+        self.assertEqual(stored.claim_token, result.lease_handle.current.token)
+        self.assertEqual(clock.sleepers, [])
+
+    async def test_context_preparation_longer_than_ttl_is_renewed(self):
+        await self._initialize_budgeted_run(1_000_000)
+        clock = AgentLeaseTestClock(self.repository, datetime(2026, 11, 23, 6, 0))
+        model = _QueuedModel(self.binding, [("finished", ())])
+        runner = self._runner(
+            model,
+            _RecordingInvoker(),
+            enable_preflight=True,
+            token_counter=lambda *_args: 1,
+        )
+        runner._leases._sleep = clock.sleep
+        original_build = runner._context_candidate_builder.build
+
+        async def build(**kwargs):
+            await clock.advance(65)
+            return await original_build(**kwargs)
+
+        runner._context_candidate_builder.build = build
+        result = await runner.run("run-1")
+        self.assertEqual(result.state, "final_candidate")
+        self.assertGreaterEqual(clock.renew_count, 6)
+        self.assertEqual(clock.max_sleepers, 1)
+        self.assertEqual(clock.sleepers, [])
+
     async def test_execution_error_carries_the_same_handle_after_token_rotation(self):
         repository = self.repository
         handle = await AgentLeaseController(repository, ttl_seconds=30).acquire(

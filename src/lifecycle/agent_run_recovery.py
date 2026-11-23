@@ -213,6 +213,28 @@ class AgentRunRecoveryCoordinator:
             return AgentRecoveryResult(run, AgentRecoveryState.WAITING)
 
         handle = await self._leases.acquire(run_id, owner_id=self._owner_id)
+        return await self._leases.run_owned(
+            handle,
+            lambda _handle: self._recover_claimed_run(
+                run_id,
+                handle=handle,
+                initial_required_tool_name=initial_required_tool_name,
+                trusted_facts=trusted_facts,
+                visibility_context=visibility_context,
+                cancellation=cancellation,
+            ),
+        )
+
+    async def _recover_claimed_run(
+        self,
+        run_id: str,
+        *,
+        handle: AgentLeaseHandle,
+        initial_required_tool_name: str | None,
+        trusted_facts: tuple[str, ...],
+        visibility_context: Any | None,
+        cancellation: Any | None,
+    ) -> AgentRecoveryResult:
         run = await self._require_run(run_id)
         items = await self._runs.list_items(run_id)
         calls = {
@@ -263,38 +285,43 @@ class AgentRunRecoveryCoordinator:
                         }
                         else "agent_transient_skill_result_unavailable"
                     )
-            await self._writer.commit_agent_call_outcome(
-                AgentCallOutcomeCommit(
-                    run_id=run_id,
-                    expected_revision=latest.revision,
-                    expected_claim_token=handle.current.token,
-                    call_item_id=call_id,
-                    safe_result_payload=(
-                        recovered.safe_result_payload
-                        if recovered is not None
-                        else (
-                            None
-                            if recovery_error is not None
-                            else {"status": "aborted"}
-                        )
-                    ),
-                    status=(
-                        AgentCallOutcomeStatus.COMPLETED
-                        if recovered is not None
-                        else AgentCallOutcomeStatus.FAILED
-                        if recovery_error is not None
-                        else AgentCallOutcomeStatus.ABORTED
-                    ),
-                    safe_error_code=(
-                        recovery_error
-                        or (
-                            None
+
+            async def commit_recovered(lease):
+                latest = await self._require_run(run_id)
+                return await self._writer.commit_agent_call_outcome(
+                    AgentCallOutcomeCommit(
+                        run_id=run_id,
+                        expected_revision=latest.revision,
+                        expected_claim_token=lease.token,
+                        call_item_id=call_id,
+                        safe_result_payload=(
+                            recovered.safe_result_payload
                             if recovered is not None
-                            else "side_effect_unknown_no_replay"
-                        )
-                    ),
+                            else (
+                                None
+                                if recovery_error is not None
+                                else {"status": "aborted"}
+                            )
+                        ),
+                        status=(
+                            AgentCallOutcomeStatus.COMPLETED
+                            if recovered is not None
+                            else AgentCallOutcomeStatus.FAILED
+                            if recovery_error is not None
+                            else AgentCallOutcomeStatus.ABORTED
+                        ),
+                        safe_error_code=(
+                            recovery_error
+                            or (
+                                None
+                                if recovered is not None
+                                else "side_effect_unknown_no_replay"
+                            )
+                        ),
+                    )
                 )
-            )
+
+            await handle.run_ownership_bound(commit_recovered)
 
         loop_result = await self._resumer.run_claimed(
             run_id,
@@ -358,6 +385,30 @@ class AgentRunRecoveryCoordinator:
             return AgentRecoveryResult(run, AgentRecoveryState.TERMINAL, None, acknowledged)
 
         handle = await self._leases.acquire(run.run_id, owner_id=self._owner_id)
+        return await self._leases.run_owned(
+            handle,
+            lambda _handle: self._close_claimed_call(
+                locator,
+                handle=handle,
+                owner_scope=owner_scope,
+                authority_digest=authority_digest,
+                resolve_authority=resolve_authority,
+                acknowledge=acknowledge,
+                require_waiting=require_waiting,
+            ),
+        )
+
+    async def _close_claimed_call(
+        self,
+        locator: AgentContinuationLocator,
+        *,
+        handle: AgentLeaseHandle,
+        owner_scope: str,
+        authority_digest: str,
+        resolve_authority: AuthorityResolver,
+        acknowledge: Acknowledger | None,
+        require_waiting: bool,
+    ) -> AgentRecoveryResult:
         run, call, result = await self._load_and_validate(
             locator,
             owner_scope=owner_scope,
@@ -390,25 +441,30 @@ class AgentRunRecoveryCoordinator:
         if run.status in self._TERMINAL:
             acknowledged = await _acknowledge(acknowledge)
             return AgentRecoveryResult(run, AgentRecoveryState.TERMINAL, None, acknowledged)
-        committed = await self._writer.commit_agent_call_outcome(
-            AgentCallOutcomeCommit(
-                run_id=run.run_id,
-                expected_revision=run.revision,
-                expected_claim_token=handle.current.token,
-                call_item_id=call.item_id,
-                safe_result_payload=resolution.safe_result_payload,
-                status=resolution.status,
-                continuation_payload={
-                    "authority_digest": resolution.authority_digest,
-                    "facts": dict(resolution.safe_continuation_facts),
-                    "locator_digest": locator.digest,
-                    "resume_kind": locator.resume_kind.value,
-                    "schema": "maf.agent.continuation.v1",
-                },
-                staged_artifacts=resolution.staged_artifacts,
-                safe_error_code=resolution.safe_error_code,
+
+        async def commit_resolution(lease):
+            latest = await self._require_run(run.run_id)
+            return await self._writer.commit_agent_call_outcome(
+                AgentCallOutcomeCommit(
+                    run_id=run.run_id,
+                    expected_revision=latest.revision,
+                    expected_claim_token=lease.token,
+                    call_item_id=call.item_id,
+                    safe_result_payload=resolution.safe_result_payload,
+                    status=resolution.status,
+                    continuation_payload={
+                        "authority_digest": resolution.authority_digest,
+                        "facts": dict(resolution.safe_continuation_facts),
+                        "locator_digest": locator.digest,
+                        "resume_kind": locator.resume_kind.value,
+                        "schema": "maf.agent.continuation.v1",
+                    },
+                    staged_artifacts=resolution.staged_artifacts,
+                    safe_error_code=resolution.safe_error_code,
+                )
             )
-        )
+
+        committed = await handle.run_ownership_bound(commit_resolution)
         acknowledged = await _acknowledge(acknowledge)
         updated = await self._runs.get_run(run.run_id)
         if updated is None:

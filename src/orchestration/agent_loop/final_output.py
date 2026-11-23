@@ -37,9 +37,27 @@ class AgentFinalOutputPublisher:
         candidate_item_id: str,
         handle: AgentLeaseHandle,
     ) -> AgentFinalOutputResult:
+        return await self._leases.run_owned(
+            handle,
+            lambda _handle: self._publish(
+                run_id=run_id,
+                candidate_item_id=candidate_item_id,
+                handle=handle,
+            ),
+        )
+
+    async def _publish(
+        self,
+        *,
+        run_id: str,
+        candidate_item_id: str,
+        handle: AgentLeaseHandle,
+    ) -> AgentFinalOutputResult:
         run = await self._runs.get_run(run_id)
         if run is None:
             raise AgentStorageConflict("agent_final_run_missing")
+        if run.status is AgentRunStatus.COMPLETED:
+            handle.stop_heartbeat()
         items = await self._runs.list_items(run_id)
         candidate = next(
             (item for item in items if item.item_id == candidate_item_id),
@@ -70,30 +88,32 @@ class AgentFinalOutputPublisher:
         if not text.strip() or bool(payload.get("mixed_text_and_tool_calls")):
             raise AgentStorageConflict("agent_final_candidate_invalid")
 
-        async def commit(_handle: AgentLeaseHandle) -> AgentFinalOutputResult:
+        async def commit(lease) -> AgentFinalOutputResult:
             latest = await self._runs.get_run(run_id)
             if latest is None:
                 raise AgentStorageConflict("agent_final_run_missing")
-            return await self._writer.commit_agent_final_output(
+            result = await self._writer.commit_agent_final_output(
                 AgentFinalOutputCommit(
                     run_id=run_id,
                     expected_revision=latest.revision,
                     expected_claim_token=(
-                        _handle.current.token
+                        lease.token
                         if latest.status is not AgentRunStatus.COMPLETED
                         else None
                     ),
                     text=text,
                 )
             )
+            handle.stop_heartbeat()
+            return result
 
         if run.status is AgentRunStatus.COMPLETED:
-            result = await commit(handle)
+            result = await handle.run_ownership_bound(commit)
             await self._cleanup_after_final(result)
             return result
         if run.status is not AgentRunStatus.RUNNING:
             raise AgentStorageConflict("agent_final_run_not_publishable")
-        result = await self._leases.run_active_phase("final_publish", handle, commit)
+        result = await handle.run_ownership_bound(commit)
         await self._cleanup_after_final(result)
         return result
 

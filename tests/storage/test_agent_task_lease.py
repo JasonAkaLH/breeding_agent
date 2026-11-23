@@ -142,10 +142,19 @@ class SQLiteAgentTaskLeaseTest(unittest.IsolatedAsyncioTestCase):
     async def test_renew_at_or_after_expiry_fails_closed(self) -> None:
         lease = await self.repository.acquire_task_lease("run", owner_id="worker-a", ttl_seconds=30)
         self.now = lease.expires_at
-        with self.assertRaisesRegex(AgentStorageConflict, "lease_lost"):
+        with (
+            self.assertLogs(
+                "src.storage.sqlite.agent_repository", level="WARNING"
+            ) as logs,
+            self.assertRaisesRegex(AgentStorageConflict, "lease_lost"),
+        ):
             await self.repository.renew_task_lease(
                 "run", owner_id="worker-a", token=lease.token, ttl_seconds=30
             )
+        self.assertEqual(logs.records[0].run_id, "run")
+        self.assertEqual(logs.records[0].reason, "expired")
+        self.assertIn("task_id=task", logs.output[0])
+        self.assertNotIn(lease.token, logs.output[0])
 
     async def test_concurrent_acquire_has_exactly_one_winner(self) -> None:
         results = await asyncio.gather(
@@ -184,6 +193,69 @@ class _FakeLeaseStore:
 
 
 class AgentLeaseControllerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_scope_exit_finishes_inflight_renewal_and_keeps_rotated_token(self):
+        store = _FakeLeaseStore()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_renew = store.renew_task_lease
+
+        async def renew(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original_renew(*args, **kwargs)
+
+        async def sleep(_delay):
+            await asyncio.sleep(0)
+
+        store.renew_task_lease = renew
+        controller = AgentLeaseController(store, ttl_seconds=30, sleep=sleep)
+        handle = await controller.acquire("run", owner_id="worker")
+
+        async def operation(_handle):
+            await entered.wait()
+            return "finished"
+
+        task = asyncio.create_task(controller.run_owned(handle, operation))
+        await entered.wait()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        release.set()
+        self.assertEqual(await task, "finished")
+        self.assertEqual(handle.current.token, store.current.token)
+        self.assertEqual(store.renew_count, 1)
+        self.assertIsNone(handle._heartbeat_task)
+
+    async def test_cancellation_cleans_up_single_nested_heartbeat(self):
+        store = _FakeLeaseStore()
+        controller = AgentLeaseController(store, ttl_seconds=30)
+        handle = await controller.acquire("run", owner_id="worker")
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def operation(_handle):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        task = asyncio.create_task(
+            controller.run_owned(
+                handle,
+                lambda _handle: controller.run_active_phase(
+                    "model_sample", handle, operation
+                ),
+            )
+        )
+        await entered.wait()
+        heartbeat = handle._heartbeat_task
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(heartbeat.cancelled())
+        self.assertIsNone(handle._heartbeat_task)
+
     async def test_heartbeat_waits_for_an_ownership_bound_database_operation(self) -> None:
         renew_allowed = asyncio.Event()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -59,6 +60,7 @@ from src.storage.sqlalchemy_models import (
 )
 
 
+logger = logging.getLogger(__name__)
 FaultInjector = Callable[[str], None]
 
 
@@ -1228,6 +1230,37 @@ class SQLiteAgentRepository:
             or run.lease_expires_at is None
             or run.lease_expires_at <= now
         ):
+            reason = (
+                "owner_mismatch"
+                if run.claim_owner != owner_id
+                else "token_mismatch"
+                if run.claim_token != token
+                else "missing_expiry"
+                if run.lease_expires_at is None
+                else "expired"
+            )
+            logger.warning(
+                "agent_task_lease_renewal_rejected run_id=%s task_id=%s reason=%s "
+                "storage_now=%s lease_expires_at=%s",
+                run_id,
+                run.task_id,
+                reason,
+                now.isoformat(),
+                run.lease_expires_at.isoformat()
+                if run.lease_expires_at is not None
+                else None,
+                extra={
+                    "run_id": run_id,
+                    "task_id": run.task_id,
+                    "reason": reason,
+                    "storage_now": now.isoformat(),
+                    "lease_expires_at": (
+                        run.lease_expires_at.isoformat()
+                        if run.lease_expires_at is not None
+                        else None
+                    ),
+                },
+            )
             raise AgentStorageConflict("agent_task_lease_lost")
         next_token = self._token_factory()
         if not next_token or next_token == token:

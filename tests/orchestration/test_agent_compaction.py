@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 from src.orchestration.agent_loop.compaction import AgentCompactionService
@@ -31,6 +32,7 @@ from src.storage.sqlite import (
     create_sqlite_session_factory,
 )
 from src.storage.sqlite.models import TaskRow
+from tests.agent_lease_test_support import AgentLeaseTestClock
 
 
 def _candidate(
@@ -135,6 +137,10 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     async def test_same_binding_summary_advances_boundary_without_deleting_sources(self) -> None:
+        clock = AgentLeaseTestClock(
+            self.repository, self.handle.current.expires_at - timedelta(seconds=30)
+        )
+        self.leases._sleep = clock.sleep
         model = _SummaryModel(self.binding)
         cleaned_boundaries = []
 
@@ -156,6 +162,13 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
             minimum_suffix_items=2,
         )
         calls = 0
+        original_largest = service._largest_fitting_request
+
+        async def slow_largest(**kwargs):
+            await clock.advance(65)
+            return await original_largest(**kwargs)
+
+        service._largest_fitting_request = slow_largest
 
         def repreflight(_run, _items):
             nonlocal calls
@@ -172,6 +185,8 @@ class AgentCompactionTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(calls, 1)
+        self.assertGreaterEqual(clock.renew_count, 6)
+        self.assertEqual(clock.sleepers, [])
         self.assertEqual(len(model.requests), 1)
         self.assertEqual(model.requests[0].binding, self.binding)
         self.assertEqual(outcome.run.compacted_through_sequence, 3)

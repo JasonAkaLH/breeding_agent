@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -124,13 +125,17 @@ async def get_num_of_tokens_from_messages_async(
     if not settings.available:
         if provider_required:
             raise TokenizationError("provider tokenization is unavailable")
-        return _fallback_num_tokens_from_messages(texts, encoding_name=encoding_name)
+        return await asyncio.to_thread(
+            _fallback_num_tokens_from_messages, texts, encoding_name=encoding_name
+        )
     try:
         return sum(await _remote_token_counts_async(texts, settings))
     except Exception as exc:
         if provider_required or not settings.fallback_to_tiktoken:
             raise TokenizationError("provider tokenization failed") from exc
-    return _fallback_num_tokens_from_messages(texts, encoding_name=encoding_name)
+    return await asyncio.to_thread(
+        _fallback_num_tokens_from_messages, texts, encoding_name=encoding_name
+    )
 
 
 def tokenize_text_with_offsets(

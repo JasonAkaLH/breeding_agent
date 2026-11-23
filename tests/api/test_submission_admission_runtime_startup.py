@@ -37,6 +37,7 @@ from src.orchestration.agent_loop.models import (
 )
 from src.orchestration.models import UserMCPServerProfile
 from tests.api.support import APITestCase
+from tests.agent_lease_test_support import AgentLeaseTestClock
 
 
 class _StopStartup(RuntimeError):
@@ -44,6 +45,45 @@ class _StopStartup(RuntimeError):
 
 
 class AgentRunLeaseLossRecoveryIntegrationTest(APITestCase):
+    async def test_restart_renews_during_slow_context_and_completes_historical_task(
+        self,
+    ):
+        self.runtime._schedule_execution = AsyncMock()
+        response = await self.submit_message(content="hello", capability_id=None)
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        await self.reconfigure_runtime()
+        repository = self.runtime.agent_run_repository
+        clock = AgentLeaseTestClock(
+            repository,
+            datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=31),
+        )
+        self.runtime._utcnow_naive = lambda: clock.now
+        runner = self.runtime.agent_loop_orchestrator._runner
+        runner._leases._sleep = clock.sleep
+        self.runtime._agent_run_recovery._leases._sleep = clock.sleep
+        original_build = runner._context_candidate_builder.build
+
+        async def slow_build(**kwargs):
+            await clock.advance(65)
+            return await original_build(**kwargs)
+
+        runner._context_candidate_builder.build = slow_build
+        await asyncio.wait_for(self.runtime.start(), timeout=10)
+        self.assertEqual(
+            (await repository.get_run(run.run_id)).status, AgentRunStatus.COMPLETED
+        )
+        self.assertEqual(
+            (await self.runtime.storage.get_task(task_id)).status, TaskStatus.COMPLETED
+        )
+        conversation = await self.runtime.storage.get_conversation(run.conversation_id)
+        self.assertIsNone(conversation.current_task_id)
+        self.assertGreaterEqual(clock.renew_count, 6)
+        self.assertEqual(clock.max_sleepers, 1)
+        self.assertEqual(clock.sleepers, [])
+        self.assertEqual((await self.client.get("/api-doc")).status_code, 200)
+
     async def test_restart_recovers_historical_run_then_survives_real_lease_takeover(self):
         self.runtime._schedule_execution = AsyncMock()
         response = await self.submit_message(content="hello", capability_id=None)
@@ -78,6 +118,7 @@ class AgentRunLeaseLossRecoveryIntegrationTest(APITestCase):
             )
 
         self.runtime.agent_loop_orchestrator._runner._leases._sleep = takeover_before_renew
+        self.runtime._agent_run_recovery._leases._sleep = takeover_before_renew
         self.runtime._agent_run_recovery_fatal_exit = Mock()
         await asyncio.wait_for(self.runtime.start(), timeout=10)
         self.assertTrue(cancelled.is_set())
