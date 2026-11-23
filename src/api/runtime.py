@@ -10900,6 +10900,8 @@ class ApiRuntime(
         for run in await self.agent_run_repository.list_recoverable_runs():
             try:
                 await self._recover_agent_run(run)
+            except ExecutionOwnershipLost:
+                self._schedule_agent_run_lease_retry(run.run_id)
             except AgentStorageConflict as exc:
                 if str(exc) != "agent_task_lease_held":
                     raise
@@ -11640,6 +11642,9 @@ class ApiRuntime(
             try:
                 await self._recover_agent_run(run)
                 return
+            except ExecutionOwnershipLost:
+                # Re-read the durable owner before attempting recovery again.
+                continue
             except AgentStorageConflict as exc:
                 if str(exc) == "agent_task_lease_held":
                     continue
