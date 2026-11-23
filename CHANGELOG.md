@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-23：修复历史 AgentRun 恢复期间失租导致整个后端启动失败，以及后台恢复失租触发进程退出的问题；启动与后台统一将 ExecutionOwnershipLost 交回既有去重租约观察器，重读持久化 owner/到期状态后再恢复，不关闭任务、覆盖接手者或绕过写入栅栏，非租约错误继续阻断。补充真实 SQLite 历史任务重启、模型采样中租约过期并接管、旧操作取消、启动后 API 可用及后台等待回归；相关137项和隔离 PostgreSQL 6项通过，Ruff/diff检查通过。无数据库 schema、公开 API 或前端变更。License Requirement：无新增依赖或许可变化。
+
 - 2026-11-20：按 V3 计划修复 MCP dispatch 续租范围：取得 claim 后持续覆盖发现、Selector、参数准备、Tool 和结果提交，保留 30/5/10 秒规则；claim 更新串行刷新 revision，失败/unknown 收尾原子绑定原 intent/outbox/owner/token/revision，旧执行者不能关闭接手后的任务。操作预算覆盖短锁、连接池与 SQL，PostgreSQL 事务内限制锁/语句时间，超时线程不得迟到提交；取消后不假定 Tool 回滚、不重放业务调用。Agent 异常携带实际续租 handle，Runtime 仅投影已提交的 owned failure，保留准备失败及启动权威收敛。补充模拟时间与隔离 PostgreSQL 并发回归，去重后的相关279项（含真实 PostgreSQL 10项）、Ruff和diff检查通过；全局接口快照另有3项既有失败，原因是快照缺少HEAD中已存在的5个方法，未扩展本次范围修复。无 schema、公开 API、前端、MCP Server 或依赖变更，未部署或修改远端旧数据。License Requirement：无新增依赖或许可变化。
 
 - 修复 MCP 多节点任务在重启时被误判为 `mcp_resolved_authority_incomplete`：resolved intent 的调用和结果回执校验限定到当前 node，不再将同 Task 其他节点的工具调用计入 no-call 节点，也不允许其他节点回执满足当前节点的终态要求。回归覆盖兄弟节点已调用、本节点未调用、兄弟节点缺失回执及回执错配；相关 41 项测试通过，修复后的真实启动校验函数只读检查开发 PostgreSQL 的 64 条 resolved intent 全部通过，未修改历史任务或调用数据。License Requirement：复用现有依赖，无新增依赖或许可变化。

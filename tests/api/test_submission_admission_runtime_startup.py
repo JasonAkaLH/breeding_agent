@@ -12,6 +12,7 @@ from src.api.runtime import ApiRuntime
 from src.api.submission_admission import PreparedAgentRecoveryContext
 from src.api.upload_errors import UploadValidationError
 from src.core.enums import MessageRole, NodeStatus, TaskStatus
+from src.core.errors import ExecutionOwnershipLost
 from src.core.models import (
     Conversation,
     ConversationFileResource,
@@ -22,20 +23,76 @@ from src.core.models import (
     TaskInputAttachment,
     TaskNode,
 )
+from src.orchestration.agent_loop.lease import AgentLeaseController, AgentLeaseHandle
 from src.orchestration.agent_loop.models import (
     AgentItem,
     AgentItemKind,
     AgentItemState,
+    AgentLeaseLost,
     AgentModelBinding,
     AgentRun,
     AgentRunStatus,
     AgentStorageConflict,
+    AgentTaskLease,
 )
 from src.orchestration.models import UserMCPServerProfile
+from tests.api.support import APITestCase
 
 
 class _StopStartup(RuntimeError):
     pass
+
+
+class AgentRunLeaseLossRecoveryIntegrationTest(APITestCase):
+    async def test_restart_recovers_historical_run_then_survives_real_lease_takeover(self):
+        self.runtime._schedule_execution = AsyncMock()
+        response = await self.submit_message(content="hello", capability_id=None)
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        run = await self.runtime.agent_run_repository.get_run_for_task(task_id)
+        self.assertIsNotNone(run)
+        sampled = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocked_model(_prompt, **_kwargs):
+            sampled.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        await self.reconfigure_runtime(main_agent_stream_generator=blocked_model)
+        repository = self.runtime.agent_run_repository
+        clock = max(datetime.now(timezone.utc).replace(tzinfo=None),
+                    run.lease_expires_at or datetime.min) + timedelta(seconds=31)
+        repository._now = lambda: clock
+        self.runtime._utcnow_naive = lambda: clock
+        takeover = None
+
+        async def takeover_before_renew(_delay):
+            nonlocal clock, takeover
+            await sampled.wait()
+            clock += timedelta(seconds=31)
+            takeover = await repository.acquire_task_lease(
+                run.run_id, owner_id="successor", ttl_seconds=30,
+            )
+
+        self.runtime.agent_loop_orchestrator._runner._leases._sleep = takeover_before_renew
+        self.runtime._agent_run_recovery_fatal_exit = Mock()
+        await asyncio.wait_for(self.runtime.start(), timeout=10)
+        self.assertTrue(cancelled.is_set())
+        self.assertIsNotNone(takeover)
+        recovered = await repository.get_run(run.run_id)
+        self.assertEqual(recovered.status, AgentRunStatus.RUNNING)
+        self.assertEqual(recovered.claim_owner, "successor")
+        self.assertEqual(recovered.claim_token, takeover.token)
+        self.assertEqual((await self.runtime.storage.get_task(task_id)).status,
+                         TaskStatus.RUNNING)
+        conversation = await self.runtime.storage.get_conversation(run.conversation_id)
+        self.assertEqual(conversation.current_task_id, task_id)
+        self.assertIn(run.run_id, self.runtime._agent_run_lease_retry_tasks)
+        self.runtime._agent_run_recovery_fatal_exit.assert_not_called()
+        self.assertEqual((await self.client.get("/api-doc")).status_code, 200)
 
 
 class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
@@ -411,6 +468,81 @@ class SubmissionAdmissionRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentRunLeaseRetryStartupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_start_survives_recovery_heartbeat_loss_and_recovers_next_run(self) -> None:
+        events: list[str] = []
+        runtime = SubmissionAdmissionRuntimeStartupTest._startup_runtime(events, None)
+        lost = SimpleNamespace(run_id="agent-run:lost")
+        next_run = SimpleNamespace(run_id="agent-run:next")
+        runtime.agent_run_repository = SimpleNamespace(
+            list_recoverable_runs=AsyncMock(return_value=(lost, next_run))
+        )
+        runtime._agent_run_lease_retry_tasks = {}
+        runtime._agent_run_lease_retry_errors = {}
+        runtime._agent_run_recovery_fatal_exit = Mock()
+        runtime._mark_task_failed = AsyncMock()
+        runtime._clear_conversation_current_task = AsyncMock()
+        runtime._release_task_skill_revision_if_terminal = AsyncMock()
+        runtime._release_task_mcp_revision_if_terminal = AsyncMock()
+        for name in (
+            "_mcp_cp7_safety_facade", "user_mcp_audit_service",
+            "user_mcp_presence_service", "mcp_remote_task_recovery_worker",
+            "user_mcp_health_runner", "user_mcp_gateway", "user_mcp_config_service",
+            "postgres_mcp_invalidation_bus", "postgres_auth_invalidation_bus",
+            "_mcp_rollout_metric_recorder", "_mcp_post_ready_recovery_task",
+            "_mcp_result_artifact_projector", "_mcp_pending_action_payload_store",
+            "user_mcp_result_janitor",
+        ):
+            setattr(runtime, name, None)
+
+        store = SimpleNamespace(renew_task_lease=AsyncMock(
+            side_effect=AgentStorageConflict("agent_task_lease_lost")
+        ))
+        async def heartbeat_sleep(_delay: float) -> None:
+            await asyncio.sleep(0)
+
+        controller = AgentLeaseController(store, ttl_seconds=30, sleep=heartbeat_sleep)
+        handle = AgentLeaseHandle(AgentTaskLease(
+            lost.run_id, "task-lost", "old-owner", "old-token", 1,
+            datetime.now(timezone.utc) + timedelta(seconds=30),
+        ))
+        cancelled = asyncio.Event()
+        attempts: list[str] = []
+
+        async def operation(_handle) -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        async def recover(run) -> None:
+            attempts.append(run.run_id)
+            if run is lost:
+                await controller.run_active_phase("model_sample", handle, operation)
+
+        runtime._recover_agent_run = recover
+        runtime._recover_agent_runs = ApiRuntime._recover_agent_runs.__get__(runtime)
+        runtime._observe_agent_run_lease = AsyncMock(side_effect=lambda _run_id: None)
+        try:
+            await runtime.start()
+            retries = tuple(runtime._agent_run_lease_retry_tasks.values())
+            await asyncio.gather(*retries)
+            await runtime._mcp_post_ready_recovery_task
+            self.assertEqual(attempts, [lost.run_id, next_run.run_id])
+            self.assertTrue(cancelled.is_set())
+            runtime._observe_agent_run_lease.assert_awaited_once_with(lost.run_id)
+            store.renew_task_lease.assert_awaited_once()
+            runtime._mark_task_failed.assert_not_awaited()
+            runtime._clear_conversation_current_task.assert_not_awaited()
+            runtime._release_task_skill_revision_if_terminal.assert_not_awaited()
+            runtime._release_task_mcp_revision_if_terminal.assert_not_awaited()
+            runtime._agent_run_recovery_fatal_exit.assert_not_called()
+        finally:
+            await runtime._cancel_agent_run_lease_retries()
+            post_ready = runtime._mcp_post_ready_recovery_task
+            if post_ready is not None:
+                post_ready.cancel()
+                await asyncio.gather(post_ready, return_exceptions=True)
+
     @staticmethod
     def _run(*, status: AgentRunStatus, lease_expires_at: datetime | None) -> AgentRun:
         return AgentRun(
@@ -1339,6 +1471,56 @@ class PreparedAgentRunAndLeaseRetryRuntimeTest(unittest.IsolatedAsyncioTestCase)
 class AgentRunLeaseRetryFailureBoundaryTest(unittest.IsolatedAsyncioTestCase):
     _run = staticmethod(AgentRunLeaseRetryStartupTest._run)
     _runtime = AgentRunLeaseRetryStartupTest._runtime
+
+    async def test_background_ownership_loss_observes_new_owner_without_fatal_exit(self) -> None:
+        for error_type in (AgentLeaseLost, ExecutionOwnershipLost):
+            with self.subTest(error_type=error_type.__name__):
+                clock = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+                initial = self._run(status=AgentRunStatus.RUNNING, lease_expires_at=clock)
+                attempts = 0
+
+                async def recover(_run_id: str, **_kwargs) -> None:
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts == 1:
+                        raise AgentStorageConflict("agent_task_lease_held")
+                    state.current = replace(
+                        state.current, claim_owner="new-owner", claim_token="new-token",
+                        lease_expires_at=clock + timedelta(seconds=30),
+                    )
+                    raise error_type("agent_task_lease_lost")
+
+                runtime, state = self._runtime(initial_run=initial, recover=recover)
+                runtime._utcnow_naive = lambda: clock.replace(tzinfo=None)
+                runtime._mark_task_failed = AsyncMock()
+                runtime._release_task_skill_revision_if_terminal = AsyncMock()
+                runtime._release_task_mcp_revision_if_terminal = AsyncMock()
+                delays: list[float] = []
+
+                async def sleep(delay: float) -> None:
+                    delays.append(delay)
+                    state.current = replace(
+                        state.current, status=AgentRunStatus.WAITING_FOR_INPUT,
+                    )
+
+                runtime._agent_run_lease_retry_sleep = sleep
+                await runtime._recover_agent_runs()
+                retry = runtime._agent_run_lease_retry_tasks[initial.run_id]
+                try:
+                    await retry
+                    await asyncio.sleep(0)
+                    self.assertEqual(attempts, 2)
+                    self.assertEqual(delays, [30.0])
+                    self.assertEqual(state.current.claim_owner, "new-owner")
+                    self.assertEqual(state.current.claim_token, "new-token")
+                    runtime._mark_task_failed.assert_not_awaited()
+                    runtime._clear_conversation_current_task.assert_not_awaited()
+                    runtime._release_task_skill_revision_if_terminal.assert_not_awaited()
+                    runtime._release_task_mcp_revision_if_terminal.assert_not_awaited()
+                    runtime._agent_run_recovery_fatal_exit.assert_not_called()
+                    self.assertEqual(runtime._agent_run_lease_retry_errors, {})
+                finally:
+                    await runtime._cancel_agent_run_lease_retries()
 
     async def test_background_non_lease_failure_does_not_mutate_takeover_owner(self) -> None:
         clock = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
