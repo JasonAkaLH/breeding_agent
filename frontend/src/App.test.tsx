@@ -1699,7 +1699,7 @@ describe('App', () => {
       mode: 'chat',
       routingMode: 'auto',
       capabilityId: null,
-      deepThinking: false,
+      deepThinking: true,
       reasoningEffort: 'high',
     })));
     expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-1-flash-261017' }));
@@ -2621,19 +2621,19 @@ describe('App', () => {
     expect(await screen.findByText(/retained.csv/)).toBeInTheDocument();
   });
 
-  it('submits deep thinking flag from the composer function menu', async () => {
+  it('submits an explicitly disabled deep thinking flag from the composer function menu', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
     fireEvent.click(await screen.findByLabelText('深度思考'));
-    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '请深入分析' } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '普通回答' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'chat',
-      deepThinking: true,
+      deepThinking: false,
       reasoningEffort: 'high',
     })));
   });
@@ -2663,7 +2663,7 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       conversationId: nextConversationId,
       modelEdition: 'deepseek-v4-1-flash-261017',
-      deepThinking: false,
+      deepThinking: true,
       reasoningEffort: 'high',
     })));
   });
@@ -2675,6 +2675,7 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
     const effortSelect = screen.getAllByLabelText('思考强度')[0];
     expect(effortSelect).not.toHaveClass('ant-select-disabled');
     fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
@@ -2695,7 +2696,6 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     const thinkingSwitch = await screen.findByLabelText('深度思考');
-    fireEvent.click(thinkingSwitch);
     fireEvent.click(thinkingSwitch);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '关闭思考但保留高强度' } });
@@ -2719,7 +2719,6 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
-    fireEvent.click(await screen.findByLabelText('深度思考'));
     const effortSelect = screen.getAllByLabelText('思考强度')[0].closest('.ant-select') as HTMLElement;
     fireEvent.mouseDown(effortSelect.querySelector('.ant-select-selector') as HTMLElement);
 
@@ -2741,10 +2740,9 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     const thinkingSwitch = await screen.findByLabelText('深度思考');
-    fireEvent.click(thinkingSwitch);
     const effortSelect = screen.getAllByLabelText('思考强度')[0];
     fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
-    fireEvent.click(await screen.findByText('高'));
+    fireEvent.click(await screen.findByText('中'));
     fireEvent.click(thinkingSwitch);
 
     expect(effortSelect).not.toHaveClass('ant-select-disabled');
@@ -2770,6 +2768,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
     const effortSelect = screen.getAllByLabelText('思考强度')[0];
     fireEvent.mouseDown((effortSelect.closest('.ant-select') as HTMLElement).querySelector('.ant-select-selector') as HTMLElement);
     fireEvent.click(await screen.findByText('最高'));
@@ -2846,7 +2845,7 @@ describe('App', () => {
     ])} />);
 
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
-    fireEvent.click(await screen.findByLabelText('深度思考'));
+    expect(await screen.findByRole('switch', { name: '深度思考' })).toBeChecked();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '请深度思考' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -5421,7 +5420,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     fireEvent.click(await screen.findByRole('switch', { name: '深度思考' }));
-    const selection = { model_edition: 'deepseek-v4-1-flash-261017', reasoning_effort: 'high', deep_thinking: true };
+    const selection = { model_edition: 'deepseek-v4-1-flash-261017', reasoning_effort: 'high', deep_thinking: false };
     expect(api.putConversationModelSettings).toHaveBeenCalledWith('prefs-a', selection, 0);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等保存再发送' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -5535,10 +5534,10 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     fireEvent.click(await screen.findByRole('switch', { name: '深度思考' }));
-    expect(api.putConversationModelSettings).toHaveBeenCalledWith('prefs-a', expect.objectContaining({ deep_thinking: true }), 0);
+    expect(api.putConversationModelSettings).toHaveBeenCalledWith('prefs-a', expect.objectContaining({ deep_thinking: false }), 0);
     fireEvent.click(screen.getByRole('button', { name: '配置会话 b' }));
     await waitFor(() => expect(screen.getAllByLabelText('模型版本')[0].closest('.ant-select')).toHaveTextContent('DeepSeek V4 Pro'));
-    ack.resolve({ conversation_id: 'prefs-a', settings: { model_edition: 'deepseek-v4-1-flash-261017', reasoning_effort: 'high', deep_thinking: true, revision: 1, updated_at: '2026-11-23' } });
+    ack.resolve({ conversation_id: 'prefs-a', settings: { model_edition: 'deepseek-v4-1-flash-261017', reasoning_effort: 'high', deep_thinking: false, revision: 1, updated_at: '2026-11-23' } });
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '使用会话 b 的模型配置' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'prefs-b', modelEdition: 'deepseek-v4-pro-260425', reasoningEffort: 'low', deepThinking: true })));
@@ -5564,6 +5563,31 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled());
     expect(screen.getAllByLabelText('模型版本')[0].closest('.ant-select')).toHaveTextContent('DeepSeek V4 Pro');
     expect(api.putConversationModelSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables deep thinking by default in an uncreated conversation without saving early', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect(await screen.findByRole('switch', { name: '深度思考' })).toBeChecked();
+    expect(api.getConversationModelSettings).not.toHaveBeenCalled();
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([null, false])('uses enabled default only when saved settings are absent: %s', async (savedThinking) => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'prefs-existing');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({ conversations: [{ conversation_id: 'prefs-existing', username: 'alice', status: 'active', current_task_id: null, title: '已有配置会话', created_at: null, updated_at: null }] })),
+      getConversationModelSettings: vi.fn(async (id) => ({ conversation_id: id, settings: savedThinking === null ? null : { model_edition: 'deepseek-v4-pro-260425', reasoning_effort: 'high', deep_thinking: savedThinking, revision: 3, updated_at: '2026-11-23' } })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    const thinking = await screen.findByRole('switch', { name: '深度思考' });
+    expect(thinking).toHaveAttribute('aria-checked', String(savedThinking ?? true));
+    expect(api.putConversationModelSettings).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '保留已有会话配置' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ deepThinking: savedThinking ?? true })));
   });
 
 });

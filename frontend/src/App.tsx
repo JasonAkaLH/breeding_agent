@@ -285,7 +285,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [modelEditionOptions, setModelEditionOptions] = useState<ModelEditionOption[]>([]);
   const [defaultModelEdition, setDefaultModelEdition] = useState<ModelEdition | null>(null);
   const [modelEdition, setModelEdition] = useState<ModelEdition | null>(null);
-  const [deepThinking, setDeepThinking] = useState(false);
+  const [deepThinking, setDeepThinking] = useState(true);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
   const selectedModelEdition = useMemo(
     () => modelEditionOptions.find((option) => option.value === modelEdition) ?? null,
@@ -752,7 +752,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   function defaultModelSelection(): ConversationModelSelection {
     const option = modelEditionOptions.find((item) => item.value === defaultModelEdition) ?? modelEditionOptions[0] ?? null;
-    const thinking = forceDeepThinking(option);
+    const thinking = true;
     return {
       model_edition: option?.value ?? '',
       deep_thinking: thinking,
@@ -1159,7 +1159,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setSelectedMCPServerCommand(null);
     setMCPServerMenuOpen(false);
     setModelEdition(defaultModelEdition);
-    setDeepThinking(false);
+    setDeepThinking(true);
     setReasoningEffort('high');
     setModelSettingsState(null);
     setModelSettingsInvalid(false);
