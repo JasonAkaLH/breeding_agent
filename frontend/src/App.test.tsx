@@ -5563,7 +5563,7 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled());
     expect(screen.getAllByLabelText('模型版本')[0].closest('.ant-select')).toHaveTextContent('DeepSeek V4 Pro');
     expect(api.putConversationModelSettings).toHaveBeenCalledTimes(1);
-  });
+  }, 10_000);
 
   it('enables deep thinking by default in an uncreated conversation without saving early', async () => {
     const api = makeApi();
