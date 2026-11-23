@@ -70,6 +70,7 @@ from src.core.models import (
     MCPShadowAuditSample,
     MCPRolloutInstanceConfigLease,
     MCPNoServerConvergenceResult,
+    MCPTerminalResultReceipt,
     MCPValidatedTerminalResultCandidate,
     MCPTerminalState,
     MessageIdentityDisposition,
@@ -12288,10 +12289,10 @@ class ApiRuntime(
                     )
                     if call.node_id == intent.node_id
                 ]
-                receipts = [
-                    await self.storage.get_mcp_terminal_result_receipt_for_call(call.call_ref)
+                receipts = {
+                    call.call_ref: await self.storage.get_mcp_terminal_result_receipt_for_call(call.call_ref)
                     for call in calls if call.may_have_dispatched
-                ]
+                }
                 no_call = bool(
                     outbox is not None
                     and (
@@ -12347,9 +12348,16 @@ class ApiRuntime(
                         raise RuntimeError("mcp_resolved_no_call_authority_incomplete")
                 elif (
                     node is None
-                    or node.status not in {NodeStatus.COMPLETED, NodeStatus.FAILED}
                     or outbox is None
                     or str(outbox.status) != "completed"
+                    or (
+                        node.status not in {NodeStatus.COMPLETED, NodeStatus.FAILED}
+                        and not (
+                            node.status == NodeStatus.CANCELLED
+                            and task.status == TaskStatus.CANCELLED
+                            and outbox.completion_mode == "cancelled_after_call"
+                        )
+                    )
                     or outbox.completion_mode
                     not in {
                         "completed",
@@ -12358,12 +12366,18 @@ class ApiRuntime(
                         "cancelled_after_call",
                     }
                     or outbox.result_receipt_id is None
-                    or not receipts
-                    or any(receipt is None for receipt in receipts)
                     or outbox.result_receipt_id not in {
-                        receipt.result_receipt_id for receipt in receipts if receipt is not None
+                        receipt.result_receipt_id for receipt in receipts.values() if receipt is not None
                     }
+                    or not await self._has_resolved_mcp_call_evidence(intent.intent_id, calls, receipts)
                 ):
+                    logger.error(
+                        "mcp_resolved_authority_incomplete task_id=%s node_id=%s node_status=%s "
+                        "outbox_status=%s completion_mode=%s dispatched_count=%d missing_receipt_count=%d",
+                        intent.task_id, intent.node_id, getattr(node, "status", None),
+                        getattr(outbox, "status", None), getattr(outbox, "completion_mode", None),
+                        len(receipts), sum(receipt is None for receipt in receipts.values()),
+                    )
                     raise RuntimeError("mcp_resolved_authority_incomplete")
             else:
                 receipt = await self.storage.get_mcp_no_server_convergence_receipt(
@@ -12385,6 +12399,43 @@ class ApiRuntime(
                     ))
                 ):
                     raise RuntimeError("mcp_converged_authority_incomplete")
+
+    async def _has_resolved_mcp_call_evidence(
+        self,
+        intent_id: str,
+        calls: list[MCPCallRecord],
+        receipts: Mapping[str, MCPTerminalResultReceipt | None],
+    ) -> bool:
+        for original in calls:
+            if not original.may_have_dispatched or receipts[original.call_ref] is not None:
+                continue
+            if original.status != "input_required" or original.pending_action_id is None:
+                return False
+            # An MRTR input request has no terminal receipt of its own. The
+            # admitted continuation must carry a receipt for the same action.
+            continuation = next(
+                (call for call in calls if call.continuation_of_call_ref == original.call_ref),
+                None,
+            )
+            if continuation is None or continuation.call_sequence <= original.call_sequence:
+                return False
+            receipt = receipts.get(continuation.call_ref)
+            if (
+                receipt is None
+                or receipt.intent_id != intent_id
+                or receipt.completion_mode != "normal_terminal_projection"
+            ):
+                return False
+            action = await self.storage.get_mcp_pending_tool_action(original.pending_action_id)
+            if action is None or pending_action_payload_deletion_evidence(
+                action=action,
+                call=continuation,
+                original_call=original,
+                receipt=receipt,
+                projection=None,
+            ) is None:
+                return False
+        return True
 
     async def complete_cp7_safety_minute(
         self, started_at: datetime, ended_at: datetime

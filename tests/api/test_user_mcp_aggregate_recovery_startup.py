@@ -15,6 +15,7 @@ from src.api.runtime import ApiRuntime, build_api_runtime as _build_api_runtime
 from src.core.enums import NodeStatus, TaskStatus
 from src.core.models import MCPTerminalState
 from tests.api.support import InMemoryTaskRuntimeSidecar
+from tests.storage import test_mcp_dispatch_aggregate_repository as aggregate
 
 build_api_runtime = partial(
     _build_api_runtime,
@@ -631,6 +632,38 @@ class UserMCPAggregateRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "mcp_resolved_authority_incomplete"):
             await runtime._validate_terminal_cp7_mcp_authority([intent])
+
+    async def test_cancel_after_persisted_call_result_is_valid_restart_authority(self) -> None:
+        fixture = aggregate.MCPDispatchAggregateRepositoryTest()
+        await fixture.asyncSetUp()
+        for callback, args, kwargs in fixture._cleanups:
+            self.addCleanup(callback, *args, **kwargs)
+        fixture._cleanups.clear()
+        active = await fixture._admit()
+        candidate, result = fixture._terminal_snapshots()
+        committed_at = aggregate.NOW + timedelta(seconds=1)
+        committed = await fixture.storage.commit_mcp_call_terminal(
+            "call-1", candidate.candidate.candidate_id, fixture.outbox_id,
+            active.revision, "worker", "token", candidate, result, committed_at,
+        )
+        self.assertEqual(str(committed), "committed_normal")
+
+        cancelled = await fixture.storage.cancel_mcp_dispatch(
+            fixture.intent_id, fixture.outbox_id, fixture.node.node_id,
+            committed_at + timedelta(seconds=1),
+        )
+        self.assertEqual(str(cancelled), "finalized")
+        self.assertEqual(
+            (await fixture.storage.get_task_node(fixture.node.node_id)).status,
+            NodeStatus.CANCELLED,
+        )
+        runtime = self._runtime(fixture.storage)
+        await runtime._validate_mcp_aggregate_invariants()
+        receipt = await fixture.storage.get_mcp_terminal_result_receipt_for_call("call-1")
+        self.assertIsNotNone(receipt)
+        with patch.object(fixture.storage, "get_mcp_terminal_result_receipt_for_call", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "mcp_resolved_authority_incomplete"):
+                await runtime._validate_mcp_aggregate_invariants()
 
     async def test_completed_no_call_is_valid_resolved_restart_authority(
         self,
