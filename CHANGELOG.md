@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- 2026-11-23：将续租修复 `main@dc74723` 推送至 GitHub/Gitee，并从该提交的独立源码归档构建、发布开发后端 `backend-dev:0.1.42`（linux/amd64）；OCI index digest 为 `sha256:8739b83f0afe25a41b7dbc655baf639b342b1d75a1380018c3e1e903dd76f2dd`，保留 provenance attestation 及 version/revision 标签。镜像内294个交付文件与源码哈希一致，未包含本地配置或部署文件，25项续租/失败边界回归通过；使用非敏感配置、全新SQLite和既有Sidecar 0.1.28进行无外网隔离启动，后端与Sidecar均healthy、重启次数0，`/api-doc`返回200。远端摘要回拉与交付文件复验通过。开发部署文件7处后端引用从0.1.41更新至0.1.42，保留外部只读YAML挂载；三份受保护文件完成仓库外0600备份，权限/ignored/untracked、Shell语法及生产文件未变检查通过，部署文件继续不进入Git和Docker上下文。未重建前端/Sidecar镜像，未部署服务器或修改业务数据库。License Requirement：未新增仓库依赖。
+
 - 2026-11-20：按 V3 计划修复 MCP dispatch 续租范围：取得 claim 后持续覆盖发现、Selector、参数准备、Tool 和结果提交，保留 30/5/10 秒规则；claim 更新串行刷新 revision，失败/unknown 收尾原子绑定原 intent/outbox/owner/token/revision，旧执行者不能关闭接手后的任务。操作预算覆盖短锁、连接池与 SQL，PostgreSQL 事务内限制锁/语句时间，超时线程不得迟到提交；取消后不假定 Tool 回滚、不重放业务调用。Agent 异常携带实际续租 handle，Runtime 仅投影已提交的 owned failure，保留准备失败及启动权威收敛。补充模拟时间与隔离 PostgreSQL 并发回归，去重后的相关279项（含真实 PostgreSQL 10项）、Ruff和diff检查通过；全局接口快照另有3项既有失败，原因是快照缺少HEAD中已存在的5个方法，未扩展本次范围修复。无 schema、公开 API、前端、MCP Server 或依赖变更，未部署或修改远端旧数据。License Requirement：无新增依赖或许可变化。
 
 - 2026-11-03：按指定路径将开发部署命令中的 `LOGIN_EMBED_ORIGINS_FILE` 固定为宿主机 `/data/peihai/login_embed_origins_dev.yaml`，继续只读挂载至后端 `/app/login_embed_origins.yaml`；首次初始化和已有文件不覆盖逻辑保持。受保护部署文件已作仓库外0600备份，确认仅修改开发文件一处赋值、Shell语法通过，生产文件未变且三份文件仍为0600/ignored/untracked。仅更新本地部署命令，未操作服务器或发布新镜像。License Requirement：无新增依赖或许可变化。
