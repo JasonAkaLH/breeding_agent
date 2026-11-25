@@ -71,6 +71,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "complete_abandoned_mcp_remote_task_continuation": "(self, outbox_id: 'str', *, expected_revision: 'int', completed_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
   "complete_mcp_remote_task_control": "(self, outbox_id: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', outcome: 'str', completed_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
   "complete_mcp_remote_task_outbox": "(self, outbox_id: 'str', *, claim_owner: 'str', claim_token: 'str', expected_revision: 'int', completed_at: 'datetime') -> 'MCPRemoteTaskOutbox | None'",
+  "complete_submission_failure_projection": "(self, projection: 'SubmissionFailureProjection') -> 'None'",
   "complete_user_mcp_health_attempt": "(self, attempt_id: 'str', owner_user_id: 'str', server_id: 'str', *, runner_instance_id: 'str', config_version: 'int', security_version: 'int', health_status: 'str', error_code: 'str | None', completed_at: 'datetime') -> 'UserMCPServer | None'",
   "consume_mcp_dispatch_selector_step": "(self, outbox_id: 'str', claim_owner: 'str', claim_token: 'str', expected_revision: 'int', occurred_at: 'datetime') -> 'MCPDispatchResumeOutbox | None'",
   "converge_dispatched_mcp_calls_to_unknown": "(self, *, now: 'datetime', limit: 'int' = 1000) -> 'list[MCPCallRecord]'",
@@ -99,6 +100,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "expire_mcp_connection_leases": "(self, *, now: 'datetime', limit: 'int' = 1000) -> 'int'",
   "expire_user_mcp_health_attempts": "(self, *, now: 'datetime', error_code: 'str' = 'test_interrupted') -> 'int'",
   "expire_user_mcp_scope_leases": "(self, *, now: 'datetime') -> 'int'",
+  "fail_submission": "(self, request: 'SubmissionFailureRequest') -> 'SubmissionFailureResult'",
   "finalize_mcp_dispatch": "(self, intent_id: 'str', outbox_id: 'str', node_id: 'str', outcome: 'str', safe_error_code: 'str | None', expected_outbox_revision: 'int', claim_owner: 'str | None', claim_token: 'str | None', occurred_at: 'datetime') -> 'MCPDispatchFinalizeResult'",
   "finalize_mcp_dispatch_intent": "(self, intent_id: 'str', node_id: 'str', result_receipt_id: 'str', occurred_at: 'datetime') -> 'MCPDispatchFinalizeResult'",
   "finalize_mcp_dispatch_no_call": "(self, intent_id: 'str', outbox_id: 'str', node_id: 'str', outcome: 'str', safe_error_code: 'str | None', occurred_at: 'datetime') -> 'MCPDispatchFinalizeResult'",
@@ -200,8 +202,10 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "list_mcp_rollout_metric_buckets": "(self, environment_id: 'str', deployment_id: 'str', stage: 'str', *, window_started_at: 'datetime', window_ended_at: 'datetime') -> 'list[MCPRolloutMetricBucket]'",
   "list_mcp_shadow_audit_samples": "(self, environment_id: 'str', deployment_id: 'str', stage: 'str', *, window_started_at: 'datetime', window_ended_at: 'datetime') -> 'list[MCPShadowAuditSample]'",
   "list_messages_for_conversation": "(self, conversation_id: 'str') -> 'list[Message]'",
+  "list_pending_submission_failure_projections": "(self, *, after_message_id: 'str | None' = None, limit: 'int' = 128) -> 'list[SubmissionFailureProjection]'",
   "list_pending_user_mcp_server_deletions": "(self) -> 'list[UserMCPServer]'",
   "list_projectable_mcp_durable_result_lifecycles": "(self, *, after_updated_at: 'datetime | None' = None, after_result_ref: 'str | None' = None, limit: 'int' = 1000) -> 'list[MCPDurableResultLifecycle]'",
+  "list_skill_recovery_candidate_task_ids": "(self, *, after_task_id: 'str | None' = None, limit: 'int' = 128) -> 'tuple[str, ...]'",
   "list_slot_collections_for_task": "(self, task_id: 'str') -> 'list[SlotCollection]'",
   "list_slot_events": "(self, collection_id: 'str') -> 'list[SlotEvent]'",
   "list_task_input_attachments_for_conversation": "(self, conversation_id: 'str', *, limit: 'int | None' = None) -> 'list[TaskInputAttachment]'",
@@ -283,6 +287,7 @@ EXPECTED_STORAGE_METHOD_SIGNATURES = {
   "save_user_mcp_tool_grant": "(self, grant: 'UserMCPToolGrant') -> 'UserMCPToolGrant'",
   "settle_submission_route_decision_exact": "(self, *, username: 'str', conversation_id: 'str', task_id: 'str', requires_user_scoped_server: 'bool', written_at: 'datetime') -> 'SubmissionPreparationReceipt'",
   "set_mcp_rollout_metric_bucket": "(self, bucket: 'MCPRolloutMetricBucket') -> 'MCPRolloutMetricBucket'",
+  "submission_failure_is_closed": "(self, projection: 'SubmissionFailureProjection') -> 'bool'",
   "summarize_mcp_durable_result_backfill": "(self, now: 'datetime') -> 'Mapping[str, int]'",
   "suspend_mcp_for_approval": "(self, intent_id: 'str', outbox_id: 'str', expected_intent_revision: 'int', expected_outbox_revision: 'int', claim_owner: 'str', claim_token: 'str', action: 'MCPPendingToolAction', interrupt: 'Interrupt', payload_snapshot: 'MCPPendingActionPayloadSnapshot', occurred_at: 'datetime') -> 'MCPApprovalSuspendResult'",
   "suspend_mcp_for_input": "(self, intent_id: 'str', outbox_id: 'str', call_id: 'str', sealed_state_ref: 'str', expected_intent_revision: 'int', expected_outbox_revision: 'int', claim_owner: 'str', claim_token: 'str', interrupt: 'Interrupt', occurred_at: 'datetime') -> 'MCPInputSuspendResult'",
@@ -331,7 +336,7 @@ class PublicContractCompatibilityTest(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(actual), 281)
+        self.assertEqual(len(actual), 286)
         self.assertEqual(set(actual), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
         self.assertEqual(actual, EXPECTED_STORAGE_METHOD_SIGNATURES)
         self.assertTrue(

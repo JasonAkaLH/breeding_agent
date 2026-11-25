@@ -214,6 +214,7 @@ EXPECTED_METHODS_BY_PORT = {
         "prepare_submission_handoff",
         "get_submission_preparation",
         "acknowledge_submission_handoff",
+        "fail_submission",
         "close_conversation_admission",
         "reserve_message_identity",
     ),
@@ -226,6 +227,11 @@ EXPECTED_METHODS_BY_PORT = {
         "write_submission_preparation_component",
         "close_submission_preparation_receipt",
         "get_submission_preparation_receipt",
+    ),
+    "SubmissionFailureProjectionStoragePort": (
+        "submission_failure_is_closed",
+        "list_pending_submission_failure_projections",
+        "complete_submission_failure_projection",
     ),
     "ConversationStoragePort": (
         "save_conversation",
@@ -281,6 +287,7 @@ EXPECTED_METHODS_BY_PORT = {
         "get_task",
         "get_active_task_for_conversation",
         "list_tasks_for_conversation",
+        "list_skill_recovery_candidate_task_ids",
         "save_task_node",
         "compare_and_set_task_node",
         "get_task_node",
@@ -364,8 +371,8 @@ class PersistencePortContractsTest(unittest.TestCase):
             self.assertTrue(getattr(port, "_is_runtime_protocol", False), port_name)
             actual_names.extend(direct)
 
-        self.assertEqual(len(actual_names), 280)
-        self.assertEqual(len(set(actual_names)), 280)
+        self.assertEqual(len(actual_names), 286)
+        self.assertEqual(len(set(actual_names)), 286)
         self.assertEqual(set(actual_names), set(EXPECTED_STORAGE_METHOD_SIGNATURES))
 
     def test_aggregate_is_thin_and_preserves_exact_inherited_surface(self) -> None:
